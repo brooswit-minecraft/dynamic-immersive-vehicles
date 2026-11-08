@@ -18,30 +18,46 @@ import org.joml.Vector3d;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.Collections;
 
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
 public final class PhysicsBridge {
  private static final Map<EntityVehicleF_Physics, Body> bodies = new IdentityHashMap<>();
+ // Vehicle definitions whose chassis geometry failed to build a Sable body once already;
+ // tracked by the shared JSON definition object (one per packID:systemName, not per entity)
+ // so a bad content-pack definition is logged once rather than spamming every tick/vehicle.
+ private static final Set<Object> brokenDefinitions = Collections.newSetFromMap(new IdentityHashMap<>());
  private static final double DT = .05;
  private PhysicsBridge() {}
  private static Overrides.Tuning tuning(EntityVehicleF_Physics v) {
-  return Overrides.get(v.definition.packID + ":" + v.definition.systemName);
+  var t = Overrides.get(v.definition.packID + ":" + v.definition.systemName);
+  return t != null ? t : Overrides.DEFAULT;
  }
- private static List<PartGroundDevice> wheels(EntityVehicleF_Physics v) {
-  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && g.definition.ground.isWheel)
+ /** Any ground-contact device (wheel or track) the generalized suspension/friction solver can drive. */
+ private static List<PartGroundDevice> groundContacts(EntityVehicleF_Physics v) {
+  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && Classification.isDrivableGroundDevice(g.definition.ground))
     .map(p -> (PartGroundDevice)p).toList();
  }
  public static boolean active(EntityVehicleF_Physics v) {
-  var t = tuning(v);
-  // The first MVP deliberately excludes towing, aircraft, boats, treads and incomplete assemblies.
-  boolean eligible = t != null && t.enabled && !v.definition.motorized.isAircraft
-    && v.towedByConnection == null && v.towingConnections.isEmpty() && wheels(v).size() == 4;
+  String key = v.definition.packID + ":" + v.definition.systemName;
+  var installedGroundDevices = v.allParts.stream().filter(p -> p instanceof PartGroundDevice)
+    .map(p -> ((PartGroundDevice)p).definition.ground).toList();
+  boolean eligible = Classification.eligible(v.definition, installedGroundDevices, v.towedByConnection != null, Overrides.isOptedOut(key))
+    && !brokenDefinitions.contains(v.definition);
   if (!eligible) { Body old = bodies.remove(v); if (old != null) old.remove(); return false; }
   if (v.world.isClient()) return true;
   if (bodies.containsKey(v)) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
-  bodies.put(v, new Body(server,v,t));
+  try {
+   bodies.put(v, new Body(server,v,tuning(v)));
+  } catch (RuntimeException ex) {
+   // Malformed/incomplete chassis geometry for this definition: leave the vehicle to IV's
+   // native physics rather than crash its tick or any unrelated vehicle's.
+   brokenDefinitions.add(v.definition);
+   return false;
+  }
   return true;
  }
  public static void step(EntityVehicleF_Physics vehicle) { bodies.get(vehicle).step(vehicle); }
@@ -90,7 +106,10 @@ public final class PhysicsBridge {
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
     drive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
    boolean braking=v.brakeVar.isActive || v.parkingBrakeVar.isActive;
-   var wheels=wheels(v);
+   // Tracked vehicles steer by differential track speed, not a steerable wheel; cars/trucks
+   // keep steering the wheels marked turnsWithSteer. Both can coexist on the same chassis.
+   boolean skidSteer=v.definition.motorized != null && v.definition.motorized.hasSkidSteer;
+   var wheels=groundContacts(v);
    double spring=mass*9.81/(wheels.size()*tuning.suspensionTravel*.5);
    double damper=2*Math.sqrt(spring*mass/wheels.size())*.7;
    boolean contact=false;
@@ -111,6 +130,7 @@ public final class PhysicsBridge {
     Vector3d right=new Vector3d(up).cross(forward);
     double speed=localVelocity.dot(forward), sideSpeed=localVelocity.dot(right);
     double longitudinal=braking ? -Math.signum(speed)*Math.min(tuning.brakeForce/wheels.size(),Math.abs(speed)*mass/wheels.size()/DT) : drive/wheels.size();
+    if (skidSteer) longitudinal*=1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE);
     longitudinal-=speed*20;
     var tire=TireForces.friction(longitudinal,-sideSpeed*mass/wheels.size()/DT,normal,tuning.friction);
     Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);

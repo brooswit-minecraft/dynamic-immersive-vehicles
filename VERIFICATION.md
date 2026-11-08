@@ -53,19 +53,41 @@ it cannot observe vehicle spawn, boarding, driving, physics, or lifecycle
 behavior — those remain untested by this job. A failure here is reported as
 a startup/Mixin/dependency hazard, not a code-logic defect.
 
+## Classification tests (MINECRAFT-492, added 2026-11-08)
+
+`ClassificationTest` and `OverridesTest` run the real IV JSON definition types
+(`JSONVehicle`, `JSONPart.JSONPartGroundDevice`) and the override opt-out/
+validation logic without a live entity, world, or Sable runtime. They cover:
+default-eligible ground vehicles at wheel counts other than four, tracked
+vehicles, mixed wheel+track chassis, the no-config-entry default-enabled
+case, explicit per-car opt-out, aircraft/blimp exclusion, pontoon/skid-only
+(boat) exclusion, a missing `motorized` section, and a null ground-device
+entry among installed parts. They do **not** and cannot prove body
+lifecycle, double-movement prevention, or any in-game driving/flight/
+boat/towing behavior - see the acceptance list below.
+
 ## In-game acceptance (not yet performed)
 
 Use a disposable Minecraft 1.21.1 world and a legally obtained compatible IV
 content pack. Record the exact pack and car IDs. The acceptance run must show:
 
 - NeoForge starts with all three mods and all required Mixins apply.
-- One ordinary four-wheel car spawns, can be boarded, and opts into Sable using
-  the documented JSON key.
-- The car drives forward and reverse, steers, coasts, and brakes without IV's
-  original movement solver also moving it.
+- Ordinary cars spawn, can be boarded, and get Sable physics with **no**
+  config entry at all - wheel counts other than four included.
+- A tracked (tread) vehicle spawns, drives, and turns via differential track
+  force (`hasSkidSteer`).
+- Each car drives forward and reverse, steers, coasts, and brakes without
+  IV's original movement solver also moving it.
 - Terrain collision, airborne recovery, client/server synchronization, despawn,
   chunk unload/reload, world restart, and removal all behave as intended.
-- A non-opted-in IV vehicle continues to use ordinary IV physics.
+- A car with `"enabled": false` in the JSON override continues to use
+  ordinary IV physics.
+- An aircraft, a blimp, and a pontoon/skid-only boat hull all continue to use
+  ordinary IV physics (documented exclusions, not a defect).
+- A trailer actively hitched behind a car continues to follow via IV's own
+  hitch code, with no double movement, whether or not the towing car has
+  Sable physics.
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
-playable-MVP claim. Heavy build/decompile/game work must not run on TayneStation.
+playable-MVP claim for any category above. Heavy build/decompile/game work
+must not run on TayneStation.
