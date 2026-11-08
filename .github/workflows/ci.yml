@@ -77,19 +77,22 @@ jobs:
 
       - name: Boot headless dedicated server and watch for startup or crash
         run: |
-          set -u
           mkfifo server.stdin
-          gradle --no-daemon --stacktrace runServer < server.stdin > server.log 2>&1 &
+          # Open the fifo read-write first so this open can never block, regardless of
+          # whether/when gradle's process ever opens its own end (e.g. it can exit before
+          # reading stdin at all). The 1st diagnostic iteration deadlocked here because the
+          # previous version only opened the write end, which blocks forever with no reader.
+          exec 3<> server.stdin
+          timeout 660 gradle --no-daemon --stacktrace runServer <&3 > server.log 2>&1 &
           gradle_pid=$!
-          exec 3> server.stdin
           elapsed=0
           limit=600
           status=TIMEOUT
           while kill -0 "$gradle_pid" 2>/dev/null; do
-            if grep -qE 'Done \([0-9.]+s\)! For help, type "help"' server.log; then
+            if grep -qE 'Done \([0-9.]+s\)! For help, type "help"' server.log 2>/dev/null; then
               status=STARTED; break
             fi
-            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|^\[.*\] \[.*/FATAL\]' server.log; then
+            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|\[.*\] \[.*/FATAL\]' server.log 2>/dev/null; then
               status=CRASHED; break
             fi
             sleep 3; elapsed=$((elapsed + 3))
@@ -97,9 +100,9 @@ jobs:
           done
           if [ "$status" = "STARTED" ]; then printf 'stop\n' >&3; fi
           exec 3>&-
-          wait "$gradle_pid" || true
-          echo "=== server.log ==="
-          cat server.log
+          wait "$gradle_pid" 2>/dev/null || true
+          echo "=== server.log (tail -300) ==="
+          tail -n 300 server.log || true
           echo "=== result: $status ==="
           if [ "$status" != "STARTED" ]; then
             echo "Headless dedicated-server smoke check did not reach a clean startup (status=$status)." >&2
