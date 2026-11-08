@@ -20,6 +20,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
 public final class PhysicsBridge {
@@ -57,27 +58,31 @@ public final class PhysicsBridge {
   if (v.world.isClient()) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
-  try {
-   return registry.activateOnce(v, () -> new Body(server,v,tuning(definition)));
-  } catch (IllegalArgumentException geometryInvalid) {
-   // Same malformed/incomplete chassis geometry every time for this definition: safe, and
-   // worth caching, to stop recomputing the same failing bounding-box scan every tick for
-   // every instance of it. Leaves the vehicle to IV's native physics rather than crash.
-   brokenDefinitions.add(definition);
-   return false;
-  } catch (RuntimeException transientFailure) {
-   // Anything else (e.g. a Sable/world-registration failure) is not known to be deterministic
-   // for this definition - permanently caching it could silently disable default physics for
-   // every instance of an otherwise-valid vehicle until restart. The Body constructor already
-   // guarantees it never leaves a partially-registered Sable object behind; leave this
-   // definition retryable on the next tick instead of poisoning brokenDefinitions.
-   return false;
-  }
+  return activateOrClassify(registry, brokenDefinitions, v, () -> new Body(server,v,tuning(definition)));
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
   Body old = registry.deactivate(v);
   if (old != null) old.remove();
   return false;
+ }
+ /**
+  * The exact classification active() applies to a construction failure, as a seam testable
+  * with a fake key/body/constructor: only {@link InvalidChassisGeometry} - Body's own explicit,
+  * pre-registration chassis-bounds check, thrown before any Sable object exists - is safe to
+  * cache in {@code broken} as deterministic for that key. Anything else (including an unrelated
+  * IllegalArgumentException a Sable/world API might throw after registration, already rolled
+  * back by the constructor itself) is left retryable rather than silently poisoning every
+  * future instance of an otherwise-valid definition until restart.
+  */
+ static <K, B> boolean activateOrClassify(BodyRegistry<K, B> registry, Set<K> broken, K key, Supplier<B> construct) {
+  try {
+   return registry.activateOnce(key, construct);
+  } catch (InvalidChassisGeometry geometryInvalid) {
+   broken.add(key);
+   return false;
+  } catch (RuntimeException transientFailure) {
+   return false;
+  }
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  public static void cleanup() {
@@ -103,7 +108,7 @@ public final class PhysicsBridge {
     max.max(new Vector3d(c.pos.x+c.width/2,c.pos.y+c.height/2,c.pos.z+c.width/2));
    }
    if (!Double.isFinite(min.x) || max.x<=min.x || max.y<=min.y || max.z<=min.z)
-    throw new IllegalArgumentException("Vehicle has no finite chassis collision volume");
+    throw new InvalidChassisGeometry("Vehicle has no finite chassis collision volume");
    center=new Vector3d(min).add(max).mul(.5);
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
    var r=v.orientation;

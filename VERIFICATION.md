@@ -68,16 +68,26 @@ entry among installed parts.
 bookkeeping class PhysicsBridge relies on for its lifecycle/no-double-
 physics guarantee, using plain keys and dummy bodies instead of a live
 entity/Sable runtime - not a parallel stand-in, but the literal
-`registry.activateOnce(v, () -> new Body(...))` call `PhysicsBridge.active()`
-makes. It proves: an already-active key's constructor is never called
-again (no double physics), a construction failure leaves the key exactly
-as it was before the call - neither half-activated nor silently retained
-(matching `active()`'s own distinction: a deterministic `IllegalArgumentException`
-from invalid chassis geometry is cached in `brokenDefinitions` and stops
-retrying that definition, while any other construction failure is left
-retryable on the next tick rather than permanently poisoning an otherwise-
-valid definition), a later retry after a failure still succeeds, and
-`deactivate` always hands back the old body rather than dropping it.
+`registry.activateOnce(key, construct)` call `PhysicsBridge` makes. It
+proves: an already-active key's constructor is never called again (no
+double physics), a construction failure leaves the key exactly as it was
+before the call - neither half-activated nor silently retained, a later
+retry after a failure still succeeds, and `deactivate` always hands back
+the old body rather than dropping it.
+
+`PhysicsBridgeClassificationTest` exercises `PhysicsBridge.activateOrClassify(...)`,
+the exact (package-private) method `active()` calls once a vehicle is
+confirmed eligible and server-side, again with a fake key/body/constructor.
+This is the failure-classification boundary itself: only a thrown
+`InvalidChassisGeometry` - Body's own explicit, pre-registration chassis-
+bounds check - is cached in `brokenDefinitions`, stopping further retries
+for that definition. An unrelated `IllegalArgumentException` (the exact
+regression an earlier revision had: catching `IllegalArgumentException`
+broadly also caught anything `BoxPhysicsObject`/`RigidBodyHandle.of`/the
+initial-velocity call might throw, silently poisoning an otherwise-valid
+definition on an operational failure) or any other `RuntimeException`
+is proved to stay retryable, with a later successful call still able to
+activate the key.
 
 What this still cannot exercise: `active()`'s own eligibility computation
 wired to a live entity (opt-out/towing/missing-definition transitions
