@@ -17,6 +17,15 @@ The remote host did not have a usable `git` executable, so no remote commit or
 remote URL could be recovered. The ticket's pre-transfer record stated that no
 prototype commit, remote, CI workflow, or publication existed.
 
+After the direct transfer had completed, the Jira owner posted a second handoff
+receipt for the dedicated Servy staging copy at
+`/home/booswrit/incoming/minecraft-490/source-cab567d28315` and archive
+`source-cab567d28315.tar.gz`. The archive SHA-256 is
+`cab567d28315b21aa8f8d5d6481bbb4cc81be12206e5ec6ff972b1328dba74f9`.
+Its `SOURCE-MANIFEST.json` independently listed the same 19 hashes recorded
+below; every hash matched. The staging directory and archive were read only and
+remain unchanged.
+
 ## SHA-256 of recovered files before repository edits
 
 ```text
