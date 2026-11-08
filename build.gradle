@@ -1,0 +1,51 @@
+plugins {
+ id 'java-library'
+ id 'net.neoforged.moddev' version '2.0.148'
+}
+
+group = 'io.github.brooswitminecraft'
+version = '0.1.0-SNAPSHOT'
+base { archivesName = 'dynamic-immersive-vehicles' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+repositories {
+ mavenCentral()
+ exclusiveContent {
+  forRepository {
+   maven {
+    name = 'RyanHCode Maven'
+    url = 'https://maven.ryanhcode.dev/releases'
+   }
+  }
+  filter {
+   includeGroup 'dev.ryanhcode.sable'
+   includeGroup 'dev.ryanhcode.sable-companion'
+  }
+ }
+ exclusiveContent {
+  forRepository {
+   maven {
+    name = 'Curse Maven'
+    url = 'https://cursemaven.com'
+   }
+  }
+  filter { includeGroup 'curse.maven' }
+ }
+}
+
+neoForge {
+ version = '21.1.265'
+ runs { client { client() }; server { server() } }
+ mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
+}
+
+dependencies {
+ // Resolve dependencies from their publishers; never commit or bundle their jars.
+ compileOnly('curse.maven:minecraft-transport-simulator-286703:7926606') { transitive = false }
+ compileOnly('dev.ryanhcode.sable:sable-neoforge-1.21.1:2.0.5') { transitive = false }
+ compileOnly('dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0') { transitive = false }
+ testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+ testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test { useJUnitPlatform() }
