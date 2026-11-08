@@ -62,9 +62,23 @@ default-eligible ground vehicles at wheel counts other than four, tracked
 vehicles, mixed wheel+track chassis, the no-config-entry default-enabled
 case, explicit per-car opt-out, aircraft/blimp exclusion, pontoon/skid-only
 (boat) exclusion, a missing `motorized` section, and a null ground-device
-entry among installed parts. They do **not** and cannot prove body
-lifecycle, double-movement prevention, or any in-game driving/flight/
-boat/towing behavior - see the acceptance list below.
+entry among installed parts.
+
+`BodyRegistryTest` exercises the actual production bookkeeping class
+PhysicsBridge relies on for its lifecycle/no-double-physics guarantee
+(activate/deactivate/isActive/removeIf, by identity), using plain keys and
+dummy bodies instead of a live entity/Sable runtime. It proves the
+primitive PhysicsBridge's `active()` guard (`if (registry.isActive(v))
+return true;`) depends on, and that `deactivate` always hands back the old
+body rather than dropping it - but it cannot and does not exercise
+`active()`/`Body` themselves, which still need a live `EntityVehicleF_Physics`,
+`ServerLevel`, and Sable `SubLevelContainer`. Whether a real vehicle's body
+is actually constructed once, removed on opt-out/towing, and never
+duplicated end-to-end remains proven only by the acceptance list below, not
+by this unit test.
+
+None of the above prove any in-game driving/flight/boat/towing behavior -
+see the acceptance list below.
 
 ## In-game acceptance (not yet performed)
 

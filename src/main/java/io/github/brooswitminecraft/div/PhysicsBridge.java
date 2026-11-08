@@ -8,6 +8,7 @@ import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
+import minecrafttransportsimulator.jsondefs.JSONVehicle;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.HitResult;
@@ -15,57 +16,70 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3d;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
+import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.Collections;
 
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
 public final class PhysicsBridge {
- private static final Map<EntityVehicleF_Physics, Body> bodies = new IdentityHashMap<>();
+ private static final BodyRegistry<EntityVehicleF_Physics, Body> registry = new BodyRegistry<>();
  // Vehicle definitions whose chassis geometry failed to build a Sable body once already;
- // tracked by the shared JSON definition object (one per packID:systemName, not per entity)
- // so a bad content-pack definition is logged once rather than spamming every tick/vehicle.
- private static final Set<Object> brokenDefinitions = Collections.newSetFromMap(new IdentityHashMap<>());
+ // keyed by the shared JSON definition object (one per packID:systemName, not per entity), so a
+ // bad content-pack definition is retried, and logged, once rather than every tick for every
+ // vehicle instance of that definition.
+ private static final Set<JSONVehicle> brokenDefinitions = Collections.newSetFromMap(new IdentityHashMap<>());
  private static final double DT = .05;
  private PhysicsBridge() {}
- private static Overrides.Tuning tuning(EntityVehicleF_Physics v) {
-  var t = Overrides.get(v.definition.packID + ":" + v.definition.systemName);
+ private static Overrides.Tuning tuning(JSONVehicle definition) {
+  var t = Overrides.get(definition.packID + ":" + definition.systemName);
   return t != null ? t : Overrides.DEFAULT;
  }
  /** Any ground-contact device (wheel or track) the generalized suspension/friction solver can drive. */
  private static List<PartGroundDevice> groundContacts(EntityVehicleF_Physics v) {
-  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && Classification.isDrivableGroundDevice(g.definition.ground))
+  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && g.definition != null
+      && Classification.isDrivableGroundDevice(g.definition.ground))
     .map(p -> (PartGroundDevice)p).toList();
  }
  public static boolean active(EntityVehicleF_Physics v) {
-  String key = v.definition.packID + ":" + v.definition.systemName;
-  var installedGroundDevices = v.allParts.stream().filter(p -> p instanceof PartGroundDevice)
+  // Guard every dereference used to decide eligibility, in entry order, before Classification
+  // (or anything else) ever sees them: a vehicle with no definition, or with a ground part that
+  // itself has no definition, must be excluded here rather than throw.
+  JSONVehicle definition = v.definition;
+  if (definition == null) return deactivate(v);
+  String key = definition.packID + ":" + definition.systemName;
+  var installedGroundDevices = v.allParts.stream()
+    .filter(p -> p instanceof PartGroundDevice g && g.definition != null)
     .map(p -> ((PartGroundDevice)p).definition.ground).toList();
-  boolean eligible = Classification.eligible(v.definition, installedGroundDevices, v.towedByConnection != null, Overrides.isOptedOut(key))
-    && !brokenDefinitions.contains(v.definition);
-  if (!eligible) { Body old = bodies.remove(v); if (old != null) old.remove(); return false; }
+  boolean eligible = Classification.eligible(definition, installedGroundDevices, v.towedByConnection != null, Overrides.isOptedOut(key))
+    && !brokenDefinitions.contains(definition);
+  if (!eligible) return deactivate(v);
   if (v.world.isClient()) return true;
-  if (bodies.containsKey(v)) return true;
+  if (registry.isActive(v)) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
   try {
-   bodies.put(v, new Body(server,v,tuning(v)));
+   registry.activate(v, new Body(server,v,tuning(definition)));
   } catch (RuntimeException ex) {
    // Malformed/incomplete chassis geometry for this definition: leave the vehicle to IV's
-   // native physics rather than crash its tick or any unrelated vehicle's.
-   brokenDefinitions.add(v.definition);
+   // native physics rather than crash its tick or any unrelated vehicle's. The Body
+   // constructor itself guarantees it never leaves a partially-registered Sable object behind.
+   brokenDefinitions.add(definition);
    return false;
   }
   return true;
  }
- public static void step(EntityVehicleF_Physics vehicle) { bodies.get(vehicle).step(vehicle); }
+ private static boolean deactivate(EntityVehicleF_Physics v) {
+  Body old = registry.deactivate(v);
+  if (old != null) old.remove();
+  return false;
+ }
+ public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  public static void cleanup() {
-  bodies.entrySet().removeIf(e -> { if (e.getKey().isValid) return false; e.getValue().remove(); return true; });
+  registry.removeIf((v, b) -> !v.isValid, Body::remove);
  }
  public static void unload(Object level) {
-  bodies.entrySet().removeIf(e -> { if (e.getValue().level != level) return false; e.getValue().remove(); return true; });
+  registry.removeIf((v, b) -> b.level == level, Body::remove);
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  private static final class Body {
@@ -91,9 +105,19 @@ public final class PhysicsBridge {
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
    box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
-   SubLevelContainer.getContainer(level).physicsSystem().addObject(box);
-   handle=RigidBodyHandle.of(level,box);
-   handle.addLinearAndAngularVelocity(new Vector3d(v.motion.x,v.motion.y,v.motion.z).mul(v.speedFactor*20),new Vector3d());
+   var physics=SubLevelContainer.getContainer(level).physicsSystem();
+   physics.addObject(box);
+   // From here on, box is a live Sable object; any failure before this constructor returns
+   // must remove it again, since nothing else will ever hold a reference to clean it up.
+   RigidBodyHandle h;
+   try {
+    h=RigidBodyHandle.of(level,box);
+    h.addLinearAndAngularVelocity(new Vector3d(v.motion.x,v.motion.y,v.motion.z).mul(v.speedFactor*20),new Vector3d());
+   } catch (RuntimeException ex) {
+    physics.removeObject(box);
+    throw ex;
+   }
+   handle=h;
   }
   void remove() { var c=SubLevelContainer.getContainer(level); if(c!=null)c.physicsSystem().removeObject(box); }
   void step(EntityVehicleF_Physics v) {
