@@ -4,40 +4,72 @@ Independent experimental companion for Immersive Vehicles 24.0.0, Sable 2.0.5,
 NeoForge 21.1.265, and Minecraft 1.21.1. No upstream source, assets, or dependency
 jars are modified, copied, bundled, or published here.
 
-> **Unverified prototype:** hosted compilation and focused tire-math tests are
-> separate from in-game acceptance. Do not deploy this build to an existing
-> world until the runtime checklist in [VERIFICATION.md](VERIFICATION.md) passes.
+> **Unverified prototype:** hosted compilation and focused tire-math/
+> classification tests are separate from in-game acceptance. Do not deploy
+> this build to an existing world until the runtime checklist in
+> [VERIFICATION.md](VERIFICATION.md) passes.
 
 ## Scope
 
-The prototype supports ordinary four-wheel cars that are explicitly opted in by
-`packID:systemName`. It maps installed wheel geometry, vehicle mass, and chassis
-bounds, then replaces IV movement for that car with one server-owned Sable rigid
-body, raycast spring/damper suspension, and combined tire grip. IV remains
-responsible for models, seats, controls, persistence, and movement packets.
+Companion physics now applies to every eligible IV vehicle **by default**,
+across content packs, with no per-car registration or opt-in. It classifies
+each vehicle from IV's own definition at the moment it is needed:
 
-Towing, aircraft, boats, tracks, and universal content-pack support are outside
-the MVP. This is not the complete Dynamic Vehicles drivetrain, terrain, or fluid
-implementation.
+- **Ground vehicles (wheeled or tracked), any wheel/track count.** Not just
+  four-wheel cars: one wheel, three wheels, six wheels, and tracked vehicles
+  all map their installed ground-contact devices, vehicle mass, and chassis
+  bounds to one server-owned Sable rigid body with raycast spring/damper
+  suspension and combined tire/track grip. A track-steered vehicle
+  (`hasSkidSteer`) turns by differential track force instead of a steerable
+  wheel. IV remains responsible for models, seats, controls, persistence, and
+  movement packets.
+
+Known, deliberate exclusions - not silently skipped, each tracked as a
+follow-up task rather than faked with the ground solver:
+
+- **Aircraft and blimps** (`motorized.isAircraft` / `isBlimp`): flight
+  aerodynamics (lift, drag, control surfaces) is a different physics domain
+  this bridge does not yet model.
+- **Boats and other float-only hulls** (pontoon/skid devices with no wheel or
+  track): buoyancy is a different physics domain this bridge does not yet
+  model.
+- **A vehicle actively hitched behind another** (trailers): it keeps
+  following IV's own native hitch code instead of getting a second,
+  competing body, so towed trailers are unaffected either way. The towing
+  vehicle itself is still eligible on its own merits, but the extra thrust
+  IV would normally add to compensate for a trailer's drag is not modeled,
+  so towing currently feels lighter than it should.
+- A vehicle whose JSON definition is missing or has a chassis with no finite
+  collision volume is left on IV's native physics rather than crashing its
+  tick; this is logged once per definition, not per vehicle instance.
 
 ## Configuration
 
-On first start the mod writes `config/dynamic-immersive-vehicles.json`. Set
-`enabled` to `true` only for the car under test. The key is the IV definition's
-`packID:systemName`; clients and the server must use identical configuration and
-must restart after changes.
+JSON is now **optional per-car tuning**, never an activation prerequisite. A
+car with no entry at all still gets physics if its category is eligible. On
+first start the mod writes `config/dynamic-immersive-vehicles.json` with an
+example entry; the key is the IV definition's `packID:systemName`. The one
+activation-relevant field is `enabled`, and it is an opt-**out** only: omit it
+(or the whole entry) to use the default behavior above, or set it to `false`
+to exclude one specific car even if its category would otherwise qualify.
+Setting it to `true` is accepted for backwards compatibility with earlier
+opt-in configs but changes nothing beyond what omitting it already does.
+Clients and the server must use identical configuration and must restart
+after changes.
 
 ```json
 {
   "vehicles": {
     "examplepack:ordinary_car": {
-      "enabled": true,
       "massKg": 1450.0,
       "suspensionTravel": 0.3,
       "friction": 1.0,
       "driveForce": 8000.0,
       "brakeForce": 12000.0,
       "maxSteerDegrees": 30.0
+    },
+    "examplepack:known_bad_car": {
+      "enabled": false
     }
   }
 }

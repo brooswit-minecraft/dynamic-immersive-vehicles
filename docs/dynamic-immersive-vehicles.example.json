@@ -1,13 +1,15 @@
 {
   "vehicles": {
     "examplepack:ordinary_car": {
-      "enabled": true,
       "massKg": 1450.0,
       "suspensionTravel": 0.3,
       "friction": 1.0,
       "driveForce": 8000.0,
       "brakeForce": 12000.0,
       "maxSteerDegrees": 30.0
+    },
+    "examplepack:known_bad_car": {
+      "enabled": false
     }
   }
 }

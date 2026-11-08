@@ -6,10 +6,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.io.IOException;
 import java.util.Map;
-/** Explicit per-car opt-in until the initial compatibility matrix is validated. Restart to reload. */
+/**
+ * Optional per-car tuning/override, keyed by packID:systemName. Physics now applies to every
+ * eligible vehicle by default (see PhysicsBridge); a car needs no entry here at all. An entry's
+ * {@code enabled} is the one activation-relevant field, and it is an opt-OUT only: leaving it
+ * unset (or absent) uses the default classification-based behavior, {@code true} is a no-op kept
+ * for backwards compatibility with earlier opt-in configs, and {@code false} excludes that one
+ * car even if its category would otherwise be eligible. Every other field only tunes an already-
+ * eligible car. Restart to reload.
+ */
 public final class Overrides {
  public static final class Tuning {
-  public boolean enabled;
+  public Boolean enabled;
   public Double massKg;
   public double suspensionTravel = 0.3;
   public double friction = 1.0;
@@ -23,9 +31,12 @@ public final class Overrides {
      || !(maxSteerDegrees > 0 && maxSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
  }
+ /** Shared defaults applied to any eligible vehicle with no (or no matching) override entry. */
+ public static final Tuning DEFAULT = new Tuning();
  private record Config(Map<String,Tuning> vehicles) {}
  private static Map<String,Tuning> vehicles = Map.of();
  public static Tuning get(String key) { return vehicles.get(key); }
+ public static boolean isOptedOut(String key) { var t = vehicles.get(key); return t != null && Boolean.FALSE.equals(t.enabled); }
  static void load() {
   Path path = FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json");
   Gson gson = new GsonBuilder().setPrettyPrinting().create();
