@@ -22,14 +22,23 @@ or modifies it; no CI job publishes this or any other dependency's jar as an
 artifact. This project calls IV's public classes as an independent companion;
 it does not contain copied IV implementation code.
 
-## Sable 2.0.5 and Sable Companion 1.6.0
+## Sable 2.0.5
 
 - Upstream: <https://github.com/ryanhcode/sable>
 - Publisher Maven: <https://maven.ryanhcode.dev/releases>
-- CI coordinates:
-  - `dev.ryanhcode.sable:sable-neoforge-1.21.1:2.0.5`
-  - `dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0`
-- Sable license: PolyForm Shield License 1.0.0
+- CI coordinate: `dev.ryanhcode.sable:sable-neoforge-1.21.1:2.0.5`
+- License: PolyForm Shield License 1.0.0
+
+## Sable Companion 1.6.0
+
+- Upstream: <https://github.com/ryanhcode/sable>
+- Publisher Maven: <https://maven.ryanhcode.dev/releases>
+- CI coordinate: `dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0`
+- License: MIT License (distinct from Sable's PolyForm Shield License; the
+  Companion jar's own metadata declares MIT)
+- A required runtime dependency of this addon (`neoforge.mods.toml` declares
+  `sablecompanion` as required); the addon calls its `math.Pose3d` type
+  directly.
 
 These are build dependencies (compile, and, since MINECRAFT-491, transiently
 on the classpath of one disposable headless server-boot CI job) and are not
