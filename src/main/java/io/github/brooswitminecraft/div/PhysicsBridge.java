@@ -58,7 +58,7 @@ public final class PhysicsBridge {
   if (v.world.isClient()) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
-  return activateOrClassify(registry, brokenDefinitions, v, () -> new Body(server,v,tuning(definition)));
+  return activateOrClassify(registry, brokenDefinitions, v, definition, () -> new Body(server,v,tuning(definition)));
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
   Body old = registry.deactivate(v);
@@ -67,18 +67,21 @@ public final class PhysicsBridge {
  }
  /**
   * The exact classification active() applies to a construction failure, as a seam testable
-  * with a fake key/body/constructor: only {@link InvalidChassisGeometry} - Body's own explicit,
-  * pre-registration chassis-bounds check, thrown before any Sable object exists - is safe to
-  * cache in {@code broken} as deterministic for that key. Anything else (including an unrelated
-  * IllegalArgumentException a Sable/world API might throw after registration, already rolled
-  * back by the constructor itself) is left retryable rather than silently poisoning every
-  * future instance of an otherwise-valid definition until restart.
+  * with fake keys/a fake body/a fake constructor: only {@link InvalidChassisGeometry} - Body's
+  * own explicit, pre-registration chassis-bounds check, thrown before any Sable object exists -
+  * is safe to cache in {@code broken} as deterministic for {@code brokenKey}. Anything else
+  * (including an unrelated IllegalArgumentException a Sable/world API might throw after
+  * registration, already rolled back by the constructor itself) is left retryable rather than
+  * silently poisoning every future instance of an otherwise-valid definition until restart.
+  * {@code key} (the live entity, for the active-bodies registry) and {@code brokenKey} (the
+  * shared definition, so a bad content-pack definition is cached once, not per entity) are
+  * deliberately separate type parameters: PhysicsBridge keys these two maps differently.
   */
- static <K, B> boolean activateOrClassify(BodyRegistry<K, B> registry, Set<K> broken, K key, Supplier<B> construct) {
+ static <K, C, B> boolean activateOrClassify(BodyRegistry<K, B> registry, Set<C> broken, K key, C brokenKey, Supplier<B> construct) {
   try {
    return registry.activateOnce(key, construct);
   } catch (InvalidChassisGeometry geometryInvalid) {
-   broken.add(key);
+   broken.add(brokenKey);
    return false;
   } catch (RuntimeException transientFailure) {
    return false;

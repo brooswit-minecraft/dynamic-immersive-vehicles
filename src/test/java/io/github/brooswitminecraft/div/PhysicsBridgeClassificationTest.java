@@ -17,7 +17,7 @@ class PhysicsBridgeClassificationTest {
  @Test void invalidChassisGeometryIsCachedAsBroken() {
   var registry = new BodyRegistry<String, Object>();
   Set<String> broken = Collections.newSetFromMap(new IdentityHashMap<>());
-  boolean result = PhysicsBridge.activateOrClassify(registry, broken, "car",
+  boolean result = PhysicsBridge.activateOrClassify(registry, broken, "car", "car",
     () -> { throw new InvalidChassisGeometry("no finite chassis collision volume"); });
   assertFalse(result);
   assertTrue(broken.contains("car"), "a deterministic geometry failure must be cached");
@@ -30,7 +30,7 @@ class PhysicsBridgeClassificationTest {
   // poison the definition - only that one dedicated type does.
   var registry = new BodyRegistry<String, Object>();
   Set<String> broken = Collections.newSetFromMap(new IdentityHashMap<>());
-  boolean result = PhysicsBridge.activateOrClassify(registry, broken, "car",
+  boolean result = PhysicsBridge.activateOrClassify(registry, broken, "car", "car",
     () -> { throw new IllegalArgumentException("unrelated Sable/world argument failure"); });
   assertFalse(result);
   assertFalse(broken.contains("car"), "only InvalidChassisGeometry may be cached - any other exception, including IllegalArgumentException, stays retryable");
@@ -40,16 +40,16 @@ class PhysicsBridgeClassificationTest {
  @Test void anyOtherRuntimeExceptionAlsoStaysRetryable() {
   var registry = new BodyRegistry<String, Object>();
   Set<String> broken = Collections.newSetFromMap(new IdentityHashMap<>());
-  PhysicsBridge.activateOrClassify(registry, broken, "car", () -> { throw new RuntimeException("transient"); });
+  PhysicsBridge.activateOrClassify(registry, broken, "car", "car", () -> { throw new RuntimeException("transient"); });
   assertFalse(broken.contains("car"));
  }
 
  @Test void aRetryableFailureCanStillSucceedOnALaterCall() {
   var registry = new BodyRegistry<String, Object>();
   Set<String> broken = Collections.newSetFromMap(new IdentityHashMap<>());
-  PhysicsBridge.activateOrClassify(registry, broken, "car", () -> { throw new IllegalArgumentException("transient"); });
+  PhysicsBridge.activateOrClassify(registry, broken, "car", "car", () -> { throw new IllegalArgumentException("transient"); });
   Object body = new Object();
-  boolean result = PhysicsBridge.activateOrClassify(registry, broken, "car", () -> body);
+  boolean result = PhysicsBridge.activateOrClassify(registry, broken, "car", "car", () -> body);
   assertTrue(result);
   assertSame(body, registry.get("car"));
  }
@@ -58,8 +58,22 @@ class PhysicsBridgeClassificationTest {
   var registry = new BodyRegistry<String, Object>();
   Set<String> broken = Collections.newSetFromMap(new IdentityHashMap<>());
   Object body = new Object();
-  assertTrue(PhysicsBridge.activateOrClassify(registry, broken, "car", () -> body));
+  assertTrue(PhysicsBridge.activateOrClassify(registry, broken, "car", "car", () -> body));
   assertSame(body, registry.get("car"));
   assertTrue(broken.isEmpty());
+ }
+
+ @Test void keyAndBrokenKeyCanBeDifferentTypes() {
+  // Mirrors PhysicsBridge's real usage: the active-bodies registry is keyed by the live entity,
+  // but brokenDefinitions is keyed by the shared JSON definition object - a different key for
+  // a different map, on purpose, so one bad content-pack definition is cached once rather than
+  // once per entity instance of it.
+  var registry = new BodyRegistry<StringBuilder, Object>();
+  Set<Integer> broken = Collections.newSetFromMap(new IdentityHashMap<>());
+  var entity = new StringBuilder("car-instance");
+  PhysicsBridge.activateOrClassify(registry, broken, entity, 42,
+    () -> { throw new InvalidChassisGeometry("bad geometry"); });
+  assertTrue(broken.contains(42));
+  assertFalse(registry.isActive(entity));
  }
 }
