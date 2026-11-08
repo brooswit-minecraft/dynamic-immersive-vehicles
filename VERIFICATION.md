@@ -64,18 +64,34 @@ case, explicit per-car opt-out, aircraft/blimp exclusion, pontoon/skid-only
 (boat) exclusion, a missing `motorized` section, and a null ground-device
 entry among installed parts.
 
-`BodyRegistryTest` exercises the actual production bookkeeping class
-PhysicsBridge relies on for its lifecycle/no-double-physics guarantee
-(activate/deactivate/isActive/removeIf, by identity), using plain keys and
-dummy bodies instead of a live entity/Sable runtime. It proves the
-primitive PhysicsBridge's `active()` guard (`if (registry.isActive(v))
-return true;`) depends on, and that `deactivate` always hands back the old
-body rather than dropping it - but it cannot and does not exercise
-`active()`/`Body` themselves, which still need a live `EntityVehicleF_Physics`,
-`ServerLevel`, and Sable `SubLevelContainer`. Whether a real vehicle's body
-is actually constructed once, removed on opt-out/towing, and never
-duplicated end-to-end remains proven only by the acceptance list below, not
-by this unit test.
+`BodyRegistryTest` exercises `BodyRegistry`, the actual production
+bookkeeping class PhysicsBridge relies on for its lifecycle/no-double-
+physics guarantee, using plain keys and dummy bodies instead of a live
+entity/Sable runtime - not a parallel stand-in, but the literal
+`registry.activateOnce(v, () -> new Body(...))` call `PhysicsBridge.active()`
+makes. It proves: an already-active key's constructor is never called
+again (no double physics), a construction failure leaves the key exactly
+as it was before the call - neither half-activated nor silently retained
+(matching `active()`'s own distinction: a deterministic `IllegalArgumentException`
+from invalid chassis geometry is cached in `brokenDefinitions` and stops
+retrying that definition, while any other construction failure is left
+retryable on the next tick rather than permanently poisoning an otherwise-
+valid definition), a later retry after a failure still succeeds, and
+`deactivate` always hands back the old body rather than dropping it.
+
+What this still cannot exercise: `active()`'s own eligibility computation
+wired to a live entity (opt-out/towing/missing-definition transitions
+actually calling `deactivate`), `Body`'s real construction against a
+`ServerLevel`/Sable `SubLevelContainer`, and the mixins' cancellation
+decision. Those need a live `EntityVehicleF_Physics`, which cannot be
+constructed without a real `AWrapperWorld`/`IWrapperPlayer`/world, and
+`v.world`'s mixin-targeted concrete class (`mcinterface1211.WrapperWorld`)
+cannot be substituted with a fake without breaking the `(WorldAccessor)v.world`
+cast `active()` relies on - this bridge found no way to exercise that
+remaining slice without an actual running Minecraft instance. Whether a
+real vehicle's body is actually constructed once, removed on opt-out/
+towing, and never duplicated end-to-end therefore remains proven only by
+the acceptance list below, not by any unit test in this repository.
 
 None of the above prove any in-game driving/flight/boat/towing behavior -
 see the acceptance list below.

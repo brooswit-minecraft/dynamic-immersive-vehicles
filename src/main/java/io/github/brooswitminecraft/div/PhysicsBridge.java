@@ -55,19 +55,24 @@ public final class PhysicsBridge {
     && !brokenDefinitions.contains(definition);
   if (!eligible) return deactivate(v);
   if (v.world.isClient()) return true;
-  if (registry.isActive(v)) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
   try {
-   registry.activate(v, new Body(server,v,tuning(definition)));
-  } catch (RuntimeException ex) {
-   // Malformed/incomplete chassis geometry for this definition: leave the vehicle to IV's
-   // native physics rather than crash its tick or any unrelated vehicle's. The Body
-   // constructor itself guarantees it never leaves a partially-registered Sable object behind.
+   return registry.activateOnce(v, () -> new Body(server,v,tuning(definition)));
+  } catch (IllegalArgumentException geometryInvalid) {
+   // Same malformed/incomplete chassis geometry every time for this definition: safe, and
+   // worth caching, to stop recomputing the same failing bounding-box scan every tick for
+   // every instance of it. Leaves the vehicle to IV's native physics rather than crash.
    brokenDefinitions.add(definition);
    return false;
+  } catch (RuntimeException transientFailure) {
+   // Anything else (e.g. a Sable/world-registration failure) is not known to be deterministic
+   // for this definition - permanently caching it could silently disable default physics for
+   // every instance of an otherwise-valid vehicle until restart. The Body constructor already
+   // guarantees it never leaves a partially-registered Sable object behind; leave this
+   // definition retryable on the next tick instead of poisoning brokenDefinitions.
+   return false;
   }
-  return true;
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
   Body old = registry.deactivate(v);

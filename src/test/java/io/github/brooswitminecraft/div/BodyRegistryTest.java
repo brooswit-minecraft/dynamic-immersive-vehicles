@@ -26,17 +26,49 @@ class BodyRegistryTest {
   assertSame(body, registry.get("car"));
  }
 
- @Test void secondActivateCallIsWhatPhysicsBridgeMustNeverDoWithoutCheckingFirst() {
-  // PhysicsBridge always guards activate() with "if (registry.isActive(v)) return true;" so a
-  // key is never activated twice while already active. This pins the registry's half of that
-  // contract: it does not itself refuse a double activate, so the caller-side guard is load-
-  // bearing, and isActive is exactly the signal that guard reads.
+ @Test void bareActivateDoesNotRefuseADoubleActivateOnItsOwn() {
+  // The plain activate() has no built-in double-activation guard; activateOnce (below) is the
+  // method PhysicsBridge actually calls, and it is the one that supplies that guarantee. This
+  // pins the fact that the guard is not "free" from activate() alone.
   var registry = new BodyRegistry<String, Object>();
   Object first = new Object(), second = new Object();
   registry.activate("car", first);
   assertTrue(registry.isActive("car"));
   registry.activate("car", second);
-  assertSame(second, registry.get("car"), "a caller that ignores isActive() can still overwrite - exactly why PhysicsBridge checks it first");
+  assertSame(second, registry.get("car"), "a caller that bypasses activateOnce can still overwrite - exactly why PhysicsBridge never calls activate() directly");
+ }
+
+ @Test void activateOnceReusesAnAlreadyActiveBodyWithoutReconstructing() {
+  // This is the exact method PhysicsBridge.active() calls:
+  // "registry.activateOnce(v, () -> new Body(...))". Proving it never reconstructs an already-
+  // active key's body is the no-double-physics guarantee for real, not a map-only stand-in.
+  var registry = new BodyRegistry<String, Object>();
+  int[] constructions = {0};
+  Object body = new Object();
+  assertTrue(registry.activateOnce("car", () -> { constructions[0]++; return body; }));
+  assertTrue(registry.activateOnce("car", () -> { constructions[0]++; return new Object(); }));
+  assertEquals(1, constructions[0], "already active - must not call the constructor again");
+  assertSame(body, registry.get("car"));
+ }
+
+ @Test void activateOnceLeavesTheKeyUntouchedWhenConstructionThrows() {
+  // Mirrors PhysicsBridge.active()'s failed-construction path: Body's constructor can throw
+  // (deterministic invalid geometry, or an operational Sable/world failure), and activateOnce
+  // must not leave the key half-activated either way - nothing in the registry changes.
+  var registry = new BodyRegistry<String, Object>();
+  assertThrows(IllegalStateException.class, () -> registry.activateOnce("car", () -> { throw new IllegalStateException("boom"); }));
+  assertFalse(registry.isActive("car"));
+  assertNull(registry.get("car"));
+ }
+
+ @Test void activateOnceRetriesAfterAPriorConstructionFailure() {
+  // PhysicsBridge treats a non-geometry construction failure as retryable (not permanently
+  // cached), relying on activateOnce not leaving any trace of the failed attempt behind.
+  var registry = new BodyRegistry<String, Object>();
+  assertThrows(RuntimeException.class, () -> registry.activateOnce("car", () -> { throw new RuntimeException("transient"); }));
+  Object body = new Object();
+  assertTrue(registry.activateOnce("car", () -> body), "a later call with a working constructor must still succeed");
+  assertSame(body, registry.get("car"));
  }
 
  @Test void deactivateReturnsTheOldBodyForTheCallerToDestroy() {
