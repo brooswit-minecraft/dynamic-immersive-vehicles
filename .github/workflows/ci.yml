@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 8.8
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.8'
+
+      - name: Compile and test
+        run: gradle --no-daemon --stacktrace clean build
+
+      - name: Record artifact checksums
+        run: sha256sum build/libs/*.jar > build/artifact-checksums.txt
+
+      - name: Upload addon artifact and test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dynamic-immersive-vehicles-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/libs/*.jar
+            build/artifact-checksums.txt
+            build/reports/tests/test/**
+            build/test-results/test/**
+
+  # Bounded headless feasibility check (MINECRAFT-491): boots a plain NeoForge dedicated
+  # server with the pinned IV/Sable/Companion runtime present, to observe whether NeoForge
+  # starts, this addon's Mixins apply, and the mod initializes, without any display/GPU.
+  # It uses no vehicle content pack, so it cannot observe vehicle spawn/physics/lifecycle
+  # behavior; that remains out of scope for this pass. Failure here is an unsupported-
+  # harness/startup/dependency hazard finding, not a claim about in-game acceptance.
+  runtime-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 8.8
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.8'
+
+      - name: Accept Minecraft EULA for this disposable CI run only
+        run: |
+          mkdir -p run
+          echo "eula=true" > run/eula.txt
+
+      - name: Boot headless dedicated server and watch for startup or crash
+        run: |
+          mkfifo server.stdin
+          # Open the fifo read-write first so this open can never block, regardless of
+          # whether/when gradle's process ever opens its own end (e.g. it can exit before
+          # reading stdin at all). The 1st diagnostic iteration deadlocked here because the
+          # previous version only opened the write end, which blocks forever with no reader.
+          exec 3<> server.stdin
+          timeout 660 gradle --no-daemon --stacktrace runServer <&3 > server.log 2>&1 &
+          gradle_pid=$!
+          elapsed=0
+          limit=600
+          status=TIMEOUT
+          while kill -0 "$gradle_pid" 2>/dev/null; do
+            if grep -qE 'Done \([0-9.]+s\)! For help, type "help"' server.log 2>/dev/null; then
+              status=STARTED; break
+            fi
+            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|\[.*\] \[.*/FATAL\]' server.log 2>/dev/null; then
+              status=CRASHED; break
+            fi
+            sleep 3; elapsed=$((elapsed + 3))
+            if [ "$elapsed" -ge "$limit" ]; then status=TIMEOUT; break; fi
+          done
+          if [ "$status" = "STARTED" ]; then printf 'stop\n' >&3; fi
+          exec 3>&-
+          wait "$gradle_pid" 2>/dev/null || true
+          echo "=== server.log (tail -300) ==="
+          tail -n 300 server.log || true
+          echo "=== result: $status ==="
+          if [ "$status" != "STARTED" ]; then
+            echo "Headless dedicated-server smoke check did not reach a clean startup (status=$status)." >&2
+            exit 1
+          fi
+
+      - name: Upload runtime-smoke log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-smoke-log-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            server.log
+            run/logs/**

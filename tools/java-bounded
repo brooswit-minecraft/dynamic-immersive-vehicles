@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+import os,sys
+args=sys.argv[1:]
+# Limit each build component separately instead of allowing three large JVM heaps.
+heap='1536m' if any('vineflower' in a for a in args) else '512m'
+args=[a for a in args if not a.startswith('-Xmx')]
+os.environ.pop('_JAVA_OPTIONS',None)
+os.environ.pop('JAVA_TOOL_OPTIONS',None)
+java=os.environ['JAVA_HOME']+'/bin/java'
+os.execv(java,[java,'-Xmx'+heap,'-XX:ActiveProcessorCount=2']+args)

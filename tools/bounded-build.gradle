@@ -1,0 +1,5 @@
+allprojects { afterEvaluate {
+ tasks.matching { it.name == 'createMinecraftArtifacts' }.configureEach {
+  javaExecutable.set(new File(rootProject.projectDir, 'tools/java-bounded').absolutePath)
+ }
+} }

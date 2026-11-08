@@ -1,0 +1,62 @@
+plugins {
+ id 'java-library'
+ id 'net.neoforged.moddev' version '2.0.148'
+}
+
+group = 'io.github.brooswitminecraft'
+version = '0.1.0-SNAPSHOT'
+base { archivesName = 'dynamic-immersive-vehicles' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+repositories {
+ mavenCentral()
+ exclusiveContent {
+  forRepository {
+   maven {
+    name = 'RyanHCode Maven'
+    url = 'https://maven.ryanhcode.dev/releases'
+   }
+  }
+  filter {
+   includeGroup 'dev.ryanhcode.sable'
+   includeGroup 'dev.ryanhcode.sable-companion'
+  }
+ }
+ exclusiveContent {
+  forRepository {
+   maven {
+    name = 'Curse Maven'
+    url = 'https://cursemaven.com'
+   }
+  }
+  filter { includeGroup 'curse.maven' }
+ }
+}
+
+neoForge {
+ version = '21.1.265'
+ runs {
+  client { client() }
+  // 'nogui': headless CI has no display/AWT; the vanilla dedicated-server GUI would throw.
+  server { server(); programArgument('nogui') }
+ }
+ mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
+}
+
+dependencies {
+ // Resolve dependencies from their publishers; never commit or bundle their jars.
+ // 'implementation' (not 'compileOnly') so the headless runtime-smoke server run can load
+ // these classes too; the plain 'jar' task below still only zips this project's own
+ // classes/resources, so none of these dependency jars are bundled into the output artifact.
+ implementation('curse.maven:minecraft-transport-simulator-286703:7926606') { transitive = false }
+ implementation('dev.ryanhcode.sable:sable-neoforge-1.21.1:2.0.5') { transitive = false }
+ implementation('dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0') { transitive = false }
+ testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+ testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test { useJUnitPlatform() }
+
+jar {
+ from('LICENSE', 'THIRD_PARTY_NOTICES.md')
+}
