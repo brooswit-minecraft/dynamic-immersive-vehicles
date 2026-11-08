@@ -51,7 +51,10 @@ example is also available at
 
 CI uses Java 21 and Gradle 8.8. It resolves the exact official dependency
 artifacts at build time and uploads only this project's jar, checksums, and test
-reports. To run the same tasks locally with Gradle 8.8:
+reports. A second, bounded `runtime-smoke` job boots a headless dedicated
+server with those same pinned dependencies to check NeoForge/Mixin startup
+only; see [VERIFICATION.md](VERIFICATION.md) for what it does and does not
+prove. To run the same tasks locally with Gradle 8.8:
 
 ```text
 gradle --no-daemon clean build

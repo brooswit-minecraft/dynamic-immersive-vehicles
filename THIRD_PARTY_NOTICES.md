@@ -15,10 +15,12 @@ their jars into the output artifact.
 
 The IV license reserves ownership, prohibits public redistribution outside its
 official CurseForge channel except for its stated exceptions, and restricts
-public derivative works. CI therefore downloads the official CurseForge file
-only as a compile-time dependency and never uploads, bundles, forks, or modifies
-it. This project calls IV's public classes as an independent companion; it does
-not contain copied IV implementation code.
+public derivative works. CI downloads the official CurseForge file as a build
+dependency (compile, and, since MINECRAFT-491, transiently on the classpath of
+one disposable headless server-boot CI job) and never uploads, bundles, forks,
+or modifies it; no CI job publishes this or any other dependency's jar as an
+artifact. This project calls IV's public classes as an independent companion;
+it does not contain copied IV implementation code.
 
 ## Sable 2.0.5 and Sable Companion 1.6.0
 
@@ -29,6 +31,8 @@ not contain copied IV implementation code.
   - `dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0`
 - Sable license: PolyForm Shield License 1.0.0
 
-These are compile-time dependencies and are not bundled or redistributed. Users
-must obtain runtime dependencies from their publishers and comply with their
-licenses. This inventory documents the current boundary; it is not legal advice.
+These are build dependencies (compile, and, since MINECRAFT-491, transiently
+on the classpath of one disposable headless server-boot CI job) and are not
+bundled or redistributed. Users must obtain runtime dependencies from their
+publishers and comply with their licenses. This inventory documents the
+current boundary; it is not legal advice.

@@ -31,6 +31,28 @@ A green hosted run proves standard compilation, unit tests, and artifact
 production only. Its uploaded artifact must contain this project's jar,
 SHA-256 checksums, and test reports; it must not contain dependency jars.
 
+## Headless runtime-smoke check (MINECRAFT-491, added 2026-11-08)
+
+A second CI job (`runtime-smoke`) boots a plain NeoForge dedicated server
+(`gradle runServer`, with `nogui`, in a disposable CI-only world with no
+persisted state) using the same pinned IV/Sable/Companion coordinates, now
+resolved via `implementation` instead of `compileOnly` so they are present on
+the run's classpath. The plain `jar` task is unaffected: it still packages
+only this project's own classes/resources, so nothing from IV, Sable, or
+Sable Companion is bundled into the published artifact.
+
+This is a server-boot smoke check only. It watches the server log for the
+vanilla "Done (...)! For help, type help" startup line (success) or a Mixin
+apply failure / fatal exception / crash (failure) within a 10-minute budget,
+then sends `stop` and uploads the full log. A pass means: NeoForge started
+with `dynamicimmersivevehicles`, `mts` (Immersive Vehicles), `sable`, and
+`sable-companion` all present, and this addon's three Mixins
+(`VehicleForcesMixin`, `VehicleMovementMixin`, `WorldAccessor`) applied
+against IV's real classes without error. It uses no vehicle content pack, so
+it cannot observe vehicle spawn, boarding, driving, physics, or lifecycle
+behavior — those remain untested by this job. A failure here is reported as
+a startup/Mixin/dependency hazard, not a code-logic defect.
+
 ## In-game acceptance (not yet performed)
 
 Use a disposable Minecraft 1.21.1 world and a legally obtained compatible IV
