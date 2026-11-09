@@ -75,20 +75,21 @@ final class BuoyantForces {
   Vector3d forward = q.transform(new Vector3d(Math.sin(steer), 0, Math.cos(steer)));
   var propellers = v.allParts.stream().filter(p -> p instanceof PartPropeller pr && !pr.isSpare)
     .map(p -> (PartPropeller) p).toList();
-  for (var propeller : propellers) {
+  // Operational this tick: driven by a running, linked engine (drivenBy), not destroyed/removed
+  // (isActiveVar.isActive), and actually turning (currentRPM away from zero, via
+  // PartPropellerAccessor - also not public). Only these count toward the shared thrust
+  // budget's denominator - an unpowered/inactive/stalled propeller must not dilute the share a
+  // real one gets just by existing on the chassis.
+  var operational = propellers.stream().filter(p -> drivenBy.containsKey(p) && p.isActiveVar.isActive
+      && Math.abs(((PartPropellerAccessor)(Object)p).div$currentRPM()) > 1e-3)
+    .toList();
+  double perPropellerForce = Buoyancy.perOperationalPropellerForce(tuning.propellerForce, operational.size());
+  for (var propeller : operational) {
    Vector3d anchor = new Vector3d(propeller.localOffset.x, propeller.localOffset.y, propeller.localOffset.z).sub(center);
    Vector3d arm = q.transform(new Vector3d(anchor));
    Vector3d point = new Vector3d(pose.position()).add(arm);
    boolean submerged = point.y <= waterSurfaceAt(level, point.x, point.z, point.y + 2);
-   double drive = drivenBy.getOrDefault(propeller, 0.0);
-   // propeller.isActiveVar.isActive: IV's own "this part is installed and not destroyed/
-   // removed" flag. currentRPM (PartPropellerAccessor, also not public) confirms the propeller
-   // is actually turning rather than stalled/not-yet-spun-up even though a linked engine is
-   // nominally running. Together with the per-engine linkage above, a propeller with no
-   // actual driving engine, or one that is linked but not turning, never thrusts.
-   boolean operational = propeller.isActiveVar.isActive
-     && Math.abs(((PartPropellerAccessor)(Object)propeller).div$currentRPM()) > 1e-3;
-   double thrust = Buoyancy.propellerThrust(drive, tuning.propellerForce / propellers.size(), submerged, operational);
+   double thrust = Buoyancy.propellerThrust(drivenBy.get(propeller), perPropellerForce, submerged, true);
    if (thrust == 0) continue;
    awake = true;
    Vector3d force = new Vector3d(forward).mul(thrust);

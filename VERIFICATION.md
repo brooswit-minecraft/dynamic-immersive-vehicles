@@ -172,6 +172,30 @@ linkage map, and the `isSpare` filtering in (1)/(3) still require a live
 exercised only by the in-game acceptance list below, not by any unit test
 in this repository.
 
+**Thrust-share dilution, corrected after a second exact-head review.**
+The Mixin-accessor correction above fixed *which* propellers can thrust,
+but `BuoyantForces.apply(...)` still divided `tuning.propellerForce` by
+the count of every non-spare installed propeller before checking which
+of them were actually operational - so a vehicle with one powered
+propeller and one unpowered one correctly zeroed the unpowered one's
+thrust, but still only gave the powered propeller half the configured
+budget. This was exactly the "dilute the configured thrust share" half of
+the original finding that the Mixin-accessor fix had not yet addressed.
+`Buoyancy.perOperationalPropellerForce(propellerForceBudget,
+operationalCount)` (new, pure function) now computes the per-propeller
+share from only the propellers `BuoyantForces` has already determined are
+operational this tick (driven by a linked, running engine; active;
+turning) - a non-operational propeller is excluded from the denominator
+entirely, not merely zeroed after an equal split.
+`BuoyancyTest.mixedPoweredAndUnpoweredPropellerSetGivesFullAllocationToThePoweredOneAndZeroToTheOther`
+and `...twoOperationalPropellersSplitTheBudgetEvenly` cover the extracted
+allocation seam the review asked for at the pure-function level - the
+exact "one linked/turning propeller plus one unpowered propeller" case,
+and the even-split multi-propeller case. Which specific propellers end up
+in the operational set each tick still requires a live
+`PartEngine`/`PartPropeller` pair, same testing gap as the rest of this
+file.
+
 ## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
 
 `FlightForcesTest` exercises every pure function in `FlightForces` - the

@@ -42,7 +42,12 @@ each vehicle from IV's own definition at the moment it is needed:
   (`isActiveVar`), not a spare, actually turning (`currentRPM` away from
   zero), and linked to a currently-running engine - an unpowered,
   disconnected, or spare propeller produces no thrust regardless of
-  throttle, submersion, or any other engine's signal.
+  throttle, submersion, or any other engine's signal. The shared
+  per-car `propellerForce` budget is split only across the propellers
+  actually operational this tick (linked, active, turning) - a vehicle
+  with one powered propeller and one unpowered one gives the powered
+  propeller the full configured thrust, not half of it just because a
+  second, unpowered propeller also happens to be installed.
 - **Amphibious vehicles** (a drivable wheel/track device AND at least one
   `canFloat` device on the same chassis). These get *both* domains' forces
   in the same tick, not one at the expense of the other: the ground solver's

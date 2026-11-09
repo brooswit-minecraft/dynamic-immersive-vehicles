@@ -29,4 +29,11 @@ public final class Buoyancy {
  public static double propellerThrust(double throttleSigned, double propellerForce, boolean propellerSubmerged, boolean propellerActive) {
   return (propellerSubmerged && propellerActive) ? throttleSigned * propellerForce : 0;
  }
+ /** Splits the shared propeller-force budget evenly across only the propellers actually
+  * operational this tick (driven by a running, linked engine, active, and turning) - a
+  * non-operational propeller must not dilute the share a real one gets just by existing on
+  * the chassis. Zero if none are operational. */
+ public static double perOperationalPropellerForce(double propellerForceBudget, int operationalCount) {
+  return operationalCount <= 0 ? 0 : propellerForceBudget / operationalCount;
+ }
 }
