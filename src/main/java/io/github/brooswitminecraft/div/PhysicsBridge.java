@@ -9,6 +9,8 @@ import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
+import minecrafttransportsimulator.entities.instances.PartPropeller;
+import minecrafttransportsimulator.jsondefs.JSONPart;
 import minecrafttransportsimulator.jsondefs.JSONVehicle;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ClipContext;
@@ -53,7 +55,10 @@ public final class PhysicsBridge {
   var installedGroundDevices = v.allParts.stream()
     .filter(p -> p instanceof PartGroundDevice g && g.definition != null)
     .map(p -> ((PartGroundDevice)p).definition.ground).toList();
-  boolean eligible = Classification.eligible(definition, installedGroundDevices, v.towedByConnection != null, Overrides.isOptedOut(key))
+  var installedPropellers = v.allParts.stream()
+    .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
+    .map(p -> ((PartPropeller)p).definition.propeller).toList();
+  boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, v.towedByConnection != null, Overrides.isOptedOut(key))
     && !brokenDefinitions.contains(definition);
   if (!eligible) return deactivate(v);
   if (v.world.isClient()) return true;
@@ -210,12 +215,15 @@ public final class PhysicsBridge {
    return contact || drive!=0 || towThrust!=0;
   }
   /**
-   * Aircraft and blimps: no wheels, so this applies {@link FlightForces} instead of the
-   * raycast suspension/friction loop above - wing/hull lift (and blimp buoyancy), parasitic+
-   * induced drag, aileron/elevator/rudder control torques, and throttle-linear thrust from any
-   * running engine. {@code tuning.driveForce} is reused as this vehicle's max thrust, the same
-   * way it is reused as max drive force for a ground vehicle - one shared, per-car-overridable
-   * propulsive-force knob rather than a second config field.
+   * Fixed-wing aircraft and blimps (never a rotorcraft - {@link Classification#eligible} keeps
+   * any vehicle with an installed rotor propeller on IV's native physics instead): no wheels, so
+   * this applies {@link FlightForces} instead of the raycast suspension/friction loop above -
+   * wing lift, parasitic+induced drag, aileron/elevator/rudder control torques, throttle-linear
+   * thrust from any running engine, and - for a blimp - mass/gravity-compatible neutral-buoyancy
+   * lift plus ballast trim (not IV's literal {@code ballastVolume}; see
+   * {@link FlightForces#buoyancy}). {@code tuning.driveForce} is reused as this vehicle's max
+   * thrust, the same way it is reused as max drive force for a ground vehicle - one shared,
+   * per-car-overridable propulsive-force knob rather than a second config field.
    */
   private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
    var motorized = v.definition.motorized;
@@ -233,7 +241,13 @@ public final class PhysicsBridge {
    double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
    double lift=FlightForces.aeroForce(liftCoeff,motorized.wingArea,dynamicPressure);
    double drag=FlightForces.aeroForce(dragCoeff,referenceArea,dynamicPressure);
-   double buoyant=motorized.ballastVolume>0 ? FlightForces.buoyancy(AIR_DENSITY,motorized.ballastVolume) : 0;
+   // Neutral-buoyancy lift scaled to this vehicle's own weight (see FlightForces.buoyancy), not
+   // IV's literal ballastVolume - that field is normally emptyMass/1000, a small control-
+   // authority number, not an SI volume sized to displace the vehicle's mass.
+   double buoyant=motorized.isBlimp
+     ? FlightForces.buoyancy(mass,9.81,Math.max(0,Math.min(1,motorized.gravityFactor)))
+       + FlightForces.ballastTrim(mass,9.81,v.ballastControlVar.currentValue)
+     : 0;
    double throttle=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running) throttle=v.throttleVar.currentValue;
    double thrustForce=FlightForces.thrust(throttle,tuning.driveForce);

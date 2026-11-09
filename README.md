@@ -23,12 +23,18 @@ each vehicle from IV's own definition at the moment it is needed:
   (`hasSkidSteer`) turns by differential track force instead of a steerable
   wheel. IV remains responsible for models, seats, controls, persistence, and
   movement packets.
-- **Aircraft and blimps** (`motorized.isAircraft` / `isBlimp`): a server-owned
-  Sable rigid body using a separate flight force model instead of the ground
-  solver - wing/hull lift (thin-airfoil lift slope with a hard stall cutoff),
-  parasitic+induced drag, aileron/elevator/rudder control torques, and
-  throttle-linear thrust from any running engine, plus displaced-air buoyancy
-  for a blimp's ballast volume. See [`FlightForces`](src/main/java/io/github/brooswitminecraft/div/FlightForces.java)
+- **Fixed-wing aircraft and blimps** (`motorized.isAircraft` / `isBlimp`,
+  with no installed rotor propeller): a server-owned Sable rigid body using a
+  separate flight force model instead of the ground solver - wing lift
+  (thin-airfoil lift slope with a hard stall cutoff), parasitic+induced drag,
+  aileron/elevator/rudder control torques, and throttle-linear thrust from
+  any running engine. A blimp additionally gets mass/gravity-compatible
+  neutral-buoyancy lift plus ballast trim - *not* a literal displaced-air
+  calculation on IV's `ballastVolume` field, which is normally
+  `emptyMass / 1000` (a small control-authority number, not an SI volume
+  sized to displace the vehicle's mass) and would net only a few newtons
+  against Sable's full gravity on the vehicle's real mass. See
+  [`FlightForces`](src/main/java/io/github/brooswitminecraft/div/FlightForces.java)
   for the exact model and its stated simplifications (no post-stall/spin
   behavior, no advance-ratio propeller falloff, no altitude/weather air
   density, no natural weathercock stability beyond rudder input). No wheel or
@@ -40,6 +46,11 @@ follow-up task rather than faked with the ground solver:
 - **Boats and other float-only hulls** (pontoon/skid devices with no wheel or
   track): buoyancy is a different physics domain this bridge does not yet
   model.
+- **Rotorcraft** (any installed propeller with `isRotor` set, e.g. a
+  helicopter): IV gives rotor-lift propellers their own thrust-vectoring
+  solver, a different physics domain this bridge does not model; a rotorcraft
+  stays on IV's native physics rather than getting zero wing lift and
+  forward-only thrust from the fixed-wing model above.
 - **A vehicle actively hitched behind another** (trailers): it keeps
   following IV's own native hitch code instead of getting a second,
   competing body, so towed trailers are unaffected either way. The towing

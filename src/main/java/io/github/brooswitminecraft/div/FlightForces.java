@@ -63,8 +63,27 @@ public final class FlightForces {
   return throttle * maxThrust;
  }
 
- /** Buoyant lift from a displaced-air ballast volume (blimps): rho_air * V * g. */
- public static double buoyancy(double airDensity, double ballastVolume) {
-  return airDensity * ballastVolume * GRAVITY;
+ /**
+  * Neutral-buoyancy lift for a blimp, scaled to the vehicle's own weight rather than a literal
+  * Archimedes volume: IV's {@code ballastVolume} is documented as normally {@code emptyMass /
+  * 1000} - a small control-authority number, not an SI volume sized to displace the vehicle's
+  * mass - and IV's own native solver suppresses ordinary gravity for a ballast-active vehicle
+  * rather than computing real displaced-air buoyancy. {@code gravityFactor} (0-1, clamped by the
+  * caller) is that same suppression lever: 0 (the unset default) means a fully lighter-than-air
+  * hull - this returns the vehicle's full weight as upward lift, net-neutral against gravity;
+  * 1 means no suppression at all, so this is gravity-compatible by construction for any mass.
+  */
+ public static double buoyancy(double mass, double gravity, double gravityFactor) {
+  return mass * gravity * (1 - gravityFactor);
+ }
+
+ /**
+  * Fine climb/descent trim around the neutral-buoyancy baseline above, from IV's ballast
+  * control input (-1..1, release/intake), scaled as a fraction of the vehicle's own weight so it
+  * stays mass/gravity-compatible regardless of a pack's literal {@code ballastVolume} number.
+  */
+ public static double ballastTrim(double mass, double gravity, double ballastControl) {
+  double trimFraction = 0.1;
+  return mass * gravity * trimFraction * Math.max(-1, Math.min(1, ballastControl));
  }
 }
