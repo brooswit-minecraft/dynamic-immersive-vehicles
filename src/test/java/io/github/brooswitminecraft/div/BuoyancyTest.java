@@ -54,21 +54,29 @@ class BuoyancyTest {
   // chassis. This is the exact "dilutes the configured thrust share" finding review flagged.
   assertEquals(6000, Buoyancy.perOperationalPropellerForce(6000, 1));
  }
- @Test void linkedActiveTurningPropellerIsOperational() {
-  assertTrue(Buoyancy.isPropellerOperational(true, true, 1200));
-  assertTrue(Buoyancy.isPropellerOperational(true, true, -1200));
+ @Test void linkedActiveTurningPropellerWithNonzeroDriveIsOperational() {
+  assertTrue(Buoyancy.isPropellerOperational(true, true, 1200, 1));
+  assertTrue(Buoyancy.isPropellerOperational(true, true, -1200, -1));
  }
  @Test void activeButUnlinkedPropellerIsNotOperationalRegardlessOfRpm() {
   // No engine actually drives this propeller - it must not count as operational even if its
   // own RPM reading happens to be nonzero (e.g. windmilling) and it is not destroyed/removed.
-  assertFalse(Buoyancy.isPropellerOperational(false, true, 1200));
-  assertFalse(Buoyancy.isPropellerOperational(false, true, 0));
+  assertFalse(Buoyancy.isPropellerOperational(false, true, 1200, 1));
+  assertFalse(Buoyancy.isPropellerOperational(false, true, 0, 0));
  }
  @Test void linkedButStalledPropellerIsNotOperational() {
-  assertFalse(Buoyancy.isPropellerOperational(true, true, 0));
+  assertFalse(Buoyancy.isPropellerOperational(true, true, 0, 1));
  }
  @Test void linkedInactivePropellerIsNotOperational() {
-  assertFalse(Buoyancy.isPropellerOperational(true, false, 1200));
+  assertFalse(Buoyancy.isPropellerOperational(true, false, 1200, 1));
+ }
+ @Test void linkedActiveTurningButZeroDrivePropellerIsNotOperational() {
+  // Review finding: a linked, active, spinning propeller with zero computed pitch/direction
+  // (feathered, or caught mid-swing through dynamic pitch) produces no thrust of its own
+  // (signedPropellerDrive is 0) but must not count toward the shared budget's denominator
+  // either - counting it would still dilute the share a propeller that IS actually thrusting
+  // gets, just because this one happens to be spinning.
+  assertFalse(Buoyancy.isPropellerOperational(true, true, 1200, 0));
  }
  @Test void mixedOperationalAndUnlinkedPropellerSetGivesFullAllocationToTheOperationalOneAndZeroToTheOther() {
   // Exercises the actual selection predicate BuoyantForces applies, not a hand-picked
@@ -76,8 +84,8 @@ class BuoyancyTest {
   // destroyed/removed) but unlinked from any running engine - the exact "active but not
   // actually driven" case review's prior finding was about. B must not be counted in the
   // denominator, and A must receive the full, undiluted budget.
-  boolean aOperational = Buoyancy.isPropellerOperational(true, true, 1200);
-  boolean bOperational = Buoyancy.isPropellerOperational(false, true, 0);
+  boolean aOperational = Buoyancy.isPropellerOperational(true, true, 1200, 1);
+  boolean bOperational = Buoyancy.isPropellerOperational(false, true, 0, 0);
   assertTrue(aOperational);
   assertFalse(bOperational);
   int operationalCount = (aOperational ? 1 : 0) + (bOperational ? 1 : 0);
@@ -86,12 +94,28 @@ class BuoyancyTest {
   assertEquals(0, Buoyancy.propellerThrust(1, share, true, bOperational), "the unlinked propeller still produces zero");
  }
  @Test void twoOperationalPropellersSplitTheBudgetEvenly() {
-  boolean aOperational = Buoyancy.isPropellerOperational(true, true, 1200);
-  boolean bOperational = Buoyancy.isPropellerOperational(true, true, -800);
+  boolean aOperational = Buoyancy.isPropellerOperational(true, true, 1200, 1);
+  boolean bOperational = Buoyancy.isPropellerOperational(true, true, -800, -1);
   int operationalCount = (aOperational ? 1 : 0) + (bOperational ? 1 : 0);
   double share = Buoyancy.perOperationalPropellerForce(6000, operationalCount);
   assertEquals(3000, share);
   assertEquals(3000, Buoyancy.propellerThrust(1, share, true, aOperational));
+ }
+ @Test void mixedZeroDriveAndNonzeroDrivePropellerSetGivesFullAllocationToTheThrustingOneAndZeroToTheOther() {
+  // The exact mixed regression review asked for: one linked/active/turning propeller with zero
+  // desired velocity (feathered - drive 0) plus one linked/active/turning propeller with
+  // nonzero desired velocity (drive 1) - the latter must get the full, undiluted budget, not
+  // half of it just because the feathered one is also spinning.
+  double zeroDrive = Buoyancy.signedPropellerDrive(0, 1);
+  double nonzeroDrive = Buoyancy.signedPropellerDrive(10, 1);
+  boolean feathered = Buoyancy.isPropellerOperational(true, true, 1200, zeroDrive);
+  boolean thrusting = Buoyancy.isPropellerOperational(true, true, 1200, nonzeroDrive);
+  assertFalse(feathered, "zero drive must not count as operational despite spinning");
+  assertTrue(thrusting);
+  int operationalCount = (feathered ? 1 : 0) + (thrusting ? 1 : 0);
+  double share = Buoyancy.perOperationalPropellerForce(6000, operationalCount);
+  assertEquals(6000, Buoyancy.propellerThrust(nonzeroDrive, share, true, thrusting), "the thrusting propeller gets the full, undiluted budget");
+  assertEquals(0, Buoyancy.propellerThrust(zeroDrive, share, true, feathered), "the feathered propeller still produces zero");
  }
  @Test void forwardPitchPropellerDrivesForwardRegardlessOfGear() {
   // A positive desiredLinearVelocity (IV's own computed thrust direction, driven by

@@ -40,13 +40,17 @@ public final class Buoyancy {
   * counts toward {@link #perOperationalPropellerForce}'s denominator at all: linked to a
   * currently-running engine ({@code linkedToRunningEngine} - from
   * {@code PartEngineAccessor.linkedPropellers}, not reachable through any public API), not
-  * destroyed/removed ({@code active} - IV's own {@code isActiveVar}), and actually turning
-  * ({@code currentRpm} away from zero - from {@code PartPropellerAccessor}, also not public).
-  * An active propeller that is simply not linked to any running engine (so no engine drives
-  * it at all) is excluded here exactly like an inactive or stalled one - all three conditions
-  * are checked independently, so no single one can substitute for the others. */
- public static boolean isPropellerOperational(boolean linkedToRunningEngine, boolean active, double currentRpm) {
-  return linkedToRunningEngine && active && Math.abs(currentRpm) > 1e-3;
+  * destroyed/removed ({@code active} - IV's own {@code isActiveVar}), actually turning
+  * ({@code currentRpm} away from zero - from {@code PartPropellerAccessor}, also not public),
+  * and actually producing nonzero {@link #signedPropellerDrive} - a linked, active, spinning
+  * propeller with zero computed pitch/direction (feathered, or caught mid-swing through
+  * dynamic pitch) must not count toward the shared budget's denominator either: it produces no
+  * thrust of its own ({@code signedPropellerDrive} is 0, so {@link #propellerThrust} is 0) but
+  * would otherwise still dilute the share a propeller that IS actually thrusting gets, just by
+  * spinning. All four conditions are checked independently, so no single one can substitute
+  * for the others. */
+ public static boolean isPropellerOperational(boolean linkedToRunningEngine, boolean active, double currentRpm, double signedDrive) {
+  return linkedToRunningEngine && active && Math.abs(currentRpm) > 1e-3 && signedDrive != 0;
  }
  /** Signed drive for one operational propeller: the sign of IV's own computed thrust
   * direction ({@code PartPropeller.desiredLinearVelocity}, a public field driven by

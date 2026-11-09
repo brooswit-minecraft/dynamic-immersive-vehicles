@@ -84,10 +84,12 @@ final class BuoyantForces {
   var propellers = nonRotorPropellers(v);
   // Buoyancy.isPropellerOperational is the exact pure predicate this selection applies - only
   // an operational propeller counts toward the shared thrust budget's denominator, so a
-  // merely-active-but-unlinked, or linked-but-stalled, propeller does not dilute the share a
-  // truly operational one gets just by existing on the chassis.
+  // merely-active-but-unlinked, linked-but-stalled, or linked-active-turning-but-zero-drive
+  // (feathered/zero-pitch) propeller does not dilute the share a truly operational one gets
+  // just by existing on the chassis.
   var operational = propellers.stream().filter(p -> Buoyancy.isPropellerOperational(
-      drivenBy.containsKey(p), p.isActiveVar.isActive, ((PartPropellerAccessor)(Object)p).div$currentRPM()))
+      drivenBy.containsKey(p), p.isActiveVar.isActive, ((PartPropellerAccessor)(Object)p).div$currentRPM(),
+      drivenBy.getOrDefault(p, 0.0)))
     .toList();
   double perPropellerForce = Buoyancy.perOperationalPropellerForce(tuning.propellerForce, operational.size());
   for (var propeller : operational) {
