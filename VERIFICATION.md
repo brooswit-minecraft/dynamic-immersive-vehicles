@@ -126,12 +126,13 @@ was factored out of `BuoyantBody` specifically so `PhysicsBridge`'s `Body`
 (ground or flight) can call the same per-float buoyancy/water-drag/
 propeller-thrust logic alongside its own wheel/track or flight/rotor forces
 in the same tick, whenever any installed ground device is `canFloat`
-(`Body.floatCapable`, computed once at construction from the vehicle's
-installed parts at that time - this one field is not re-derived per tick
-the way the rotor/float-propeller-radius decision inside `stepRotor` is,
-since a float device being physically bolted on or off mid-flight is not a
-case this bridge treats as a realistic "missing/changed parts" scenario the
-way an installed propeller is). This is not a new classification: it is the
+(`hasFloatDevice(v)`, re-derived from the vehicle's live installed parts
+every tick by `Body.step` and passed straight into `planTick` - not cached
+at construction; an earlier version of this fix did cache it in a
+`floatCapable` field, which self-review correctly flagged, since installing
+or removing a float device afterward doesn't change the ground/flight
+category and so never triggers `replaceIfCategoryChanged` either, leaving
+nothing else to notice the change). This is not a new classification: it is the
 existing ground or flight/rotor domain from `eligible()`, with buoyancy
 layered on top at the force-application level rather than the
 classification level. `BuoyantForces` itself excludes any installed rotor

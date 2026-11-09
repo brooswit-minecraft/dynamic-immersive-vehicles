@@ -68,8 +68,15 @@ public final class PhysicsBridge {
   * flight-vehicle combined-forces case PhysicsBridge.Body's step() handles alongside its
   * primary domain. */
  private static boolean hasFloatDevice(EntityVehicleF_Physics v) {
-  return v.allParts.stream().anyMatch(p -> p instanceof PartGroundDevice g && !g.isSpare && g.definition != null
-      && Classification.isFloatDevice(g.definition.ground));
+  return hasFloatDevice(installedGroundDevices(v));
+ }
+ /** The pure decision {@link #hasFloatDevice(EntityVehicleF_Physics)} delegates to, over the
+  * same already-live-filtered (non-spare) JSON list {@link #installedGroundDevices} produces -
+  * extracted so a float device installed or removed through this exact seam, not a hand-picked
+  * boolean, is provable without a live entity/Sable runtime (see {@code PhysicsBridgeStepperTest}),
+  * the same way {@link #selectStepper} is tested over a mutable propeller list. */
+ static boolean hasFloatDevice(List<JSONPart.JSONPartGroundDevice> installedGroundDevices) {
+  return installedGroundDevices.stream().anyMatch(Classification::isFloatDevice);
  }
  /** Which force model {@code Body.step} dispatches to this tick - the literal decision it makes,
   * extracted so the "live rotor add/remove switches solvers" behavior is testable without a
