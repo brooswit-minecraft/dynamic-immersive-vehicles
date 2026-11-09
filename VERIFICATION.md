@@ -129,33 +129,48 @@ Review (PR #4) found two further defects at the live head:
    running `PartEngine` - reassigning it on every running engine found, so
    a later engine silently overwrote an earlier one's sign/throttle on a
    multi-engine vehicle - and applied it to every installed propeller with
-   no check that the propeller itself was active. The engine loop now
-   stops at the first running engine instead of letting a later one
-   overwrite it, and `Buoyancy.propellerThrust` now takes an explicit
-   `propellerActive` parameter (wired to `propeller.isActiveVar.isActive`),
-   so a destroyed/removed propeller produces zero thrust.
+   no check that the propeller itself was active. See the Mixin-accessor
+   correction immediately below for the full fix.
+3. (Found by self-review, PR #4) `PhysicsBridge.active()`'s
+   `installedPropellers` - the list `Classification.eligible`/
+   `floatEligible` use for the `isRotor` exclusion - did not exclude
+   `PartPropeller.isSpare` either, so a spare rotor could suppress ground
+   or float eligibility for a chassis whose only rotor was a non-functional
+   spare. Filtered the same way as (1).
 
-**What `propellerActive` does and does not cover, named explicitly after a
-second review round.** `isActiveVar.isActive` filters a destroyed/removed
-propeller; it does **not** establish that this specific propeller is
-connected to a running engine or turning at any real RPM - IV's public API
-exposes neither per-propeller engine linkage nor RPM (`PartPropeller`'s
-`connectedEngines`/`currentRPM` are private with no accessor; confirmed by
-inspecting the real class via `javap`). A vehicle with one running engine
-and several installed, non-spare, active propellers currently drives all
-of them from that single engine's throttle signal - an active propeller
-with no actual engine connection in-game would still thrust here. This is
-recorded as a disclosed limitation in README.md's Scope, not papered over
-as a complete "operational propeller" fix; see README.md for the exact
-wording.
+**Per-propeller drive state via Mixin accessors, added after a reviewer
+directive.** The first correction above only gated thrust on
+`propeller.isActiveVar.isActive` (destroyed/removed), which review (and
+then the ticket's actual stakeholder) correctly rejected as an incomplete
+stand-in for "this propeller is actually being driven" - `isActiveVar`
+says nothing about engine linkage or RPM, so one running engine still
+drove every active, non-spare propeller on the vehicle regardless of
+whether that engine was connected to it at all. Per instruction, this was
+corrected by reading IV's actual state rather than documenting the gap
+away: `PartEngine.linkedPropellers` and `PartPropeller.currentRPM` are
+both private with no public accessor (confirmed via `javap`), so two new
+version-pinned `@Accessor` Mixins -
+[`PartEngineAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartEngineAccessor.java)
+and
+[`PartPropellerAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartPropellerAccessor.java)
+- expose them, the same pattern this codebase already uses for
+`EntityVehicleF_Physics.getRecursiveTowingThrust()` (`VehicleTowingAccessor`)
+and the client world field (`WorldAccessor`); no IV source is edited or
+redistributed. `BuoyantForces.apply(...)` now builds a per-propeller drive
+map from each running engine's actual `linkedPropellers`, and gates thrust
+on `isActiveVar.isActive` **and** `|currentRPM| > 0` together - a
+propeller with no driving engine, or linked but stalled, produces zero
+thrust even if some other engine on the vehicle is running at full
+throttle.
 
 `BuoyancyTest.inactivePropellerProducesNoThrustEvenWhenSubmergedAtFullThrottle`
-covers the destroyed/removed-propeller case at the pure-function level -
-precisely what `propellerActive` actually gates, no more. The `isSpare`
-filtering in (1), and the per-propeller engine-linkage/RPM gap just named,
-remain in the same live-entity/`ServerLevel`/Sable-runtime testing gap
-as the rest of `BuoyantForces` - exercised only by the in-game acceptance
-list below, not by any unit test in this repository.
+covers the `propellerActive` (destroyed/removed-or-not-turning) gate at
+the pure-function level. The actual Mixin accessor reads, the per-engine
+linkage map, and the `isSpare` filtering in (1)/(3) still require a live
+`PartEngine`/`PartPropeller` pair and remain in the same live-entity/
+`ServerLevel`/Sable-runtime testing gap as the rest of `BuoyantForces` -
+exercised only by the in-game acceptance list below, not by any unit test
+in this repository.
 
 ## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
 

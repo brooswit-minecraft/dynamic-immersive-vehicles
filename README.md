@@ -30,18 +30,19 @@ each vehicle from IV's own definition at the moment it is needed:
   resting unevenly in the water is righted by that per-device force
   distribution rather than a separate stability calculation. Installed
   `PartPropeller`s add forward/reverse thrust, steered by the rudder input,
-  but only while the propeller itself is underwater - one above the surface
-  produces no thrust, same as a real propeller spinning free in air. Thrust
-  is also gated on the propeller's own `isActiveVar` (not destroyed/
-  removed) and excludes spare propellers - but **not** on whether that
-  specific propeller is actually connected to a running engine or turning
-  at any real RPM, since IV exposes neither per-propeller engine linkage
-  nor RPM through its public API. A vehicle with one running engine and
-  several installed (non-spare, active) propellers currently drives all of
-  them from that one engine's throttle signal; disconnecting a propeller
-  in-game from every engine would not, by itself, stop it from thrusting
-  here. This is a known, disclosed limitation, not a claimed fix for
-  per-propeller drive state.
+  allocated per actual engine-to-propeller linkage rather than one vehicle-
+  wide signal applied to every installed propeller. IV exposes neither that
+  linkage nor a propeller's live RPM through its public API, so this bridge
+  reads them the same way it already reads `EntityVehicleF_Physics`'s own
+  protected `getRecursiveTowingThrust()` for towing (see
+  [`PartEngineAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartEngineAccessor.java)/
+  [`PartPropellerAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartPropellerAccessor.java),
+  version-pinned `@Accessor` Mixins, not an edit to IV's own source). A
+  propeller thrusts only while it is underwater, not destroyed/removed
+  (`isActiveVar`), not a spare, actually turning (`currentRPM` away from
+  zero), and linked to a currently-running engine - an unpowered,
+  disconnected, or spare propeller produces no thrust regardless of
+  throttle, submersion, or any other engine's signal.
 - **Amphibious vehicles** (a drivable wheel/track device AND at least one
   `canFloat` device on the same chassis). These get *both* domains' forces
   in the same tick, not one at the expense of the other: the ground solver's

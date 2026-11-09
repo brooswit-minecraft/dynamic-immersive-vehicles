@@ -1,6 +1,8 @@
 package io.github.brooswitminecraft.div;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.companion.math.Pose3d;
+import io.github.brooswitminecraft.div.mixin.PartEngineAccessor;
+import io.github.brooswitminecraft.div.mixin.PartPropellerAccessor;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
@@ -11,7 +13,9 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Buoyancy/water-drag/propeller-thrust force application, shared by {@link BuoyantBody} (a
@@ -54,14 +58,17 @@ final class BuoyantForces {
    if (speed > 1e-6) force.fma(-dragMagnitude / speed, localVelocity);
    handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(force).mul(PhysicsBridge.DT)));
   }
-  // Only the first running engine sets direction/throttle - a later running engine never
-  // silently overwrites it, so a multi-engine vehicle doesn't get an arbitrary sign flip from
-  // iteration order.
-  double drive = 0;
+  // Per-propeller drive, keyed by actual engine linkage (PartEngineAccessor.linkedPropellers -
+  // IV's own private field, not reachable through any public API) rather than one vehicle-wide
+  // signal applied to every installed propeller regardless of whether a given engine drives it
+  // at all. If two running engines both link the same propeller, the first one found sets it -
+  // that propeller is not double-driven by being added to twice.
+  Map<PartPropeller, Double> drivenBy = new IdentityHashMap<>();
   for (var part : v.allParts) {
-   if (part instanceof PartEngine engine && engine.running) {
-    drive = Math.signum(engine.currentGearVar.currentValue) * v.throttleVar.currentValue;
-    break;
+   if (!(part instanceof PartEngine engine) || !engine.running) continue;
+   double engineDrive = Math.signum(engine.currentGearVar.currentValue) * v.throttleVar.currentValue;
+   for (var linked : ((PartEngineAccessor)(Object)engine).div$linkedPropellers()) {
+    drivenBy.putIfAbsent(linked, engineDrive);
    }
   }
   double steer = (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE) * Math.toRadians(tuning.maxSteerDegrees);
@@ -73,9 +80,15 @@ final class BuoyantForces {
    Vector3d arm = q.transform(new Vector3d(anchor));
    Vector3d point = new Vector3d(pose.position()).add(arm);
    boolean submerged = point.y <= waterSurfaceAt(level, point.x, point.z, point.y + 2);
+   double drive = drivenBy.getOrDefault(propeller, 0.0);
    // propeller.isActiveVar.isActive: IV's own "this part is installed and not destroyed/
-   // removed" flag - an inactive/damaged propeller never thrusts, regardless of throttle.
-   double thrust = Buoyancy.propellerThrust(drive, tuning.propellerForce / propellers.size(), submerged, propeller.isActiveVar.isActive);
+   // removed" flag. currentRPM (PartPropellerAccessor, also not public) confirms the propeller
+   // is actually turning rather than stalled/not-yet-spun-up even though a linked engine is
+   // nominally running. Together with the per-engine linkage above, a propeller with no
+   // actual driving engine, or one that is linked but not turning, never thrusts.
+   boolean operational = propeller.isActiveVar.isActive
+     && Math.abs(((PartPropellerAccessor)(Object)propeller).div$currentRPM()) > 1e-3;
+   double thrust = Buoyancy.propellerThrust(drive, tuning.propellerForce / propellers.size(), submerged, operational);
    if (thrust == 0) continue;
    awake = true;
    Vector3d force = new Vector3d(forward).mul(thrust);

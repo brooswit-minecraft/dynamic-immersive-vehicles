@@ -57,8 +57,10 @@ public final class PhysicsBridge {
   var installedGroundDevices = v.allParts.stream()
     .filter(p -> p instanceof PartGroundDevice g && !g.isSpare && g.definition != null)
     .map(p -> ((PartGroundDevice)p).definition.ground).toList();
+  // A spare rotor must not suppress eligibility: it isn't an operational part of the
+  // chassis (same reasoning as excluding spare ground devices above).
   var installedPropellers = v.allParts.stream()
-    .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
+    .filter(p -> p instanceof PartPropeller pr && !pr.isSpare && pr.definition != null)
     .map(p -> ((PartPropeller)p).definition.propeller).toList();
   boolean towed = v.towedByConnection != null, optedOut = Overrides.isOptedOut(key);
   boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
