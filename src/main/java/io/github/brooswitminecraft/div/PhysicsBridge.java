@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
@@ -90,6 +91,25 @@ public final class PhysicsBridge {
  static TickPlan planTick(boolean flight, boolean floatCapable, List<JSONPart.JSONPartPropeller> installedPropellers) {
   return new TickPlan(selectStepper(flight, installedPropellers), floatCapable);
  }
+ /**
+  * {@code registry.activateOnce} deliberately reuses an already-active body without
+  * reconstructing it (the "no double physics" guarantee) - but a vehicle's installed parts can
+  * change which body category it needs live (a rotor installed on a previously float-only hull
+  * needs a ground/flight/rotor {@code Body} instead of its {@code BuoyantBody}, or the reverse
+  * when a rotor is removed from a rotor-only hull that has no wheels), and that reuse would
+  * otherwise silently keep running the wrong - or no - force model for the vehicle's actual
+  * current parts. Generic over {@code K}/{@code B} (not tied to {@code EntityVehicleF_Physics}/
+  * {@code VehicleBody}) so this lifecycle fix is directly testable with fake keys/bodies, the
+  * same way {@link #activateOrClassify} is - see {@code PhysicsBridgeBodyReplacementTest}.
+  */
+ static <K, B> void replaceIfCategoryChanged(BodyRegistry<K, B> registry, K key, boolean neededGroundCategory,
+     java.util.function.Predicate<B> isGroundCategory, Consumer<B> remove) {
+  B existing = registry.get(key);
+  if (existing != null && isGroundCategory.test(existing) != neededGroundCategory) {
+   B old = registry.deactivate(key);
+   if (old != null) remove.accept(old);
+  }
+ }
  public static boolean active(EntityVehicleF_Physics v) {
   // Guard every dereference used to decide eligibility, in entry order, before Classification
   // (or anything else) ever sees them: a vehicle with no definition, or with a ground part that
@@ -103,6 +123,7 @@ public final class PhysicsBridge {
   boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
+  replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, VehicleBody::remove);
   if (v.world.isClient()) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;

@@ -254,8 +254,9 @@ standard Gradle/mod-loader build) confirmed `Classification.java`, the new
 against IV's real `JSONPart.JSONPartPropeller.diameter`/`isRotor` fields and
 `EntityVehicleF_Physics`'s real control-input vars
 (`elevatorInputVar`/`aileronInputVar`/`rudderInputVar`) and `throttleVar`,
-and that all 123 tests in the repository - `RotorForcesTest` (19 new),
-`PhysicsBridgeStepperTest` (8, the production-seam regression below),
+and that all 127 tests in the repository - `RotorForcesTest` (19 new),
+`PhysicsBridgeStepperTest` (8) and `PhysicsBridgeBodyReplacementTest` (4,
+both production-seam regressions below),
 the updated `ClassificationTest` (now including the frozen-state regression
 test above and the merged-in boat/float classification cases below),
 `FlightForcesTest`, `BuoyancyTest`, `TireForcesTest`, `TowingForcesTest`,
@@ -346,6 +347,34 @@ claimed by `BuoyantForces`'s underwater-thrust pass (already owned by
 `stepRotor`), a non-rotor propeller (including a null entry) always is, so
 a floating rotorcraft's thrust is counted exactly once, never both and
 never neither.
+
+**Body-category replacement lifecycle gap, found by self-review at head
+`ce65a20c`.** `registry.activateOnce` deliberately reuses an already-active
+body without reconstructing it (the existing "no double physics"
+guarantee), but review found that reuse had an unintended consequence once
+installed-part dispatch could flip which body category a vehicle needs
+live: a float-only hull (`BuoyantBody`) that later has an `isRotor`
+propeller installed becomes `ground`-eligible (via `Classification
+.isRotorcraft`), but `active()` was still calling `activateOnce` against
+the same key, which handed back the existing `BuoyantBody` unchanged -
+`BuoyantBody.step` only calls `BuoyantForces.apply`, which explicitly
+excludes rotor propellers from thrust, so the newly installed rotor would
+never receive `stepRotor`'s lift or control. The reverse transition
+(removing the only rotor from a rotor-only, wheel-less hull) likewise kept
+a stale ground/rotor `Body` running after the vehicle fell back to
+float-only eligibility. `PhysicsBridge.replaceIfCategoryChanged(registry,
+key, neededGroundCategory, isGroundCategory, remove)` - generic over the
+registry's key/body types, not tied to `EntityVehicleF_Physics`/
+`VehicleBody` - is the fix `active()` now calls first: if an existing body's
+actual category (`instanceof Body`) no longer matches the freshly computed
+`ground` decision, the stale body is deactivated and removed before
+`activateOrClassify` runs, so the subsequent `activateOnce` call
+constructs a fresh body of the correct kind instead of reusing the wrong
+one. `PhysicsBridgeBodyReplacementTest` exercises this exact method with
+fake keys/bodies: a no-op when there is no existing body or its category
+already matches, and both the float-to-ground and ground-to-float
+transitions actually remove the stale body (verified destroyed, not
+leaked) so the caller's next `activateOrClassify` call starts clean.
 
 What this still cannot exercise: `active()`'s own eligibility computation
 wired to a live entity (opt-out/towing/missing-definition transitions
