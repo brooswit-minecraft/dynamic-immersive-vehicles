@@ -4,6 +4,7 @@ import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
+import io.github.brooswitminecraft.div.mixin.VehicleTowingAccessor;
 import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
@@ -178,7 +179,13 @@ public final class PhysicsBridge {
     wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
     contact=true;
    }
-   if(contact || drive!=0) box.wakeUp();
+   // IV would normally add getRecursiveTowingThrust() - the engine thrust of everything this
+   // vehicle is towing - straight to its own thrustForce every tick, but its getForcesAndMotions
+   // never runs once PhysicsBridge takes over (see VehicleForcesMixin), so towing would otherwise
+   // feel lighter than it should. Replicate it as a center-of-mass impulse, same as IV applies it.
+   double towThrust = ((VehicleTowingAccessor)(Object)v).div$getRecursiveTowingThrust();
+   if (towThrust != 0) handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.forwardImpulse(towThrust,DT)));
+   if(contact || drive!=0 || towThrust!=0) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
    v.position.set(origin.x,origin.y,origin.z);

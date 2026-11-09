@@ -36,9 +36,18 @@ follow-up task rather than faked with the ground solver:
 - **A vehicle actively hitched behind another** (trailers): it keeps
   following IV's own native hitch code instead of getting a second,
   competing body, so towed trailers are unaffected either way. The towing
-  vehicle itself is still eligible on its own merits, but the extra thrust
-  IV would normally add to compensate for a trailer's drag is not modeled,
-  so towing currently feels lighter than it should.
+  vehicle itself is still eligible on its own merits, and now replicates the
+  one force IV's own code would otherwise add for it - the summed engine
+  thrust of everything it is towing (`getRecursiveTowingThrust`), applied as
+  a center-of-mass impulse each tick (see `TowingForces`) - so towing no
+  longer feels lighter than it should on that specific axis.
+  **Still out of scope:** the towed vehicle itself still has no Sable body,
+  joint, or constraint of its own; it is carried purely by IV's own hitch
+  position-snap, not by any coupled rigid-body physics. A real two-body
+  coupling (the trailer as its own Sable body, linked to the towing
+  vehicle's body by a hitch constraint, with its own mass/suspension/drag)
+  is a materially larger follow-up - it needs a constraint/joint on top of
+  Sable's existing rigid-body API - and is not attempted here.
 - A vehicle whose JSON definition is missing or has a chassis with no finite
   collision volume is left on IV's native physics rather than crashing its
   tick; this is logged once per definition, not per vehicle instance.
