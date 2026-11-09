@@ -60,9 +60,35 @@ a startup/Mixin/dependency hazard, not a code-logic defect.
 validation logic without a live entity, world, or Sable runtime. They cover:
 default-eligible ground vehicles at wheel counts other than four, tracked
 vehicles, mixed wheel+track chassis, the no-config-entry default-enabled
-case, explicit per-car opt-out, aircraft/blimp exclusion, pontoon/skid-only
-(boat) exclusion, a missing `motorized` section, and a null ground-device
-entry among installed parts.
+case, explicit per-car opt-out, aircraft/blimp exclusion, a missing
+`motorized` section, and a null ground-device entry among installed parts.
+
+## Buoyancy tests (MINECRAFT-494, added 2026-11-08)
+
+`Classification.floatEligible(...)` (same file, same no-live-entity testing
+approach) picks out a float-only hull: at least one installed `canFloat`
+ground device and none drivable by the ground solver, so an amphibious
+vehicle with both a wheel and a float stays on the ground solver instead of
+double-counting. `ClassificationTest` covers a single pontoon, multiple
+pontoons, a wheel+pontoon mix staying on the ground path, a non-floating
+skid (a grounded skid helicopter, still correctly excluded from both paths),
+and the same aircraft/blimp/towed/opted-out/no-device/null-definition
+exclusions `eligible()` already covers.
+
+`BuoyancyTest` exercises the pure force math `BuoyantBody` applies per
+installed float device and propeller - submerged-fraction clamping at both
+span ends, Archimedes buoyant force scaling with submerged fraction and
+hull volume, quadratic water drag that is zero when not submerged or not
+moving, and propeller thrust that is exactly zero whenever the propeller
+itself is not underwater, regardless of throttle. `BuoyantBody` itself -
+the per-tick buoyancy/drag force application at each float device's own
+world position (producing a righting torque from uneven submersion without
+separate stability code), the water-surface scan against the live
+`ServerLevel`'s `FluidState`, and the propeller thrust/steering integration
+- has the same live-entity/`ServerLevel`/Sable-runtime testing gap `Body`
+already has (see above): it needs a real `EntityVehicleF_Physics` over a
+real `ServerLevel`'s water, which remains exercised only by the in-game
+acceptance list below, not by any unit test in this repository.
 
 `BodyRegistryTest` exercises `BodyRegistry`, the actual production
 bookkeeping class PhysicsBridge relies on for its lifecycle/no-double-
@@ -122,8 +148,16 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   chunk unload/reload, world restart, and removal all behave as intended.
 - A car with `"enabled": false` in the JSON override continues to use
   ordinary IV physics.
-- An aircraft, a blimp, and a pontoon/skid-only boat hull all continue to use
-  ordinary IV physics (documented exclusions, not a defect).
+- An aircraft and a blimp continue to use ordinary IV physics (documented
+  exclusions, not a defect).
+- A pontoon/float-hulled boat with **no** config entry at all floats at a
+  plausible draft at rest, drives forward/reverse and steers via its
+  propeller/rudder while the propeller stays underwater, rights itself when
+  pushed to one side rather than flipping or sinking, and stops producing
+  thrust (coasting to a drag-limited stop, not instantly) if its propeller
+  is lifted clear of the water.
+- A non-floating skid-only vehicle (e.g. a grounded skid helicopter)
+  continues to use ordinary IV physics (documented exclusion, not a defect).
 - A trailer actively hitched behind a car continues to follow via IV's own
   hitch code, with no double movement, whether or not the towing car has
   Sable physics.

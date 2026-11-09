@@ -23,16 +23,23 @@ each vehicle from IV's own definition at the moment it is needed:
   (`hasSkidSteer`) turns by differential track force instead of a steerable
   wheel. IV remains responsible for models, seats, controls, persistence, and
   movement packets.
+- **Boats and other float-only hulls** (at least one installed ground device
+  with `canFloat`, and no wheel or track - a hull with both stays on the
+  ground solver above instead). Each installed float device gets its own
+  Archimedes buoyant force and quadratic water drag, sampled at that
+  device's own position against the local Minecraft water surface; a hull
+  resting unevenly in the water is righted by that per-device force
+  distribution rather than a separate stability calculation. Installed
+  `PartPropeller`s add forward/reverse thrust, steered by the rudder input,
+  but only while the propeller itself is underwater - one above the surface
+  produces no thrust, same as a real propeller spinning free in air.
 
 Known, deliberate exclusions - not silently skipped, each tracked as a
-follow-up task rather than faked with the ground solver:
+follow-up task rather than faked with an unrelated force model:
 
 - **Aircraft and blimps** (`motorized.isAircraft` / `isBlimp`): flight
   aerodynamics (lift, drag, control surfaces) is a different physics domain
   this bridge does not yet model.
-- **Boats and other float-only hulls** (pontoon/skid devices with no wheel or
-  track): buoyancy is a different physics domain this bridge does not yet
-  model.
 - **A vehicle actively hitched behind another** (trailers): it keeps
   following IV's own native hitch code instead of getting a second,
   competing body, so towed trailers are unaffected either way. The towing
@@ -70,13 +77,25 @@ after changes.
     },
     "examplepack:known_bad_car": {
       "enabled": false
+    },
+    "examplepack:ordinary_boat": {
+      "massKg": 900.0,
+      "hullFillFactor": 0.5,
+      "waterDrag": 400.0,
+      "propellerForce": 6000.0,
+      "maxSteerDegrees": 30.0
     }
   }
 }
 ```
 
-`massKg` is optional; omit it to use IV's calculated vehicle mass. A copyable
-example is also available at
+`massKg` is optional; omit it to use IV's calculated vehicle mass. The three
+fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
+fraction of the chassis bounding-box volume the hull actually displaces when
+fully submerged, since a real hull is not a solid box), `waterDrag`, and
+`propellerForce` (split evenly across installed propellers) - are ignored by
+a ground vehicle, and `suspensionTravel`/`friction`/`driveForce`/`brakeForce`
+are ignored by a boat. A copyable example is also available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
 
 ## Build

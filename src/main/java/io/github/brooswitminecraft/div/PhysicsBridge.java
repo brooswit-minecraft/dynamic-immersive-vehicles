@@ -24,13 +24,13 @@ import java.util.function.Supplier;
 
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
 public final class PhysicsBridge {
- private static final BodyRegistry<EntityVehicleF_Physics, Body> registry = new BodyRegistry<>();
+ private static final BodyRegistry<EntityVehicleF_Physics, VehicleBody> registry = new BodyRegistry<>();
  // Vehicle definitions whose chassis geometry failed to build a Sable body once already;
  // keyed by the shared JSON definition object (one per packID:systemName, not per entity), so a
  // bad content-pack definition is retried, and logged, once rather than every tick for every
  // vehicle instance of that definition.
  private static final Set<JSONVehicle> brokenDefinitions = Collections.newSetFromMap(new IdentityHashMap<>());
- private static final double DT = .05;
+ static final double DT = .05;
  private PhysicsBridge() {}
  private static Overrides.Tuning tuning(JSONVehicle definition) {
   var t = Overrides.get(definition.packID + ":" + definition.systemName);
@@ -52,16 +52,20 @@ public final class PhysicsBridge {
   var installedGroundDevices = v.allParts.stream()
     .filter(p -> p instanceof PartGroundDevice g && g.definition != null)
     .map(p -> ((PartGroundDevice)p).definition.ground).toList();
-  boolean eligible = Classification.eligible(definition, installedGroundDevices, v.towedByConnection != null, Overrides.isOptedOut(key))
-    && !brokenDefinitions.contains(definition);
-  if (!eligible) return deactivate(v);
+  boolean towed = v.towedByConnection != null, optedOut = Overrides.isOptedOut(key);
+  boolean ground = Classification.eligible(definition, installedGroundDevices, towed, optedOut);
+  boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, towed, optedOut);
+  if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
   if (v.world.isClient()) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
-  return activateOrClassify(registry, brokenDefinitions, v, definition, () -> new Body(server,v,tuning(definition)));
+  Supplier<VehicleBody> construct = ground
+    ? () -> new Body(server,v,tuning(definition))
+    : () -> new BuoyantBody(server,v,tuning(definition));
+  return activateOrClassify(registry, brokenDefinitions, v, definition, construct);
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
-  Body old = registry.deactivate(v);
+  VehicleBody old = registry.deactivate(v);
   if (old != null) old.remove();
   return false;
  }
@@ -89,13 +93,13 @@ public final class PhysicsBridge {
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  public static void cleanup() {
-  registry.removeIf((v, b) -> !v.isValid, Body::remove);
+  registry.removeIf((v, b) -> !v.isValid, VehicleBody::remove);
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level == level, Body::remove);
+  registry.removeIf((v, b) -> b.level() == level, VehicleBody::remove);
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
- private static final class Body {
+ private static final class Body implements VehicleBody {
   final ServerLevel level;
   final Overrides.Tuning tuning;
   final BoxPhysicsObject box;
@@ -132,8 +136,9 @@ public final class PhysicsBridge {
    }
    handle=h;
   }
-  void remove() { var c=SubLevelContainer.getContainer(level); if(c!=null)c.physicsSystem().removeObject(box); }
-  void step(EntityVehicleF_Physics v) {
+  public Object level() { return level; }
+  public void remove() { var c=SubLevelContainer.getContainer(level); if(c!=null)c.physicsSystem().removeObject(box); }
+  public void step(EntityVehicleF_Physics v) {
    box.updatePose();
    Pose3d pose=new Pose3d(box.getPose());
    Quaterniond q=new Quaterniond(pose.orientation()), inverse=new Quaterniond(q).invert();

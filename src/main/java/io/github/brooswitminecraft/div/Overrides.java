@@ -24,11 +24,20 @@ public final class Overrides {
   public double driveForce = 8000;
   public double brakeForce = 12000;
   public double maxSteerDegrees = 30;
+  // Float-only hulls (boats/pontoons) only: hullFillFactor shrinks the chassis bounding-box
+  // volume down to the fraction of it the actual hull displaces (a real hull is not a solid
+  // box), waterDrag scales quadratic water drag, and propellerForce is the thrust budget split
+  // across installed propellers.
+  public double hullFillFactor = 0.5;
+  public double waterDrag = 400;
+  public double propellerForce = 6000;
   public void validate() {
    if (massKg != null && (!Double.isFinite(massKg) || massKg < 50 || massKg > 100000)) throw new IllegalArgumentException("massKg out of range");
    if (!(suspensionTravel > 0 && suspensionTravel <= 1) || !(friction > 0 && friction <= 3)
      || !(driveForce >= 0 && driveForce <= 100000) || !(brakeForce >= 0 && brakeForce <= 100000)
      || !(maxSteerDegrees > 0 && maxSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (!(hullFillFactor > 0 && hullFillFactor <= 1) || !(waterDrag >= 0 && waterDrag <= 100000)
+     || !(propellerForce >= 0 && propellerForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
  }
  /** Shared defaults applied to any eligible vehicle with no (or no matching) override entry. */
