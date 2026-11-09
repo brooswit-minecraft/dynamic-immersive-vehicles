@@ -315,22 +315,44 @@ state (matching IV's own rule).
    tests from the prior round (kept alongside it, since `deferToNativeHitch`
    remains its own callable piece `decide` delegates to).
 
-2. **Unhandled hitch-construction failure.** `reconcileHitch` called
-   `HitchRegistry.reconcile(..., () -> createHitch(...))` with no failure path;
-   if constraint creation threw (e.g. Sable's own anchor/configuration
+2. **Unhandled hitch-construction failure, corrected twice.** `reconcileHitch`
+   called `HitchRegistry.reconcile(..., () -> createHitch(...))` with no failure
+   path; if constraint creation threw (e.g. Sable's own anchor/configuration
    validation), the exception would escape through `active()` into the
    vehicle's own tick, after the trailer's body was already live - a partial-
-   failure case the ticket explicitly requires cleanup for. Fix: `reconcileHitch`
-   now wraps the `hitches.reconcile(...)` call in a `try`/`catch (RuntimeException)`
-   that swallows the failure; `HitchRegistry.reconcile`'s own contract (new test
-   `reconcileLeavesNoPartialStateWhenCreateThrowsAndCanRetryAfter`, mirroring
-   `BodyRegistry`'s existing "untouched on failure" guarantee) proves a failed
-   `create` call records neither a joint nor a partner, so the vehicle's own
-   body survives as an unjointed, free-rolling Sable vehicle and the attempt is
-   simply retried next tick - not cached as permanently broken, since the
-   anchors are computed from live poses that can change every tick, unlike a
-   chassis definition's fixed geometry (there is no hitch analogue of
-   `InvalidChassisGeometry`).
+   failure case the ticket explicitly requires cleanup for.
+
+   The first fix made `reconcileHitch` swallow the exception
+   (`try`/`catch (RuntimeException)`), relying on `HitchRegistry.reconcile`'s own
+   contract - proved directly by `reconcileLeavesNoPartialStateWhenCreateThrowsAndCanRetryAfter`,
+   mirroring `BodyRegistry`'s existing "untouched on failure" guarantee - that a
+   failed `create` call records neither a joint nor a partner. A second review
+   round found this incomplete: it left the vehicle's own **body** untouched in
+   every case, including the first activation that the body itself was
+   constructed for. A brand-new, never-jointed body after a failed first attempt
+   is neither coupled nor on native fallback - not a coherent state, even though
+   nothing leaked at the registry level alone - and silently retrying forever in
+   that half-built state was exactly what review flagged.
+
+   `reconcileHitch` now returns `boolean` (`false` on a caught failure, instead
+   of silently returning) so `active()` can decide what the failure means for the
+   body it is holding. `PhysicsBridge.rollBackOnHitchFailure(alreadyActive)` -
+   `!alreadyActive` - is the exact, pulled-out, unit-tested decision: `active()`
+   rolls back (`deactivate(v)`, removing the body and returning `false` so IV's
+   native hitch motion is authoritative again that tick) only when the body was
+   **just** constructed this same call; an already-healthy body from a previous
+   tick is never torn down merely because a later reconcile attempt failed - the
+   same non-destructive guarantee `deferToNativeHitch` already provides when a
+   towing vehicle's body disappears. `HitchRegistryTest`'s
+   `firstActivationHitchFailureRollsBackTheJustCreatedBodyWithNoLeak` and
+   `anAlreadyActiveBodySurvivesAFailedReconcileAttempt` exercise this exact
+   production composition - a real `BodyRegistry` alongside a real
+   `HitchRegistry`, calling the real `PhysicsBridge.rollBackOnHitchFailure` - for
+   both halves of the decision, including a full retry-and-succeed cycle after
+   a rolled-back first attempt. Retrying is still not cached as permanently
+   broken either way, since the anchors are computed from live poses that can
+   change every tick, unlike a chassis definition's fixed geometry (there is no
+   hitch analogue of `InvalidChassisGeometry`).
 
 **What remains unexercised by any unit test, the same shape of gap
 `PhysicsBridgeClassificationTest`'s own note below already describes for
@@ -348,7 +370,7 @@ real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
 `BoxPhysicsObject.getPose()`, and IV's real
 `minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
 fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
-`.mounted`, `.restricted`), and that all 97 tests across the full suite
+`.mounted`, `.restricted`), and that all 99 tests across the full suite
 (`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
 `FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
 `PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is

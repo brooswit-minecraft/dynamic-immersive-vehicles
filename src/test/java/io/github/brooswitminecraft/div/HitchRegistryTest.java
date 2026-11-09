@@ -59,6 +59,75 @@ class HitchRegistryTest {
   assertTrue(hitches.isJointed("trailer"), "a later call with a working constructor must still succeed");
  }
 
+ @Test void firstActivationHitchFailureRollsBackTheJustCreatedBodyWithNoLeak() {
+  // Second finding from external review: mirrors active()'s own composition (a real
+  // BodyRegistry alongside this registry, exactly as PhysicsBridge wires them) and calls the
+  // real production decision, PhysicsBridge.rollBackOnHitchFailure - a trailer body constructed
+  // THIS call, whose very first hitch-reconcile attempt then fails, must be rolled back
+  // entirely: a brand new, never-jointed body is neither coupled nor on native fallback, so
+  // leaving it live is not a coherent state, even though it is log-free and leak-free at the
+  // registry level alone.
+  var bodies = new BodyRegistry<String, Object>();
+  var hitches = new HitchRegistry<String>();
+  int[] bodyRemovals = {0};
+
+  boolean alreadyActive = bodies.isActive("trailer");
+  assertFalse(alreadyActive);
+  assertTrue(bodies.activateOnce("trailer", Object::new));
+
+  boolean hitchOk;
+  try {
+   hitches.reconcile("trailer", "truck", () -> { throw new RuntimeException("invalid anchor/configuration this tick"); });
+   hitchOk = true;
+  } catch (RuntimeException e) {
+   hitchOk = false;
+  }
+  assertFalse(hitchOk);
+
+  if (!hitchOk && PhysicsBridge.rollBackOnHitchFailure(alreadyActive)) {
+   if (bodies.deactivate("trailer") != null) bodyRemovals[0]++;
+  }
+
+  assertFalse(bodies.isActive("trailer"), "the just-created body must be rolled back, not left dangling unjointed");
+  assertFalse(hitches.isJointed("trailer"));
+  assertEquals(1, bodyRemovals[0], "exactly one removal - no leak, no double-removal");
+
+  // Retry next tick, as a fresh first activation, with a working hitch creator must succeed.
+  assertFalse(bodies.isActive("trailer"));
+  bodies.activateOnce("trailer", Object::new);
+  boolean[] jointRemoved = {false};
+  hitches.reconcile("trailer", "truck", () -> fakeJoint(jointRemoved));
+  assertTrue(bodies.isActive("trailer"));
+  assertTrue(hitches.isJointed("trailer"));
+ }
+
+ @Test void anAlreadyActiveBodySurvivesAFailedReconcileAttempt() {
+  // The other half of the same production decision: a body that already existed before this
+  // call (healthy, from a previous tick) must never be rolled back merely because a later
+  // reconcile attempt fails - the same non-destructive guarantee deferToNativeHitch already
+  // provides when a towing vehicle's body disappears. Only the stale/failed joint is retried.
+  var bodies = new BodyRegistry<String, Object>();
+  var hitches = new HitchRegistry<String>();
+  bodies.activateOnce("trailer", Object::new);
+
+  boolean alreadyActive = bodies.isActive("trailer");
+  assertTrue(alreadyActive);
+  boolean hitchOk;
+  try {
+   hitches.reconcile("trailer", "truck", () -> { throw new RuntimeException("invalid anchor/configuration this tick"); });
+   hitchOk = true;
+  } catch (RuntimeException e) {
+   hitchOk = false;
+  }
+  assertFalse(hitchOk);
+
+  if (!hitchOk && PhysicsBridge.rollBackOnHitchFailure(alreadyActive)) {
+   bodies.deactivate("trailer");
+  }
+
+  assertTrue(bodies.isActive("trailer"), "an already-active body must survive a failed reconcile attempt");
+ }
+
  @Test void reconcileCreatesExactlyOneJointForActiveTowingAndTrailerKeys() {
   var hitches = new HitchRegistry<String>();
   int[] constructions = {0};

@@ -73,9 +73,25 @@ public final class PhysicsBridge {
   if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
+  boolean alreadyActive = registry.isActive(v);
   boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, () -> new Body(server,v,tuning(definition)));
-  if (activated) reconcileHitch(v, towedByConnection);
-  return activated;
+  if (!activated) return false;
+  if (!reconcileHitch(v, towedByConnection) && rollBackOnHitchFailure(alreadyActive)) return deactivate(v);
+  return true;
+ }
+ /**
+  * Whether a failed hitch-reconcile attempt must roll back (deactivate/remove) the body
+  * {@code active()} just constructed this call, pulled out as a pure boolean seam. Only ever
+  * true when the body did NOT already exist before this call ({@code !alreadyActive}): a brand
+  * new, never-jointed body after a failed first attempt is neither coupled nor on native
+  * fallback - leaving it live would be the exact silently-retried-every-tick partial state
+  * external review flagged. An ALREADY-active body (healthy, from a previous tick) must never be
+  * torn down merely because a later reconcile attempt failed - the same non-destructive
+  * guarantee {@code deferToNativeHitch} already provides when a towing vehicle's body
+  * disappears; only the stale/failed joint attempt is retried next tick, not the body itself.
+  */
+ static boolean rollBackOnHitchFailure(boolean alreadyActive) {
+  return !alreadyActive;
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
   Body old = registry.deactivate(v);
@@ -125,20 +141,25 @@ public final class PhysicsBridge {
   * towing vehicle's active body if it does not have one yet (or had one to a different towing
   * vehicle, or its old joint went invalid), removes a stale one if it is no longer towed (or its
   * towing vehicle is no longer active), and does nothing otherwise. Called every tick after
-  * {@code active()} confirms this vehicle (towed or not) already has a live Sable body. If joint
-  * construction itself fails (e.g. Sable's own anchor/configuration validation), the exception is
-  * swallowed rather than left to escape into the vehicle's own tick: {@link HitchRegistry#reconcile}
-  * guarantees no partial joint/partner state is recorded for a failed attempt, so the vehicle's
-  * own body (already live) survives as an unjointed, free-rolling Sable vehicle and is retried
-  * next tick - not cached as permanently broken, since the anchors are computed from live poses
-  * that can change every tick, unlike a chassis definition's fixed geometry.
+  * {@code active()} confirms this vehicle (towed or not) already has a live Sable body. Returns
+  * {@code false} if joint construction itself failed (e.g. Sable's own anchor/configuration
+  * validation) rather than letting the exception escape into the vehicle's own tick -
+  * {@link HitchRegistry#reconcile} guarantees no partial joint/partner state is recorded for a
+  * failed attempt either way. The caller ({@code active()}) is the one that decides what a
+  * {@code false} result means for the body: {@link #rollBackOnHitchFailure} rolls back a body
+  * that was JUST constructed this call (there is no coherent state - neither coupled nor on
+  * native fallback - for a brand new, never-jointed body to sit in), but leaves an
+  * already-healthy body from a previous tick alone, retried next tick - not cached as
+  * permanently broken either way, since the anchors are computed from live poses that can change
+  * every tick, unlike a chassis definition's fixed geometry.
   */
- private static void reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
+ private static boolean reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
   EntityVehicleF_Physics desired = connection != null && registry.isActive(connection.towingVehicle) ? connection.towingVehicle : null;
   try {
    hitches.reconcile(v, desired, () -> createHitch(registry.get(desired), registry.get(v), connection));
+   return true;
   } catch (RuntimeException transientFailure) {
-   // Swallowed on purpose - see this method's doc.
+   return false;
   }
  }
  private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
