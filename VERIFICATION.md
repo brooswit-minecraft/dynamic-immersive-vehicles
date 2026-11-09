@@ -286,6 +286,52 @@ original case, preserved), a jointed connection never being compensable (this
 regression), and a mounted connection never being compensable regardless of joint
 state (matching IV's own rule).
 
+**Two findings from external review (wroosbit, CHANGES_REQUESTED on PR #7 @
+`d30b35e`), both now fixed.**
+
+1. **Client-side single-authority violation.** `active()` evaluated
+   `deferToNativeHitch` (which depends on `registry.isActive(...)`) BEFORE the
+   `v.world.isClient()` branch. The body/hitch registries are populated only by
+   server-side code (inside that same branch's `else`), so a client-side towed
+   entity's own `alreadyActive`/`towingVehicleActive` lookups are permanently
+   `false` regardless of what the server has actually done - `deferToNativeHitch`
+   then returns `true` forever for a towed client entity, so `active()` returns
+   `false` on the client even once the server has genuinely built and jointed a
+   Sable body for it. The client keeps running IV's native force/movement path
+   while the server independently runs Sable - exactly the dual-authority
+   condition this ticket requires there be none of. Fix: the full decision is now
+   its own enum-returning seam, `PhysicsBridge.decide(eligible, isClient, towed,
+   alreadyActive, towingVehicleActive)`, which resolves the client branch first
+   and unconditionally (`CLIENT_ACTIVE` for any eligible client call, regardless
+   of the other three flags) - the server-only hitch-ordering wait
+   (`deferToNativeHitch`) is only ever consulted once `isClient` is already known
+   `false`. `active()` now calls `decide(...)` instead of inlining the two
+   checks in the wrong order. `PhysicsBridgeClassificationTest` covers the exact
+   regression (`clientNeverConsultsTheServerOnlyHitchOrderingWait`: `CLIENT_ACTIVE`
+   for every combination of towed/alreadyActive/towingVehicleActive once
+   `isClient` is true) plus the ineligible and server-side cases (first-activation
+   wait, already-active-trailer non-deferral, ordinary-vehicle activation) as a
+   single coherent seam, superseding the narrower `deferToNativeHitch`-only
+   tests from the prior round (kept alongside it, since `deferToNativeHitch`
+   remains its own callable piece `decide` delegates to).
+
+2. **Unhandled hitch-construction failure.** `reconcileHitch` called
+   `HitchRegistry.reconcile(..., () -> createHitch(...))` with no failure path;
+   if constraint creation threw (e.g. Sable's own anchor/configuration
+   validation), the exception would escape through `active()` into the
+   vehicle's own tick, after the trailer's body was already live - a partial-
+   failure case the ticket explicitly requires cleanup for. Fix: `reconcileHitch`
+   now wraps the `hitches.reconcile(...)` call in a `try`/`catch (RuntimeException)`
+   that swallows the failure; `HitchRegistry.reconcile`'s own contract (new test
+   `reconcileLeavesNoPartialStateWhenCreateThrowsAndCanRetryAfter`, mirroring
+   `BodyRegistry`'s existing "untouched on failure" guarantee) proves a failed
+   `create` call records neither a joint nor a partner, so the vehicle's own
+   body survives as an unjointed, free-rolling Sable vehicle and the attempt is
+   simply retried next tick - not cached as permanently broken, since the
+   anchors are computed from live poses that can change every tick, unlike a
+   chassis definition's fixed geometry (there is no hitch analogue of
+   `InvalidChassisGeometry`).
+
 **What remains unexercised by any unit test, the same shape of gap
 `PhysicsBridgeClassificationTest`'s own note below already describes for
 plain activation:** `PhysicsBridge.active()`'s own ordering wait (a trailer
@@ -302,7 +348,7 @@ real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
 `BoxPhysicsObject.getPose()`, and IV's real
 `minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
 fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
-`.mounted`, `.restricted`), and that all 93 tests across the full suite
+`.mounted`, `.restricted`), and that all 97 tests across the full suite
 (`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
 `FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
 `PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is

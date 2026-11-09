@@ -68,9 +68,9 @@ public final class PhysicsBridge {
   boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, Overrides.isOptedOut(key))
     && !brokenDefinitions.contains(definition);
   boolean towingVehicleActive = towedByConnection != null && registry.isActive(towedByConnection.towingVehicle);
-  if (eligible && deferToNativeHitch(towedByConnection != null, registry.isActive(v), towingVehicleActive)) eligible = false;
-  if (!eligible) return deactivate(v);
-  if (v.world.isClient()) return true;
+  var decision = decide(eligible, v.world.isClient(), towedByConnection != null, registry.isActive(v), towingVehicleActive);
+  if (decision == ActivationDecision.INELIGIBLE || decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
+  if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
   boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, () -> new Body(server,v,tuning(definition)));
@@ -82,19 +82,40 @@ public final class PhysicsBridge {
   if (old != null) { hitches.release(v); old.remove(); }
   return false;
  }
+ enum ActivationDecision { INELIGIBLE, CLIENT_ACTIVE, DEFER_TO_NATIVE, ACTIVATE }
+ /**
+  * The full activation decision {@code active()} applies, pulled out as a pure seam testable
+  * without a live entity/world/registry. The client branch is resolved BEFORE the server-only
+  * hitch-ordering wait, and deliberately ignores {@code alreadyActive}/{@code towingVehicleActive}
+  * entirely: the body and hitch registries are populated only by server-side code (inside the
+  * {@code !isClient} branch of {@code active()}), so a client-side towed entity's own registry
+  * lookups are permanently false regardless of the server's real state. Applying
+  * {@code deferToNativeHitch} to the client the same way as the server would make a client-side
+  * towed vehicle defer to IV's native hitch code forever, even once the server has actually
+  * jointed it - the client would keep running IV's own force/movement path while the server
+  * independently runs Sable, a single-authority violation this bridge is required not to have.
+  * This was a real regression found by external review: an earlier revision evaluated the
+  * hitch-ordering wait before the client/server branch instead of after it.
+  */
+ static ActivationDecision decide(boolean eligible, boolean isClient, boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
+  if (!eligible) return ActivationDecision.INELIGIBLE;
+  if (isClient) return ActivationDecision.CLIENT_ACTIVE;
+  if (deferToNativeHitch(towed, alreadyActive, towingVehicleActive)) return ActivationDecision.DEFER_TO_NATIVE;
+  return ActivationDecision.ACTIVATE;
+ }
  /**
   * Whether an otherwise-eligible towed vehicle must still defer to IV's native hitch code this
-  * tick rather than get (or keep) a Sable body - the exact decision {@code active()} applies,
-  * pulled out as a pure boolean seam so it is testable without a live entity/registry. Only a
-  * vehicle that is {@code towed} can ever defer. On FIRST activation ({@code !alreadyActive}),
-  * it defers until its towing vehicle has its own active body to joint against - a transient
-  * ordering wait, not a permanent exclusion. An ALREADY-active trailer (its own Sable body
-  * already exists) must never be deferred/torn down just because its towing vehicle's body has
-  * since gone away - it stays an unjointed, free-rolling Sable vehicle instead; only its stale
-  * joint, not its body, is {@code reconcileHitch}'s job to release in that case. This was a real
-  * regression caught by self-review before this ticket's first external review: an earlier
-  * revision applied this wait unconditionally, deactivating (destroying) an already-active
-  * trailer's body the moment its towing vehicle's body disappeared.
+  * tick rather than get (or keep) a Sable body - the server-only half of the decision
+  * {@code decide()} applies, pulled out as its own pure boolean seam. Only a vehicle that is
+  * {@code towed} can ever defer. On FIRST activation ({@code !alreadyActive}), it defers until
+  * its towing vehicle has its own active body to joint against - a transient ordering wait, not
+  * a permanent exclusion. An ALREADY-active trailer (its own Sable body already exists) must
+  * never be deferred/torn down just because its towing vehicle's body has since gone away - it
+  * stays an unjointed, free-rolling Sable vehicle instead; only its stale joint, not its body, is
+  * {@code reconcileHitch}'s job to release in that case. This was a real regression caught by
+  * self-review before this ticket's first external review: an earlier revision applied this wait
+  * unconditionally, deactivating (destroying) an already-active trailer's body the moment its
+  * towing vehicle's body disappeared.
   */
  static boolean deferToNativeHitch(boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
   return towed && !alreadyActive && !towingVehicleActive;
@@ -104,11 +125,21 @@ public final class PhysicsBridge {
   * towing vehicle's active body if it does not have one yet (or had one to a different towing
   * vehicle, or its old joint went invalid), removes a stale one if it is no longer towed (or its
   * towing vehicle is no longer active), and does nothing otherwise. Called every tick after
-  * {@code active()} confirms this vehicle (towed or not) already has a live Sable body.
+  * {@code active()} confirms this vehicle (towed or not) already has a live Sable body. If joint
+  * construction itself fails (e.g. Sable's own anchor/configuration validation), the exception is
+  * swallowed rather than left to escape into the vehicle's own tick: {@link HitchRegistry#reconcile}
+  * guarantees no partial joint/partner state is recorded for a failed attempt, so the vehicle's
+  * own body (already live) survives as an unjointed, free-rolling Sable vehicle and is retried
+  * next tick - not cached as permanently broken, since the anchors are computed from live poses
+  * that can change every tick, unlike a chassis definition's fixed geometry.
   */
  private static void reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
   EntityVehicleF_Physics desired = connection != null && registry.isActive(connection.towingVehicle) ? connection.towingVehicle : null;
-  hitches.reconcile(v, desired, () -> createHitch(registry.get(desired), registry.get(v), connection));
+  try {
+   hitches.reconcile(v, desired, () -> createHitch(registry.get(desired), registry.get(v), connection));
+  } catch (RuntimeException transientFailure) {
+   // Swallowed on purpose - see this method's doc.
+  }
  }
  private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
   var towingPose = towing.box.getPose();

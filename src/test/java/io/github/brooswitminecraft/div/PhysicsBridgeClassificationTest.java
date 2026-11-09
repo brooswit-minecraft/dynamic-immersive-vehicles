@@ -3,6 +3,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
+import static io.github.brooswitminecraft.div.PhysicsBridge.ActivationDecision.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -80,6 +81,31 @@ class PhysicsBridgeClassificationTest {
   // leaving the trailer as an unjointed, free-rolling Sable vehicle and only releasing the
   // stale joint (reconcileHitch's job, not active()'s).
   assertFalse(PhysicsBridge.deferToNativeHitch(true, true, false));
+ }
+
+ @Test void ineligibleAlwaysDecidesIneligibleRegardlessOfOtherFlags() {
+  assertEquals(INELIGIBLE, PhysicsBridge.decide(false, false, true, true, true));
+  assertEquals(INELIGIBLE, PhysicsBridge.decide(false, true, true, true, true));
+ }
+
+ @Test void clientNeverConsultsTheServerOnlyHitchOrderingWait() {
+  // The exact regression external review found: an earlier revision evaluated
+  // deferToNativeHitch BEFORE the client branch, so a towed client entity - whose registry
+  // lookups (alreadyActive/towingVehicleActive) are permanently false, since the registry is
+  // only ever populated by server-side code - deferred to IV's native hitch code forever, even
+  // once the server had actually built and jointed its Sable body. decide() must return
+  // CLIENT_ACTIVE for any eligible client call, never DEFER_TO_NATIVE, regardless of towed/
+  // alreadyActive/towingVehicleActive.
+  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, true, false, false));
+  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, false, false, false));
+  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, true, true, false));
+ }
+
+ @Test void serverDefersToNativeHitchOnlyOnFirstActivationOfATowedVehicle() {
+  assertEquals(DEFER_TO_NATIVE, PhysicsBridge.decide(true, false, true, false, false));
+  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, true, false, true));
+  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, true, true, false));
+  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, false, false, false));
  }
 
  @Test void unjointedUnmountedConnectionsAreCompensable() {

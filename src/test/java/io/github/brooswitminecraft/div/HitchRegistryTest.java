@@ -42,6 +42,23 @@ class HitchRegistryTest {
   };
  }
 
+ @Test void reconcileLeavesNoPartialStateWhenCreateThrowsAndCanRetryAfter() {
+  // MINECRAFT-498 external review regression: PhysicsBridge.reconcileHitch calls this method
+  // directly from active()'s own call path with no failure handling of its own; this registry's
+  // own contract is what makes PhysicsBridge's catch-and-retry-next-tick safe - a failed create
+  // must leave neither a joint nor a recorded partner behind (the same "untouched on failure"
+  // guarantee BodyRegistry.activateOnce already provides for body construction), and the
+  // exception itself propagates to the caller rather than being swallowed here.
+  var hitches = new HitchRegistry<String>();
+  assertThrows(RuntimeException.class, () -> hitches.reconcile("trailer", "truck",
+    () -> { throw new RuntimeException("constraint anchor/configuration invalid this tick"); }));
+  assertFalse(hitches.isJointed("trailer"));
+  assertNull(hitches.partnerOf("trailer"));
+  boolean[] removed = {false};
+  hitches.reconcile("trailer", "truck", () -> fakeJoint(removed));
+  assertTrue(hitches.isJointed("trailer"), "a later call with a working constructor must still succeed");
+ }
+
  @Test void reconcileCreatesExactlyOneJointForActiveTowingAndTrailerKeys() {
   var hitches = new HitchRegistry<String>();
   int[] constructions = {0};
