@@ -64,9 +64,34 @@ case, explicit per-car opt-out, pontoon/skid-only (boat) exclusion, a missing
 `motorized` section, and a null ground-device entry among installed parts.
 Aircraft and blimps are now covered as an eligible category requiring no
 ground-contact device at all (`isFlightVehicle`), still excluded by an
-explicit opt-out or an active tow, and now also excluded when any installed
-propeller is a rotor (`isRotor`, see below) - a helicopter must stay on IV's
-native physics, not be given wing lift it has no wings for.
+explicit opt-out, and now also excluded when any installed propeller is a
+rotor (`isRotor`, see below) - a helicopter must stay on IV's native
+physics, not be given wing lift it has no wings for.
+
+**Towed status removed from `Classification.eligible` entirely (MINECRAFT-498,
+scope correction after owner clarification).** An earlier revision of this
+task excluded a towed flight vehicle from eligibility while making a towed
+ground vehicle eligible - a ground-only interpretation of "coupled trailer
+category." The ticket's actual owner clarified that authorization is every
+IV vehicle, not ground-only, and that hitch coupling must extend to any
+category this bridge already models (not inventing support where IV or this
+bridge categorically cannot). Since the hitch joint itself (`HitchJoint`/
+`PhysicsBridge.createHitch`) is domain-agnostic - it only connects two
+already-classified Sable bodies by their own connection-point anchors - nothing
+about it actually required gating on domain. The `activelyTowed` parameter
+was dead code once that gate was removed from both branches, so it was
+deleted from `Classification.eligible`'s signature rather than left unused;
+`PhysicsBridge.active()` no longer passes it. Boats remain excluded, but for
+an unrelated and still entirely accurate reason: no Sable body type for a
+float-only hull exists on this branch at all (a separate, not-yet-merged
+task), so there is nothing a hitch joint could connect to regardless of towed
+status - this was already true before MINECRAFT-498 and needed no change.
+`ClassificationTest`'s towed-specific cases were removed (the parameter they
+exercised no longer exists); the general ground/flight eligibility and
+boat-exclusion cases they shared with already cover the same ground, and the
+actual towed-vehicle behavior (the ordering wait, joint create/release) is
+exercised at the `PhysicsBridge`/`HitchRegistry` level instead, where it now
+genuinely lives.
 
 ## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
 
@@ -277,7 +302,7 @@ real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
 `BoxPhysicsObject.getPose()`, and IV's real
 `minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
 fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
-`.mounted`, `.restricted`), and that all 96 tests across the full suite
+`.mounted`, `.restricted`), and that all 93 tests across the full suite
 (`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
 `FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
 `PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is
@@ -405,12 +430,13 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   and then fixed). During the brief ordering wait before the trailer has its
   own body, the towing vehicle's compensation still applies (matching
   MINECRAFT-496, unchanged for that window).
-- A towed flight vehicle (aircraft/blimp) continues to use ordinary IV
-  physics (documented exclusion, not a defect) - this task is ground-domain
-  only.
-- A towed flight vehicle (aircraft/blimp) continues to use ordinary IV
-  physics (documented exclusion, not a defect) - this task is ground-domain
-  only.
+- A towed flight vehicle (aircraft/blimp, not a rotorcraft) gets its own
+  Sable body and hitch joint to its towing vehicle, on the same ordering/
+  release terms as a towed ground vehicle - the joint math is domain-
+  agnostic, so this is the same mechanism, not a separate implementation.
+- A towed float-only hull (boat) continues to use ordinary IV physics -
+  not a towing-specific exclusion, but because no Sable buoyant body type
+  exists on this branch at all yet (a separate, not-yet-merged task).
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
 playable-MVP claim for any category above - ground, flight, or boat. The

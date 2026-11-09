@@ -65,7 +65,7 @@ public final class PhysicsBridge {
     .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
     .map(p -> ((PartPropeller)p).definition.propeller).toList();
   TowingConnection towedByConnection = v.towedByConnection;
-  boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, towedByConnection != null, Overrides.isOptedOut(key))
+  boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, Overrides.isOptedOut(key))
     && !brokenDefinitions.contains(definition);
   boolean towingVehicleActive = towedByConnection != null && registry.isActive(towedByConnection.towingVehicle);
   if (eligible && deferToNativeHitch(towedByConnection != null, registry.isActive(v), towingVehicleActive)) eligible = false;

@@ -48,59 +48,70 @@ follow-up task rather than faked with the ground solver:
 
 - **Boats and other float-only hulls** (pontoon/skid devices with no wheel or
   track): buoyancy is a different physics domain this bridge does not yet
-  model.
+  model - there is no Sable body type for a hull at all on this branch, so
+  there is nothing for a hitch joint to connect to either, regardless of
+  towed status. (A separate task adds this category; hitch coupling for it
+  is a natural follow-up to that task, not to this one, once it lands.)
 - **Rotorcraft** (any installed propeller with `isRotor` set, e.g. a
   helicopter): IV gives rotor-lift propellers their own thrust-vectoring
   solver, a different physics domain this bridge does not model; a rotorcraft
   stays on IV's native physics rather than getting zero wing lift and
   forward-only thrust from the fixed-wing model above.
-- **A trailer (a ground vehicle actively hitched behind another)** now gets
-  its own server-owned Sable body, jointed to its towing vehicle's body by a
-  Sable `GenericConstraintConfiguration` hitch (see `HitchJoint` for the
-  anchor-position/locked-axis math, `HitchRegistry` for the testable joint-
-  lifecycle bookkeeping - create/replace/release, by key - and
-  `PhysicsBridge.createHitch`/`reconcileHitch` for how those two are wired to
-  a live entity/Sable body) - not IV's native hitch position-snap.
-  The joint anchors each body at its own `JSONConnection.pos` (the hitch/
-  hookup points IV's own connection group already defines), always locks the
-  three linear axes (the two anchor points stay coincident - a hitch is not
-  a sliding coupling), and locks rotation according to the connection's own
-  flags: a `mounted` connection (e.g. a flatbed) is fully rigid, a
-  `restricted` one allows only pitch (its own documented contract), and an
-  ordinary connection leaves all rotation free - a real ball/pintle hitch,
-  with the trailer's own wheels/suspension (the same raycast ground solver
-  every other ground vehicle uses) keeping it upright rather than the joint.
-  A towing vehicle's own replicated towing-thrust compensation impulse
-  (`TowingForces`, its own math unchanged) is still applied on top of this,
-  so towing is still not lighter than it should be on that axis - but what
-  gets summed into it changed: `PhysicsBridge.unjointedTowingThrust`
-  replicates IV's own `getRecursiveTowingThrust` recursion (and its
-  `mounted`-connection skip) only for a towed vehicle that does **not**
-  already have its own active hitch joint. A jointed trailer's own engine
-  thrust is applied directly to its own Sable body by its own ground step
-  and already reaches the towing vehicle mechanically through the joint
-  Sable itself solves; compensating for it again at the towing vehicle
-  would propel a powered trailer twice (`PhysicsBridge.compensableConnection`
-  is the exact, unit-tested per-connection decision).
-
-  **Ordering dependency, not a classification exclusion:** a trailer only
-  gets its own body once its towing vehicle already has one active - the
-  joint has to connect to a live body, not to IV's raw position. This is
-  normally a same-tick (at most one-tick) wait, not a permanent exclusion;
-  until it resolves, the trailer stays on IV's native hitch code exactly as
-  before, so there is never a window with both a snap and a Sable body
-  moving it (`VehicleForcesMixin` only cancels IV's native forces once
-  `PhysicsBridge.active()` actually returns true for that entity). Detaching
-  a trailer (or its towing vehicle losing its own body - opt-out, despawn,
-  chunk unload) releases the joint without leaking it or touching a body
-  Sable has already destroyed; the trailer itself keeps its own body and
-  simply becomes an unjointed, free-rolling ground vehicle, the same as any
-  other.
-  A towed flight vehicle (aircraft/blimp) stays excluded, same as before -
-  a hitch joint for the flight domain is not attempted.
 - A vehicle whose JSON definition is missing or has a chassis with no finite
   collision volume is left on IV's native physics rather than crashing its
   tick; this is logged once per definition, not per vehicle instance.
+
+## Trailer/hitch coupling
+
+A vehicle actively hitched behind another (a trailer) is eligible for its
+own Sable body on the same terms as any other vehicle **in its own
+category** - ground or flight - jointed to its towing vehicle's body by a
+Sable `GenericConstraintConfiguration` hitch (see `HitchJoint` for the
+anchor-position/locked-axis math, `HitchRegistry` for the testable joint-
+lifecycle bookkeeping - create/replace/release, by key - and
+`PhysicsBridge.createHitch`/`reconcileHitch` for how those two are wired to
+a live entity/Sable body), rather than IV's native hitch position-snap. The
+joint math itself is domain-agnostic - it only connects two already-
+classified bodies by their own `JSONConnection.pos` anchors - so a towed
+aircraft/blimp is jointed exactly the same way a towed ground vehicle is; a
+towed boat is excluded only because the boat category above is, not because
+of anything specific to towing. The joint anchors each body at its own
+`JSONConnection.pos` (the hitch/hookup points IV's own connection group
+already defines), always locks the three linear axes (the two anchor points
+stay coincident - a hitch is not a sliding coupling), and locks rotation
+according to the connection's own flags: a `mounted` connection (e.g. a
+flatbed) is fully rigid, a `restricted` one allows only pitch (its own
+documented contract), and an ordinary connection leaves all rotation free -
+a real ball/pintle hitch, with the towed vehicle's own suspension/
+aerodynamics (the same ground/flight solver every other vehicle in that
+category uses) keeping it stable rather than the joint.
+
+A towing vehicle's own replicated towing-thrust compensation impulse
+(`TowingForces`, its own math unchanged) is still applied on top of this,
+so towing is still not lighter than it should be on that axis - but what
+gets summed into it changed: `PhysicsBridge.unjointedTowingThrust`
+replicates IV's own `getRecursiveTowingThrust` recursion (and its
+`mounted`-connection skip) only for a towed vehicle that does **not**
+already have its own active hitch joint. A jointed trailer's own engine
+thrust is applied directly to its own Sable body by its own step and
+already reaches the towing vehicle mechanically through the joint Sable
+itself solves; compensating for it again at the towing vehicle would propel
+a powered trailer twice (`PhysicsBridge.compensableConnection` is the exact,
+unit-tested per-connection decision).
+
+**Ordering dependency, not a classification exclusion:** a towed vehicle
+only gets its own body once its towing vehicle already has one active - the
+joint has to connect to a live body, not to IV's raw position. This is
+normally a same-tick (at most one-tick) wait, not a permanent exclusion;
+until it resolves, the towed vehicle stays on IV's native hitch code exactly
+as before, so there is never a window with both a snap and a Sable body
+moving it (`VehicleForcesMixin` only cancels IV's native forces once
+`PhysicsBridge.active()` actually returns true for that entity). Detaching a
+towed vehicle (or its towing vehicle losing its own body - opt-out, despawn,
+chunk unload) releases the joint without leaking it or touching a body Sable
+has already destroyed; the towed vehicle itself keeps its own body and
+simply becomes an unjointed, free vehicle in its own category, the same as
+any other.
 
 ## Configuration
 

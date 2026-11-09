@@ -3,9 +3,10 @@ import minecrafttransportsimulator.jsondefs.JSONPart;
 import minecrafttransportsimulator.jsondefs.JSONVehicle;
 import java.util.List;
 /**
- * Pure category decision: does this vehicle definition, in this towing/opt-out state, get a
- * Sable body at all? Operates only on IV's plain JSON definition types, so it needs no live
- * entity, world, or Sable runtime and can run as an ordinary unit test.
+ * Pure category decision: does this vehicle definition, in this opt-out state, get a Sable body
+ * at all? Operates only on IV's plain JSON definition types, so it needs no live entity, world,
+ * or Sable runtime and can run as an ordinary unit test. Towed status plays no part in this
+ * decision - see the class doc below for why.
  *
  * <p>This bridge currently models two categories: a ground vehicle with at least one wheel or
  * track contact device (of any count), and a fixed-wing aircraft or blimp (flight aerodynamics,
@@ -15,12 +16,14 @@ import java.util.List;
  * IV's own native solver treats separately), and an explicit per-car opt-out are all excluded on
  * purpose, not missed by accident. See README.md for the follow-up tasks tracking each gap.
  *
- * <p>A ground vehicle actively hitched behind another (a trailer) is now eligible on the same
- * terms as any other ground vehicle - {@link PhysicsBridge} gives it its own Sable body jointed
- * to its towing vehicle's body (see {@link HitchJoint}), rather than excluding it to IV's native
- * position-snap. A flight vehicle that is actively towed stays excluded: a towed aircraft/blimp
- * is not a category this bridge models, and is left on IV's native physics rather than guessed
- * at.
+ * <p>A vehicle actively hitched behind another (a trailer) is eligible on the same terms as any
+ * other vehicle in its own category, ground or flight - {@link PhysicsBridge} gives it its own
+ * Sable body jointed to its towing vehicle's body (see {@link HitchJoint}; the joint math itself
+ * is domain-agnostic, since it only connects two already-classified bodies), rather than
+ * excluding it to IV's native position-snap. Only a category this bridge does not model at all
+ * is still excluded regardless of towed status - currently just boats/float-only hulls, which
+ * have no Sable body type on this branch to joint in the first place (a separate, not-yet-merged
+ * task; see README.md).
  */
 public final class Classification {
  private Classification() {}
@@ -40,15 +43,14 @@ public final class Classification {
     && (definition.motorized.isAircraft || definition.motorized.isBlimp);
  }
  public static boolean eligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices,
-     List<JSONPart.JSONPartPropeller> installedPropellers, boolean activelyTowed, boolean optedOut) {
+     List<JSONPart.JSONPartPropeller> installedPropellers, boolean optedOut) {
   if (optedOut) return false;
   if (definition == null || definition.motorized == null) return false;
   if (isFlightVehicle(definition)) {
-   // A towed flight vehicle (and a helicopter - any installed rotor propeller, which needs
-   // rotor lift/vectoring this bridge does not model) stay on IV's native physics rather than
-   // getting zero wing lift and forward-only thrust, or a hitch joint this bridge never builds
-   // for the flight domain.
-   if (activelyTowed) return false;
+   // A helicopter (any installed rotor propeller) needs rotor lift/vectoring this bridge does
+   // not model; leave it on IV's native physics rather than giving it zero wing lift and
+   // forward-only thrust. A towed aircraft/blimp is otherwise eligible on the same terms as any
+   // other flight vehicle - see the class doc for why towed status alone no longer excludes it.
    return installedPropellers.stream().noneMatch(Classification::isRotor);
   }
   // A towed ground vehicle (trailer) is eligible on the same terms as any other ground
