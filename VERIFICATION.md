@@ -129,18 +129,31 @@ Review (PR #4) found two further defects at the live head:
    running `PartEngine` - reassigning it on every running engine found, so
    a later engine silently overwrote an earlier one's sign/throttle on a
    multi-engine vehicle - and applied it to every installed propeller with
-   no check that the propeller itself was active. `Buoyancy.propellerThrust`
-   now takes an explicit `propellerActive` parameter (wired to
-   `propeller.isActiveVar.isActive`), so an inactive/damaged propeller
-   produces zero thrust regardless of throttle or submersion; the engine
-   loop now stops at the first running engine instead of letting a later
-   one overwrite it.
+   no check that the propeller itself was active. The engine loop now
+   stops at the first running engine instead of letting a later one
+   overwrite it, and `Buoyancy.propellerThrust` now takes an explicit
+   `propellerActive` parameter (wired to `propeller.isActiveVar.isActive`),
+   so a destroyed/removed propeller produces zero thrust.
+
+**What `propellerActive` does and does not cover, named explicitly after a
+second review round.** `isActiveVar.isActive` filters a destroyed/removed
+propeller; it does **not** establish that this specific propeller is
+connected to a running engine or turning at any real RPM - IV's public API
+exposes neither per-propeller engine linkage nor RPM (`PartPropeller`'s
+`connectedEngines`/`currentRPM` are private with no accessor; confirmed by
+inspecting the real class via `javap`). A vehicle with one running engine
+and several installed, non-spare, active propellers currently drives all
+of them from that single engine's throttle signal - an active propeller
+with no actual engine connection in-game would still thrust here. This is
+recorded as a disclosed limitation in README.md's Scope, not papered over
+as a complete "operational propeller" fix; see README.md for the exact
+wording.
 
 `BuoyancyTest.inactivePropellerProducesNoThrustEvenWhenSubmergedAtFullThrottle`
-covers (2) at the pure-function level. The `isSpare` filtering in (1), and
-the engine/propeller linkage `BuoyantForces.apply(...)` still cannot verify
-from IV's public API (which specific engine drives which propeller, actual
-RPM) remain in the same live-entity/`ServerLevel`/Sable-runtime testing gap
+covers the destroyed/removed-propeller case at the pure-function level -
+precisely what `propellerActive` actually gates, no more. The `isSpare`
+filtering in (1), and the per-propeller engine-linkage/RPM gap just named,
+remain in the same live-entity/`ServerLevel`/Sable-runtime testing gap
 as the rest of `BuoyantForces` - exercised only by the in-game acceptance
 list below, not by any unit test in this repository.
 
