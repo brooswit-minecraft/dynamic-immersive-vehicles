@@ -61,11 +61,17 @@ public final class Classification {
   * by the ground solver. A vehicle with both (e.g. an amphibious car) stays on the ground domain
   * via {@link #eligible} instead - {@link #floatEligible} is the exclusive fallback for a hull
   * with nothing the ground solver can drive, not a check for "has a float device" in general.
+  * An installed rotor propeller excludes it the same way it excludes a flight vehicle in
+  * {@link #eligible} - IV's rotor-lift/thrust-vectoring solver is a different, unmodeled
+  * physics domain regardless of which other domain the rest of the chassis would otherwise
+  * qualify for.
   */
- public static boolean floatEligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices, boolean activelyTowed, boolean optedOut) {
+ public static boolean floatEligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices,
+     List<JSONPart.JSONPartPropeller> installedPropellers, boolean activelyTowed, boolean optedOut) {
   if (optedOut || activelyTowed) return false;
   if (definition == null || definition.motorized == null) return false;
   if (isFlightVehicle(definition)) return false;
+  if (installedPropellers.stream().anyMatch(Classification::isRotor)) return false;
   if (installedGroundDevices.stream().anyMatch(Classification::isDrivableGroundDevice)) return false;
   return installedGroundDevices.stream().anyMatch(Classification::isFloatDevice);
  }

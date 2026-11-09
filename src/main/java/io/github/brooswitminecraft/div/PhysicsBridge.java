@@ -59,7 +59,7 @@ public final class PhysicsBridge {
     .map(p -> ((PartPropeller)p).definition.propeller).toList();
   boolean towed = v.towedByConnection != null, optedOut = Overrides.isOptedOut(key);
   boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
-  boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, towed, optedOut);
+  boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
   if (v.world.isClient()) return true;
   var level = ((WorldAccessor)v.world).div$level();

@@ -139,44 +139,55 @@ class ClassificationTest {
  }
 
  @Test void pontoonOnlyHullIsFloatEligible() {
-  assertTrue(Classification.floatEligible(motorized(), List.of(pontoon()), false, false));
+  assertTrue(Classification.floatEligible(motorized(), List.of(pontoon()), NO_PROPELLERS, false, false));
  }
 
  @Test void multiplePontoonsAreFloatEligible() {
-  assertTrue(Classification.floatEligible(motorized(), List.of(pontoon(), pontoon()), false, false));
+  assertTrue(Classification.floatEligible(motorized(), List.of(pontoon(), pontoon()), NO_PROPELLERS, false, false));
  }
 
  @Test void aVehicleWithAWheelIsNotFloatEligibleEvenIfItAlsoHasAFloat() {
   // An amphibious car stays on the ground solver via eligible(); floatEligible() is the
   // exclusive fallback for a hull with nothing the ground solver can drive.
-  assertFalse(Classification.floatEligible(motorized(), List.of(wheel(), pontoon()), false, false));
+  assertFalse(Classification.floatEligible(motorized(), List.of(wheel(), pontoon()), NO_PROPELLERS, false, false));
  }
 
  @Test void skidWithNoCanFloatIsNotFloatEligible() {
   // A grounded skid helicopter: no wheel/track, and its skid does not float either.
   var skid = new JSONPart.JSONPartGroundDevice();
-  assertFalse(Classification.floatEligible(motorized(), List.of(skid), false, false));
+  assertFalse(Classification.floatEligible(motorized(), List.of(skid), NO_PROPELLERS, false, false));
+ }
+
+ @Test void floatOnlyHullWithAnInstalledRotorPropellerIsExcluded() {
+  // A pontoon/skid rotorcraft: IV's rotor-lift/thrust-vectoring solver is a different,
+  // unmodeled physics domain regardless of which other domain the chassis would otherwise
+  // qualify for - the same exclusion eligible() applies for a flight vehicle's rotor.
+  assertFalse(Classification.floatEligible(motorized(), List.of(pontoon()), List.of(rotor()), false, false));
+ }
+
+ @Test void floatOnlyHullWithAnOrdinaryPropellerStaysFloatEligible() {
+  assertTrue(Classification.floatEligible(motorized(), List.of(pontoon()), List.of(forwardPropeller()), false, false));
  }
 
  @Test void floatEligibleExcludesAircraftBlimpTowedAndOptedOut() {
   var aircraft = motorized();
   aircraft.motorized.isAircraft = true;
-  assertFalse(Classification.floatEligible(aircraft, List.of(pontoon()), false, false));
+  assertFalse(Classification.floatEligible(aircraft, List.of(pontoon()), NO_PROPELLERS, false, false));
 
   var blimp = motorized();
   blimp.motorized.isBlimp = true;
-  assertFalse(Classification.floatEligible(blimp, List.of(pontoon()), false, false));
+  assertFalse(Classification.floatEligible(blimp, List.of(pontoon()), NO_PROPELLERS, false, false));
 
-  assertFalse(Classification.floatEligible(motorized(), List.of(pontoon()), true, false));
-  assertFalse(Classification.floatEligible(motorized(), List.of(pontoon()), false, true));
+  assertFalse(Classification.floatEligible(motorized(), List.of(pontoon()), NO_PROPELLERS, true, false));
+  assertFalse(Classification.floatEligible(motorized(), List.of(pontoon()), NO_PROPELLERS, false, true));
  }
 
  @Test void floatEligibleWithNoGroundDeviceAtAllIsExcluded() {
-  assertFalse(Classification.floatEligible(motorized(), List.of(), false, false));
+  assertFalse(Classification.floatEligible(motorized(), List.of(), NO_PROPELLERS, false, false));
  }
 
  @Test void floatEligibleOnNullDefinitionIsExcludedNotACrash() {
-  assertFalse(Classification.floatEligible(null, List.of(pontoon()), false, false));
+  assertFalse(Classification.floatEligible(null, List.of(pontoon()), NO_PROPELLERS, false, false));
  }
 
  @Test void noGroundDeviceAtAllIsExcluded() {
