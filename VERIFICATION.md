@@ -127,6 +127,12 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
 - A trailer actively hitched behind a car continues to follow via IV's own
   hitch code, with no double movement, whether or not the towing car has
   Sable physics.
+- A car towing a trailer (empty, then loaded/with its own engine where the
+  pack allows it) accelerates and holds speed noticeably closer to IV's own
+  unmodified behavior than before this change, since `getRecursiveTowingThrust`
+  is now replicated as a center-of-mass impulse on the towing vehicle's Sable
+  body (`TowingForces`/`VehicleTowingAccessor`) - see README.md "Scope" for
+  what remains unaddressed (the trailer's own coupled body/constraint).
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
 playable-MVP claim for any category above. Heavy build/decompile/game work
