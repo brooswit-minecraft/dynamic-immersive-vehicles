@@ -97,14 +97,18 @@ public final class PhysicsBridge {
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  private static final class Body {
+  private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
+  private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
   final ServerLevel level;
   final Overrides.Tuning tuning;
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
   final double mass;
+  final boolean flight;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
+   this.flight=Classification.isFlightVehicle(v.definition);
    mass=tuning.massKg != null ? tuning.massKg : Math.max(50,v.getMass());
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
    for (var group : v.definition.collisionGroups) for (var c : group.collisions) {
@@ -140,6 +144,19 @@ public final class PhysicsBridge {
    Quaterniond q=new Quaterniond(pose.orientation()), inverse=new Quaterniond(q).invert();
    Vector3d velocity=handle.getLinearVelocity(new Vector3d()), angular=handle.getAngularVelocity(new Vector3d());
    Vector3d up=q.transform(new Vector3d(0,1,0));
+   boolean awake = flight ? stepFlight(v,pose,q,inverse,velocity,up) : stepGround(v,pose,q,inverse,angular,velocity,up);
+   if (awake) box.wakeUp();
+   // Sable is authoritative. The pose here is the most recent completed simulation step.
+   Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
+   v.position.set(origin.x,origin.y,origin.z);
+   Matrix3d m=new Matrix3d().set(q);
+   var r=v.orientation;
+   r.m00=m.m00();r.m01=m.m10();r.m02=m.m20();
+   r.m10=m.m01();r.m11=m.m11();r.m12=m.m21();
+   r.m20=m.m02();r.m21=m.m12();r.m22=m.m22();r.convertToAngles();
+   v.motion.set(velocity.x,velocity.y,velocity.z).scale(1/(20*v.speedFactor));
+  }
+  private boolean stepGround(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d angular, Vector3d velocity, Vector3d up) {
    double drive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
     drive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
@@ -190,16 +207,50 @@ public final class PhysicsBridge {
    // Sable impulse. See TowingForces for the derivation.
    double towThrust = ((VehicleTowingAccessor)(Object)v).div$getRecursiveTowingThrust();
    if (towThrust != 0) handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.impulse(towThrust,v.speedFactor,mass,v.currentMass)));
-   if(contact || drive!=0 || towThrust!=0) box.wakeUp();
-   // Sable is authoritative. The pose here is the most recent completed simulation step.
-   Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
-   v.position.set(origin.x,origin.y,origin.z);
-   Matrix3d m=new Matrix3d().set(q);
-   var r=v.orientation;
-   r.m00=m.m00();r.m01=m.m10();r.m02=m.m20();
-   r.m10=m.m01();r.m11=m.m11();r.m12=m.m21();
-   r.m20=m.m02();r.m21=m.m12();r.m22=m.m22();r.convertToAngles();
-   v.motion.set(velocity.x,velocity.y,velocity.z).scale(1/(20*v.speedFactor));
+   return contact || drive!=0 || towThrust!=0;
+  }
+  /**
+   * Aircraft and blimps: no wheels, so this applies {@link FlightForces} instead of the
+   * raycast suspension/friction loop above - wing/hull lift (and blimp buoyancy), parasitic+
+   * induced drag, aileron/elevator/rudder control torques, and throttle-linear thrust from any
+   * running engine. {@code tuning.driveForce} is reused as this vehicle's max thrust, the same
+   * way it is reused as max drive force for a ground vehicle - one shared, per-car-overridable
+   * propulsive-force knob rather than a second config field.
+   */
+  private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
+   var motorized = v.definition.motorized;
+   Vector3d forward=q.transform(new Vector3d(0,0,1));
+   Vector3d right=new Vector3d(up).cross(forward);
+   Vector3d localVelocity=inverse.transform(new Vector3d(velocity));
+   double forwardSpeed=localVelocity.z, verticalSpeed=localVelocity.y, lateralSpeed=localVelocity.x;
+   double speed=velocity.length();
+   double dynamicPressure=FlightForces.dynamicPressure(AIR_DENSITY,speed);
+   double angleOfAttack=Math.atan2(-verticalSpeed,Math.abs(forwardSpeed));
+   double sideslip=Math.atan2(lateralSpeed,Math.abs(forwardSpeed));
+   double liftCoeff=FlightForces.liftCoefficient(angleOfAttack);
+   double aspectRatio=motorized.wingArea>0 ? (motorized.wingSpan*motorized.wingSpan)/motorized.wingArea : 0;
+   double dragCoeff=FlightForces.dragCoefficient(liftCoeff,Math.max(0.02,motorized.dragCoefficient),aspectRatio);
+   double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
+   double lift=FlightForces.aeroForce(liftCoeff,motorized.wingArea,dynamicPressure);
+   double drag=FlightForces.aeroForce(dragCoeff,referenceArea,dynamicPressure);
+   double buoyant=motorized.ballastVolume>0 ? FlightForces.buoyancy(AIR_DENSITY,motorized.ballastVolume) : 0;
+   double throttle=0;
+   for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running) throttle=v.throttleVar.currentValue;
+   double thrustForce=FlightForces.thrust(throttle,tuning.driveForce);
+   Vector3d dragDirection=speed>1e-6 ? new Vector3d(velocity).normalize() : new Vector3d();
+   Vector3d force=new Vector3d(up).mul(lift).fma(buoyant,WORLD_UP).fma(thrustForce,forward).fma(-drag,dragDirection);
+   handle.applyLinearImpulse(force.mul(DT));
+   double wingArm=motorized.wingSpan>0 ? motorized.wingSpan/2 : 1;
+   double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
+   double aileronDeflection=Math.toRadians(v.aileronInputVar.currentValue);
+   double elevatorDeflection=Math.toRadians(v.elevatorInputVar.currentValue);
+   double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
+   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure)*wingArm;
+   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure)*tailArm;
+   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure)*tailArm;
+   Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
+   handle.applyTorqueImpulse(torque.mul(DT));
+   return true;
   }
  }
 }

@@ -57,16 +57,38 @@ class ClassificationTest {
   assertFalse(Classification.eligible(motorized(), List.of(wheel()), false, true));
  }
 
- @Test void aircraftIsExcluded() {
+ @Test void aircraftIsEligibleWithNoGroundDeviceAtAll() {
   var v = motorized();
   v.motorized.isAircraft = true;
-  assertFalse(Classification.eligible(v, List.of(wheel()), false, false));
+  assertTrue(Classification.eligible(v, List.of(), false, false));
+  assertTrue(Classification.isFlightVehicle(v));
  }
 
- @Test void blimpIsExcluded() {
+ @Test void blimpIsEligibleWithNoGroundDeviceAtAll() {
   var v = motorized();
   v.motorized.isBlimp = true;
-  assertFalse(Classification.eligible(v, List.of(), false, false));
+  assertTrue(Classification.eligible(v, List.of(), false, false));
+  assertTrue(Classification.isFlightVehicle(v));
+ }
+
+ @Test void aircraftOptOutStillExcludes() {
+  var v = motorized();
+  v.motorized.isAircraft = true;
+  assertFalse(Classification.eligible(v, List.of(), false, true));
+ }
+
+ @Test void activelyTowedAircraftIsExcluded() {
+  var v = motorized();
+  v.motorized.isAircraft = true;
+  assertFalse(Classification.eligible(v, List.of(), true, false));
+ }
+
+ @Test void groundVehicleIsNotClassifiedAsFlight() {
+  assertFalse(Classification.isFlightVehicle(motorized()));
+ }
+
+ @Test void nullDefinitionIsNotClassifiedAsFlight() {
+  assertFalse(Classification.isFlightVehicle(null));
  }
 
  @Test void activelyTowedVehicleIsExcludedEvenIfOtherwiseEligible() {
