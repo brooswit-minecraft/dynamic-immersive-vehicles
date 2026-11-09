@@ -55,10 +55,7 @@ public final class PhysicsBridge {
   var installedGroundDevices = v.allParts.stream()
     .filter(p -> p instanceof PartGroundDevice g && g.definition != null)
     .map(p -> ((PartGroundDevice)p).definition.ground).toList();
-  var installedPropellers = v.allParts.stream()
-    .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
-    .map(p -> ((PartPropeller)p).definition.propeller).toList();
-  boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, v.towedByConnection != null, Overrides.isOptedOut(key))
+  boolean eligible = Classification.eligible(definition, installedGroundDevices, v.towedByConnection != null, Overrides.isOptedOut(key))
     && !brokenDefinitions.contains(definition);
   if (!eligible) return deactivate(v);
   if (v.world.isClient()) return true;
@@ -111,9 +108,19 @@ public final class PhysicsBridge {
   final Vector3d center;
   final double mass;
   final boolean flight;
+  final boolean rotor;
+  final double rotorRadiusMeters;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
    this.flight=Classification.isFlightVehicle(v.definition);
+   var installedPropellers = v.allParts.stream()
+     .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
+     .map(p -> ((PartPropeller)p).definition.propeller).toList();
+   this.rotor = flight && Classification.isRotorcraft(installedPropellers);
+   this.rotorRadiusMeters = rotor
+     ? RotorForces.rotorRadiusMeters(installedPropellers.stream().filter(Classification::isRotor)
+         .mapToDouble(p -> p.diameter).max().orElse(0))
+     : 0;
    mass=tuning.massKg != null ? tuning.massKg : Math.max(50,v.getMass());
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
    for (var group : v.definition.collisionGroups) for (var c : group.collisions) {
@@ -149,7 +156,7 @@ public final class PhysicsBridge {
    Quaterniond q=new Quaterniond(pose.orientation()), inverse=new Quaterniond(q).invert();
    Vector3d velocity=handle.getLinearVelocity(new Vector3d()), angular=handle.getAngularVelocity(new Vector3d());
    Vector3d up=q.transform(new Vector3d(0,1,0));
-   boolean awake = flight ? stepFlight(v,pose,q,inverse,velocity,up) : stepGround(v,pose,q,inverse,angular,velocity,up);
+   boolean awake = flight ? (rotor ? stepRotor(v,q,up) : stepFlight(v,pose,q,inverse,velocity,up)) : stepGround(v,pose,q,inverse,angular,velocity,up);
    if (awake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
@@ -215,9 +222,10 @@ public final class PhysicsBridge {
    return contact || drive!=0 || towThrust!=0;
   }
   /**
-   * Fixed-wing aircraft and blimps (never a rotorcraft - {@link Classification#eligible} keeps
-   * any vehicle with an installed rotor propeller on IV's native physics instead): no wheels, so
-   * this applies {@link FlightForces} instead of the raycast suspension/friction loop above -
+   * Fixed-wing aircraft and blimps (never a rotorcraft - {@code Body.step} routes any vehicle
+   * with an installed rotor propeller to {@link #stepRotor} instead, since it has no wing for
+   * this method's lift model to act on): no wheels, so this applies {@link FlightForces} instead
+   * of the raycast suspension/friction loop above -
    * wing lift, parasitic+induced drag, aileron/elevator/rudder control torques, throttle-linear
    * thrust from any running engine, and - for a blimp with a configured ballastVolume - mass/
    * gravity-compatible neutral-buoyancy lift plus ballast trim, gated and scaled the way IV's
@@ -261,6 +269,42 @@ public final class PhysicsBridge {
    double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure)*wingArm;
    double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure)*tailArm;
    double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure)*tailArm;
+   Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
+   handle.applyTorqueImpulse(torque.mul(DT));
+   return true;
+  }
+  /**
+   * A rotorcraft (installed rotor propeller - {@link Classification#isRotorcraft}): no wing, so
+   * {@link FlightForces}'s angle-of-attack lift has nothing to act on. Collective pitch from
+   * throttle supplies vertical thrust ({@link RotorForces#lift}); cyclic tilt from elevator/
+   * aileron input steers that thrust vector forward/sideways for the hover-to-forward-flight
+   * transition ({@link RotorForces#verticalComponent}/{@link RotorForces#horizontalComponent})
+   * and separately drives attitude torque ({@link RotorForces#cyclicTorque}); rudder input
+   * supplies yaw/anti-torque authority ({@link RotorForces#yawTorque}). {@code tuning.driveForce}
+   * is reused as this vehicle's max rotor thrust, the same shared propulsive-force knob as the
+   * ground and fixed-wing categories.
+   */
+  private boolean stepRotor(EntityVehicleF_Physics v, Quaterniond q, Vector3d up) {
+   var motorized = v.definition.motorized;
+   Vector3d forward=q.transform(new Vector3d(0,0,1));
+   Vector3d right=new Vector3d(up).cross(forward);
+   double throttle=0;
+   for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running) throttle=v.throttleVar.currentValue;
+   double collective=RotorForces.collective(throttle);
+   double thrust=RotorForces.lift(collective,tuning.driveForce);
+   double tiltPitch=RotorForces.cyclicTilt(Math.toRadians(v.elevatorInputVar.currentValue));
+   double tiltRoll=RotorForces.cyclicTilt(Math.toRadians(v.aileronInputVar.currentValue));
+   double tiltMagnitude=Math.hypot(tiltPitch,tiltRoll);
+   double vertical=RotorForces.verticalComponent(thrust,tiltMagnitude);
+   double forwardComp=RotorForces.horizontalComponent(thrust,tiltPitch);
+   double lateralComp=RotorForces.horizontalComponent(thrust,tiltRoll);
+   Vector3d force=new Vector3d(up).mul(vertical).fma(forwardComp,forward).fma(lateralComp,right);
+   handle.applyLinearImpulse(force.mul(DT));
+   double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
+   double rollTorque=RotorForces.cyclicTorque(tiltRoll,thrust,rotorRadiusMeters);
+   double pitchTorque=RotorForces.cyclicTorque(tiltPitch,thrust,rotorRadiusMeters);
+   double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
+   double yawTorque=RotorForces.yawTorque(rudderDeflection,thrust,tailArm);
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
    return true;

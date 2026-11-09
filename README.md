@@ -42,6 +42,23 @@ each vehicle from IV's own definition at the moment it is needed:
   behavior, no advance-ratio propeller falloff, no altitude/weather air
   density, no natural weathercock stability beyond rudder input). No wheel or
   track device is required for this category to be eligible.
+- **Rotorcraft** (an aircraft with any installed `isRotor` propeller, e.g. a
+  helicopter): a server-owned Sable rigid body using a separate rotor force
+  model instead of the fixed-wing model above, which has no wing for a
+  rotorcraft to generate lift from - collective-pitch vertical thrust from
+  throttle, cyclic tilt from elevator/aileron input that steers that thrust
+  vector forward/sideways for the hover-to-forward-flight transition and
+  separately drives attitude (roll/pitch) torque, and rudder-driven yaw/
+  anti-torque authority. Unlike a fixed-wing control surface, this attitude
+  and yaw authority scales with available thrust, not airspeed, so a
+  helicopter keeps full control hovering at zero airspeed. See
+  [`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
+  for the exact model and its stated simplifications (no translational-lift
+  efficiency gain in forward flight, no retreating-blade stall, no
+  autorotation/engine-out descent, no ground effect, and every installed
+  rotor propeller treated as one lumped main lift rotor rather than modeling
+  an individual tail rotor's own thrust/mount orientation). No wheel or track
+  device is required for this category to be eligible.
 
 Known, deliberate exclusions - not silently skipped, each tracked as a
 follow-up task rather than faked with the ground solver:
@@ -49,11 +66,6 @@ follow-up task rather than faked with the ground solver:
 - **Boats and other float-only hulls** (pontoon/skid devices with no wheel or
   track): buoyancy is a different physics domain this bridge does not yet
   model.
-- **Rotorcraft** (any installed propeller with `isRotor` set, e.g. a
-  helicopter): IV gives rotor-lift propellers their own thrust-vectoring
-  solver, a different physics domain this bridge does not model; a rotorcraft
-  stays on IV's native physics rather than getting zero wing lift and
-  forward-only thrust from the fixed-wing model above.
 - **A vehicle actively hitched behind another** (trailers): it keeps
   following IV's own native hitch code instead of getting a second,
   competing body, so towed trailers are unaffected either way. The towing

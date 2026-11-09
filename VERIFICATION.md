@@ -64,9 +64,11 @@ case, explicit per-car opt-out, pontoon/skid-only (boat) exclusion, a missing
 `motorized` section, and a null ground-device entry among installed parts.
 Aircraft and blimps are now covered as an eligible category requiring no
 ground-contact device at all (`isFlightVehicle`), still excluded by an
-explicit opt-out or an active tow, and now also excluded when any installed
-propeller is a rotor (`isRotor`, see below) - a helicopter must stay on IV's
-native physics, not be given wing lift it has no wings for.
+explicit opt-out or an active tow. A rotorcraft (any installed `isRotor`
+propeller, see `isRotorcraft` below) is eligible the same way - it is still
+an aircraft, just one `PhysicsBridge.Body` routes to the rotor force model
+(see below) instead of the fixed-wing model, which has no wing for a
+rotorcraft to act on.
 
 ## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
 
@@ -121,32 +123,56 @@ independent of any `gravityFactor` value since the method takes none. It
 also keeps the representative 1,000 kg blimp integration-level seam test
 from the first round, re-pointed at `blimpBuoyancy`'s active-ballast case.
 
-**Rotorcraft exclusion, added after review.** Review also found
-`Classification.eligible` activated every `isAircraft` definition,
-including helicopters, while `PhysicsBridge.stepFlight` supplies only wing
-lift and forward thrust - a zero-wing-area helicopter got zero lift and
-forward-only thrust after IV's native solver was cancelled for it.
-`Classification.isRotor(JSONPart.JSONPartPropeller)` now checks IV's own
-`isRotor` flag, and `eligible` excludes any flight vehicle with an installed
-rotor propeller, leaving it on IV's native physics. `ClassificationTest`
-covers: a fixed-wing aircraft with an ordinary (non-rotor) propeller stays
-eligible, a rotorcraft is excluded even though `isAircraft` is set, a rotor
-among multiple installed propellers still excludes, and a null propeller
-list entry is ignored rather than throwing.
+## Rotor force model tests (MINECRAFT-497, added 2026-11-09)
+
+Following up on MINECRAFT-495's rotorcraft exclusion (above, now superseded):
+`Classification.eligible` no longer takes a propeller list at all and now
+treats every `isFlightVehicle` definition - fixed-wing, blimp, or rotorcraft
+- as eligible; the fixed-wing/rotor split happens inside
+`PhysicsBridge.Body`, not in the pure eligibility decision. `Classification
+.isRotorcraft(List<JSONPart.JSONPartPropeller>)` (built on the existing
+`isRotor`) is the pure predicate `Body`'s constructor uses to pick
+`stepRotor` over `stepFlight`. `ClassificationTest` covers: a fixed-wing
+aircraft with an ordinary (non-rotor) propeller is not a rotorcraft, a
+helicopter (`isRotor` propeller) is both eligible and a rotorcraft, a rotor
+among multiple installed propellers still marks rotorcraft, no propellers
+(or no rotor among them) does not, and a null propeller list entry is
+ignored rather than throwing.
+
+`RotorForcesTest` exercises every pure function in the new `RotorForces` -
+the rotor-domain analogue of `FlightForces`/`TireForcesTest` - with no live
+entity, world, or Sable runtime: collective pitch that is zero below IV's
+own throttle deadband and reaches full authority at full throttle (matching
+`PartPropeller`'s own rotor pitch mapping), lift that scales linearly with
+collective, cyclic tilt that passes through within range and clamps at 20
+degrees, the vertical component shrinking and the horizontal component
+growing (and flipping sign) as tilt increases - the hover-to-forward-flight
+mechanism - cyclic and yaw torque that are zero at zero input, scale with
+available thrust (not airspeed, unlike a fixed-wing control surface, so a
+hovering helicopter keeps full attitude authority at zero airspeed), and
+flip sign with input direction, and rotor-radius conversion from IV's
+inch-diameter propeller field. `PhysicsBridge`'s own `stepRotor` (force/
+torque application against a live rigid body) is not unit-tested, the same
+way `stepFlight` and the ground solver's wheel loop are not - all three are
+only exercised, where they are exercised at all, by the acceptance list
+below.
 
 A local, non-CI sanity check (`javac --release 21 -proc:none` against the
-real `mts.jar`/Sable 2.0.5/joml jars pulled from this host's Gradle cache,
-the same API-check approach as the recovered-prototype evidence above, not
-a standard Gradle/mod-loader build) confirmed `Classification.java`,
-`FlightForces.java`, and the updated `PhysicsBridge.java` compile cleanly
-against IV's real `JSONVehicle.motorized` fields (`wingArea`, `wingSpan`,
-`aileronArea`, `elevatorArea`, `rudderArea`, `tailDistance`,
-`crossSectionalArea`, `ballastVolume`, `dragCoefficient`),
-`JSONPart.JSONPartPropeller.isRotor`, and `EntityVehicleF_Physics`'s real
-control-input vars, `ballastControlVar`, and `MAX_*_ANGLE` constants, and
-that all 50 tests in `FlightForcesTest`, the updated `ClassificationTest`,
-`TireForcesTest`, and `TowingForcesTest` pass under a manually assembled JUnit Platform
-launcher. This is evidence the new code compiles and its pure functions
+real `mts.jar`, Sable NeoForge 2.0.5, joml 1.10.5, and a NeoForge
+21.1.250 merged artifact - a close but not exact match to this repo's
+pinned 21.1.265, pulled from this host's Gradle cache; the same API-check
+approach as the recovered-prototype/MINECRAFT-495 evidence above, not a
+standard Gradle/mod-loader build) confirmed `Classification.java`, the new
+`RotorForces.java`, and the updated `PhysicsBridge.java` compile cleanly
+against IV's real `JSONPart.JSONPartPropeller.diameter`/`isRotor` fields and
+`EntityVehicleF_Physics`'s real control-input vars
+(`elevatorInputVar`/`aileronInputVar`/`rudderInputVar`) and `throttleVar`,
+and that all 92 tests in the repository - `RotorForcesTest` (19 new),
+`FlightForcesTest`, the updated `ClassificationTest`, `TireForcesTest`,
+`TowingForcesTest`, `OverridesTest`, `BodyRegistryTest`, and
+`PhysicsBridgeClassificationTest` - pass under a manually assembled JUnit
+Platform launcher (JUnit 5.11.4/platform 1.11.4). This is evidence the new
+code compiles and its pure functions
 behave as specified - it is not the hosted Gradle build, is not the
 `runtime-smoke` Mixin-apply check, and proves nothing about in-game flight
 behavior.
@@ -221,9 +247,14 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   wing-based lift.
 - An aircraft or blimp with `"enabled": false` in the JSON override continues
   to use ordinary IV physics.
-- A helicopter (an `isAircraft` vehicle with an installed `isRotor`
-  propeller) continues to use ordinary IV physics (documented exclusion,
-  not a defect) - no wing lift is applied to it.
+- An aircraft or blimp with an installed rotor propeller (a helicopter)
+  spawns, can be boarded, and gets Sable rotor physics with no config
+  entry: throttle produces collective vertical thrust and can hold a
+  hover, elevator/aileron cyclic input tilts that thrust to move forward/
+  sideways/backward and banks the fuselage accordingly, and rudder input
+  yaws it, all without IV's native rotor-vectoring solver also moving it -
+  distinct from a fixed-wing aircraft's wing-based lift and airspeed-
+  dependent control authority.
 - A trailer actively hitched behind a car continues to follow via IV's own
   hitch code, with no double movement, whether or not the towing car has
   Sable physics.
