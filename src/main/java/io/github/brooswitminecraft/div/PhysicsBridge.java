@@ -71,11 +71,8 @@ public final class PhysicsBridge {
   TowingConnection towedByConnection = v.towedByConnection;
   boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, towedByConnection != null, Overrides.isOptedOut(key))
     && !brokenDefinitions.contains(definition);
-  // A trailer only gets its own Sable body once its towing vehicle already has one to joint
-  // against - the hitch joint PhysicsBridge builds below connects to that live body, not to
-  // IV's own position. This is a transient ordering wait (the towing vehicle normally activates
-  // the same tick it becomes eligible), so it is retried every tick, never cached as broken.
-  if (eligible && towedByConnection != null && !registry.isActive(towedByConnection.towingVehicle)) eligible = false;
+  boolean towingVehicleActive = towedByConnection != null && registry.isActive(towedByConnection.towingVehicle);
+  if (eligible && deferToNativeHitch(towedByConnection != null, registry.isActive(v), towingVehicleActive)) eligible = false;
   if (!eligible) return deactivate(v);
   if (v.world.isClient()) return true;
   var level = ((WorldAccessor)v.world).div$level();
@@ -88,6 +85,23 @@ public final class PhysicsBridge {
   Body old = registry.deactivate(v);
   if (old != null) { releaseHitch(v); old.remove(); }
   return false;
+ }
+ /**
+  * Whether an otherwise-eligible towed vehicle must still defer to IV's native hitch code this
+  * tick rather than get (or keep) a Sable body - the exact decision {@code active()} applies,
+  * pulled out as a pure boolean seam so it is testable without a live entity/registry. Only a
+  * vehicle that is {@code towed} can ever defer. On FIRST activation ({@code !alreadyActive}),
+  * it defers until its towing vehicle has its own active body to joint against - a transient
+  * ordering wait, not a permanent exclusion. An ALREADY-active trailer (its own Sable body
+  * already exists) must never be deferred/torn down just because its towing vehicle's body has
+  * since gone away - it stays an unjointed, free-rolling Sable vehicle instead; only its stale
+  * joint, not its body, is {@code reconcileHitch}'s job to release in that case. This was a real
+  * regression caught by self-review before this ticket's first external review: an earlier
+  * revision applied this wait unconditionally, deactivating (destroying) an already-active
+  * trailer's body the moment its towing vehicle's body disappeared.
+  */
+ static boolean deferToNativeHitch(boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
+  return towed && !alreadyActive && !towingVehicleActive;
  }
  /**
   * Brings this trailer's hitch joint in line with {@code connection}: builds one against its

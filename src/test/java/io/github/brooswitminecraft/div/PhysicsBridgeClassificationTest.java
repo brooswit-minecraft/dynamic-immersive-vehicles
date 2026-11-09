@@ -63,6 +63,30 @@ class PhysicsBridgeClassificationTest {
   assertTrue(broken.isEmpty());
  }
 
+ @Test void firstActivationDefersUntilTheTowingVehicleHasABody() {
+  // A trailer's very first activation must wait for its towing vehicle to already have an
+  // active body - the joint it needs connects to that body, not to IV's raw position.
+  assertTrue(PhysicsBridge.deferToNativeHitch(true, false, false));
+ }
+
+ @Test void firstActivationProceedsOnceTheTowingVehicleHasABody() {
+  assertFalse(PhysicsBridge.deferToNativeHitch(true, false, true));
+ }
+
+ @Test void anAlreadyActiveTrailerIsNeverDeferredEvenIfItsTowingVehicleLosesItsBody() {
+  // MINECRAFT-498 self-review regression: an earlier revision applied the ordering wait
+  // unconditionally and would deactivate (destroy) an already-active trailer's own body the
+  // moment its towing vehicle's body disappeared (opt-out, despawn, chunk unload), instead of
+  // leaving the trailer as an unjointed, free-rolling Sable vehicle and only releasing the
+  // stale joint (reconcileHitch's job, not active()'s).
+  assertFalse(PhysicsBridge.deferToNativeHitch(true, true, false));
+ }
+
+ @Test void anUntowedVehicleNeverDefersRegardlessOfTheOtherFlags() {
+  assertFalse(PhysicsBridge.deferToNativeHitch(false, false, false));
+  assertFalse(PhysicsBridge.deferToNativeHitch(false, true, true));
+ }
+
  @Test void keyAndBrokenKeyCanBeDifferentTypes() {
   // Mirrors PhysicsBridge's real usage: the active-bodies registry is keyed by the live entity,
   // but brokenDefinitions is keyed by the shared JSON definition object - a different key for

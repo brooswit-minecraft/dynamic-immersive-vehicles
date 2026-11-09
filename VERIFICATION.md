@@ -173,6 +173,23 @@ relies on for each anchor). Locked-axis selection is covered for all three
 (every axis, fully rigid), `restricted` (linear plus yaw/roll, pitch free)
 - and that `mounted` takes precedence when both flags are set.
 
+**Lifecycle regression, caught by self-review before external review.** The
+first revision's `active()` applied the towing-vehicle-ordering wait
+unconditionally: once a trailer's own body was already active, if its
+towing vehicle later lost its own body (opt-out, despawn, chunk unload),
+the same guard that correctly defers a trailer's *first* activation also
+deactivated - destroyed - the trailer's already-active body, instead of
+leaving it as an unjointed, free-rolling Sable vehicle and only releasing
+the now-stale joint (`reconcileHitch`'s job). The fix pulls that decision
+out into a pure, package-private seam, `PhysicsBridge.deferToNativeHitch
+(towed, alreadyActive, towingVehicleActive)`, so it is testable without a
+live entity/registry: it defers only when `towed && !alreadyActive &&
+!towingVehicleActive`. `PhysicsBridgeClassificationTest` now covers all
+four cases - first activation waits, first activation proceeds once the
+towing vehicle has a body, an already-active trailer is never deferred
+even once its towing vehicle's body is gone (the regression itself), and
+an untowed vehicle never defers regardless of the other two flags.
+
 `BodyRegistryTest`'s `removeIf` test now also asserts the bulk-removal
 callback receives the key, not just the body (`PhysicsBridge.releaseHitch`
 needs the entity to find and release any hitch joint keyed to it during a
@@ -194,7 +211,7 @@ real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
 `BoxPhysicsObject.getPose()`, and IV's real
 `minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
 fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
-`.mounted`, `.restricted`), and that all 80 tests across the full suite
+`.mounted`, `.restricted`), and that all 84 tests across the full suite
 (`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
 `FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
 `PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is
