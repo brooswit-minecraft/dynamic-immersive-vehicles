@@ -225,6 +225,42 @@ callback receives the key, not just the body (`PhysicsBridge.releaseHitch`
 needs the entity to find and release any hitch joint keyed to it during a
 `cleanup()`/`unload()` sweep, which a body-only callback could not give it).
 
+**Towing-force double-count regression, caught by a third self-review round.**
+`Body.stepGround` still replicated IV's own `getRecursiveTowingThrust()` verbatim
+as a compensation impulse on the towing vehicle's Sable body - the exact
+MINECRAFT-496 fix, unmodified. That recursive sum includes
+`towedVehicle.thrustForceValue` for every towed vehicle in the chain, but a towed
+vehicle that is now Sable-active and jointed (this task's own change) also applies
+its own engine thrust directly to its own body via its own `stepGround` call, which
+already reaches the towing vehicle mechanically through the hitch joint Sable
+itself solves. Left unmodified, a powered trailer would be propelled twice: once
+by its own body's drive force, and again by the towing vehicle's now-stale
+compensation for the same thrust.
+
+The fix replaces the direct `getRecursiveTowingThrust()` call with
+`PhysicsBridge.unjointedTowingThrust(v)`, a private recursive sum this bridge
+performs itself - mirroring IV's own recursion and its `mounted`-connection skip
+exactly, except that any immediate towed vehicle already reported `isJointed` by
+`HitchRegistry` (and everything recursed through it) is skipped entirely, since
+that whole subtree's thrust already propagates through its own independently-
+Sable-simulated body and joint. Reading each towed vehicle's own
+`thrustForceValue` (previously only reachable via IV's own recursive method,
+never per-level) required a second mixin accessor on `VehicleTowingAccessor`
+(`@Accessor("thrustForceValue")`, alongside the existing `@Invoker` for the
+recursive method).
+
+The actual per-connection inclusion decision - `!mounted && !jointed` - is pulled
+out as its own pure, unit-tested seam, `PhysicsBridge.compensableConnection(mounted,
+jointed)`, the same kind of extraction `deferToNativeHitch` already used for the
+prior lifecycle regression: the full recursive walk over real `TowingConnection`/
+`EntityVehicleF_Physics` objects cannot be unit-tested without a live world (the
+same documented limitation as `active()` itself, below), but the decision it makes
+at each connection can be, and is: `PhysicsBridgeClassificationTest` now also
+covers an unjointed, unmounted connection staying compensable (MINECRAFT-496's
+original case, preserved), a jointed connection never being compensable (this
+regression), and a mounted connection never being compensable regardless of joint
+state (matching IV's own rule).
+
 **What remains unexercised by any unit test, the same shape of gap
 `PhysicsBridgeClassificationTest`'s own note below already describes for
 plain activation:** `PhysicsBridge.active()`'s own ordering wait (a trailer
@@ -241,7 +277,7 @@ real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
 `BoxPhysicsObject.getPose()`, and IV's real
 `minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
 fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
-`.mounted`, `.restricted`), and that all 93 tests across the full suite
+`.mounted`, `.restricted`), and that all 96 tests across the full suite
 (`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
 `FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
 `PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is
@@ -355,12 +391,23 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
 - The towing car despawning, unloading its chunk, or losing its own Sable
   body for any other reason releases the joint without an error or a
   leaked body; the trailer's own body survives as an unjointed vehicle.
-- A car towing a trailer (empty, then loaded/with its own engine where the
-  pack allows it) accelerates and holds speed noticeably closer to IV's own
-  unmodified behavior than before this change, since `getRecursiveTowingThrust`
-  is still replicated as a center-of-mass impulse on the towing vehicle's
-  Sable body (`TowingForces`/`VehicleTowingAccessor`, unchanged by this
-  task) - now on top of, not instead of, the trailer's own coupled body.
+- A car towing an UNPOWERED trailer (no engine) accelerates and holds speed
+  noticeably closer to IV's own unmodified behavior than before MINECRAFT-496,
+  since that trailer stays unjointed-equivalent for compensation purposes
+  (`thrustForceValue` is zero either way) while now also getting real
+  suspension/drag from its own coupled body.
+- A car towing a POWERED trailer (its own engine, where the pack allows it) is
+  propelled by that trailer's thrust exactly once - through the trailer's own
+  Sable body and the hitch joint - not twice: the towing vehicle's `TowingForces`
+  compensation must not also add the trailer's thrust once the trailer is
+  jointed (`PhysicsBridge.unjointedTowingThrust`/`compensableConnection` -
+  the MINECRAFT-498 self-review regression this task's own change introduced
+  and then fixed). During the brief ordering wait before the trailer has its
+  own body, the towing vehicle's compensation still applies (matching
+  MINECRAFT-496, unchanged for that window).
+- A towed flight vehicle (aircraft/blimp) continues to use ordinary IV
+  physics (documented exclusion, not a defect) - this task is ground-domain
+  only.
 - A towed flight vehicle (aircraft/blimp) continues to use ordinary IV
   physics (documented exclusion, not a defect) - this task is ground-domain
   only.

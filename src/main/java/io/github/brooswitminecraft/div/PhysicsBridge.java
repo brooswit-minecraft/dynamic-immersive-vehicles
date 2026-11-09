@@ -122,6 +122,42 @@ public final class PhysicsBridge {
   return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
  }
  /**
+  * The portion of IV's own getRecursiveTowingThrust() a towing Sable body must still replicate
+  * as a compensation impulse (see TowingForces): the same recursion IV's own method performs
+  * (a {@code mounted} connection never contributes, matching IV's own rule), except that any
+  * immediate towed vehicle which already has an active hitch joint (and everything further
+  * recursed through it) is skipped entirely - its own engine thrust is now applied directly to
+  * its own Sable body by its own {@code stepGround} call and already reaches {@code v}
+  * mechanically through the joint Sable itself solves, so replicating it again here would
+  * double-count it (MINECRAFT-498 self-review finding). An un-jointed towed vehicle (still on
+  * IV's native hitch code - see {@code active()}'s ordering wait) has no such path, so its full
+  * contribution is still replicated exactly as MINECRAFT-496 established.
+  */
+ private static double unjointedTowingThrust(EntityVehicleF_Physics v) {
+  double thrust = 0;
+  for (TowingConnection connection : v.towingConnections) {
+   EntityVehicleF_Physics towed = connection.towedVehicle;
+   if (!compensableConnection(connection.hitchConnection.mounted, hitches.isJointed(towed))) continue;
+   var accessor = (VehicleTowingAccessor)(Object)towed;
+   thrust += accessor.div$getThrustForceValue() + unjointedTowingThrust(towed);
+  }
+  return thrust;
+ }
+ /**
+  * Whether one towing connection's towed-vehicle contribution belongs in
+  * {@code unjointedTowingThrust}'s sum - the exact per-connection decision that sum applies,
+  * pulled out as a pure boolean seam so it is testable without a live entity/world/Sable
+  * runtime. A {@code mounted} connection never contributes (matching IV's own
+  * getRecursiveTowingThrust rule - a mounted vehicle, e.g. a flatbed's cargo, is not treated as
+  * adding towing thrust). An unmounted connection contributes only while its towed vehicle is
+  * NOT {@code jointed} - once jointed, that vehicle's engine thrust already reaches the towing
+  * body mechanically through the Sable joint, and compensating for it again here would double-
+  * count it (the MINECRAFT-498 self-review regression this seam exists to pin).
+  */
+ static boolean compensableConnection(boolean mounted, boolean jointed) {
+  return !mounted && !jointed;
+ }
+ /**
   * The exact classification active() applies to a construction failure, as a seam testable
   * with fake keys/a fake body/a fake constructor: only {@link InvalidChassisGeometry} - Body's
   * own explicit, pre-registration chassis-bounds check, thrown before any Sable object exists -
@@ -254,13 +290,18 @@ public final class PhysicsBridge {
    // IV would normally add getRecursiveTowingThrust() - the engine thrust of everything this
    // vehicle is towing - straight to its own thrustForce every tick, but its getForcesAndMotions
    // never runs once PhysicsBridge takes over (see VehicleForcesMixin), so towing would otherwise
-   // feel lighter than it should. getRecursiveTowingThrust() is in IV's own force units, where
-   // IV itself integrates it as motion.addScaled(totalForce, 1/currentMass) once per tick - not
-   // SI newtons - so it must go through the same IV-motion<->Sable-velocity conversion this class
-   // already uses on activation/writeback (v.motion * v.speedFactor * 20), scaled by this body's
-   // own mass (which may be a tuning.massKg override, not v.currentMass) to land on the matching
-   // Sable impulse. See TowingForces for the derivation.
-   double towThrust = ((VehicleTowingAccessor)(Object)v).div$getRecursiveTowingThrust();
+   // feel lighter than it should. That recursive sum is in IV's own force units, where IV itself
+   // integrates it as motion.addScaled(totalForce, 1/currentMass) once per tick - not SI newtons
+   // - so it must go through the same IV-motion<->Sable-velocity conversion this class already
+   // uses on activation/writeback (v.motion * v.speedFactor * 20), scaled by this body's own
+   // mass (which may be a tuning.massKg override, not v.currentMass) to land on the matching
+   // Sable impulse. See TowingForces for the derivation. unjointedTowingThrust (not IV's own
+   // getRecursiveTowingThrust() directly) is what must be replicated here: a towed vehicle that
+   // already has its own Sable body and hitch joint (MINECRAFT-498) applies its own engine
+   // thrust directly via its own stepGround call, which already reaches this vehicle mechanically
+   // through the joint Sable itself solves - replicating that portion again here would double-
+   // count it.
+   double towThrust = unjointedTowingThrust(v);
    if (towThrust != 0) handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.impulse(towThrust,v.speedFactor,mass,v.currentMass)));
    return contact || drive!=0 || towThrust!=0;
   }

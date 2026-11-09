@@ -82,6 +82,28 @@ class PhysicsBridgeClassificationTest {
   assertFalse(PhysicsBridge.deferToNativeHitch(true, true, false));
  }
 
+ @Test void unjointedUnmountedConnectionsAreCompensable() {
+  // MINECRAFT-496's original case, preserved: a trailer still on IV's native hitch code (no
+  // Sable body/joint of its own yet) has no other path for its engine thrust to reach the
+  // towing vehicle, so it must still be replicated here.
+  assertTrue(PhysicsBridge.compensableConnection(false, false));
+ }
+
+ @Test void aJointedConnectionIsNeverCompensable() {
+  // MINECRAFT-498 self-review regression (second finding): once a towed vehicle has its own
+  // Sable body and hitch joint, its engine thrust is applied directly to its own body and
+  // already reaches the towing vehicle mechanically through the joint. Compensating for it
+  // again here would propel a powered trailer twice.
+  assertFalse(PhysicsBridge.compensableConnection(false, true));
+ }
+
+ @Test void aMountedConnectionIsNeverCompensableRegardlessOfJointState() {
+  // Matches IV's own getRecursiveTowingThrust rule: a mounted connection (e.g. a flatbed's
+  // cargo) never contributes towing-thrust compensation, jointed or not.
+  assertFalse(PhysicsBridge.compensableConnection(true, false));
+  assertFalse(PhysicsBridge.compensableConnection(true, true));
+ }
+
  @Test void anUntowedVehicleNeverDefersRegardlessOfTheOtherFlags() {
   assertFalse(PhysicsBridge.deferToNativeHitch(false, false, false));
   assertFalse(PhysicsBridge.deferToNativeHitch(false, true, true));

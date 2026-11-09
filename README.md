@@ -70,9 +70,18 @@ follow-up task rather than faked with the ground solver:
   ordinary connection leaves all rotation free - a real ball/pintle hitch,
   with the trailer's own wheels/suspension (the same raycast ground solver
   every other ground vehicle uses) keeping it upright rather than the joint.
-  A towing vehicle's own replicated `getRecursiveTowingThrust` impulse
-  (`TowingForces`, unchanged) is applied on top of this, so towing is still
-  not lighter than it should be on that axis.
+  A towing vehicle's own replicated towing-thrust compensation impulse
+  (`TowingForces`, its own math unchanged) is still applied on top of this,
+  so towing is still not lighter than it should be on that axis - but what
+  gets summed into it changed: `PhysicsBridge.unjointedTowingThrust`
+  replicates IV's own `getRecursiveTowingThrust` recursion (and its
+  `mounted`-connection skip) only for a towed vehicle that does **not**
+  already have its own active hitch joint. A jointed trailer's own engine
+  thrust is applied directly to its own Sable body by its own ground step
+  and already reaches the towing vehicle mechanically through the joint
+  Sable itself solves; compensating for it again at the towing vehicle
+  would propel a powered trailer twice (`PhysicsBridge.compensableConnection`
+  is the exact, unit-tested per-connection decision).
 
   **Ordering dependency, not a classification exclusion:** a trailer only
   gets its own body once its towing vehicle already has one active - the
