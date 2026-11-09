@@ -19,15 +19,20 @@ import java.util.Map;
 
 /**
  * Buoyancy/water-drag/propeller-thrust force application, shared by {@link BuoyantBody} (a
- * float-only hull's entire domain) and {@link PhysicsBridge}'s ground {@code Body} (an
- * amphibious vehicle - a drivable wheel/track AND at least one canFloat device - gets both the
- * ground solver's wheel forces and these, applied in the same tick, rather than this bridge
- * silently dropping its water behavior just because it also has wheels; see
- * Classification.floatEligible's javadoc). Archimedes buoyant force and quadratic water drag are
- * sampled per installed canFloat device at that device's own world position against the live
- * Minecraft water surface, which naturally produces a righting torque from uneven submersion -
- * no separate stability code needed. Installed propellers add forward/reverse thrust, steered by
- * rudder input, but only while the propeller itself is underwater.
+ * float-only hull's entire domain) and {@link PhysicsBridge}'s ground/flight {@code Body} (an
+ * amphibious vehicle - a drivable wheel/track, or a rotorcraft/fixed-wing/blimp, with at least
+ * one canFloat device - gets both its ground/flight domain's own forces and these, applied in
+ * the same tick, rather than this bridge silently dropping its water behavior just because it
+ * also drives or flies; see Classification.floatEligible's javadoc). Archimedes buoyant force
+ * and quadratic water drag are sampled per installed canFloat device at that device's own world
+ * position against the live Minecraft water surface, which naturally produces a righting torque
+ * from uneven submersion - no separate stability code needed. Installed non-rotor propellers add
+ * forward/reverse thrust, steered by rudder input, allocated per actual engine-to-propeller
+ * linkage (not reachable through IV's public API - see {@link PartEngineAccessor}/
+ * {@link PartPropellerAccessor}) rather than one vehicle-wide signal applied to every installed
+ * propeller; an installed rotor propeller is excluded here deliberately - its thrust is already
+ * supplied by {@code PhysicsBridge.Body.stepRotor}'s own collective/cyclic model regardless of
+ * water, so counting it again here would double-apply the same propulsive force.
  */
 final class BuoyantForces {
  private BuoyantForces() {}
@@ -73,8 +78,7 @@ final class BuoyantForces {
   }
   double steer = (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE) * Math.toRadians(tuning.maxSteerDegrees);
   Vector3d forward = q.transform(new Vector3d(Math.sin(steer), 0, Math.cos(steer)));
-  var propellers = v.allParts.stream().filter(p -> p instanceof PartPropeller pr && !pr.isSpare)
-    .map(p -> (PartPropeller) p).toList();
+  var propellers = nonRotorPropellers(v);
   // Buoyancy.isPropellerOperational is the exact pure predicate this selection applies - only
   // an operational propeller counts toward the shared thrust budget's denominator, so a
   // merely-active-but-unlinked, or linked-but-stalled, propeller does not dilute the share a
@@ -117,5 +121,15 @@ final class BuoyantForces {
   return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && !g.isSpare && g.definition != null
       && Classification.isFloatDevice(g.definition.ground))
     .map(p -> (PartGroundDevice) p).toList();
+ }
+
+ /** Excludes any spare propeller (same reasoning as {@link #floats}) and any installed rotor
+  * propeller via {@link Classification#needsUnderwaterPropellerThrust} - see the class-level
+  * note on why rotor thrust is already supplied by {@code PhysicsBridge.Body.stepRotor} and
+  * must not be counted twice. */
+ private static List<PartPropeller> nonRotorPropellers(EntityVehicleF_Physics v) {
+  return v.allParts.stream().filter(p -> p instanceof PartPropeller pr && !pr.isSpare
+      && Classification.needsUnderwaterPropellerThrust(pr.definition != null ? pr.definition.propeller : null))
+    .map(p -> (PartPropeller) p).toList();
  }
 }

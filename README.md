@@ -23,39 +23,6 @@ each vehicle from IV's own definition at the moment it is needed:
   (`hasSkidSteer`) turns by differential track force instead of a steerable
   wheel. IV remains responsible for models, seats, controls, persistence, and
   movement packets.
-- **Boats and other float-only hulls** (at least one installed ground device
-  with `canFloat`, and no wheel or track). Each installed float device gets
-  its own Archimedes buoyant force and quadratic water drag, sampled at that
-  device's own position against the local Minecraft water surface; a hull
-  resting unevenly in the water is righted by that per-device force
-  distribution rather than a separate stability calculation. Installed
-  `PartPropeller`s add forward/reverse thrust, steered by the rudder input,
-  allocated per actual engine-to-propeller linkage rather than one vehicle-
-  wide signal applied to every installed propeller. IV exposes neither that
-  linkage nor a propeller's live RPM through its public API, so this bridge
-  reads them the same way it already reads `EntityVehicleF_Physics`'s own
-  protected `getRecursiveTowingThrust()` for towing (see
-  [`PartEngineAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartEngineAccessor.java)/
-  [`PartPropellerAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartPropellerAccessor.java),
-  version-pinned `@Accessor` Mixins, not an edit to IV's own source). A
-  propeller thrusts only while it is underwater, not destroyed/removed
-  (`isActiveVar`), not a spare, actually turning (`currentRPM` away from
-  zero), and linked to a currently-running engine - an unpowered,
-  disconnected, or spare propeller produces no thrust regardless of
-  throttle, submersion, or any other engine's signal. The shared
-  per-car `propellerForce` budget is split only across the propellers
-  actually operational this tick (linked, active, turning) - a vehicle
-  with one powered propeller and one unpowered one gives the powered
-  propeller the full configured thrust, not half of it just because a
-  second, unpowered propeller also happens to be installed.
-- **Amphibious vehicles** (a drivable wheel/track device AND at least one
-  `canFloat` device on the same chassis). These get *both* domains' forces
-  in the same tick, not one at the expense of the other: the ground solver's
-  wheel/track suspension and grip, plus the same per-float buoyancy/water-
-  drag/propeller-thrust forces above applied to their float devices. There
-  is no separate "amphibious" classification - this is the ground domain
-  from the bullet above, with buoyancy layered on top whenever a float
-  device is present on the chassis.
 - **Fixed-wing aircraft and blimps** (`motorized.isAircraft` / `isBlimp`,
   with no installed rotor propeller): a server-owned Sable rigid body using a
   separate flight force model instead of the ground solver - wing lift
@@ -75,15 +42,72 @@ each vehicle from IV's own definition at the moment it is needed:
   behavior, no advance-ratio propeller falloff, no altitude/weather air
   density, no natural weathercock stability beyond rudder input). No wheel or
   track device is required for this category to be eligible.
+- **Rotorcraft** (any vehicle with an installed `isRotor` propeller, e.g. a
+  helicopter - checked directly against the installed part, independent of
+  the `motorized.isAircraft`/`isBlimp` flag, so a rotor-carrying vehicle with
+  neither flag set is still eligible as a rotorcraft rather than being
+  deactivated or stuck on the ground solver): a server-owned Sable rigid body
+  using a separate rotor force model instead of the fixed-wing model above,
+  which has no wing for a rotorcraft to generate lift from - collective-pitch
+  vertical thrust from throttle, cyclic tilt from elevator/aileron input that
+  steers that thrust vector forward/sideways for the hover-to-forward-flight
+  transition and separately drives attitude (roll/pitch) torque, and
+  rudder-driven yaw/anti-torque authority. Unlike a fixed-wing control
+  surface, this attitude and yaw authority scales with available thrust, not
+  airspeed, so a helicopter keeps full control hovering at zero airspeed.
+  See
+  [`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
+  for the exact model and its stated simplifications (no translational-lift
+  efficiency gain in forward flight, no retreating-blade stall, no
+  autorotation/engine-out descent, no ground effect, and every installed
+  rotor propeller treated as one lumped main lift rotor rather than modeling
+  an individual tail rotor's own thrust/mount orientation). No wheel or track
+  device is required for this category to be eligible, and an installed
+  rotor always takes priority over wheels/tracks for dispatch (a wheeled
+  rotor-equipped vehicle still gets rotor physics, not the ground solver).
+- **Boats and other float-only hulls** (at least one installed ground device
+  with `canFloat`, and no wheel or track, and no installed rotor propeller).
+  Each installed float device gets its own Archimedes buoyant force and
+  quadratic water drag, sampled at that device's own position against the
+  local Minecraft water surface; a hull resting unevenly in the water is
+  righted by that per-device force distribution rather than a separate
+  stability calculation. Installed non-rotor `PartPropeller`s add forward/
+  reverse thrust, steered by the rudder input, allocated per actual
+  engine-to-propeller linkage rather than one vehicle-wide signal applied to
+  every installed propeller. IV exposes neither that linkage nor a
+  propeller's live RPM through its public API, so this bridge reads them the
+  same way it already reads `EntityVehicleF_Physics`'s own protected
+  `getRecursiveTowingThrust()` for towing (see
+  [`PartEngineAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartEngineAccessor.java)/
+  [`PartPropellerAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartPropellerAccessor.java),
+  version-pinned `@Accessor` Mixins, not an edit to IV's own source). A
+  propeller thrusts only while it is underwater, not destroyed/removed
+  (`isActiveVar`), not a spare, actually turning (`currentRPM` away from
+  zero), and linked to a currently-running engine - an unpowered,
+  disconnected, or spare propeller produces no thrust regardless of
+  throttle, submersion, or any other engine's signal. The shared per-car
+  `propellerForce` budget is split only across the non-rotor propellers
+  actually operational this tick (linked, active, turning) - a vehicle with
+  one powered propeller and one unpowered one gives the powered propeller
+  the full configured thrust, not half of it just because a second,
+  unpowered propeller also happens to be installed.
+- **Amphibious and float-equipped flight/rotor vehicles** (a drivable wheel/
+  track device, a fixed-wing/blimp flag, or a rotor propeller, AND at least
+  one `canFloat` device on the same chassis - an amphibious car, a seaplane,
+  or a floatplane helicopter). These get *both* domains' forces in the same
+  tick, not one at the expense of the other: the ground/flight/rotor forces
+  above, plus the same per-float buoyancy/water-drag/underwater-propeller-
+  thrust forces applied to their float devices (a rotor propeller's own
+  thrust is never double-counted here, since it is excluded from this
+  underwater-propeller-thrust pass - see
+  [`BuoyantForces`](src/main/java/io/github/brooswitminecraft/div/BuoyantForces.java)).
+  There is no separate "amphibious" classification - this is the same ground/
+  flight/rotor domain from the bullets above, with buoyancy layered on top
+  whenever a float device is present on the chassis.
 
 Known, deliberate exclusions - not silently skipped, each tracked as a
 follow-up task rather than faked with an unrelated force model:
 
-- **Rotorcraft** (any installed propeller with `isRotor` set, e.g. a
-  helicopter): IV gives rotor-lift propellers their own thrust-vectoring
-  solver, a different physics domain this bridge does not model; a rotorcraft
-  stays on IV's native physics rather than getting zero wing lift and
-  forward-only thrust from the fixed-wing model above.
 - **A vehicle actively hitched behind another** (trailers): it keeps
   following IV's own native hitch code instead of getting a second,
   competing body, so towed trailers are unaffected either way. The towing
@@ -146,10 +170,12 @@ after changes.
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
 fully submerged, since a real hull is not a solid box), `waterDrag`, and
-`propellerForce` (split evenly across operational propellers - linked to a
-running engine, active, and turning - not every installed propeller) - are ignored by
-a ground vehicle, and `suspensionTravel`/`friction`/`driveForce`/`brakeForce`
-are ignored by a boat. A copyable example is also available at
+`propellerForce` (split evenly across the non-rotor propellers actually
+operational this tick - linked to a running engine, active, and turning -
+not every installed propeller) - are ignored by a ground/flight vehicle
+with no float device, and `suspensionTravel`/`friction`/`driveForce`/
+`brakeForce` are ignored by a float-only hull. A copyable example is also
+available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
 
 ## Build

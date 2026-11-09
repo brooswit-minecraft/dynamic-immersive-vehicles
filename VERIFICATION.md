@@ -63,25 +63,40 @@ vehicles, mixed wheel+track chassis, the no-config-entry default-enabled
 case, explicit per-car opt-out, a missing `motorized` section, and a null
 ground-device entry among installed parts. Aircraft and blimps are now
 covered as an eligible category requiring no ground-contact device at all
-(`isFlightVehicle`), still excluded by an explicit opt-out or an active tow,
-and now also excluded when any installed propeller is a rotor (`isRotor`,
-see below) - a helicopter must stay on IV's native physics, not be given
-wing lift it has no wings for.
+(`isFlightVehicle`), still excluded by an explicit opt-out or an active tow.
+A rotorcraft (any installed `isRotor` propeller, see `isRotorcraft` below)
+is eligible the same way, checked directly against the installed part
+before the `isAircraft`/`isBlimp` flag or ground devices are even
+considered - a rotor-carrying vehicle with neither flag set, or one with
+wheels, is still eligible as a rotorcraft rather than deactivated or stuck
+on the ground solver (a gap the first actual Wroosbit review found; see the
+production-seam section below for the full fix). `PhysicsBridge.Body`
+routes it to the rotor force model instead of the fixed-wing model, which
+has no wing for a rotorcraft to act on.
 
 ## Buoyancy tests (MINECRAFT-494, added 2026-11-08; updated for amphibious handling)
 
 `Classification.floatEligible(...)` (same file, same no-live-entity testing
 approach) picks out a float-only hull: at least one installed `canFloat`
-ground device, none drivable by the ground solver, and not a flight vehicle.
-A vehicle with both a drivable ground device and a float device is instead
-`eligible()` (the ground domain) - `floatEligible` is the exclusive fallback
-for a hull with nothing the ground solver can drive, not a general "has a
-float device" check; see PhysicsBridge's amphibious handling below for how
-that combined case actually gets its water behavior. `ClassificationTest`
-covers a single pontoon, multiple pontoons, a wheel+pontoon mix staying on
-the ground path, a non-floating skid (a grounded skid helicopter, correctly
-excluded from both paths), and the same aircraft/blimp/towed/opted-out/
-no-device/null-definition exclusions `eligible()` already covers.
+ground device, none drivable by the ground solver, not a flight vehicle,
+and no installed rotor propeller. A vehicle with a drivable ground device
+or a flight flag AND a float device is instead `eligible()` (the ground or
+flight/rotor domain) - `floatEligible` is the exclusive fallback for a hull
+with nothing the ground solver can drive and nothing the flight/rotor model
+can fly, not a general "has a float device" check; see PhysicsBridge's
+amphibious handling below for how those combined cases actually get their
+water behavior. `ClassificationTest` covers a single pontoon, multiple
+pontoons, a wheel+pontoon mix staying on the ground path, a non-floating
+skid (a grounded skid helicopter, correctly excluded from both paths), a
+float-only hull with an installed rotor propeller (correctly excluded even
+without an `isAircraft`/`isBlimp` flag - a defensive check since a rotor-
+carrying definition is essentially always a flight vehicle already excluded
+above it), a float-only hull with an ordinary propeller staying float-
+eligible, a float-equipped rotorcraft proven `eligible()` and never
+`floatEligible()` (the combined rotor+float routing the two classifications
+must agree on so `PhysicsBridge.active()` never builds both a `Body` and a
+`BuoyantBody` for the same vehicle), and the same aircraft/blimp/towed/
+opted-out/no-device/null-definition exclusions `eligible()` already covers.
 
 `BuoyancyTest` exercises the pure force math `BuoyantForces` applies per
 installed float device and propeller - submerged-fraction clamping at both
@@ -94,24 +109,41 @@ device's own world position (producing a righting torque from uneven
 submersion without separate stability code), the water-surface scan against
 the live `ServerLevel`'s `FluidState`, and the propeller thrust/steering
 integration - has the same live-entity/`ServerLevel`/Sable-runtime testing
-gap `Body.stepGround`/`stepFlight` already have (see below): it needs a
-real `EntityVehicleF_Physics` over a real `ServerLevel`'s water, which
-remains exercised only by the in-game acceptance list below, not by any
-unit test in this repository.
+gap `Body.stepGround`/`stepFlight`/`stepRotor` already have (see below): it
+needs a real `EntityVehicleF_Physics` over a real `ServerLevel`'s water,
+which remains exercised only by the in-game acceptance list below, not by
+any unit test in this repository.
 
-**Amphibious combined domain, added after review.** Review flagged that
-routing every vehicle with a drivable ground device exclusively to the
-ground solver - even one that also has a `canFloat` device - would silently
-drop water behavior for an amphibious vehicle just because it has wheels.
-`BuoyantForces.apply(...)` was factored out of `BuoyantBody` specifically so
-`PhysicsBridge`'s ground `Body` can call the same per-float buoyancy/water-
-drag/propeller-thrust logic alongside its own wheel/track forces in the same
-tick, whenever any installed ground device is `canFloat` (`Body.amphibious`,
-computed once at construction). This is not a new classification: it is the
-existing ground domain from `eligible()`, with buoyancy layered on top at
-the force-application level rather than the classification level. Like the
-rest of `BuoyantForces`, the actual combined force application against a
-live rigid body is exercised only by the in-game acceptance list below.
+**Amphibious combined domain, added after review; extended to flight/rotor
+after the MINECRAFT-497 coordination review.** Review flagged that routing
+every vehicle with a drivable ground device exclusively to the ground
+solver - even one that also has a `canFloat` device - would silently drop
+water behavior for an amphibious vehicle just because it has wheels; a
+later review on this same ticket flagged the identical gap for a
+float-equipped fixed-wing/rotorcraft (a seaplane or floatplane helicopter)
+being routed exclusively to the flight/rotor model. `BuoyantForces.apply(...)`
+was factored out of `BuoyantBody` specifically so `PhysicsBridge`'s `Body`
+(ground or flight) can call the same per-float buoyancy/water-drag/
+propeller-thrust logic alongside its own wheel/track or flight/rotor forces
+in the same tick, whenever any installed ground device is `canFloat`
+(`Body.floatCapable`, computed once at construction from the vehicle's
+installed parts at that time - this one field is not re-derived per tick
+the way the rotor/float-propeller-radius decision inside `stepRotor` is,
+since a float device being physically bolted on or off mid-flight is not a
+case this bridge treats as a realistic "missing/changed parts" scenario the
+way an installed propeller is). This is not a new classification: it is the
+existing ground or flight/rotor domain from `eligible()`, with buoyancy
+layered on top at the force-application level rather than the
+classification level. `BuoyantForces` itself excludes any installed rotor
+propeller from its own underwater-propeller-thrust pass (`nonRotorPropellers`),
+so a floating rotorcraft's thrust is supplied exactly once, by
+`stepRotor`'s own collective/cyclic model, never doubled by `BuoyantForces`
+treating the rotor as a second forward propeller - a rotor sitting above a
+floating hull is in practice never itself submerged, so a reviewer checking
+only submersion would not have caught this without the explicit exclusion.
+Like the rest of `BuoyantForces`, the actual combined force application
+against a live rigid body is exercised only by the in-game acceptance list
+below.
 
 **Spare-part and propeller-activity findings, corrected after review.**
 Review (PR #4) found two further defects at the live head:
@@ -249,32 +281,77 @@ independent of any `gravityFactor` value since the method takes none. It
 also keeps the representative 1,000 kg blimp integration-level seam test
 from the first round, re-pointed at `blimpBuoyancy`'s active-ballast case.
 
-**Rotorcraft exclusion, added after review.** Review also found
-`Classification.eligible` activated every `isAircraft` definition,
-including helicopters, while `PhysicsBridge.stepFlight` supplies only wing
-lift and forward thrust - a zero-wing-area helicopter got zero lift and
-forward-only thrust after IV's native solver was cancelled for it.
-`Classification.isRotor(JSONPart.JSONPartPropeller)` now checks IV's own
-`isRotor` flag, and `eligible` excludes any flight vehicle with an installed
-rotor propeller, leaving it on IV's native physics. `ClassificationTest`
-covers: a fixed-wing aircraft with an ordinary (non-rotor) propeller stays
-eligible, a rotorcraft is excluded even though `isAircraft` is set, a rotor
-among multiple installed propellers still excludes, and a null propeller
-list entry is ignored rather than throwing.
+## Rotor force model tests (MINECRAFT-497, added 2026-11-09)
+
+Following up on MINECRAFT-495's rotorcraft exclusion (above, now superseded):
+`Classification.eligible` no longer takes a propeller list at all and now
+treats every `isFlightVehicle` definition - fixed-wing, blimp, or rotorcraft
+- as eligible; the fixed-wing/rotor split happens inside
+`PhysicsBridge.Body`, not in the pure eligibility decision. `Classification
+.isRotorcraft(List<JSONPart.JSONPartPropeller>)` (built on the existing
+`isRotor`) is the pure predicate `Body.step` calls fresh every tick (via the
+new `PhysicsBridge.installedPropellers`, re-derived from the vehicle's
+current parts, never cached) to pick `stepRotor` over `stepFlight` and to
+size the rotor radius - not a value frozen once in `Body`'s constructor, so
+a rotor installed, removed, or replaced after a vehicle's body is already
+active switches solvers on the very next tick rather than keeping a stale
+one. Self-review caught the frozen-at-construction version of this first
+(PR #6 comment 6738923375 / Jira comment 52469-52470): the original
+revision cached both `rotor` and the rotor radius in `Body`'s constructor,
+so an installed-part change after activation was silently ignored - exactly
+the "missing/changed parts" case the ticket calls out. `ClassificationTest`
+covers: a fixed-wing aircraft with an ordinary (non-rotor) propeller is not
+a rotorcraft, a helicopter (`isRotor` propeller) is both eligible and a
+rotorcraft, a rotor among multiple installed propellers still marks
+rotorcraft, the same mutable installed-parts list answers correctly before
+a rotor is added, after it is added, and after it is removed again (the
+integration-seam regression test for the frozen-state finding), no propellers
+(or no rotor among them) does not, and a null propeller list entry is
+ignored rather than throwing.
+
+`RotorForcesTest` exercises every pure function in the new `RotorForces` -
+the rotor-domain analogue of `FlightForces`/`TireForcesTest` - with no live
+entity, world, or Sable runtime: collective pitch that is zero below IV's
+own throttle deadband and reaches full authority at full throttle (matching
+`PartPropeller`'s own rotor pitch mapping), lift that scales linearly with
+collective, cyclic tilt that passes through within range and clamps at 20
+degrees, the vertical component shrinking and the horizontal component
+growing (and flipping sign) as tilt increases - the hover-to-forward-flight
+mechanism - cyclic and yaw torque that are zero at zero input, scale with
+available thrust (not airspeed, unlike a fixed-wing control surface, so a
+hovering helicopter keeps full attitude authority at zero airspeed), and
+flip sign with input direction, and rotor-radius conversion from IV's
+inch-diameter propeller field. `PhysicsBridge`'s own `stepRotor` (force/
+torque application against a live rigid body) is not unit-tested, the same
+way `stepFlight` and the ground solver's wheel loop are not - all three are
+only exercised, where they are exercised at all, by the acceptance list
+below.
 
 A local, non-CI sanity check (`javac --release 21 -proc:none` against the
-real `mts.jar`/Sable 2.0.5/joml jars pulled from this host's Gradle cache,
-the same API-check approach as the recovered-prototype evidence above, not
-a standard Gradle/mod-loader build) confirmed `Classification.java`,
-`FlightForces.java`, and the updated `PhysicsBridge.java` compile cleanly
-against IV's real `JSONVehicle.motorized` fields (`wingArea`, `wingSpan`,
-`aileronArea`, `elevatorArea`, `rudderArea`, `tailDistance`,
-`crossSectionalArea`, `ballastVolume`, `dragCoefficient`),
-`JSONPart.JSONPartPropeller.isRotor`, and `EntityVehicleF_Physics`'s real
-control-input vars, `ballastControlVar`, and `MAX_*_ANGLE` constants, and
-that all 50 tests in `FlightForcesTest`, the updated `ClassificationTest`,
-`TireForcesTest`, and `TowingForcesTest` pass under a manually assembled JUnit Platform
-launcher. This is evidence the new code compiles and its pure functions
+real `mts.jar`, Sable NeoForge 2.0.5, joml 1.10.5, and a NeoForge
+21.1.250 merged artifact - a close but not exact match to this repo's
+pinned 21.1.265, pulled from this host's Gradle cache; the same API-check
+approach as the recovered-prototype/MINECRAFT-495 evidence above, not a
+standard Gradle/mod-loader build) confirmed `Classification.java`, the new
+`RotorForces.java`, and the updated `PhysicsBridge.java` compile cleanly
+against IV's real `JSONPart.JSONPartPropeller.diameter`/`isRotor` fields and
+`EntityVehicleF_Physics`'s real control-input vars
+(`elevatorInputVar`/`aileronInputVar`/`rudderInputVar`) and `throttleVar`,
+and that all 127 tests in the repository - `RotorForcesTest` (19 new),
+`PhysicsBridgeStepperTest` (8) and `PhysicsBridgeBodyReplacementTest` (4,
+both production-seam regressions below),
+the updated `ClassificationTest` (now including the frozen-state regression
+test above and the merged-in boat/float classification cases below),
+`FlightForcesTest`, `BuoyancyTest`, `TireForcesTest`, `TowingForcesTest`,
+`OverridesTest`, `BodyRegistryTest`, and `PhysicsBridgeClassificationTest` -
+pass under a manually assembled JUnit Platform launcher (JUnit 5.11.4/
+platform 1.11.4). This head also integrates boat MINECRAFT-494/PR #4's
+`VehicleBody`/`BuoyantBody`/`BuoyantForces`/`Buoyancy` classes directly into
+this branch (PR #4 had not yet merged to main at the time of this
+integration) per review direction, rather than waiting for #4 to merge
+first; `PhysicsBridge` now types its registry and `active()`'s construction
+choice as the shared `VehicleBody` interface instead of the single concrete
+`Body` class. This is evidence the new code compiles and its pure functions
 behave as specified - it is not the hosted Gradle build, is not the
 `runtime-smoke` Mixin-apply check, and proves nothing about in-game flight
 behavior.
@@ -303,6 +380,84 @@ initial-velocity call might throw, silently poisoning an otherwise-valid
 definition on an operational failure) or any other `RuntimeException`
 is proved to stay retryable, with a later successful call still able to
 activate the key.
+
+**Production-seam regression, added after self-review (MINECRAFT-497
+self-review, Jira comment 52510).** Review found the rotor/float regression
+coverage added so far stopped at pure classification: `ClassificationTest`
+proved `Classification.isRotorcraft(...)` and
+`needsUnderwaterPropellerThrust(...)` are themselves correct and stateless,
+but nothing exercised the actual decision `PhysicsBridge.Body.step` makes
+with that information. `Body` itself cannot be constructed in a unit test
+(see below - it needs a live `ServerLevel`/Sable `SubLevelContainer`), so
+its solver-selection decision was extracted into
+`PhysicsBridge.selectStepper(flight, installedPropellers)` - a
+package-private static method, not a parallel stand-in: `Body.step` now
+calls it every tick to choose `stepGround`/`stepFlight`/`stepRotor`.
+
+**Installed-rotor eligibility/dispatch gap, found by the first actual
+Wroosbit review (Jira comment 52565) at head `f68ceab6`.** That review found
+the fix above still missed the ticket's requirement to drive rotor physics
+from the actual installed `isRotor` propeller, not a definition flag: both
+`Classification.eligible` and the then-current `selectStepper` only reached
+`ROTOR` when `motorized.isAircraft`/`isBlimp` was also set, so a vehicle
+with a real installed rotor propeller but neither flag was either
+deactivated outright (no wheels) or stuck on the ground solver (with
+wheels) - its rotor never received lift or control. `selectStepper` now
+checks `Classification.isRotorcraft(installedPropellers)` first and returns
+`ROTOR` unconditionally when true, falling back to `FLIGHT`/`GROUND` on the
+`flight` flag only when there is no installed rotor; `Classification
+.eligible` makes the identical check first, before even looking at the
+`isAircraft`/`isBlimp` flag or ground devices, so such a vehicle is eligible
+at all. `PhysicsBridgeStepperTest` and `ClassificationTest` both cover a
+rotor installed with no aircraft/blimp flag (alone, and alongside wheels) -
+rotor dispatch wins over wheels, not the reverse.
+
+That same review also found the rotor+float production-seam coverage still
+only exercised predicates, never the actual composition `Body.step` applies
+(`stepRotor` and `BuoyantForces.apply` both invoked together). The full
+per-tick decision - which primary force model to run, and whether to
+separately apply buoyancy - is now extracted as `PhysicsBridge.planTick
+(flight, floatCapable, installedPropellers)`, returning a `TickPlan
+(Stepper, boolean)` record; `Body.step` calls this one method for both
+halves of the decision instead of computing them separately.
+`PhysicsBridgeStepperTest` exercises it directly: a floating rotorcraft's
+plan is `TickPlan(ROTOR, true)` - both halves at once, neither at the
+expense of the other - with or without the aircraft/blimp flag, and the
+rotor/non-rotor propeller-thrust partition `needsUnderwaterPropellerThrust`
+defines is proved to have no overlap and no gap for the exact propeller
+list a `ROTOR`-selecting tick plan carries: a rotor propeller is never
+claimed by `BuoyantForces`'s underwater-thrust pass (already owned by
+`stepRotor`), a non-rotor propeller (including a null entry) always is, so
+a floating rotorcraft's thrust is counted exactly once, never both and
+never neither.
+
+**Body-category replacement lifecycle gap, found by self-review at head
+`ce65a20c`.** `registry.activateOnce` deliberately reuses an already-active
+body without reconstructing it (the existing "no double physics"
+guarantee), but review found that reuse had an unintended consequence once
+installed-part dispatch could flip which body category a vehicle needs
+live: a float-only hull (`BuoyantBody`) that later has an `isRotor`
+propeller installed becomes `ground`-eligible (via `Classification
+.isRotorcraft`), but `active()` was still calling `activateOnce` against
+the same key, which handed back the existing `BuoyantBody` unchanged -
+`BuoyantBody.step` only calls `BuoyantForces.apply`, which explicitly
+excludes rotor propellers from thrust, so the newly installed rotor would
+never receive `stepRotor`'s lift or control. The reverse transition
+(removing the only rotor from a rotor-only, wheel-less hull) likewise kept
+a stale ground/rotor `Body` running after the vehicle fell back to
+float-only eligibility. `PhysicsBridge.replaceIfCategoryChanged(registry,
+key, neededGroundCategory, isGroundCategory, remove)` - generic over the
+registry's key/body types, not tied to `EntityVehicleF_Physics`/
+`VehicleBody` - is the fix `active()` now calls first: if an existing body's
+actual category (`instanceof Body`) no longer matches the freshly computed
+`ground` decision, the stale body is deactivated and removed before
+`activateOrClassify` runs, so the subsequent `activateOnce` call
+constructs a fresh body of the correct kind instead of reusing the wrong
+one. `PhysicsBridgeBodyReplacementTest` exercises this exact method with
+fake keys/bodies: a no-op when there is no existing body or its category
+already matches, and both the float-to-ground and ground-to-float
+transitions actually remove the stale body (verified destroyed, not
+leaked) so the caller's next `activateOrClassify` call starts clean.
 
 What this still cannot exercise: `active()`'s own eligibility computation
 wired to a live entity (opt-out/towing/missing-definition transitions
@@ -359,9 +514,23 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   wing-based lift.
 - An aircraft or blimp with `"enabled": false` in the JSON override continues
   to use ordinary IV physics.
-- A helicopter (an `isAircraft` vehicle with an installed `isRotor`
-  propeller) continues to use ordinary IV physics (documented exclusion,
-  not a defect) - no wing lift is applied to it.
+- A vehicle with an installed rotor propeller (a helicopter) spawns, can be
+  boarded, and gets Sable rotor physics with no config entry: throttle
+  produces collective vertical thrust and can hold a hover, elevator/aileron
+  cyclic input tilts that thrust to move forward/sideways/backward and
+  banks the fuselage accordingly, and rudder input yaws it, all without IV's
+  native rotor-vectoring solver also moving it - distinct from a fixed-wing
+  aircraft's wing-based lift and airspeed-dependent control authority. This
+  must hold both for a definition with `motorized.isAircraft`/`isBlimp` set
+  and for one with neither flag set (dispatch is driven by the installed
+  rotor part itself, not the flag) and both with and without wheels
+  installed alongside the rotor (the rotor must still win dispatch over the
+  ground solver).
+- A float-equipped helicopter (an installed rotor propeller AND at least
+  one `canFloat` device) lands on and floats on water - buoyancy/righting
+  from its float devices visibly active at the same time as rotor thrust/
+  attitude control, with no double-counted propeller thrust from the rotor
+  itself (see `BuoyantForces`'s rotor exclusion).
 - A trailer actively hitched behind a car continues to follow via IV's own
   hitch code, with no double movement, whether or not the towing car has
   Sable physics.
