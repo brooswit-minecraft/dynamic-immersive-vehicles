@@ -4,10 +4,12 @@ import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
+import io.github.brooswitminecraft.div.mixin.VehicleTowingAccessor;
 import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
+import minecrafttransportsimulator.entities.instances.PartPropeller;
 import minecrafttransportsimulator.jsondefs.JSONVehicle;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ClipContext;
@@ -52,8 +54,11 @@ public final class PhysicsBridge {
   var installedGroundDevices = v.allParts.stream()
     .filter(p -> p instanceof PartGroundDevice g && g.definition != null)
     .map(p -> ((PartGroundDevice)p).definition.ground).toList();
+  var installedPropellers = v.allParts.stream()
+    .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
+    .map(p -> ((PartPropeller)p).definition.propeller).toList();
   boolean towed = v.towedByConnection != null, optedOut = Overrides.isOptedOut(key);
-  boolean ground = Classification.eligible(definition, installedGroundDevices, towed, optedOut);
+  boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, towed, optedOut);
   if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
   if (v.world.isClient()) return true;
@@ -100,14 +105,25 @@ public final class PhysicsBridge {
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  private static final class Body implements VehicleBody {
+  private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
+  private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
   final ServerLevel level;
   final Overrides.Tuning tuning;
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
   final double mass;
+  final boolean flight;
+  // An amphibious vehicle (a drivable wheel/track AND a canFloat device) gets BOTH this ground
+  // domain's wheel forces and buoyancy/water-drag/propeller-thrust applied to its float devices
+  // in the same tick - combined domain forces rather than its water behavior silently dropping
+  // out just because it was classified eligible here for having a wheel. hullVolume is cheap to
+  // compute unconditionally and only used when amphibious.
+  final boolean amphibious;
+  final double hullVolume;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
+   this.flight=Classification.isFlightVehicle(v.definition);
    mass=tuning.massKg != null ? tuning.massKg : Math.max(50,v.getMass());
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
    for (var group : v.definition.collisionGroups) for (var c : group.collisions) {
@@ -118,6 +134,9 @@ public final class PhysicsBridge {
     throw new InvalidChassisGeometry("Vehicle has no finite chassis collision volume");
    center=new Vector3d(min).add(max).mul(.5);
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
+   this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
+   this.amphibious = !flight && v.allParts.stream().anyMatch(p -> p instanceof PartGroundDevice g
+       && g.definition != null && Classification.isFloatDevice(g.definition.ground));
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
@@ -144,6 +163,26 @@ public final class PhysicsBridge {
    Quaterniond q=new Quaterniond(pose.orientation()), inverse=new Quaterniond(q).invert();
    Vector3d velocity=handle.getLinearVelocity(new Vector3d()), angular=handle.getAngularVelocity(new Vector3d());
    Vector3d up=q.transform(new Vector3d(0,1,0));
+   boolean awake;
+   if (flight) {
+    awake = stepFlight(v,pose,q,inverse,velocity,up);
+   } else {
+    boolean groundAwake = stepGround(v,pose,q,inverse,angular,velocity,up);
+    boolean floatAwake = amphibious && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
+    awake = groundAwake || floatAwake;
+   }
+   if (awake) box.wakeUp();
+   // Sable is authoritative. The pose here is the most recent completed simulation step.
+   Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
+   v.position.set(origin.x,origin.y,origin.z);
+   Matrix3d m=new Matrix3d().set(q);
+   var r=v.orientation;
+   r.m00=m.m00();r.m01=m.m10();r.m02=m.m20();
+   r.m10=m.m01();r.m11=m.m11();r.m12=m.m21();
+   r.m20=m.m02();r.m21=m.m12();r.m22=m.m22();r.convertToAngles();
+   v.motion.set(velocity.x,velocity.y,velocity.z).scale(1/(20*v.speedFactor));
+  }
+  private boolean stepGround(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d angular, Vector3d velocity, Vector3d up) {
    double drive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
     drive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
@@ -183,16 +222,69 @@ public final class PhysicsBridge {
     wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
     contact=true;
    }
-   if(contact || drive!=0) box.wakeUp();
-   // Sable is authoritative. The pose here is the most recent completed simulation step.
-   Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
-   v.position.set(origin.x,origin.y,origin.z);
-   Matrix3d m=new Matrix3d().set(q);
-   var r=v.orientation;
-   r.m00=m.m00();r.m01=m.m10();r.m02=m.m20();
-   r.m10=m.m01();r.m11=m.m11();r.m12=m.m21();
-   r.m20=m.m02();r.m21=m.m12();r.m22=m.m22();r.convertToAngles();
-   v.motion.set(velocity.x,velocity.y,velocity.z).scale(1/(20*v.speedFactor));
+   // IV would normally add getRecursiveTowingThrust() - the engine thrust of everything this
+   // vehicle is towing - straight to its own thrustForce every tick, but its getForcesAndMotions
+   // never runs once PhysicsBridge takes over (see VehicleForcesMixin), so towing would otherwise
+   // feel lighter than it should. getRecursiveTowingThrust() is in IV's own force units, where
+   // IV itself integrates it as motion.addScaled(totalForce, 1/currentMass) once per tick - not
+   // SI newtons - so it must go through the same IV-motion<->Sable-velocity conversion this class
+   // already uses on activation/writeback (v.motion * v.speedFactor * 20), scaled by this body's
+   // own mass (which may be a tuning.massKg override, not v.currentMass) to land on the matching
+   // Sable impulse. See TowingForces for the derivation.
+   double towThrust = ((VehicleTowingAccessor)(Object)v).div$getRecursiveTowingThrust();
+   if (towThrust != 0) handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.impulse(towThrust,v.speedFactor,mass,v.currentMass)));
+   return contact || drive!=0 || towThrust!=0;
+  }
+  /**
+   * Fixed-wing aircraft and blimps (never a rotorcraft - {@link Classification#eligible} keeps
+   * any vehicle with an installed rotor propeller on IV's native physics instead): no wheels, so
+   * this applies {@link FlightForces} instead of the raycast suspension/friction loop above -
+   * wing lift, parasitic+induced drag, aileron/elevator/rudder control torques, throttle-linear
+   * thrust from any running engine, and - for a blimp with a configured ballastVolume - mass/
+   * gravity-compatible neutral-buoyancy lift plus ballast trim, gated and scaled the way IV's
+   * own ballast system is (see {@link FlightForces#blimpBuoyancy}), not a literal Archimedes
+   * calculation on that field's raw number. {@code tuning.driveForce} is reused as this
+   * vehicle's max thrust, the same way it is reused as max drive force for a ground vehicle -
+   * one shared, per-car-overridable propulsive-force knob rather than a second config field.
+   */
+  private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
+   var motorized = v.definition.motorized;
+   Vector3d forward=q.transform(new Vector3d(0,0,1));
+   Vector3d right=new Vector3d(up).cross(forward);
+   Vector3d localVelocity=inverse.transform(new Vector3d(velocity));
+   double forwardSpeed=localVelocity.z, verticalSpeed=localVelocity.y, lateralSpeed=localVelocity.x;
+   double speed=velocity.length();
+   double dynamicPressure=FlightForces.dynamicPressure(AIR_DENSITY,speed);
+   double angleOfAttack=Math.atan2(-verticalSpeed,Math.abs(forwardSpeed));
+   double sideslip=Math.atan2(lateralSpeed,Math.abs(forwardSpeed));
+   double liftCoeff=FlightForces.liftCoefficient(angleOfAttack);
+   double aspectRatio=motorized.wingArea>0 ? (motorized.wingSpan*motorized.wingSpan)/motorized.wingArea : 0;
+   double dragCoeff=FlightForces.dragCoefficient(liftCoeff,Math.max(0.02,motorized.dragCoefficient),aspectRatio);
+   double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
+   double lift=FlightForces.aeroForce(liftCoeff,motorized.wingArea,dynamicPressure);
+   double drag=FlightForces.aeroForce(dragCoeff,referenceArea,dynamicPressure);
+   // Gated on ballastVolume being configured/nonzero, matching IV's own ballast-active
+   // condition, not on gravityFactor (see FlightForces.blimpBuoyancy for why).
+   double buoyant=motorized.isBlimp
+     ? FlightForces.blimpBuoyancy(mass,9.81,motorized.ballastVolume,v.ballastControlVar.currentValue)
+     : 0;
+   double throttle=0;
+   for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running) throttle=v.throttleVar.currentValue;
+   double thrustForce=FlightForces.thrust(throttle,tuning.driveForce);
+   Vector3d dragDirection=speed>1e-6 ? new Vector3d(velocity).normalize() : new Vector3d();
+   Vector3d force=new Vector3d(up).mul(lift).fma(buoyant,WORLD_UP).fma(thrustForce,forward).fma(-drag,dragDirection);
+   handle.applyLinearImpulse(force.mul(DT));
+   double wingArm=motorized.wingSpan>0 ? motorized.wingSpan/2 : 1;
+   double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
+   double aileronDeflection=Math.toRadians(v.aileronInputVar.currentValue);
+   double elevatorDeflection=Math.toRadians(v.elevatorInputVar.currentValue);
+   double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
+   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure)*wingArm;
+   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure)*tailArm;
+   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure)*tailArm;
+   Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
+   handle.applyTorqueImpulse(torque.mul(DT));
+   return true;
   }
  }
 }
