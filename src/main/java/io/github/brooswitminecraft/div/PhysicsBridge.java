@@ -65,6 +65,17 @@ public final class PhysicsBridge {
   return v.allParts.stream().anyMatch(p -> p instanceof PartGroundDevice g && g.definition != null
       && Classification.isFloatDevice(g.definition.ground));
  }
+ /** Which force model {@code Body.step} dispatches to this tick - the literal decision it makes,
+  * extracted so the "live rotor add/remove switches solvers" behavior is testable without a
+  * live entity/Sable runtime (see {@code PhysicsBridgeStepperTest}), the same way
+  * {@link #activateOrClassify} extracts {@code active()}'s own failure-classification boundary. */
+ enum Stepper { GROUND, FLIGHT, ROTOR }
+ /** {@code installedPropellers} is ignored for a ground vehicle (never ROTOR without a flight
+  * flag) - callers only need to compute it when {@code flight} is true. */
+ static Stepper selectStepper(boolean flight, List<JSONPart.JSONPartPropeller> installedPropellers) {
+  if (!flight) return Stepper.GROUND;
+  return Classification.isRotorcraft(installedPropellers) ? Stepper.ROTOR : Stepper.FLIGHT;
+ }
  public static boolean active(EntityVehicleF_Physics v) {
   // Guard every dereference used to decide eligibility, in entry order, before Classification
   // (or anything else) ever sees them: a vehicle with no definition, or with a ground part that
@@ -180,17 +191,15 @@ public final class PhysicsBridge {
    Quaterniond q=new Quaterniond(pose.orientation()), inverse=new Quaterniond(q).invert();
    Vector3d velocity=handle.getLinearVelocity(new Vector3d()), angular=handle.getAngularVelocity(new Vector3d());
    Vector3d up=q.transform(new Vector3d(0,1,0));
-   boolean primaryAwake;
-   if (flight) {
-    // Re-derived from the vehicle's current parts every tick, not cached from construction: a
-    // rotor propeller installed, removed, or replaced after this body is already active must
-    // switch solvers (or rotor radius) immediately, not keep running the stale one.
-    var installedPropellers = installedPropellers(v);
-    boolean rotor = Classification.isRotorcraft(installedPropellers);
-    primaryAwake = rotor ? stepRotor(v,q,up,installedPropellers) : stepFlight(v,pose,q,inverse,velocity,up);
-   } else {
-    primaryAwake = stepGround(v,pose,q,inverse,angular,velocity,up);
-   }
+   // Re-derived from the vehicle's current parts every tick, not cached from construction: a
+   // rotor propeller installed, removed, or replaced after this body is already active must
+   // switch solvers (or rotor radius) immediately, not keep running the stale one.
+   var installedPropellers = flight ? installedPropellers(v) : List.<JSONPart.JSONPartPropeller>of();
+   boolean primaryAwake = switch (selectStepper(flight, installedPropellers)) {
+    case GROUND -> stepGround(v,pose,q,inverse,angular,velocity,up);
+    case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
+    case ROTOR -> stepRotor(v,q,up,installedPropellers);
+   };
    boolean floatAwake = floatCapable && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
    if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.

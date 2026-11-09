@@ -32,6 +32,17 @@ public final class Classification {
  public static boolean isFloatDevice(JSONPart.JSONPartGroundDevice ground) {
   return ground != null && ground.canFloat;
  }
+ /**
+  * Whether {@link BuoyantForces}'s underwater-propeller-thrust pass should apply to this
+  * propeller, as opposed to {@code PhysicsBridge.Body.stepRotor}'s own collective/cyclic thrust
+  * model owning it instead. This is the exact partition that keeps a floating rotorcraft's
+  * thrust counted exactly once: {@code needsUnderwaterPropellerThrust(p) == !isRotor(p)} for
+  * every {@code p}, so a propeller is never claimed by both force models and never dropped by
+  * neither.
+  */
+ public static boolean needsUnderwaterPropellerThrust(JSONPart.JSONPartPropeller propeller) {
+  return !isRotor(propeller);
+ }
  /** A rotor-lift propeller (helicopter main/tail rotor), as opposed to a plain forward-thrust
   * propeller - IV marks these explicitly and gives them their own thrust-vectoring solver this
   * bridge replaces with {@link RotorForces} instead of the fixed-wing model. */

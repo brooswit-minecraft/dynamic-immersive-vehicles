@@ -249,7 +249,8 @@ standard Gradle/mod-loader build) confirmed `Classification.java`, the new
 against IV's real `JSONPart.JSONPartPropeller.diameter`/`isRotor` fields and
 `EntityVehicleF_Physics`'s real control-input vars
 (`elevatorInputVar`/`aileronInputVar`/`rudderInputVar`) and `throttleVar`,
-and that all 112 tests in the repository - `RotorForcesTest` (19 new),
+and that all 117 tests in the repository - `RotorForcesTest` (19 new),
+`PhysicsBridgeStepperTest` (5 new, the production-seam regression below),
 the updated `ClassificationTest` (now including the frozen-state regression
 test above and the merged-in boat/float classification cases below),
 `FlightForcesTest`, `BuoyancyTest`, `TireForcesTest`, `TowingForcesTest`,
@@ -290,6 +291,31 @@ initial-velocity call might throw, silently poisoning an otherwise-valid
 definition on an operational failure) or any other `RuntimeException`
 is proved to stay retryable, with a later successful call still able to
 activate the key.
+
+**Production-seam regression, added after review (MINECRAFT-497 self-review,
+Jira comment 52510).** Review found the rotor/float regression coverage
+added so far stopped at pure classification: `ClassificationTest` proved
+`Classification.isRotorcraft(...)` and `needsUnderwaterPropellerThrust(...)`
+are themselves correct and stateless, but nothing exercised the actual
+decision `PhysicsBridge.Body.step` makes with that information. `Body`
+itself cannot be constructed in a unit test (see below - it needs a live
+`ServerLevel`/Sable `SubLevelContainer`), so its solver-selection decision
+was extracted into `PhysicsBridge.selectStepper(flight, installedPropellers)`
+- a package-private static method, not a parallel stand-in: `Body.step`'s
+`switch` literally calls it every tick to choose `stepGround`/`stepFlight`/
+`stepRotor`. `PhysicsBridgeStepperTest` exercises that exact method: a
+ground vehicle always selects `GROUND` regardless of propellers; a flight
+vehicle selects `FLIGHT` with no rotor and `ROTOR` with one; and the same
+mutable installed-parts list, across a rotor being installed then removed,
+flips the answer both ways on the same list instance - the literal
+"missing/changed parts" behavior the ticket requires, now proven against
+the method `Body.step` actually calls rather than only against
+`Classification.isRotorcraft` in isolation. It also proves the rotor/
+non-rotor propeller-thrust partition `Classification.needsUnderwaterPropellerThrust`
+defines has no overlap and no gap - a rotor propeller is never claimed by
+`BuoyantForces`'s underwater-thrust pass, a non-rotor propeller (including a
+null entry) always is, so a floating rotorcraft's thrust is counted exactly
+once between `stepRotor` and `BuoyantForces`, never both and never neither.
 
 What this still cannot exercise: `active()`'s own eligibility computation
 wired to a live entity (opt-out/towing/missing-definition transitions

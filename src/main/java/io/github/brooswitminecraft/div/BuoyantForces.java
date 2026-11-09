@@ -96,11 +96,12 @@ final class BuoyantForces {
     .map(p -> (PartGroundDevice) p).toList();
  }
 
- /** Excludes any installed rotor propeller - see the class-level note on why that thrust is
-  * already supplied by {@code PhysicsBridge.Body.stepRotor} and must not be counted twice. */
+ /** Excludes any installed rotor propeller via {@link Classification#needsUnderwaterPropellerThrust}
+  * - see the class-level note on why that thrust is already supplied by
+  * {@code PhysicsBridge.Body.stepRotor} and must not be counted twice. */
  private static List<PartPropeller> nonRotorPropellers(EntityVehicleF_Physics v) {
   return v.allParts.stream().filter(p -> p instanceof PartPropeller pr
-      && (pr.definition == null || !Classification.isRotor(pr.definition.propeller)))
+      && Classification.needsUnderwaterPropellerThrust(pr.definition != null ? pr.definition.propeller : null))
     .map(p -> (PartPropeller) p).toList();
  }
 }
