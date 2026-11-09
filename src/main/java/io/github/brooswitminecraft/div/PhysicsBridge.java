@@ -45,6 +45,13 @@ public final class PhysicsBridge {
       && Classification.isDrivableGroundDevice(g.definition.ground))
     .map(p -> (PartGroundDevice)p).toList();
  }
+ /** Every currently-installed propeller's JSON definition, recomputed fresh from the vehicle's
+  * current parts each time it is called - never cached, so a rotor added/removed/replaced after
+  * activation is reflected on the very next tick. */
+ private static List<JSONPart.JSONPartPropeller> installedPropellers(EntityVehicleF_Physics v) {
+  return v.allParts.stream().filter(p -> p instanceof PartPropeller pr && pr.definition != null)
+    .map(p -> ((PartPropeller)p).definition.propeller).toList();
+ }
  public static boolean active(EntityVehicleF_Physics v) {
   // Guard every dereference used to decide eligibility, in entry order, before Classification
   // (or anything else) ever sees them: a vehicle with no definition, or with a ground part that
@@ -108,19 +115,9 @@ public final class PhysicsBridge {
   final Vector3d center;
   final double mass;
   final boolean flight;
-  final boolean rotor;
-  final double rotorRadiusMeters;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
    this.flight=Classification.isFlightVehicle(v.definition);
-   var installedPropellers = v.allParts.stream()
-     .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
-     .map(p -> ((PartPropeller)p).definition.propeller).toList();
-   this.rotor = flight && Classification.isRotorcraft(installedPropellers);
-   this.rotorRadiusMeters = rotor
-     ? RotorForces.rotorRadiusMeters(installedPropellers.stream().filter(Classification::isRotor)
-         .mapToDouble(p -> p.diameter).max().orElse(0))
-     : 0;
    mass=tuning.massKg != null ? tuning.massKg : Math.max(50,v.getMass());
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
    for (var group : v.definition.collisionGroups) for (var c : group.collisions) {
@@ -156,7 +153,12 @@ public final class PhysicsBridge {
    Quaterniond q=new Quaterniond(pose.orientation()), inverse=new Quaterniond(q).invert();
    Vector3d velocity=handle.getLinearVelocity(new Vector3d()), angular=handle.getAngularVelocity(new Vector3d());
    Vector3d up=q.transform(new Vector3d(0,1,0));
-   boolean awake = flight ? (rotor ? stepRotor(v,q,up) : stepFlight(v,pose,q,inverse,velocity,up)) : stepGround(v,pose,q,inverse,angular,velocity,up);
+   // Re-derived from the vehicle's current parts every tick, not cached from construction: a
+   // rotor propeller installed, removed, or replaced after this body is already active must
+   // switch solvers (or rotor radius) immediately, not keep running the stale one.
+   var installedPropellers = flight ? installedPropellers(v) : List.<JSONPart.JSONPartPropeller>of();
+   boolean rotor = flight && Classification.isRotorcraft(installedPropellers);
+   boolean awake = flight ? (rotor ? stepRotor(v,q,up,installedPropellers) : stepFlight(v,pose,q,inverse,velocity,up)) : stepGround(v,pose,q,inverse,angular,velocity,up);
    if (awake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
@@ -282,9 +284,11 @@ public final class PhysicsBridge {
    * and separately drives attitude torque ({@link RotorForces#cyclicTorque}); rudder input
    * supplies yaw/anti-torque authority ({@link RotorForces#yawTorque}). {@code tuning.driveForce}
    * is reused as this vehicle's max rotor thrust, the same shared propulsive-force knob as the
-   * ground and fixed-wing categories.
+   * ground and fixed-wing categories. {@code installedPropellers} is this tick's live installed-
+   * parts list (see {@link PhysicsBridge#installedPropellers}), not a value cached from
+   * construction, so the rotor radius below tracks a rotor added/removed/replaced in flight.
    */
-  private boolean stepRotor(EntityVehicleF_Physics v, Quaterniond q, Vector3d up) {
+  private boolean stepRotor(EntityVehicleF_Physics v, Quaterniond q, Vector3d up, List<JSONPart.JSONPartPropeller> installedPropellers) {
    var motorized = v.definition.motorized;
    Vector3d forward=q.transform(new Vector3d(0,0,1));
    Vector3d right=new Vector3d(up).cross(forward);
@@ -301,6 +305,8 @@ public final class PhysicsBridge {
    Vector3d force=new Vector3d(up).mul(vertical).fma(forwardComp,forward).fma(lateralComp,right);
    handle.applyLinearImpulse(force.mul(DT));
    double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
+   double rotorRadiusMeters=RotorForces.rotorRadiusMeters(installedPropellers.stream()
+     .filter(Classification::isRotor).mapToDouble(p -> p.diameter).max().orElse(0));
    double rollTorque=RotorForces.cyclicTorque(tiltRoll,thrust,rotorRadiusMeters);
    double pitchTorque=RotorForces.cyclicTorque(tiltPitch,thrust,rotorRadiusMeters);
    double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);

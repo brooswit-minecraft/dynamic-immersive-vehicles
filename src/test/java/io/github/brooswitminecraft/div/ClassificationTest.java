@@ -100,6 +100,22 @@ class ClassificationTest {
   assertFalse(Classification.isRotorcraft(List.of()));
  }
 
+ @Test void isRotorcraftReflectsPartsChangingAfterAnEarlierCallNotAnyFrozenState() {
+  // Integration-seam guard: PhysicsBridge.Body.step re-derives solver selection from this method
+  // every tick instead of caching it from construction (a prior revision did cache it, missing
+  // the ticket's "missing/changed parts" requirement - a rotor installed/removed/replaced after
+  // activation never flipped the selected solver). isRotorcraft itself must have no memory of a
+  // previous call: the exact same mutable installed-parts list, after a rotor is added then
+  // removed, must answer each call based only on its current contents.
+  var installed = new java.util.ArrayList<JSONPart.JSONPartPropeller>();
+  installed.add(forwardPropeller());
+  assertFalse(Classification.isRotorcraft(installed), "no rotor installed yet");
+  installed.add(rotor());
+  assertTrue(Classification.isRotorcraft(installed), "rotor just installed: solver must switch to RotorForces");
+  installed.remove(installed.size() - 1);
+  assertFalse(Classification.isRotorcraft(installed), "rotor just removed: solver must switch back to FlightForces");
+ }
+
  @Test void nullPropellerEntryIsIgnoredNotACrash() {
   assertFalse(Classification.isRotor(null));
   assertFalse(Classification.isRotorcraft(Arrays.<JSONPart.JSONPartPropeller>asList(null, forwardPropeller())));

@@ -131,11 +131,23 @@ treats every `isFlightVehicle` definition - fixed-wing, blimp, or rotorcraft
 - as eligible; the fixed-wing/rotor split happens inside
 `PhysicsBridge.Body`, not in the pure eligibility decision. `Classification
 .isRotorcraft(List<JSONPart.JSONPartPropeller>)` (built on the existing
-`isRotor`) is the pure predicate `Body`'s constructor uses to pick
-`stepRotor` over `stepFlight`. `ClassificationTest` covers: a fixed-wing
-aircraft with an ordinary (non-rotor) propeller is not a rotorcraft, a
-helicopter (`isRotor` propeller) is both eligible and a rotorcraft, a rotor
-among multiple installed propellers still marks rotorcraft, no propellers
+`isRotor`) is the pure predicate `Body.step` calls fresh every tick (via the
+new `PhysicsBridge.installedPropellers`, re-derived from the vehicle's
+current parts, never cached) to pick `stepRotor` over `stepFlight` and to
+size the rotor radius - not a value frozen once in `Body`'s constructor, so
+a rotor installed, removed, or replaced after a vehicle's body is already
+active switches solvers on the very next tick rather than keeping a stale
+one. Self-review caught the frozen-at-construction version of this first
+(PR #6 comment 6738923375 / Jira comment 52469-52470): the original
+revision cached both `rotor` and the rotor radius in `Body`'s constructor,
+so an installed-part change after activation was silently ignored - exactly
+the "missing/changed parts" case the ticket calls out. `ClassificationTest`
+covers: a fixed-wing aircraft with an ordinary (non-rotor) propeller is not
+a rotorcraft, a helicopter (`isRotor` propeller) is both eligible and a
+rotorcraft, a rotor among multiple installed propellers still marks
+rotorcraft, the same mutable installed-parts list answers correctly before
+a rotor is added, after it is added, and after it is removed again (the
+integration-seam regression test for the frozen-state finding), no propellers
 (or no rotor among them) does not, and a null propeller list entry is
 ignored rather than throwing.
 
@@ -167,8 +179,9 @@ standard Gradle/mod-loader build) confirmed `Classification.java`, the new
 against IV's real `JSONPart.JSONPartPropeller.diameter`/`isRotor` fields and
 `EntityVehicleF_Physics`'s real control-input vars
 (`elevatorInputVar`/`aileronInputVar`/`rudderInputVar`) and `throttleVar`,
-and that all 92 tests in the repository - `RotorForcesTest` (19 new),
-`FlightForcesTest`, the updated `ClassificationTest`, `TireForcesTest`,
+and that all 93 tests in the repository - `RotorForcesTest` (19 new),
+the updated `ClassificationTest` (now including the frozen-state
+regression test above), `FlightForcesTest`, `TireForcesTest`,
 `TowingForcesTest`, `OverridesTest`, `BodyRegistryTest`, and
 `PhysicsBridgeClassificationTest` - pass under a manually assembled JUnit
 Platform launcher (JUnit 5.11.4/platform 1.11.4). This is evidence the new
