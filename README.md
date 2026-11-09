@@ -80,8 +80,17 @@ each vehicle from IV's own definition at the moment it is needed:
   `getRecursiveTowingThrust()` for towing (see
   [`PartEngineAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartEngineAccessor.java)/
   [`PartPropellerAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartPropellerAccessor.java),
-  version-pinned `@Accessor` Mixins, not an edit to IV's own source). A
-  propeller thrusts only while it is underwater, not destroyed/removed
+  version-pinned `@Accessor` Mixins, not an edit to IV's own source). Thrust
+  direction comes from the propeller's own public `desiredLinearVelocity`
+  (driven by `currentPitch` - a fixed sign for a static-pitch propeller, or
+  one swung between forward and reverse by `vehicle.reverseThrustVar` for a
+  dynamic-pitch one), never from engine transmission gear state: a propeller
+  has no gearbox of its own, so an engine sitting in neutral still drives a
+  turning, correctly-pitched propeller, and a dynamic-pitch propeller
+  reversed via `reverseThrustVar` thrusts backward even while the
+  transmission itself stays in a forward gear (see
+  [`Buoyancy.signedPropellerDrive`](src/main/java/io/github/brooswitminecraft/div/Buoyancy.java)).
+  A propeller thrusts only while it is underwater, not destroyed/removed
   (`isActiveVar`), not a spare, actually turning (`currentRPM` away from
   zero), and linked to a currently-running engine - an unpowered,
   disconnected, or spare propeller produces no thrust regardless of

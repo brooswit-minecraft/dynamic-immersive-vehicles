@@ -67,13 +67,16 @@ final class BuoyantForces {
   // IV's own private field, not reachable through any public API) rather than one vehicle-wide
   // signal applied to every installed propeller regardless of whether a given engine drives it
   // at all. If two running engines both link the same propeller, the first one found sets it -
-  // that propeller is not double-driven by being added to twice.
+  // that propeller is not double-driven by being added to twice. Direction comes from the
+  // propeller's own desiredLinearVelocity (see Buoyancy.signedPropellerDrive), not the engine's
+  // transmission gear - a propeller has no gearbox of its own, and a gear-based sign disagreed
+  // with IV's real forward/reverse state whenever an engine sat in neutral while still turning
+  // a propeller, or a dynamic-pitch propeller was reversed via reverseThrustVar.
   Map<PartPropeller, Double> drivenBy = new IdentityHashMap<>();
   for (var part : v.allParts) {
    if (!(part instanceof PartEngine engine) || !engine.running) continue;
-   double engineDrive = Math.signum(engine.currentGearVar.currentValue) * v.throttleVar.currentValue;
    for (var linked : ((PartEngineAccessor)(Object)engine).div$linkedPropellers()) {
-    drivenBy.putIfAbsent(linked, engineDrive);
+    drivenBy.putIfAbsent(linked, Buoyancy.signedPropellerDrive(linked.desiredLinearVelocity, v.throttleVar.currentValue));
    }
   }
   double steer = (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE) * Math.toRadians(tuning.maxSteerDegrees);

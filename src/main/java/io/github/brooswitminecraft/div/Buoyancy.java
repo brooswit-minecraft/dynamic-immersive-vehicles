@@ -48,4 +48,18 @@ public final class Buoyancy {
  public static boolean isPropellerOperational(boolean linkedToRunningEngine, boolean active, double currentRpm) {
   return linkedToRunningEngine && active && Math.abs(currentRpm) > 1e-3;
  }
+ /** Signed drive for one operational propeller: the sign of IV's own computed thrust
+  * direction ({@code PartPropeller.desiredLinearVelocity}, a public field driven by
+  * {@code currentPitch} - a fixed, JSON-defined sign for a static-pitch propeller, or one
+  * swung between forward and reverse by {@code vehicle.reverseThrustVar} for a dynamic-pitch
+  * one), times vehicle throttle for magnitude. A propeller has no gearbox of its own:
+  * transmission gear state ({@code PartEngine.currentGearVar}) selects direction for driven
+  * wheels, not for a propeller linked to the same engine, so it must not be consulted here -
+  * using it produced wrong-direction or falsely-zero thrust whenever gear and propeller pitch
+  * disagreed (e.g. an engine in neutral still spinning a propeller, or a dynamic-pitch
+  * propeller reversed via {@code reverseThrustVar} while the transmission stayed in a forward
+  * gear). Zero {@code desiredLinearVelocity} (no computed direction yet) yields zero drive. */
+ public static double signedPropellerDrive(double desiredLinearVelocity, double throttle) {
+  return Math.signum(desiredLinearVelocity) * throttle;
+ }
 }

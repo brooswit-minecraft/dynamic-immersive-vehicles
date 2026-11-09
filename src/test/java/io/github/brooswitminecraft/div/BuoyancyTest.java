@@ -93,4 +93,26 @@ class BuoyancyTest {
   assertEquals(3000, share);
   assertEquals(3000, Buoyancy.propellerThrust(1, share, true, aOperational));
  }
+ @Test void forwardPitchPropellerDrivesForwardRegardlessOfGear() {
+  // A positive desiredLinearVelocity (IV's own computed thrust direction, driven by
+  // currentPitch) must drive forward even if the review's prior, wrong source of direction
+  // (transmission gear) would have said otherwise - this production seam never consults gear
+  // at all, so there is nothing to disagree with.
+  assertEquals(1, Buoyancy.signedPropellerDrive(12.5, 1));
+  assertEquals(.5, Buoyancy.signedPropellerDrive(12.5, .5));
+ }
+ @Test void reversedPitchPropellerDrivesInReverseAtFullThrottle() {
+  // A dynamic-pitch propeller swung negative by vehicle.reverseThrustVar - the exact scenario
+  // review named, where the transmission can still read a forward gear - must drive in
+  // reverse. Direction comes only from the propeller's own computed velocity.
+  assertEquals(-1, Buoyancy.signedPropellerDrive(-8, 1));
+ }
+ @Test void engineInNeutralStillDrivesAPropellerWithNonzeroPitch() {
+  // The review's other named case: an engine in neutral (gear sign 0) must not zero out a
+  // propeller that is still actually turning and pitched for thrust - gear is never consulted.
+  assertEquals(1, Buoyancy.signedPropellerDrive(5, 1));
+ }
+ @Test void zeroDesiredVelocityYieldsZeroDrive() {
+  assertEquals(0, Buoyancy.signedPropellerDrive(0, 1));
+ }
 }

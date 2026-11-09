@@ -228,6 +228,36 @@ in the operational set each tick still requires a live
 `PartEngine`/`PartPropeller` pair, same testing gap as the rest of this
 file.
 
+**Propeller thrust direction, corrected after a third exact-head review
+(post-reconciliation).** The allocation fix above still derived each
+propeller's signed drive from `Math.signum(engine.currentGearVar.currentValue)
+* throttle` - transmission gear state, not propeller direction. Review
+correctly identified this as wrong: confirmed via `javap` against the
+pinned IV 7926606 bytecode, `PartPropeller.update()` computes
+`currentRPM` from linked engines' `rpm / propellerGearboxRatio`
+independent of `currentGearVar` entirely, and derives its own
+`desiredLinearVelocity` (a public field) from `currentPitch` - a fixed,
+JSON-defined sign for a static-pitch propeller, or one swung between
+`+45`/`-45` by `vehicle.reverseThrustVar` for a dynamic-pitch one;
+`addToForceOutput()` then derives real thrust direction from
+`desiredLinearVelocity - airstreamLinearVelocity`, never from gear. So an
+engine sitting in neutral (`currentGearVar == 0`) produced zero bridge
+thrust for a propeller that IV itself still drove and pitched for thrust,
+and a dynamic-pitch propeller reversed via `reverseThrustVar` could keep
+receiving forward bridge thrust while the transmission stayed in a
+forward gear. Fixed by `Buoyancy.signedPropellerDrive(desiredLinearVelocity,
+throttle)` (new, pure function): `BuoyantForces.apply(...)` now reads
+each linked propeller's own public `desiredLinearVelocity` for direction
+and never consults `currentGearVar`. No new Mixin accessor was needed -
+`desiredLinearVelocity` is already a public field, confirmed via the same
+`javap` pass. `BuoyancyTest.forwardPitchPropellerDrivesForwardRegardlessOfGear`,
+`...reversedPitchPropellerDrivesInReverseAtFullThrottle`, and
+`...engineInNeutralStillDrivesAPropellerWithNonzeroPitch` cover the two
+named disagreement scenarios directly through this seam at the
+pure-function level; which value a live propeller's `desiredLinearVelocity`
+actually holds at a given tick still requires a live `PartPropeller`, same
+testing gap as the rest of this file.
+
 ## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
 
 `FlightForcesTest` exercises every pure function in `FlightForces` - the
