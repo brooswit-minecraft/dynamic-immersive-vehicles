@@ -83,6 +83,23 @@ class PhysicsBridgeStepperTest {
   assertEquals(new PhysicsBridge.TickPlan(PhysicsBridge.Stepper.ROTOR, true), PhysicsBridge.planTick(false, true, installedPropellers));
  }
 
+ @Test void liveFloatDeviceAddRemoveTransitionTogglesBuoyancyEachTick() {
+  // Self-review finding: Body previously cached floatCapable once at construction, so
+  // installing or removing a canFloat device afterward (which doesn't itself change the
+  // ground/flight category, so never triggers replaceIfCategoryChanged) left buoyancy
+  // permanently stuck on whatever was true when the body was built. The fix is that Body.step
+  // now passes hasFloatDevice(v) - freshly computed from the vehicle's current parts - into
+  // planTick every tick, the same uncached pattern already proven for rotor add/remove above.
+  // This is the closest production-seam proof available without a live entity (see
+  // VERIFICATION.md): planTick takes floatCapable as a parameter, not a cached field, so the
+  // exact same call with a different live value this tick must flip appliesBuoyancy immediately
+  // both ways, with no state carried over between calls.
+  var installed = List.<JSONPart.JSONPartPropeller>of();
+  assertFalse(PhysicsBridge.planTick(false, false, installed).appliesBuoyancy(), "no float device yet");
+  assertTrue(PhysicsBridge.planTick(false, true, installed).appliesBuoyancy(), "float device just installed");
+  assertFalse(PhysicsBridge.planTick(false, false, installed).appliesBuoyancy(), "float device just removed");
+ }
+
  @Test void rotorAndNonRotorPropellerThrustOwnershipPartitionsWithNoOverlapOrGap() {
   // The other half of the rotor+float composition: when a tick plan selects ROTOR, the rotor
   // propeller's own thrust comes from stepRotor using the same installedPropellers list passed

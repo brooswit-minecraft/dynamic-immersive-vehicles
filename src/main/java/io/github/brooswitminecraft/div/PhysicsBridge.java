@@ -87,7 +87,9 @@ public final class PhysicsBridge {
  }
  /** The full per-tick plan {@code Body.step} composes: which primary force model to run, and
   * whether to additionally apply {@link BuoyantForces} this tick (independent of which primary
-  * model ran - see {@link Body#floatCapable}). Extracted as its own testable collaborator so the
+  * model ran - {@code floatCapable} is re-read from the vehicle's live parts every tick by the
+  * caller, never cached, so installing/removing a float device takes effect on the next tick).
+  * Extracted as its own testable collaborator so the
   * rotor+float composition (a floating rotorcraft gets both ROTOR's own thrust and buoyancy on
   * its float devices, with rotor thrust never double-counted by {@code BuoyantForces}'s own
   * underwater-propeller pass) is provable without a live entity/Sable runtime - see
@@ -187,8 +189,12 @@ public final class PhysicsBridge {
   // buoyancy/water-drag/underwater-propeller forces applied to its float devices in the same
   // tick - combined domain forces rather than its water behavior silently dropping out just
   // because it was classified eligible here for driving or flying. hullVolume is cheap to
-  // compute unconditionally and only used when floatCapable.
-  final boolean floatCapable;
+  // compute unconditionally and only used when float-capable. Float capability itself is NOT
+  // cached here: it must be re-read from the vehicle's current parts every tick in step(), the
+  // same way installedPropellers already is - a canFloat device installed or removed after
+  // this body is already active (without itself triggering replaceIfCategoryChanged, which
+  // only reacts to the ground/flight category, not float capability) must start or stop getting
+  // buoyancy on the very next tick, not stay stuck on whatever was true at construction.
   final double hullVolume;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
@@ -204,7 +210,6 @@ public final class PhysicsBridge {
    center=new Vector3d(min).add(max).mul(.5);
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
    this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
-   this.floatCapable = hasFloatDevice(v);
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
@@ -237,7 +242,10 @@ public final class PhysicsBridge {
    // unconditionally (not gated on flight) - an installed rotor drives ROTOR dispatch even on a
    // vehicle with no aircraft/blimp flag (see Classification#isRotorcraft and selectStepper).
    var installedPropellers = installedPropellers(v);
-   var plan = planTick(flight, floatCapable, installedPropellers);
+   // Also re-derived every tick, not cached at construction (self-review finding): a canFloat
+   // device installed or removed later doesn't change the ground/flight category, so it never
+   // triggers replaceIfCategoryChanged - this is the only place that would otherwise notice.
+   var plan = planTick(flight, hasFloatDevice(v), installedPropellers);
    boolean primaryAwake = switch (plan.stepper()) {
     case GROUND -> stepGround(v,pose,q,inverse,angular,velocity,up);
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
