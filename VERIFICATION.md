@@ -65,9 +65,14 @@ ground-device entry among installed parts. Aircraft and blimps are now
 covered as an eligible category requiring no ground-contact device at all
 (`isFlightVehicle`), still excluded by an explicit opt-out or an active tow.
 A rotorcraft (any installed `isRotor` propeller, see `isRotorcraft` below)
-is eligible the same way - it is still an aircraft, just one
-`PhysicsBridge.Body` routes to the rotor force model (see below) instead of
-the fixed-wing model, which has no wing for a rotorcraft to act on.
+is eligible the same way, checked directly against the installed part
+before the `isAircraft`/`isBlimp` flag or ground devices are even
+considered - a rotor-carrying vehicle with neither flag set, or one with
+wheels, is still eligible as a rotorcraft rather than deactivated or stuck
+on the ground solver (a gap the first actual Wroosbit review found; see the
+production-seam section below for the full fix). `PhysicsBridge.Body`
+routes it to the rotor force model instead of the fixed-wing model, which
+has no wing for a rotorcraft to act on.
 
 ## Buoyancy tests (MINECRAFT-494, added 2026-11-08; updated for amphibious handling)
 
@@ -249,8 +254,8 @@ standard Gradle/mod-loader build) confirmed `Classification.java`, the new
 against IV's real `JSONPart.JSONPartPropeller.diameter`/`isRotor` fields and
 `EntityVehicleF_Physics`'s real control-input vars
 (`elevatorInputVar`/`aileronInputVar`/`rudderInputVar`) and `throttleVar`,
-and that all 117 tests in the repository - `RotorForcesTest` (19 new),
-`PhysicsBridgeStepperTest` (5 new, the production-seam regression below),
+and that all 123 tests in the repository - `RotorForcesTest` (19 new),
+`PhysicsBridgeStepperTest` (8, the production-seam regression below),
 the updated `ClassificationTest` (now including the frozen-state regression
 test above and the merged-in boat/float classification cases below),
 `FlightForcesTest`, `BuoyancyTest`, `TireForcesTest`, `TowingForcesTest`,
@@ -292,30 +297,55 @@ definition on an operational failure) or any other `RuntimeException`
 is proved to stay retryable, with a later successful call still able to
 activate the key.
 
-**Production-seam regression, added after review (MINECRAFT-497 self-review,
-Jira comment 52510).** Review found the rotor/float regression coverage
-added so far stopped at pure classification: `ClassificationTest` proved
-`Classification.isRotorcraft(...)` and `needsUnderwaterPropellerThrust(...)`
-are themselves correct and stateless, but nothing exercised the actual
-decision `PhysicsBridge.Body.step` makes with that information. `Body`
-itself cannot be constructed in a unit test (see below - it needs a live
-`ServerLevel`/Sable `SubLevelContainer`), so its solver-selection decision
-was extracted into `PhysicsBridge.selectStepper(flight, installedPropellers)`
-- a package-private static method, not a parallel stand-in: `Body.step`'s
-`switch` literally calls it every tick to choose `stepGround`/`stepFlight`/
-`stepRotor`. `PhysicsBridgeStepperTest` exercises that exact method: a
-ground vehicle always selects `GROUND` regardless of propellers; a flight
-vehicle selects `FLIGHT` with no rotor and `ROTOR` with one; and the same
-mutable installed-parts list, across a rotor being installed then removed,
-flips the answer both ways on the same list instance - the literal
-"missing/changed parts" behavior the ticket requires, now proven against
-the method `Body.step` actually calls rather than only against
-`Classification.isRotorcraft` in isolation. It also proves the rotor/
-non-rotor propeller-thrust partition `Classification.needsUnderwaterPropellerThrust`
-defines has no overlap and no gap - a rotor propeller is never claimed by
-`BuoyantForces`'s underwater-thrust pass, a non-rotor propeller (including a
-null entry) always is, so a floating rotorcraft's thrust is counted exactly
-once between `stepRotor` and `BuoyantForces`, never both and never neither.
+**Production-seam regression, added after self-review (MINECRAFT-497
+self-review, Jira comment 52510).** Review found the rotor/float regression
+coverage added so far stopped at pure classification: `ClassificationTest`
+proved `Classification.isRotorcraft(...)` and
+`needsUnderwaterPropellerThrust(...)` are themselves correct and stateless,
+but nothing exercised the actual decision `PhysicsBridge.Body.step` makes
+with that information. `Body` itself cannot be constructed in a unit test
+(see below - it needs a live `ServerLevel`/Sable `SubLevelContainer`), so
+its solver-selection decision was extracted into
+`PhysicsBridge.selectStepper(flight, installedPropellers)` - a
+package-private static method, not a parallel stand-in: `Body.step` now
+calls it every tick to choose `stepGround`/`stepFlight`/`stepRotor`.
+
+**Installed-rotor eligibility/dispatch gap, found by the first actual
+Wroosbit review (Jira comment 52565) at head `f68ceab6`.** That review found
+the fix above still missed the ticket's requirement to drive rotor physics
+from the actual installed `isRotor` propeller, not a definition flag: both
+`Classification.eligible` and the then-current `selectStepper` only reached
+`ROTOR` when `motorized.isAircraft`/`isBlimp` was also set, so a vehicle
+with a real installed rotor propeller but neither flag was either
+deactivated outright (no wheels) or stuck on the ground solver (with
+wheels) - its rotor never received lift or control. `selectStepper` now
+checks `Classification.isRotorcraft(installedPropellers)` first and returns
+`ROTOR` unconditionally when true, falling back to `FLIGHT`/`GROUND` on the
+`flight` flag only when there is no installed rotor; `Classification
+.eligible` makes the identical check first, before even looking at the
+`isAircraft`/`isBlimp` flag or ground devices, so such a vehicle is eligible
+at all. `PhysicsBridgeStepperTest` and `ClassificationTest` both cover a
+rotor installed with no aircraft/blimp flag (alone, and alongside wheels) -
+rotor dispatch wins over wheels, not the reverse.
+
+That same review also found the rotor+float production-seam coverage still
+only exercised predicates, never the actual composition `Body.step` applies
+(`stepRotor` and `BuoyantForces.apply` both invoked together). The full
+per-tick decision - which primary force model to run, and whether to
+separately apply buoyancy - is now extracted as `PhysicsBridge.planTick
+(flight, floatCapable, installedPropellers)`, returning a `TickPlan
+(Stepper, boolean)` record; `Body.step` calls this one method for both
+halves of the decision instead of computing them separately.
+`PhysicsBridgeStepperTest` exercises it directly: a floating rotorcraft's
+plan is `TickPlan(ROTOR, true)` - both halves at once, neither at the
+expense of the other - with or without the aircraft/blimp flag, and the
+rotor/non-rotor propeller-thrust partition `needsUnderwaterPropellerThrust`
+defines is proved to have no overlap and no gap for the exact propeller
+list a `ROTOR`-selecting tick plan carries: a rotor propeller is never
+claimed by `BuoyantForces`'s underwater-thrust pass (already owned by
+`stepRotor`), a non-rotor propeller (including a null entry) always is, so
+a floating rotorcraft's thrust is counted exactly once, never both and
+never neither.
 
 What this still cannot exercise: `active()`'s own eligibility computation
 wired to a live entity (opt-out/towing/missing-definition transitions
@@ -372,14 +402,18 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   wing-based lift.
 - An aircraft or blimp with `"enabled": false` in the JSON override continues
   to use ordinary IV physics.
-- An aircraft or blimp with an installed rotor propeller (a helicopter)
-  spawns, can be boarded, and gets Sable rotor physics with no config
-  entry: throttle produces collective vertical thrust and can hold a
-  hover, elevator/aileron cyclic input tilts that thrust to move forward/
-  sideways/backward and banks the fuselage accordingly, and rudder input
-  yaws it, all without IV's native rotor-vectoring solver also moving it -
-  distinct from a fixed-wing aircraft's wing-based lift and airspeed-
-  dependent control authority.
+- A vehicle with an installed rotor propeller (a helicopter) spawns, can be
+  boarded, and gets Sable rotor physics with no config entry: throttle
+  produces collective vertical thrust and can hold a hover, elevator/aileron
+  cyclic input tilts that thrust to move forward/sideways/backward and
+  banks the fuselage accordingly, and rudder input yaws it, all without IV's
+  native rotor-vectoring solver also moving it - distinct from a fixed-wing
+  aircraft's wing-based lift and airspeed-dependent control authority. This
+  must hold both for a definition with `motorized.isAircraft`/`isBlimp` set
+  and for one with neither flag set (dispatch is driven by the installed
+  rotor part itself, not the flag) and both with and without wheels
+  installed alongside the rotor (the rotor must still win dispatch over the
+  ground solver).
 - A float-equipped helicopter (an installed rotor propeller AND at least
   one `canFloat` device) lands on and floats on water - buoyancy/righting
   from its float devices visibly active at the same time as rotor thrust/

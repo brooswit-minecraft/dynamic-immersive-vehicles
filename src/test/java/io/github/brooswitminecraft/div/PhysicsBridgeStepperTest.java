@@ -6,13 +6,15 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Exercises {@code PhysicsBridge.selectStepper(...)}, the exact (package-private) decision
- * {@code Body.step} makes every tick to pick a force model - the live integration seam between
- * {@code Classification.isRotorcraft} (already covered in isolation by {@code ClassificationTest})
- * and the production dispatch that actually calls {@code stepGround}/{@code stepFlight}/
- * {@code stepRotor}. A live {@code EntityVehicleF_Physics}/Sable body cannot be constructed in a
- * unit test (see VERIFICATION.md), so this is the closest production-seam coverage available:
- * {@code selectStepper} is the literal method {@code Body.step} calls, not a parallel stand-in.
+ * Exercises {@code PhysicsBridge.selectStepper(...)} and {@code PhysicsBridge.planTick(...)},
+ * the exact (package-private) decisions {@code Body.step} makes every tick to pick a force
+ * model and compose it with buoyancy - the live integration seam between
+ * {@code Classification.isRotorcraft}/{@code needsUnderwaterPropellerThrust} (already covered in
+ * isolation by {@code ClassificationTest}) and the production dispatch that actually calls
+ * {@code stepGround}/{@code stepFlight}/{@code stepRotor}/{@code BuoyantForces.apply}. A live
+ * {@code EntityVehicleF_Physics}/Sable body cannot be constructed in a unit test (see
+ * VERIFICATION.md), so this is the closest production-seam coverage available: both methods are
+ * the literal code {@code Body.step} calls, not a parallel stand-in.
  */
 class PhysicsBridgeStepperTest {
  private static JSONPart.JSONPartPropeller rotor() {
@@ -24,9 +26,16 @@ class PhysicsBridgeStepperTest {
   return new JSONPart.JSONPartPropeller();
  }
 
- @Test void groundVehicleAlwaysSelectsGroundRegardlessOfPropellers() {
+ @Test void groundVehicleSelectsGroundWithNoInstalledRotor() {
   assertEquals(PhysicsBridge.Stepper.GROUND, PhysicsBridge.selectStepper(false, List.of()));
-  assertEquals(PhysicsBridge.Stepper.GROUND, PhysicsBridge.selectStepper(false, List.of(rotor())));
+  assertEquals(PhysicsBridge.Stepper.GROUND, PhysicsBridge.selectStepper(false, List.of(forwardPropeller())));
+ }
+
+ @Test void installedRotorSelectsRotorEvenWithoutTheFlightFlag() {
+  // Review finding: a vehicle with an actual installed isRotor propeller but no
+  // isAircraft/isBlimp flag was previously stuck on GROUND, its rotor never getting lift/
+  // control. The installed part must win dispatch regardless of flight.
+  assertEquals(PhysicsBridge.Stepper.ROTOR, PhysicsBridge.selectStepper(false, List.of(rotor())));
  }
 
  @Test void flightVehicleWithNoRotorSelectsFlight() {
@@ -53,20 +62,39 @@ class PhysicsBridgeStepperTest {
   assertEquals(PhysicsBridge.Stepper.FLIGHT, PhysicsBridge.selectStepper(true, installed), "rotor just removed");
  }
 
+ @Test void planTickComposesStepperAndBuoyancyIndependently() {
+  // planTick is the literal method Body.step calls to decide both which primary force model to
+  // run and whether to additionally apply BuoyantForces this tick - the two are independent
+  // axes (a ground, flight, or rotor body can each separately be float-capable or not).
+  assertEquals(new PhysicsBridge.TickPlan(PhysicsBridge.Stepper.GROUND, false), PhysicsBridge.planTick(false, false, List.of()));
+  assertEquals(new PhysicsBridge.TickPlan(PhysicsBridge.Stepper.GROUND, true), PhysicsBridge.planTick(false, true, List.of()));
+  assertEquals(new PhysicsBridge.TickPlan(PhysicsBridge.Stepper.FLIGHT, false), PhysicsBridge.planTick(true, false, List.of()));
+  assertEquals(new PhysicsBridge.TickPlan(PhysicsBridge.Stepper.FLIGHT, true), PhysicsBridge.planTick(true, true, List.of()));
+ }
+
+ @Test void floatEquippedRotorcraftTickPlansRotorPlusBuoyancy() {
+  // The rotor+float production composition the review specifically asked for: a float-equipped
+  // helicopter's tick plan must select ROTOR (so stepRotor supplies its own collective/cyclic
+  // thrust) AND apply buoyancy (so BuoyantForces still lifts/rights its float devices) - both at
+  // once, neither at the expense of the other. This holds with or without the aircraft/blimp
+  // flag, since rotor dispatch no longer depends on it.
+  var installedPropellers = List.of(rotor());
+  assertEquals(new PhysicsBridge.TickPlan(PhysicsBridge.Stepper.ROTOR, true), PhysicsBridge.planTick(true, true, installedPropellers));
+  assertEquals(new PhysicsBridge.TickPlan(PhysicsBridge.Stepper.ROTOR, true), PhysicsBridge.planTick(false, true, installedPropellers));
+ }
+
  @Test void rotorAndNonRotorPropellerThrustOwnershipPartitionsWithNoOverlapOrGap() {
-  // The other half of the review's finding: rotor+float force composition must count a
-  // propeller's thrust exactly once. needsUnderwaterPropellerThrust(p) selects exactly the
-  // propellers BuoyantForces applies underwater thrust to; a ROTOR-stepped vehicle's rotor
-  // propeller must be the complementary set stepRotor already covers, by construction, for
-  // every propeller - never both methods, never neither.
+  // The other half of the rotor+float composition: when a tick plan selects ROTOR, the rotor
+  // propeller's own thrust comes from stepRotor using the same installedPropellers list passed
+  // into planTick; BuoyantForces (applied because appliesBuoyancy is true) must exclude exactly
+  // that propeller from its own underwater-thrust pass via needsUnderwaterPropellerThrust, so
+  // the rotor's thrust is counted exactly once - never by both methods, never by neither.
   var rotor = rotor();
   var forward = forwardPropeller();
-  assertTrue(Classification.isRotorcraft(List.of(rotor)));
-  assertFalse(Classification.needsUnderwaterPropellerThrust(rotor), "stepRotor owns this one's thrust");
-  assertFalse(Classification.isRotorcraft(List.of(forward)));
-  assertTrue(Classification.needsUnderwaterPropellerThrust(forward), "BuoyantForces owns this one's thrust");
-  // A null propeller entry (defensive, see Classification.isRotor) is never treated as a rotor,
-  // so it stays on the underwater-thrust side rather than silently losing thrust coverage.
-  assertTrue(Classification.needsUnderwaterPropellerThrust(null));
+  var plan = PhysicsBridge.planTick(true, true, List.of(forward, rotor));
+  assertEquals(PhysicsBridge.Stepper.ROTOR, plan.stepper(), "stepRotor owns this tick's rotor thrust");
+  assertTrue(plan.appliesBuoyancy(), "BuoyantForces still applies for this tick's float devices");
+  assertFalse(Classification.needsUnderwaterPropellerThrust(rotor), "excluded from BuoyantForces's thrust pass - stepRotor already owns it");
+  assertTrue(Classification.needsUnderwaterPropellerThrust(forward), "not excluded - BuoyantForces owns this one, stepRotor does not apply to it");
  }
 }

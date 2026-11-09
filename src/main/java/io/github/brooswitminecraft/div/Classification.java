@@ -10,7 +10,9 @@ import java.util.List;
  * <p>This bridge currently models four categories: a ground vehicle with at least one wheel or
  * track contact device (of any count, {@link #eligible}), a fixed-wing aircraft or blimp (flight
  * aerodynamics, see {@link FlightForces}) or a rotorcraft (any installed rotor propeller, see
- * {@link RotorForces}) (also {@link #eligible}), and a float-only hull with at least one
+ * {@link RotorForces} - checked directly against the installed part, independent of the
+ * {@code isAircraft}/{@code isBlimp} flag, so a rotor-carrying vehicle with neither flag set is
+ * still a rotorcraft) (also {@link #eligible}), and a float-only hull with at least one
  * canFloat ground device and no wheel or track at all ({@link #floatEligible}) - a boat or other
  * pontoon-hulled vehicle, handled by its own buoyancy force model rather than the ground/flight
  * solvers. A vehicle with a drivable ground device or a flight flag AND a canFloat device (e.g.
@@ -62,12 +64,18 @@ public final class Classification {
     && (definition.motorized.isAircraft || definition.motorized.isBlimp);
  }
  public static boolean eligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices,
-     boolean activelyTowed, boolean optedOut) {
+     List<JSONPart.JSONPartPropeller> installedPropellers, boolean activelyTowed, boolean optedOut) {
   if (optedOut || activelyTowed) return false;
   if (definition == null || definition.motorized == null) return false;
-  // Fixed-wing, blimp, and rotorcraft are all eligible here - PhysicsBridge.Body picks the
-  // matching force model (FlightForces vs RotorForces) once it has the live installed-propeller
-  // list; this pure category decision does not need to distinguish them.
+  // An installed rotor propeller always makes this a rotorcraft, independent of the
+  // isAircraft/isBlimp flag: review found a vehicle with an actual installed isRotor propeller
+  // but no aircraft/blimp flag was previously either deactivated (no wheels) or stuck on the
+  // ground solver (with wheels), its rotor never getting lift/control. Rotor physics must be
+  // driven by the actual installed part, not gated on a definition flag it doesn't need.
+  if (isRotorcraft(installedPropellers)) return true;
+  // Fixed-wing and blimp are eligible here too - PhysicsBridge.Body picks FlightForces once it
+  // has the live installed-propeller list; this pure category decision does not need to
+  // distinguish them from each other.
   if (isFlightVehicle(definition)) return true;
   return installedGroundDevices.stream().anyMatch(Classification::isDrivableGroundDevice);
  }
@@ -78,11 +86,13 @@ public final class Classification {
   * rotorcraft) stays on the ground/flight domain via {@link #eligible} instead -
   * {@link #floatEligible} is the exclusive fallback for a hull with nothing the ground solver
   * can drive and nothing the flight/rotor model can fly, not a check for "has a float device"
-  * in general. An installed rotor propeller excludes it the same way {@link #isFlightVehicle}
-  * does - IV's rotor-lift/thrust-vectoring solver is a different, unmodeled physics domain
-  * regardless of which other domain the rest of the chassis would otherwise qualify for; in
-  * practice this is a defensive belt-and-suspenders check, since a rotor-carrying definition is
-  * essentially always also a flight vehicle already excluded by the check above it.
+  * in general. An installed rotor propeller excludes it directly (the same check {@link #eligible}
+  * makes first) - IV's rotor-lift/thrust-vectoring solver is a different, unmodeled physics
+  * domain regardless of which other domain the rest of the chassis would otherwise qualify for,
+  * and {@link #eligible} already returns true for any installed rotor regardless of the
+  * aircraft/blimp flag, so this method would never be reached for one via the {@code !ground}
+  * guard in {@code PhysicsBridge.active} - this check is kept anyway as a direct, self-contained
+  * guarantee rather than relying on call-site ordering.
   */
  public static boolean floatEligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices,
      List<JSONPart.JSONPartPropeller> installedPropellers, boolean activelyTowed, boolean optedOut) {

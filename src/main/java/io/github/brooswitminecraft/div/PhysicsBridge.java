@@ -70,11 +70,25 @@ public final class PhysicsBridge {
   * live entity/Sable runtime (see {@code PhysicsBridgeStepperTest}), the same way
   * {@link #activateOrClassify} extracts {@code active()}'s own failure-classification boundary. */
  enum Stepper { GROUND, FLIGHT, ROTOR }
- /** {@code installedPropellers} is ignored for a ground vehicle (never ROTOR without a flight
-  * flag) - callers only need to compute it when {@code flight} is true. */
+ /** An installed rotor propeller always wins dispatch, independent of {@code flight}
+  * ({@code motorized.isAircraft}/{@code isBlimp}): review found a vehicle with an actual
+  * installed {@code isRotor} propeller but no aircraft/blimp flag was previously stuck on
+  * GROUND (or deactivated outright), its rotor never getting lift/control - rotor physics must
+  * be driven by the actual installed part, not gated on a definition flag it doesn't need. */
  static Stepper selectStepper(boolean flight, List<JSONPart.JSONPartPropeller> installedPropellers) {
-  if (!flight) return Stepper.GROUND;
-  return Classification.isRotorcraft(installedPropellers) ? Stepper.ROTOR : Stepper.FLIGHT;
+  if (Classification.isRotorcraft(installedPropellers)) return Stepper.ROTOR;
+  return flight ? Stepper.FLIGHT : Stepper.GROUND;
+ }
+ /** The full per-tick plan {@code Body.step} composes: which primary force model to run, and
+  * whether to additionally apply {@link BuoyantForces} this tick (independent of which primary
+  * model ran - see {@link Body#floatCapable}). Extracted as its own testable collaborator so the
+  * rotor+float composition (a floating rotorcraft gets both ROTOR's own thrust and buoyancy on
+  * its float devices, with rotor thrust never double-counted by {@code BuoyantForces}'s own
+  * underwater-propeller pass) is provable without a live entity/Sable runtime - see
+  * {@code PhysicsBridgeStepperTest}. */
+ record TickPlan(Stepper stepper, boolean appliesBuoyancy) {}
+ static TickPlan planTick(boolean flight, boolean floatCapable, List<JSONPart.JSONPartPropeller> installedPropellers) {
+  return new TickPlan(selectStepper(flight, installedPropellers), floatCapable);
  }
  public static boolean active(EntityVehicleF_Physics v) {
   // Guard every dereference used to decide eligibility, in entry order, before Classification
@@ -86,7 +100,7 @@ public final class PhysicsBridge {
   var installedGroundDevices = installedGroundDevices(v);
   var installedPropellers = installedPropellers(v);
   boolean towed = v.towedByConnection != null, optedOut = Overrides.isOptedOut(key);
-  boolean ground = Classification.eligible(definition, installedGroundDevices, towed, optedOut);
+  boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
   if (v.world.isClient()) return true;
@@ -193,14 +207,17 @@ public final class PhysicsBridge {
    Vector3d up=q.transform(new Vector3d(0,1,0));
    // Re-derived from the vehicle's current parts every tick, not cached from construction: a
    // rotor propeller installed, removed, or replaced after this body is already active must
-   // switch solvers (or rotor radius) immediately, not keep running the stale one.
-   var installedPropellers = flight ? installedPropellers(v) : List.<JSONPart.JSONPartPropeller>of();
-   boolean primaryAwake = switch (selectStepper(flight, installedPropellers)) {
+   // switch solvers (or rotor radius) immediately, not keep running the stale one. Computed
+   // unconditionally (not gated on flight) - an installed rotor drives ROTOR dispatch even on a
+   // vehicle with no aircraft/blimp flag (see Classification#isRotorcraft and selectStepper).
+   var installedPropellers = installedPropellers(v);
+   var plan = planTick(flight, floatCapable, installedPropellers);
+   boolean primaryAwake = switch (plan.stepper()) {
     case GROUND -> stepGround(v,pose,q,inverse,angular,velocity,up);
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
     case ROTOR -> stepRotor(v,q,up,installedPropellers);
    };
-   boolean floatAwake = floatCapable && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
+   boolean floatAwake = plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
    if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));

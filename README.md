@@ -42,23 +42,29 @@ each vehicle from IV's own definition at the moment it is needed:
   behavior, no advance-ratio propeller falloff, no altitude/weather air
   density, no natural weathercock stability beyond rudder input). No wheel or
   track device is required for this category to be eligible.
-- **Rotorcraft** (an aircraft with any installed `isRotor` propeller, e.g. a
-  helicopter): a server-owned Sable rigid body using a separate rotor force
-  model instead of the fixed-wing model above, which has no wing for a
-  rotorcraft to generate lift from - collective-pitch vertical thrust from
-  throttle, cyclic tilt from elevator/aileron input that steers that thrust
-  vector forward/sideways for the hover-to-forward-flight transition and
-  separately drives attitude (roll/pitch) torque, and rudder-driven yaw/
-  anti-torque authority. Unlike a fixed-wing control surface, this attitude
-  and yaw authority scales with available thrust, not airspeed, so a
-  helicopter keeps full control hovering at zero airspeed. See
+- **Rotorcraft** (any vehicle with an installed `isRotor` propeller, e.g. a
+  helicopter - checked directly against the installed part, independent of
+  the `motorized.isAircraft`/`isBlimp` flag, so a rotor-carrying vehicle with
+  neither flag set is still eligible as a rotorcraft rather than being
+  deactivated or stuck on the ground solver): a server-owned Sable rigid body
+  using a separate rotor force model instead of the fixed-wing model above,
+  which has no wing for a rotorcraft to generate lift from - collective-pitch
+  vertical thrust from throttle, cyclic tilt from elevator/aileron input that
+  steers that thrust vector forward/sideways for the hover-to-forward-flight
+  transition and separately drives attitude (roll/pitch) torque, and
+  rudder-driven yaw/anti-torque authority. Unlike a fixed-wing control
+  surface, this attitude and yaw authority scales with available thrust, not
+  airspeed, so a helicopter keeps full control hovering at zero airspeed.
+  See
   [`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
   for the exact model and its stated simplifications (no translational-lift
   efficiency gain in forward flight, no retreating-blade stall, no
   autorotation/engine-out descent, no ground effect, and every installed
   rotor propeller treated as one lumped main lift rotor rather than modeling
   an individual tail rotor's own thrust/mount orientation). No wheel or track
-  device is required for this category to be eligible.
+  device is required for this category to be eligible, and an installed
+  rotor always takes priority over wheels/tracks for dispatch (a wheeled
+  rotor-equipped vehicle still gets rotor physics, not the ground solver).
 - **Boats and other float-only hulls** (at least one installed ground device
   with `canFloat`, and no wheel or track, and no installed rotor propeller).
   Each installed float device gets its own Archimedes buoyant force and
