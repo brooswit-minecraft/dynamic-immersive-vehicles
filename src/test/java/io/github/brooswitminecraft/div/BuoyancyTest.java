@@ -54,18 +54,43 @@ class BuoyancyTest {
   // chassis. This is the exact "dilutes the configured thrust share" finding review flagged.
   assertEquals(6000, Buoyancy.perOperationalPropellerForce(6000, 1));
  }
- @Test void mixedPoweredAndUnpoweredPropellerSetGivesFullAllocationToThePoweredOneAndZeroToTheOther() {
-  // End-to-end of the same scenario through propellerThrust: one operational propeller taking
-  // the undiluted share, one non-operational propeller (present on the chassis, but not
-  // counted in perOperationalPropellerForce's denominator) producing exactly zero.
-  double operationalCount = 1; // the unpowered propeller is excluded from the count entirely
-  double share = Buoyancy.perOperationalPropellerForce(6000, (int) operationalCount);
-  assertEquals(6000, Buoyancy.propellerThrust(1, share, true, true), "the operational propeller gets the full, undiluted budget");
-  assertEquals(0, Buoyancy.propellerThrust(1, share, true, false), "the unpowered propeller still produces zero regardless of the share size");
+ @Test void linkedActiveTurningPropellerIsOperational() {
+  assertTrue(Buoyancy.isPropellerOperational(true, true, 1200));
+  assertTrue(Buoyancy.isPropellerOperational(true, true, -1200));
+ }
+ @Test void activeButUnlinkedPropellerIsNotOperationalRegardlessOfRpm() {
+  // No engine actually drives this propeller - it must not count as operational even if its
+  // own RPM reading happens to be nonzero (e.g. windmilling) and it is not destroyed/removed.
+  assertFalse(Buoyancy.isPropellerOperational(false, true, 1200));
+  assertFalse(Buoyancy.isPropellerOperational(false, true, 0));
+ }
+ @Test void linkedButStalledPropellerIsNotOperational() {
+  assertFalse(Buoyancy.isPropellerOperational(true, true, 0));
+ }
+ @Test void linkedInactivePropellerIsNotOperational() {
+  assertFalse(Buoyancy.isPropellerOperational(true, false, 1200));
+ }
+ @Test void mixedOperationalAndUnlinkedPropellerSetGivesFullAllocationToTheOperationalOneAndZeroToTheOther() {
+  // Exercises the actual selection predicate BuoyantForces applies, not a hand-picked
+  // operational count: propeller A is linked/active/turning; propeller B is active (not
+  // destroyed/removed) but unlinked from any running engine - the exact "active but not
+  // actually driven" case review's prior finding was about. B must not be counted in the
+  // denominator, and A must receive the full, undiluted budget.
+  boolean aOperational = Buoyancy.isPropellerOperational(true, true, 1200);
+  boolean bOperational = Buoyancy.isPropellerOperational(false, true, 0);
+  assertTrue(aOperational);
+  assertFalse(bOperational);
+  int operationalCount = (aOperational ? 1 : 0) + (bOperational ? 1 : 0);
+  double share = Buoyancy.perOperationalPropellerForce(6000, operationalCount);
+  assertEquals(6000, Buoyancy.propellerThrust(1, share, true, aOperational), "the operational propeller gets the full, undiluted budget");
+  assertEquals(0, Buoyancy.propellerThrust(1, share, true, bOperational), "the unlinked propeller still produces zero");
  }
  @Test void twoOperationalPropellersSplitTheBudgetEvenly() {
-  double share = Buoyancy.perOperationalPropellerForce(6000, 2);
+  boolean aOperational = Buoyancy.isPropellerOperational(true, true, 1200);
+  boolean bOperational = Buoyancy.isPropellerOperational(true, true, -800);
+  int operationalCount = (aOperational ? 1 : 0) + (bOperational ? 1 : 0);
+  double share = Buoyancy.perOperationalPropellerForce(6000, operationalCount);
   assertEquals(3000, share);
-  assertEquals(3000, Buoyancy.propellerThrust(1, share, true, true));
+  assertEquals(3000, Buoyancy.propellerThrust(1, share, true, aOperational));
  }
 }

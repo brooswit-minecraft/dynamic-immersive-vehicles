@@ -36,4 +36,16 @@ public final class Buoyancy {
  public static double perOperationalPropellerForce(double propellerForceBudget, int operationalCount) {
   return operationalCount <= 0 ? 0 : propellerForceBudget / operationalCount;
  }
+ /** The exact per-propeller selection test {@code BuoyantForces} applies before a propeller
+  * counts toward {@link #perOperationalPropellerForce}'s denominator at all: linked to a
+  * currently-running engine ({@code linkedToRunningEngine} - from
+  * {@code PartEngineAccessor.linkedPropellers}, not reachable through any public API), not
+  * destroyed/removed ({@code active} - IV's own {@code isActiveVar}), and actually turning
+  * ({@code currentRpm} away from zero - from {@code PartPropellerAccessor}, also not public).
+  * An active propeller that is simply not linked to any running engine (so no engine drives
+  * it at all) is excluded here exactly like an inactive or stalled one - all three conditions
+  * are checked independently, so no single one can substitute for the others. */
+ public static boolean isPropellerOperational(boolean linkedToRunningEngine, boolean active, double currentRpm) {
+  return linkedToRunningEngine && active && Math.abs(currentRpm) > 1e-3;
+ }
 }

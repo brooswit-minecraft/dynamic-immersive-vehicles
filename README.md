@@ -146,7 +146,8 @@ after changes.
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
 fully submerged, since a real hull is not a solid box), `waterDrag`, and
-`propellerForce` (split evenly across installed propellers) - are ignored by
+`propellerForce` (split evenly across operational propellers - linked to a
+running engine, active, and turning - not every installed propeller) - are ignored by
 a ground vehicle, and `suspensionTravel`/`friction`/`driveForce`/`brakeForce`
 are ignored by a boat. A copyable example is also available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
