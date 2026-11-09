@@ -25,7 +25,6 @@ import org.joml.Vector3d;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -37,12 +36,9 @@ public final class PhysicsBridge {
  // bad content-pack definition is retried, and logged, once rather than every tick for every
  // vehicle instance of that definition.
  private static final Set<JSONVehicle> brokenDefinitions = Collections.newSetFromMap(new IdentityHashMap<>());
- // The towed side (trailer) of each live hitch joint, and which towing vehicle it is currently
- // jointed to - keyed by the trailer entity so either side's removal (the trailer's own, or its
- // towing vehicle's) can release the joint without leaking it. A towing vehicle may key more
- // than one trailer here (a dolly chain); the trailer itself ever keys at most one.
- private static final Map<EntityVehicleF_Physics, PhysicsConstraintHandle> hitchJoints = new IdentityHashMap<>();
- private static final Map<EntityVehicleF_Physics, EntityVehicleF_Physics> hitchPartner = new IdentityHashMap<>();
+ // Live hitch-joint bookkeeping, keyed by the trailer entity - see HitchRegistry for why this is
+ // its own class (a testable seam, independent of Body/live Sable types).
+ private static final HitchRegistry<EntityVehicleF_Physics> hitches = new HitchRegistry<>();
  private static final double DT = .05;
  private PhysicsBridge() {}
  private static Overrides.Tuning tuning(JSONVehicle definition) {
@@ -83,7 +79,7 @@ public final class PhysicsBridge {
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
   Body old = registry.deactivate(v);
-  if (old != null) { releaseHitch(v); old.remove(); }
+  if (old != null) { hitches.release(v); old.remove(); }
   return false;
  }
  /**
@@ -112,15 +108,7 @@ public final class PhysicsBridge {
   */
  private static void reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
   EntityVehicleF_Physics desired = connection != null && registry.isActive(connection.towingVehicle) ? connection.towingVehicle : null;
-  PhysicsConstraintHandle existing = hitchJoints.get(v);
-  if (desired == hitchPartner.get(v) && (existing == null || existing.isValid())) return;
-  if (existing != null) existing.remove();
-  hitchJoints.remove(v);
-  hitchPartner.remove(v);
-  if (desired == null) return;
-  PhysicsConstraintHandle joint = createHitch(registry.get(desired), registry.get(v), connection);
-  hitchJoints.put(v, joint);
-  hitchPartner.put(v, desired);
+  hitches.reconcile(v, desired, () -> createHitch(registry.get(desired), registry.get(v), connection));
  }
  private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
   var towingPose = towing.box.getPose();
@@ -132,20 +120,6 @@ public final class PhysicsBridge {
   var config = new GenericConstraintConfiguration(hitchPos, hookupPos, towingPose.orientation(), trailerPose.orientation(),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
   return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
- }
- /** Releases this entity's own hitch joint if it is a trailer, and any joints trailers hold
-  * against it if it is (also) a towing vehicle - called from every path that actually removes a
-  * body, so a joint is never left referencing a body Sable has already destroyed. */
- private static void releaseHitch(EntityVehicleF_Physics v) {
-  PhysicsConstraintHandle own = hitchJoints.remove(v);
-  if (own != null) own.remove();
-  hitchPartner.remove(v);
-  hitchPartner.entrySet().removeIf(e -> {
-   if (e.getValue() != v) return false;
-   PhysicsConstraintHandle joint = hitchJoints.remove(e.getKey());
-   if (joint != null) joint.remove();
-   return true;
-  });
  }
  /**
   * The exact classification active() applies to a construction failure, as a seam testable
@@ -171,10 +145,10 @@ public final class PhysicsBridge {
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  public static void cleanup() {
-  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { releaseHitch(v); b.remove(); });
+  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); });
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level == level, (v, b) -> { releaseHitch(v); b.remove(); });
+  registry.removeIf((v, b) -> b.level == level, (v, b) -> { hitches.release(v); b.remove(); });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  private static final class Body {

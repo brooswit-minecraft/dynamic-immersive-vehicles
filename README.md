@@ -57,8 +57,10 @@ follow-up task rather than faked with the ground solver:
 - **A trailer (a ground vehicle actively hitched behind another)** now gets
   its own server-owned Sable body, jointed to its towing vehicle's body by a
   Sable `GenericConstraintConfiguration` hitch (see `HitchJoint` for the
-  anchor-position/locked-axis math and `PhysicsBridge.createHitch`/
-  `reconcileHitch` for the lifecycle) - not IV's native hitch position-snap.
+  anchor-position/locked-axis math, `HitchRegistry` for the testable joint-
+  lifecycle bookkeeping - create/replace/release, by key - and
+  `PhysicsBridge.createHitch`/`reconcileHitch` for how those two are wired to
+  a live entity/Sable body) - not IV's native hitch position-snap.
   The joint anchors each body at its own `JSONConnection.pos` (the hitch/
   hookup points IV's own connection group already defines), always locks the
   three linear axes (the two anchor points stay coincident - a hitch is not

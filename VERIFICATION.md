@@ -190,6 +190,36 @@ towing vehicle has a body, an already-active trailer is never deferred
 even once its towing vehicle's body is gone (the regression itself), and
 an untowed vehicle never defers regardless of the other two flags.
 
+**Production-used hitch lifecycle seam, added after a second self-review round.**
+The first fix above (`deferToNativeHitch`) only tested a pure boolean helper, not the
+production `active()`/`reconcileHitch()`/`release` call paths themselves - review
+correctly found that gap: it could not establish that losing a towing vehicle's body
+releases the real joint while the trailer's body survives, or that `cleanup()`/
+`unload()` release joints before bodies. The hitch-joint bookkeeping previously
+inlined in `PhysicsBridge` (two `IdentityHashMap`s) is now its own class,
+`HitchRegistry<K>` - generic over the key type and built only against
+`PhysicsConstraintHandle` (a small Sable interface with no live-runtime dependency
+of its own), the same kind of seam `BodyRegistry` already provides for body
+lifecycle. `PhysicsBridge.reconcileHitch`/`active()`/`cleanup()`/`unload()` now all
+delegate to one `HitchRegistry` instance instead of managing the maps directly.
+
+`HitchRegistryTest` exercises this actual production class - not a parallel
+reimplementation - with fake `String` keys and a fake `GenericConstraintHandle`
+(the same non-sealed Sable subinterface real hitch joints use; `PhysicsConstraintHandle`
+itself is sealed and cannot be implemented directly). It covers: exactly one joint
+is constructed for a newly-jointed pair and reconciling again against the same
+valid partner does not construct a second one; reconciling to a `null` desired
+partner releases without ever calling `create`; **the regression itself** - a
+separate fake `BodyRegistry<String,Object>` stands in for real `Body` lifecycle,
+proving that releasing the towing vehicle's joint-registry entry never touches the
+trailer's still-active body (`HitchRegistry` has no way to reach a body at all -
+only keys and joint handles); releasing a key drops joints it holds as either the
+trailer or the towing side; releasing a key with no joint in either role is a
+no-op; an existing joint is rebuilt if it has gone invalid even for the same
+partner; switching to a different towing vehicle releases the old joint before
+building the new one; and a bulk sweep (mirroring `cleanup()`/`unload()`'s
+`BiConsumer`) releases every joint before its body, leaking none.
+
 `BodyRegistryTest`'s `removeIf` test now also asserts the bulk-removal
 callback receives the key, not just the body (`PhysicsBridge.releaseHitch`
 needs the entity to find and release any hitch joint keyed to it during a
@@ -211,7 +241,7 @@ real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
 `BoxPhysicsObject.getPose()`, and IV's real
 `minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
 fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
-`.mounted`, `.restricted`), and that all 84 tests across the full suite
+`.mounted`, `.restricted`), and that all 93 tests across the full suite
 (`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
 `FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
 `PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is
