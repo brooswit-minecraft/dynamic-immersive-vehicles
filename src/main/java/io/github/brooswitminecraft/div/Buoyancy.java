@@ -23,8 +23,10 @@ public final class Buoyancy {
  public static double drag(double speed, double submergedFraction, double dragCoefficient) {
   return submergedFraction * dragCoefficient * speed * speed;
  }
- /** Propeller thrust (N); a propeller produces no thrust at all unless it is underwater. */
- public static double propellerThrust(double throttleSigned, double propellerForce, boolean propellerSubmerged) {
-  return propellerSubmerged ? throttleSigned * propellerForce : 0;
+ /** Propeller thrust (N); a propeller produces no thrust at all unless it is both underwater
+  * and itself active (IV's own isActiveVar - not destroyed/removed) - an inactive or damaged
+  * propeller stays silent regardless of throttle or submersion. */
+ public static double propellerThrust(double throttleSigned, double propellerForce, boolean propellerSubmerged, boolean propellerActive) {
+  return (propellerSubmerged && propellerActive) ? throttleSigned * propellerForce : 0;
  }
 }

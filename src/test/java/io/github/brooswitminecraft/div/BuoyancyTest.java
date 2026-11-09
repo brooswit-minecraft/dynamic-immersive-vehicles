@@ -31,11 +31,17 @@ class BuoyancyTest {
   assertEquals(4 * at1, at2, 1e-9);
  }
  @Test void propellerAboveWaterProducesNoThrustRegardlessOfThrottle() {
-  assertEquals(0, Buoyancy.propellerThrust(1, 5000, false));
-  assertEquals(0, Buoyancy.propellerThrust(-1, 5000, false));
+  assertEquals(0, Buoyancy.propellerThrust(1, 5000, false, true));
+  assertEquals(0, Buoyancy.propellerThrust(-1, 5000, false, true));
  }
  @Test void submergedPropellerThrustFollowsSignedThrottle() {
-  assertEquals(5000, Buoyancy.propellerThrust(1, 5000, true));
-  assertEquals(-2500, Buoyancy.propellerThrust(-.5, 5000, true));
+  assertEquals(5000, Buoyancy.propellerThrust(1, 5000, true, true));
+  assertEquals(-2500, Buoyancy.propellerThrust(-.5, 5000, true, true));
+ }
+ @Test void inactivePropellerProducesNoThrustEvenWhenSubmergedAtFullThrottle() {
+  // An inactive/damaged propeller must stay silent regardless of throttle or submersion -
+  // the exact review finding this pins down.
+  assertEquals(0, Buoyancy.propellerThrust(1, 5000, true, false));
+  assertEquals(0, Buoyancy.propellerThrust(-1, 5000, true, false));
  }
 }

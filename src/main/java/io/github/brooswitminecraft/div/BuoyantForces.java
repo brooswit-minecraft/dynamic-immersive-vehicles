@@ -54,20 +54,28 @@ final class BuoyantForces {
    if (speed > 1e-6) force.fma(-dragMagnitude / speed, localVelocity);
    handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(force).mul(PhysicsBridge.DT)));
   }
+  // Only the first running engine sets direction/throttle - a later running engine never
+  // silently overwrites it, so a multi-engine vehicle doesn't get an arbitrary sign flip from
+  // iteration order.
   double drive = 0;
-  for (var part : v.allParts) if (part instanceof PartEngine engine && engine.running)
-   drive = Math.signum(engine.currentGearVar.currentValue) * v.throttleVar.currentValue;
+  for (var part : v.allParts) {
+   if (part instanceof PartEngine engine && engine.running) {
+    drive = Math.signum(engine.currentGearVar.currentValue) * v.throttleVar.currentValue;
+    break;
+   }
+  }
   double steer = (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE) * Math.toRadians(tuning.maxSteerDegrees);
   Vector3d forward = q.transform(new Vector3d(Math.sin(steer), 0, Math.cos(steer)));
-  int propellerCount = 0;
-  for (var part : v.allParts) if (part instanceof PartPropeller) propellerCount++;
-  for (var part : v.allParts) {
-   if (!(part instanceof PartPropeller propeller)) continue;
+  var propellers = v.allParts.stream().filter(p -> p instanceof PartPropeller pr && !pr.isSpare)
+    .map(p -> (PartPropeller) p).toList();
+  for (var propeller : propellers) {
    Vector3d anchor = new Vector3d(propeller.localOffset.x, propeller.localOffset.y, propeller.localOffset.z).sub(center);
    Vector3d arm = q.transform(new Vector3d(anchor));
    Vector3d point = new Vector3d(pose.position()).add(arm);
    boolean submerged = point.y <= waterSurfaceAt(level, point.x, point.z, point.y + 2);
-   double thrust = Buoyancy.propellerThrust(drive, tuning.propellerForce / propellerCount, submerged);
+   // propeller.isActiveVar.isActive: IV's own "this part is installed and not destroyed/
+   // removed" flag - an inactive/damaged propeller never thrusts, regardless of throttle.
+   double thrust = Buoyancy.propellerThrust(drive, tuning.propellerForce / propellers.size(), submerged, propeller.isActiveVar.isActive);
    if (thrust == 0) continue;
    awake = true;
    Vector3d force = new Vector3d(forward).mul(thrust);
@@ -88,8 +96,12 @@ final class BuoyantForces {
   return Double.NEGATIVE_INFINITY;
  }
 
+ /** Spares (MTS's own VehicleGroundDeviceBox excludes them from support the same way) carry
+  * no hull support of their own - counting one would both activate buoyancy at its spare
+  * mounting location and dilute volumePerFloat away from the floats actually holding the hull
+  * up. */
  private static List<PartGroundDevice> floats(EntityVehicleF_Physics v) {
-  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && g.definition != null
+  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && !g.isSpare && g.definition != null
       && Classification.isFloatDevice(g.definition.ground))
     .map(p -> (PartGroundDevice) p).toList();
  }

@@ -51,8 +51,11 @@ public final class PhysicsBridge {
   JSONVehicle definition = v.definition;
   if (definition == null) return deactivate(v);
   String key = definition.packID + ":" + definition.systemName;
+  // Spares carry no hull/ground support of their own (MTS's own VehicleGroundDeviceBox
+  // excludes them from support the same way); a spare must not count toward either domain's
+  // eligibility.
   var installedGroundDevices = v.allParts.stream()
-    .filter(p -> p instanceof PartGroundDevice g && g.definition != null)
+    .filter(p -> p instanceof PartGroundDevice g && !g.isSpare && g.definition != null)
     .map(p -> ((PartGroundDevice)p).definition.ground).toList();
   var installedPropellers = v.allParts.stream()
     .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
@@ -136,7 +139,7 @@ public final class PhysicsBridge {
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
    this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
    this.amphibious = !flight && v.allParts.stream().anyMatch(p -> p instanceof PartGroundDevice g
-       && g.definition != null && Classification.isFloatDevice(g.definition.ground));
+       && !g.isSpare && g.definition != null && Classification.isFloatDevice(g.definition.ground));
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);

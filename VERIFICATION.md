@@ -113,6 +113,37 @@ the force-application level rather than the classification level. Like the
 rest of `BuoyantForces`, the actual combined force application against a
 live rigid body is exercised only by the in-game acceptance list below.
 
+**Spare-part and propeller-activity findings, corrected after review.**
+Review (PR #4) found two further defects at the live head:
+
+1. Neither `PhysicsBridge.active()`'s `installedGroundDevices` nor
+   `BuoyantForces.floats()` excluded `APart.isSpare`. MTS's own
+   `VehicleGroundDeviceBox` excludes spare ground devices from support the
+   same way; left unfiltered here, a spare pontoon could activate buoyancy,
+   receive force at its spare mounting location, and dilute
+   `volumePerFloat` away from the floats actually holding the hull up.
+   Both call sites now filter `!g.isSpare` before building their working
+   set, and `BuoyantForces`'s propeller loop does the same for
+   `PartPropeller.isSpare`.
+2. `BuoyantForces.apply(...)` took a single `drive` value from *any*
+   running `PartEngine` - reassigning it on every running engine found, so
+   a later engine silently overwrote an earlier one's sign/throttle on a
+   multi-engine vehicle - and applied it to every installed propeller with
+   no check that the propeller itself was active. `Buoyancy.propellerThrust`
+   now takes an explicit `propellerActive` parameter (wired to
+   `propeller.isActiveVar.isActive`), so an inactive/damaged propeller
+   produces zero thrust regardless of throttle or submersion; the engine
+   loop now stops at the first running engine instead of letting a later
+   one overwrite it.
+
+`BuoyancyTest.inactivePropellerProducesNoThrustEvenWhenSubmergedAtFullThrottle`
+covers (2) at the pure-function level. The `isSpare` filtering in (1), and
+the engine/propeller linkage `BuoyantForces.apply(...)` still cannot verify
+from IV's public API (which specific engine drives which propeller, actual
+RPM) remain in the same live-entity/`ServerLevel`/Sable-runtime testing gap
+as the rest of `BuoyantForces` - exercised only by the in-game acceptance
+list below, not by any unit test in this repository.
+
 ## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
 
 `FlightForcesTest` exercises every pure function in `FlightForces` - the
