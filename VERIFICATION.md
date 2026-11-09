@@ -60,15 +60,85 @@ a startup/Mixin/dependency hazard, not a code-logic defect.
 validation logic without a live entity, world, or Sable runtime. They cover:
 default-eligible ground vehicles at wheel counts other than four, tracked
 vehicles, mixed wheel+track chassis, the no-config-entry default-enabled
-case, explicit per-car opt-out, pontoon/skid-only (boat) exclusion, a missing
-`motorized` section, and a null ground-device entry among installed parts.
-Aircraft and blimps are now covered as an eligible category requiring no
-ground-contact device at all (`isFlightVehicle`), still excluded by an
-explicit opt-out or an active tow. A rotorcraft (any installed `isRotor`
-propeller, see `isRotorcraft` below) is eligible the same way - it is still
-an aircraft, just one `PhysicsBridge.Body` routes to the rotor force model
-(see below) instead of the fixed-wing model, which has no wing for a
-rotorcraft to act on.
+case, explicit per-car opt-out, a missing `motorized` section, and a null
+ground-device entry among installed parts. Aircraft and blimps are now
+covered as an eligible category requiring no ground-contact device at all
+(`isFlightVehicle`), still excluded by an explicit opt-out or an active tow.
+A rotorcraft (any installed `isRotor` propeller, see `isRotorcraft` below)
+is eligible the same way - it is still an aircraft, just one
+`PhysicsBridge.Body` routes to the rotor force model (see below) instead of
+the fixed-wing model, which has no wing for a rotorcraft to act on.
+
+## Buoyancy tests (MINECRAFT-494, added 2026-11-08; updated for amphibious handling)
+
+`Classification.floatEligible(...)` (same file, same no-live-entity testing
+approach) picks out a float-only hull: at least one installed `canFloat`
+ground device, none drivable by the ground solver, not a flight vehicle,
+and no installed rotor propeller. A vehicle with a drivable ground device
+or a flight flag AND a float device is instead `eligible()` (the ground or
+flight/rotor domain) - `floatEligible` is the exclusive fallback for a hull
+with nothing the ground solver can drive and nothing the flight/rotor model
+can fly, not a general "has a float device" check; see PhysicsBridge's
+amphibious handling below for how those combined cases actually get their
+water behavior. `ClassificationTest` covers a single pontoon, multiple
+pontoons, a wheel+pontoon mix staying on the ground path, a non-floating
+skid (a grounded skid helicopter, correctly excluded from both paths), a
+float-only hull with an installed rotor propeller (correctly excluded even
+without an `isAircraft`/`isBlimp` flag - a defensive check since a rotor-
+carrying definition is essentially always a flight vehicle already excluded
+above it), a float-only hull with an ordinary propeller staying float-
+eligible, a float-equipped rotorcraft proven `eligible()` and never
+`floatEligible()` (the combined rotor+float routing the two classifications
+must agree on so `PhysicsBridge.active()` never builds both a `Body` and a
+`BuoyantBody` for the same vehicle), and the same aircraft/blimp/towed/
+opted-out/no-device/null-definition exclusions `eligible()` already covers.
+
+`BuoyancyTest` exercises the pure force math `BuoyantForces` applies per
+installed float device and propeller - submerged-fraction clamping at both
+span ends, Archimedes buoyant force scaling with submerged fraction and
+hull volume, quadratic water drag that is zero when not submerged or not
+moving, and propeller thrust that is exactly zero whenever the propeller
+itself is not underwater, regardless of throttle. `BuoyantForces.apply(...)`
+itself - the per-tick buoyancy/drag force application at each float
+device's own world position (producing a righting torque from uneven
+submersion without separate stability code), the water-surface scan against
+the live `ServerLevel`'s `FluidState`, and the propeller thrust/steering
+integration - has the same live-entity/`ServerLevel`/Sable-runtime testing
+gap `Body.stepGround`/`stepFlight`/`stepRotor` already have (see below): it
+needs a real `EntityVehicleF_Physics` over a real `ServerLevel`'s water,
+which remains exercised only by the in-game acceptance list below, not by
+any unit test in this repository.
+
+**Amphibious combined domain, added after review; extended to flight/rotor
+after the MINECRAFT-497 coordination review.** Review flagged that routing
+every vehicle with a drivable ground device exclusively to the ground
+solver - even one that also has a `canFloat` device - would silently drop
+water behavior for an amphibious vehicle just because it has wheels; a
+later review on this same ticket flagged the identical gap for a
+float-equipped fixed-wing/rotorcraft (a seaplane or floatplane helicopter)
+being routed exclusively to the flight/rotor model. `BuoyantForces.apply(...)`
+was factored out of `BuoyantBody` specifically so `PhysicsBridge`'s `Body`
+(ground or flight) can call the same per-float buoyancy/water-drag/
+propeller-thrust logic alongside its own wheel/track or flight/rotor forces
+in the same tick, whenever any installed ground device is `canFloat`
+(`Body.floatCapable`, computed once at construction from the vehicle's
+installed parts at that time - this one field is not re-derived per tick
+the way the rotor/float-propeller-radius decision inside `stepRotor` is,
+since a float device being physically bolted on or off mid-flight is not a
+case this bridge treats as a realistic "missing/changed parts" scenario the
+way an installed propeller is). This is not a new classification: it is the
+existing ground or flight/rotor domain from `eligible()`, with buoyancy
+layered on top at the force-application level rather than the
+classification level. `BuoyantForces` itself excludes any installed rotor
+propeller from its own underwater-propeller-thrust pass (`nonRotorPropellers`),
+so a floating rotorcraft's thrust is supplied exactly once, by
+`stepRotor`'s own collective/cyclic model, never doubled by `BuoyantForces`
+treating the rotor as a second forward propeller - a rotor sitting above a
+floating hull is in practice never itself submerged, so a reviewer checking
+only submersion would not have caught this without the explicit exclusion.
+Like the rest of `BuoyantForces`, the actual combined force application
+against a live rigid body is exercised only by the in-game acceptance list
+below.
 
 ## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
 
@@ -179,13 +249,19 @@ standard Gradle/mod-loader build) confirmed `Classification.java`, the new
 against IV's real `JSONPart.JSONPartPropeller.diameter`/`isRotor` fields and
 `EntityVehicleF_Physics`'s real control-input vars
 (`elevatorInputVar`/`aileronInputVar`/`rudderInputVar`) and `throttleVar`,
-and that all 93 tests in the repository - `RotorForcesTest` (19 new),
-the updated `ClassificationTest` (now including the frozen-state
-regression test above), `FlightForcesTest`, `TireForcesTest`,
-`TowingForcesTest`, `OverridesTest`, `BodyRegistryTest`, and
-`PhysicsBridgeClassificationTest` - pass under a manually assembled JUnit
-Platform launcher (JUnit 5.11.4/platform 1.11.4). This is evidence the new
-code compiles and its pure functions
+and that all 112 tests in the repository - `RotorForcesTest` (19 new),
+the updated `ClassificationTest` (now including the frozen-state regression
+test above and the merged-in boat/float classification cases below),
+`FlightForcesTest`, `BuoyancyTest`, `TireForcesTest`, `TowingForcesTest`,
+`OverridesTest`, `BodyRegistryTest`, and `PhysicsBridgeClassificationTest` -
+pass under a manually assembled JUnit Platform launcher (JUnit 5.11.4/
+platform 1.11.4). This head also integrates boat MINECRAFT-494/PR #4's
+`VehicleBody`/`BuoyantBody`/`BuoyantForces`/`Buoyancy` classes directly into
+this branch (PR #4 had not yet merged to main at the time of this
+integration) per review direction, rather than waiting for #4 to merge
+first; `PhysicsBridge` now types its registry and `active()`'s construction
+choice as the shared `VehicleBody` interface instead of the single concrete
+`Body` class. This is evidence the new code compiles and its pure functions
 behave as specified - it is not the hosted Gradle build, is not the
 `runtime-smoke` Mixin-apply check, and proves nothing about in-game flight
 behavior.
@@ -248,8 +324,18 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   chunk unload/reload, world restart, and removal all behave as intended.
 - A car with `"enabled": false` in the JSON override continues to use
   ordinary IV physics.
-- A pontoon/skid-only boat hull continues to use ordinary IV physics
-  (documented exclusion, not a defect).
+- A pontoon/float-hulled boat with **no** config entry at all floats at a
+  plausible draft at rest, drives forward/reverse and steers via its
+  propeller/rudder while the propeller stays underwater, rights itself when
+  pushed to one side rather than flipping or sinking, and stops producing
+  thrust (coasting to a drag-limited stop, not instantly) if its propeller
+  is lifted clear of the water.
+- An amphibious vehicle (wheels/tracks AND at least one `canFloat` device)
+  drives normally on land and, on entering water, also floats/rights itself
+  and gets propeller thrust where installed - both domains' forces visibly
+  active at once, not one replacing the other.
+- A non-floating skid-only vehicle (e.g. a grounded skid helicopter)
+  continues to use ordinary IV physics (documented exclusion, not a defect).
 - An aircraft spawns, can be boarded, and gets Sable flight physics with no
   config entry: throttle produces forward thrust, pitch/roll/yaw respond to
   elevator/aileron/rudder input, and the craft can take off, climb, bank, and
@@ -268,6 +354,11 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   yaws it, all without IV's native rotor-vectoring solver also moving it -
   distinct from a fixed-wing aircraft's wing-based lift and airspeed-
   dependent control authority.
+- A float-equipped helicopter (an installed rotor propeller AND at least
+  one `canFloat` device) lands on and floats on water - buoyancy/righting
+  from its float devices visibly active at the same time as rotor thrust/
+  attitude control, with no double-counted propeller thrust from the rotor
+  itself (see `BuoyantForces`'s rotor exclusion).
 - A trailer actively hitched behind a car continues to follow via IV's own
   hitch code, with no double movement, whether or not the towing car has
   Sable physics.

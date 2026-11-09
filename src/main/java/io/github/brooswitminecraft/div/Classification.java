@@ -7,19 +7,30 @@ import java.util.List;
  * Sable body at all? Operates only on IV's plain JSON definition types, so it needs no live
  * entity, world, or Sable runtime and can run as an ordinary unit test.
  *
- * <p>This bridge currently models three categories: a ground vehicle with at least one wheel or
- * track contact device (of any count), a fixed-wing aircraft or blimp (flight aerodynamics, see
- * {@link FlightForces}), and a rotorcraft - any aircraft with an installed rotor propeller
- * (helicopter thrust-vectoring, see {@link RotorForces}) - needing no wheel/track device either
- * way. A vehicle with no wheel/track device and no aircraft/blimp flag (e.g. a pontoon-hulled
- * boat - buoyancy is a different, unmodeled physics domain), a vehicle actively hitched behind
- * another, and an explicit per-car opt-out are all excluded on purpose, not missed by accident.
- * See README.md for the follow-up tasks tracking each gap.
+ * <p>This bridge currently models four categories: a ground vehicle with at least one wheel or
+ * track contact device (of any count, {@link #eligible}), a fixed-wing aircraft or blimp (flight
+ * aerodynamics, see {@link FlightForces}) or a rotorcraft (any installed rotor propeller, see
+ * {@link RotorForces}) (also {@link #eligible}), and a float-only hull with at least one
+ * canFloat ground device and no wheel or track at all ({@link #floatEligible}) - a boat or other
+ * pontoon-hulled vehicle, handled by its own buoyancy force model rather than the ground/flight
+ * solvers. A vehicle with a drivable ground device or a flight flag AND a canFloat device (e.g.
+ * an amphibious car, or a float-equipped seaplane/rotorcraft) stays eligible for its ground or
+ * flight domain, which then also applies buoyancy/water-drag/underwater-propeller forces to its
+ * float devices alongside its wheel or flight forces in the same tick (see PhysicsBridge's
+ * amphibious handling) - combined domain forces, not a silent water-behavior exclusion for a
+ * vehicle that happens to drive or fly. A skid-only vehicle that neither drives nor floats (e.g.
+ * a grounded skid helicopter with no canFloat skid), a vehicle actively hitched behind another,
+ * and an explicit per-car opt-out are all excluded on purpose, not missed by accident. See
+ * README.md for the follow-up tasks tracking each remaining gap.
  */
 public final class Classification {
  private Classification() {}
  public static boolean isDrivableGroundDevice(JSONPart.JSONPartGroundDevice ground) {
   return ground != null && (ground.isWheel || ground.isTread);
+ }
+ /** A ground device that displaces water (pontoon/float), independent of whether it also drives. */
+ public static boolean isFloatDevice(JSONPart.JSONPartGroundDevice ground) {
+  return ground != null && ground.canFloat;
  }
  /** A rotor-lift propeller (helicopter main/tail rotor), as opposed to a plain forward-thrust
   * propeller - IV marks these explicitly and gives them their own thrust-vectoring solver this
@@ -48,5 +59,27 @@ public final class Classification {
   // list; this pure category decision does not need to distinguish them.
   if (isFlightVehicle(definition)) return true;
   return installedGroundDevices.stream().anyMatch(Classification::isDrivableGroundDevice);
+ }
+ /**
+  * A float-only hull: at least one installed ground device marked canFloat, and none drivable
+  * by the ground solver, and not a flight vehicle. A vehicle with both a drivable device (or a
+  * flight flag) and a canFloat device (e.g. an amphibious car, or a float-equipped seaplane/
+  * rotorcraft) stays on the ground/flight domain via {@link #eligible} instead -
+  * {@link #floatEligible} is the exclusive fallback for a hull with nothing the ground solver
+  * can drive and nothing the flight/rotor model can fly, not a check for "has a float device"
+  * in general. An installed rotor propeller excludes it the same way {@link #isFlightVehicle}
+  * does - IV's rotor-lift/thrust-vectoring solver is a different, unmodeled physics domain
+  * regardless of which other domain the rest of the chassis would otherwise qualify for; in
+  * practice this is a defensive belt-and-suspenders check, since a rotor-carrying definition is
+  * essentially always also a flight vehicle already excluded by the check above it.
+  */
+ public static boolean floatEligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices,
+     List<JSONPart.JSONPartPropeller> installedPropellers, boolean activelyTowed, boolean optedOut) {
+  if (optedOut || activelyTowed) return false;
+  if (definition == null || definition.motorized == null) return false;
+  if (isFlightVehicle(definition)) return false;
+  if (isRotorcraft(installedPropellers)) return false;
+  if (installedGroundDevices.stream().anyMatch(Classification::isDrivableGroundDevice)) return false;
+  return installedGroundDevices.stream().anyMatch(Classification::isFloatDevice);
  }
 }

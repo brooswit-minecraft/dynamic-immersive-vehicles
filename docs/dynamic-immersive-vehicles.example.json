@@ -8,6 +8,13 @@
       "brakeForce": 12000.0,
       "maxSteerDegrees": 30.0
     },
+    "examplepack:ordinary_boat": {
+      "massKg": 900.0,
+      "hullFillFactor": 0.5,
+      "waterDrag": 400.0,
+      "propellerForce": 6000.0,
+      "maxSteerDegrees": 30.0
+    },
     "examplepack:known_bad_car": {
       "enabled": false
     }

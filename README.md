@@ -59,13 +59,33 @@ each vehicle from IV's own definition at the moment it is needed:
   rotor propeller treated as one lumped main lift rotor rather than modeling
   an individual tail rotor's own thrust/mount orientation). No wheel or track
   device is required for this category to be eligible.
+- **Boats and other float-only hulls** (at least one installed ground device
+  with `canFloat`, and no wheel or track, and no installed rotor propeller).
+  Each installed float device gets its own Archimedes buoyant force and
+  quadratic water drag, sampled at that device's own position against the
+  local Minecraft water surface; a hull resting unevenly in the water is
+  righted by that per-device force distribution rather than a separate
+  stability calculation. Installed non-rotor `PartPropeller`s add forward/
+  reverse thrust, steered by the rudder input, but only while the propeller
+  itself is underwater - one above the surface produces no thrust, same as a
+  real propeller spinning free in air.
+- **Amphibious and float-equipped flight/rotor vehicles** (a drivable wheel/
+  track device, a fixed-wing/blimp flag, or a rotor propeller, AND at least
+  one `canFloat` device on the same chassis - an amphibious car, a seaplane,
+  or a floatplane helicopter). These get *both* domains' forces in the same
+  tick, not one at the expense of the other: the ground/flight/rotor forces
+  above, plus the same per-float buoyancy/water-drag/underwater-propeller-
+  thrust forces applied to their float devices (a rotor propeller's own
+  thrust is never double-counted here, since it is excluded from this
+  underwater-propeller-thrust pass - see
+  [`BuoyantForces`](src/main/java/io/github/brooswitminecraft/div/BuoyantForces.java)).
+  There is no separate "amphibious" classification - this is the same ground/
+  flight/rotor domain from the bullets above, with buoyancy layered on top
+  whenever a float device is present on the chassis.
 
 Known, deliberate exclusions - not silently skipped, each tracked as a
-follow-up task rather than faked with the ground solver:
+follow-up task rather than faked with an unrelated force model:
 
-- **Boats and other float-only hulls** (pontoon/skid devices with no wheel or
-  track): buoyancy is a different physics domain this bridge does not yet
-  model.
 - **A vehicle actively hitched behind another** (trailers): it keeps
   following IV's own native hitch code instead of getting a second,
   competing body, so towed trailers are unaffected either way. The towing
@@ -112,13 +132,26 @@ after changes.
     },
     "examplepack:known_bad_car": {
       "enabled": false
+    },
+    "examplepack:ordinary_boat": {
+      "massKg": 900.0,
+      "hullFillFactor": 0.5,
+      "waterDrag": 400.0,
+      "propellerForce": 6000.0,
+      "maxSteerDegrees": 30.0
     }
   }
 }
 ```
 
-`massKg` is optional; omit it to use IV's calculated vehicle mass. A copyable
-example is also available at
+`massKg` is optional; omit it to use IV's calculated vehicle mass. The three
+fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
+fraction of the chassis bounding-box volume the hull actually displaces when
+fully submerged, since a real hull is not a solid box), `waterDrag`, and
+`propellerForce` (split evenly across installed non-rotor propellers) - are
+ignored by a ground/flight vehicle with no float device, and
+`suspensionTravel`/`friction`/`driveForce`/`brakeForce` are ignored by a
+float-only hull. A copyable example is also available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
 
 ## Build
