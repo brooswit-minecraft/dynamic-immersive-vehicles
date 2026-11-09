@@ -1,11 +1,14 @@
 package io.github.brooswitminecraft.div;
 
+import dev.ryanhcode.sable.api.physics.constraint.GenericConstraintConfiguration;
+import dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
 import io.github.brooswitminecraft.div.mixin.VehicleTowingAccessor;
 import io.github.brooswitminecraft.div.mixin.WorldAccessor;
+import minecrafttransportsimulator.baseclasses.TowingConnection;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
@@ -22,6 +25,7 @@ import org.joml.Vector3d;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -33,6 +37,12 @@ public final class PhysicsBridge {
  // bad content-pack definition is retried, and logged, once rather than every tick for every
  // vehicle instance of that definition.
  private static final Set<JSONVehicle> brokenDefinitions = Collections.newSetFromMap(new IdentityHashMap<>());
+ // The towed side (trailer) of each live hitch joint, and which towing vehicle it is currently
+ // jointed to - keyed by the trailer entity so either side's removal (the trailer's own, or its
+ // towing vehicle's) can release the joint without leaking it. A towing vehicle may key more
+ // than one trailer here (a dolly chain); the trailer itself ever keys at most one.
+ private static final Map<EntityVehicleF_Physics, PhysicsConstraintHandle> hitchJoints = new IdentityHashMap<>();
+ private static final Map<EntityVehicleF_Physics, EntityVehicleF_Physics> hitchPartner = new IdentityHashMap<>();
  private static final double DT = .05;
  private PhysicsBridge() {}
  private static Overrides.Tuning tuning(JSONVehicle definition) {
@@ -58,18 +68,70 @@ public final class PhysicsBridge {
   var installedPropellers = v.allParts.stream()
     .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
     .map(p -> ((PartPropeller)p).definition.propeller).toList();
-  boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, v.towedByConnection != null, Overrides.isOptedOut(key))
+  TowingConnection towedByConnection = v.towedByConnection;
+  boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, towedByConnection != null, Overrides.isOptedOut(key))
     && !brokenDefinitions.contains(definition);
+  // A trailer only gets its own Sable body once its towing vehicle already has one to joint
+  // against - the hitch joint PhysicsBridge builds below connects to that live body, not to
+  // IV's own position. This is a transient ordering wait (the towing vehicle normally activates
+  // the same tick it becomes eligible), so it is retried every tick, never cached as broken.
+  if (eligible && towedByConnection != null && !registry.isActive(towedByConnection.towingVehicle)) eligible = false;
   if (!eligible) return deactivate(v);
   if (v.world.isClient()) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
-  return activateOrClassify(registry, brokenDefinitions, v, definition, () -> new Body(server,v,tuning(definition)));
+  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, () -> new Body(server,v,tuning(definition)));
+  if (activated) reconcileHitch(v, towedByConnection);
+  return activated;
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
   Body old = registry.deactivate(v);
-  if (old != null) old.remove();
+  if (old != null) { releaseHitch(v); old.remove(); }
   return false;
+ }
+ /**
+  * Brings this trailer's hitch joint in line with {@code connection}: builds one against its
+  * towing vehicle's active body if it does not have one yet (or had one to a different towing
+  * vehicle, or its old joint went invalid), removes a stale one if it is no longer towed (or its
+  * towing vehicle is no longer active), and does nothing otherwise. Called every tick after
+  * {@code active()} confirms this vehicle (towed or not) already has a live Sable body.
+  */
+ private static void reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
+  EntityVehicleF_Physics desired = connection != null && registry.isActive(connection.towingVehicle) ? connection.towingVehicle : null;
+  PhysicsConstraintHandle existing = hitchJoints.get(v);
+  if (desired == hitchPartner.get(v) && (existing == null || existing.isValid())) return;
+  if (existing != null) existing.remove();
+  hitchJoints.remove(v);
+  hitchPartner.remove(v);
+  if (desired == null) return;
+  PhysicsConstraintHandle joint = createHitch(registry.get(desired), registry.get(v), connection);
+  hitchJoints.put(v, joint);
+  hitchPartner.put(v, desired);
+ }
+ private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
+  var towingPose = towing.box.getPose();
+  var trailerPose = trailer.box.getPose();
+  var hitchPos = HitchJoint.anchorWorldPosition(towingPose.position(), towingPose.orientation(), towing.center,
+    new Vector3d(connection.hitchConnection.pos.x, connection.hitchConnection.pos.y, connection.hitchConnection.pos.z), new Vector3d());
+  var hookupPos = HitchJoint.anchorWorldPosition(trailerPose.position(), trailerPose.orientation(), trailer.center,
+    new Vector3d(connection.hookupConnection.pos.x, connection.hookupConnection.pos.y, connection.hookupConnection.pos.z), new Vector3d());
+  var config = new GenericConstraintConfiguration(hitchPos, hookupPos, towingPose.orientation(), trailerPose.orientation(),
+    HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
+  return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
+ }
+ /** Releases this entity's own hitch joint if it is a trailer, and any joints trailers hold
+  * against it if it is (also) a towing vehicle - called from every path that actually removes a
+  * body, so a joint is never left referencing a body Sable has already destroyed. */
+ private static void releaseHitch(EntityVehicleF_Physics v) {
+  PhysicsConstraintHandle own = hitchJoints.remove(v);
+  if (own != null) own.remove();
+  hitchPartner.remove(v);
+  hitchPartner.entrySet().removeIf(e -> {
+   if (e.getValue() != v) return false;
+   PhysicsConstraintHandle joint = hitchJoints.remove(e.getKey());
+   if (joint != null) joint.remove();
+   return true;
+  });
  }
  /**
   * The exact classification active() applies to a construction failure, as a seam testable
@@ -95,10 +157,10 @@ public final class PhysicsBridge {
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  public static void cleanup() {
-  registry.removeIf((v, b) -> !v.isValid, Body::remove);
+  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { releaseHitch(v); b.remove(); });
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level == level, Body::remove);
+  registry.removeIf((v, b) -> b.level == level, (v, b) -> { releaseHitch(v); b.remove(); });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  private static final class Body {

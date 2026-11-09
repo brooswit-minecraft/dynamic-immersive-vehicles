@@ -129,8 +129,15 @@ class ClassificationTest {
   assertFalse(Classification.isFlightVehicle(null));
  }
 
- @Test void activelyTowedVehicleIsExcludedEvenIfOtherwiseEligible() {
-  assertFalse(Classification.eligible(motorized(), List.of(wheel()), NO_PROPELLERS, true, false));
+ @Test void activelyTowedGroundVehicleIsNowEligibleForItsOwnHitchedBody() {
+  // MINECRAFT-498: a trailer is eligible on the same terms as any other ground vehicle;
+  // PhysicsBridge (not this pure classification) is what further requires its towing vehicle to
+  // already have an active Sable body before actually constructing one for it.
+  assertTrue(Classification.eligible(motorized(), List.of(wheel()), NO_PROPELLERS, true, false));
+ }
+
+ @Test void activelyTowedGroundVehicleOptOutStillExcludes() {
+  assertFalse(Classification.eligible(motorized(), List.of(wheel()), NO_PROPELLERS, true, true));
  }
 
  @Test void pontoonOnlyHullWithNoWheelOrTrackIsExcluded() {

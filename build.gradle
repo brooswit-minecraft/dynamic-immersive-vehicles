@@ -51,6 +51,12 @@ dependencies {
  implementation('curse.maven:minecraft-transport-simulator-286703:7926606') { transitive = false }
  implementation('dev.ryanhcode.sable:sable-neoforge-1.21.1:2.0.5') { transitive = false }
  implementation('dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0') { transitive = false }
+ // The neoForge moddev plugin only wires JOML into the 'main' sourceSet it knows about as a
+ // mod (see the 'mods' block above); plain unit tests (PhysicsBridgeClassificationTest, which
+ // loads the real PhysicsBridge class) need it explicitly, pinned to the same version NeoForge
+ // itself resolves, so a hitch joint's JOML constraint-configuration types are resolvable
+ // without a live Minecraft/NeoForge runtime.
+ testImplementation 'org.joml:joml:1.10.5'
  testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

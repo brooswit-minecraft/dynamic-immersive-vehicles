@@ -1,4 +1,4 @@
-# Verification, 2026-11-08
+# Verification, 2026-11-09
 
 ## Recovered prototype evidence (not current CI evidence)
 
@@ -151,6 +151,69 @@ behave as specified - it is not the hosted Gradle build, is not the
 `runtime-smoke` Mixin-apply check, and proves nothing about in-game flight
 behavior.
 
+## Trailer hitch joint tests (MINECRAFT-498, added 2026-11-09)
+
+`ClassificationTest` now covers the changed rule: a towed ground vehicle
+(trailer) is eligible on the same terms as any other ground vehicle
+(`activelyTowedGroundVehicleIsNowEligibleForItsOwnHitchedBody`), still
+excluded by its own opt-out
+(`activelyTowedGroundVehicleOptOutStillExcludes`), while a towed flight
+vehicle stays excluded (`activelyTowedAircraftIsExcluded`, unchanged) -
+trailer bodies are a ground-domain-only feature in this change.
+
+`HitchJointTest` exercises every pure function in the new `HitchJoint`
+module - the hitch-domain analogue of `TireForcesTest`/`FlightForcesTest` -
+with no live entity, world, or Sable runtime: anchor-world-position at an
+identity pose (local offset minus center, no rotation), the same anchor
+under a 90-degree yaw (confirming the offset is rotated before
+translating, not after), and that it writes into and returns the exact
+`dest` instance passed in (the calling convention `PhysicsBridge.createHitch`
+relies on for each anchor). Locked-axis selection is covered for all three
+`JSONConnection` flag combinations - ordinary (linear only), `mounted`
+(every axis, fully rigid), `restricted` (linear plus yaw/roll, pitch free)
+- and that `mounted` takes precedence when both flags are set.
+
+`BodyRegistryTest`'s `removeIf` test now also asserts the bulk-removal
+callback receives the key, not just the body (`PhysicsBridge.releaseHitch`
+needs the entity to find and release any hitch joint keyed to it during a
+`cleanup()`/`unload()` sweep, which a body-only callback could not give it).
+
+**What remains unexercised by any unit test, the same shape of gap
+`PhysicsBridgeClassificationTest`'s own note below already describes for
+plain activation:** `PhysicsBridge.active()`'s own ordering wait (a trailer
+deferring until its towing vehicle's body exists), `reconcileHitch`'s
+create/replace/release transitions, and `createHitch`/`releaseHitch`
+against a live Sable body and constraint - all of these need a live
+`EntityVehicleF_Physics`/`ServerLevel`/Sable `SubLevelContainer`, for the
+same reason documented below (the `(WorldAccessor)v.world` mixin cast). A
+local, non-CI `javac --release 21 -proc:none` API-check (same approach as
+the recovered-prototype/rotorcraft-exclusion evidence above) against the
+real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
+`dev.ryanhcode.sable.api.physics.constraint.GenericConstraintConfiguration`/
+`PhysicsConstraintHandle`/`ConstraintJointAxis`, `PhysicsPipeline.addConstraint`,
+`BoxPhysicsObject.getPose()`, and IV's real
+`minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
+fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
+`.mounted`, `.restricted`), and that all 80 tests across the full suite
+(`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
+`FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
+`PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is
+evidence the new code compiles and its pure functions behave as specified -
+it is not the hosted Gradle build, is not the `runtime-smoke` Mixin-apply
+check, and proves nothing about in-game hitch behavior.
+
+A `testImplementation 'org.joml:joml:1.10.5'` dependency was added
+(`build.gradle`): the neoForge moddev plugin only wires JOML into the
+`main` sourceSet it treats as a mod, and `PhysicsBridgeClassificationTest`
+loading the real `PhysicsBridge` class now requires resolving JOML types
+(`GenericConstraintConfiguration`'s `Vector3dc`/`Quaterniondc` parameters)
+at class-verification time even though that test never constructs a hitch
+joint itself - without it, that test failed with
+`NoClassDefFoundError: org/joml/Vector3dc`, caught locally before this was
+ever pushed to CI. The version is pinned to the one NeoForge's own
+dependency resolution already strictly constrains main's `compileClasspath`
+to, not a separately chosen version.
+
 `BodyRegistryTest` exercises `BodyRegistry`, the actual production
 bookkeeping class PhysicsBridge relies on for its lifecycle/no-double-
 physics guarantee, using plain keys and dummy bodies instead of a live
@@ -224,15 +287,36 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
 - A helicopter (an `isAircraft` vehicle with an installed `isRotor`
   propeller) continues to use ordinary IV physics (documented exclusion,
   not a defect) - no wing lift is applied to it.
-- A trailer actively hitched behind a car continues to follow via IV's own
-  hitch code, with no double movement, whether or not the towing car has
-  Sable physics.
+- A trailer hitched behind a car whose own body is not yet active (opted
+  out, or not yet server-side) continues to follow via IV's own hitch code,
+  with no double movement, for as long as that ordering dependency holds.
+- A trailer hitched behind a car with an active Sable body gets its own
+  Sable body jointed to the car's, with no double movement (IV's native
+  hitch-following code does not also move it once `PhysicsBridge.active()`
+  returns true for the trailer) and no position-snap jitter; the trailer's
+  own wheels/suspension respond to terrain independently of the towing car,
+  while the hitch keeps the two bodies coupled.
+- The joint's locked rotation matches the connection's own flags: an
+  ordinary hitch lets the trailer swing/pitch/roll independently (settling
+  upright on its own wheels), a `restricted` connection allows only pitch,
+  and a `mounted` connection (e.g. a flatbed) stays fully rigid relative to
+  the towing vehicle.
+- Detaching a trailer at runtime releases the joint; the trailer continues
+  as an ordinary free-rolling Sable ground vehicle (coasting, steerable if
+  pushed, responsive to terrain) with no stale joint pulling it toward the
+  car it was released from.
+- The towing car despawning, unloading its chunk, or losing its own Sable
+  body for any other reason releases the joint without an error or a
+  leaked body; the trailer's own body survives as an unjointed vehicle.
 - A car towing a trailer (empty, then loaded/with its own engine where the
   pack allows it) accelerates and holds speed noticeably closer to IV's own
   unmodified behavior than before this change, since `getRecursiveTowingThrust`
-  is now replicated as a center-of-mass impulse on the towing vehicle's Sable
-  body (`TowingForces`/`VehicleTowingAccessor`) - see README.md "Scope" for
-  what remains unaddressed (the trailer's own coupled body/constraint).
+  is still replicated as a center-of-mass impulse on the towing vehicle's
+  Sable body (`TowingForces`/`VehicleTowingAccessor`, unchanged by this
+  task) - now on top of, not instead of, the trailer's own coupled body.
+- A towed flight vehicle (aircraft/blimp) continues to use ordinary IV
+  physics (documented exclusion, not a defect) - this task is ground-domain
+  only.
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
 playable-MVP claim for any category above - ground, flight, or boat. The

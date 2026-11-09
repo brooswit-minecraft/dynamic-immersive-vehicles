@@ -12,9 +12,15 @@ import java.util.List;
  * see {@link FlightForces}) with no installed rotor. A vehicle with no wheel/track device and no
  * aircraft/blimp flag (e.g. a pontoon-hulled boat - buoyancy is a different, unmodeled physics
  * domain), a rotorcraft (helicopter thrust-vectoring is a different, unmodeled physics domain
- * IV's own native solver treats separately), a vehicle actively hitched behind another, and an
- * explicit per-car opt-out are all excluded on purpose, not missed by accident. See README.md
- * for the follow-up tasks tracking each gap.
+ * IV's own native solver treats separately), and an explicit per-car opt-out are all excluded on
+ * purpose, not missed by accident. See README.md for the follow-up tasks tracking each gap.
+ *
+ * <p>A ground vehicle actively hitched behind another (a trailer) is now eligible on the same
+ * terms as any other ground vehicle - {@link PhysicsBridge} gives it its own Sable body jointed
+ * to its towing vehicle's body (see {@link HitchJoint}), rather than excluding it to IV's native
+ * position-snap. A flight vehicle that is actively towed stays excluded: a towed aircraft/blimp
+ * is not a category this bridge models, and is left on IV's native physics rather than guessed
+ * at.
  */
 public final class Classification {
  private Classification() {}
@@ -35,14 +41,20 @@ public final class Classification {
  }
  public static boolean eligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices,
      List<JSONPart.JSONPartPropeller> installedPropellers, boolean activelyTowed, boolean optedOut) {
-  if (optedOut || activelyTowed) return false;
+  if (optedOut) return false;
   if (definition == null || definition.motorized == null) return false;
   if (isFlightVehicle(definition)) {
-   // A helicopter (any installed rotor propeller) needs rotor lift/vectoring this bridge does
-   // not model; leave it on IV's native physics rather than giving it zero wing lift and
-   // forward-only thrust.
+   // A towed flight vehicle (and a helicopter - any installed rotor propeller, which needs
+   // rotor lift/vectoring this bridge does not model) stay on IV's native physics rather than
+   // getting zero wing lift and forward-only thrust, or a hitch joint this bridge never builds
+   // for the flight domain.
+   if (activelyTowed) return false;
    return installedPropellers.stream().noneMatch(Classification::isRotor);
   }
+  // A towed ground vehicle (trailer) is eligible on the same terms as any other ground
+  // vehicle - PhysicsBridge is the one that additionally requires its towing vehicle to already
+  // have an active Sable body before actually constructing the trailer's, since that is what the
+  // hitch joint connects to; that dependency needs the registry, not this pure classification.
   return installedGroundDevices.stream().anyMatch(Classification::isDrivableGroundDevice);
  }
 }
