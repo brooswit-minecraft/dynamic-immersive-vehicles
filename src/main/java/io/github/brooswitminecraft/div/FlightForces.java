@@ -64,26 +64,30 @@ public final class FlightForces {
  }
 
  /**
-  * Neutral-buoyancy lift for a blimp, scaled to the vehicle's own weight rather than a literal
-  * Archimedes volume: IV's {@code ballastVolume} is documented as normally {@code emptyMass /
-  * 1000} - a small control-authority number, not an SI volume sized to displace the vehicle's
-  * mass - and IV's own native solver suppresses ordinary gravity for a ballast-active vehicle
-  * rather than computing real displaced-air buoyancy. {@code gravityFactor} (0-1, clamped by the
-  * caller) is that same suppression lever: 0 (the unset default) means a fully lighter-than-air
-  * hull - this returns the vehicle's full weight as upward lift, net-neutral against gravity;
-  * 1 means no suppression at all, so this is gravity-compatible by construction for any mass.
-  */
- public static double buoyancy(double mass, double gravity, double gravityFactor) {
-  return mass * gravity * (1 - gravityFactor);
- }
-
- /**
-  * Fine climb/descent trim around the neutral-buoyancy baseline above, from IV's ballast
+  * Fine climb/descent trim around the neutral-buoyancy baseline below, from IV's ballast
   * control input (-1..1, release/intake), scaled as a fraction of the vehicle's own weight so it
   * stays mass/gravity-compatible regardless of a pack's literal {@code ballastVolume} number.
   */
  public static double ballastTrim(double mass, double gravity, double ballastControl) {
   double trimFraction = 0.1;
   return mass * gravity * trimFraction * Math.max(-1, Math.min(1, ballastControl));
+ }
+
+ /**
+  * Neutral-buoyancy lift for a blimp, gated and scaled the way IV's own ballast system is -
+  * not a literal Archimedes volume, and not gated or scaled by {@code gravityFactor}. Pinned IV
+  * source (reviewed in PR #5) shows gravity suppression is keyed to whether {@code
+  * ballastVolume} is configured/active at all (zero/unset means IV applies ordinary gravity to
+  * this vehicle, matching a plain Sable body here), not to {@code gravityFactor} - whose own
+  * runtime default actually resolves to full gravity (1) when a pack leaves it unset, the
+  * opposite of what an earlier revision of this method assumed. {@code ballastVolume} itself is
+  * normally {@code emptyMass / 1000} - a small control-authority number, not an SI volume sized
+  * to displace the vehicle's mass - so once a nonzero value marks ballast active, this returns
+  * the vehicle's full weight as upward lift (net-neutral against gravity) rather than a
+  * literal {@code rho * V * g} computed from that number, plus the trim above.
+  */
+ public static double blimpBuoyancy(double mass, double gravity, double ballastVolume, double ballastControl) {
+  if (ballastVolume <= 0) return 0;
+  return mass * gravity + ballastTrim(mass, gravity, ballastControl);
  }
 }

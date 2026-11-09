@@ -84,34 +84,42 @@ against a live rigid body) is not unit-tested, the same way the ground
 solver's wheel loop in `Body.step` is not - both are only exercised, where
 they are exercised at all, by the acceptance list below.
 
-**Blimp buoyancy, corrected after review.** The first revision computed
-buoyancy as `rho_air * ballastVolume * g`, treating IV's `ballastVolume`
-field as a literal displaced-air volume. Review (PR #5) found this
-incompatible with IV's own contract: `ballastVolume` is normally
-`emptyMass / 1000` - a small control-authority number, not an SI volume
-sized to displace the vehicle's mass - and IV's native solver suppresses
-ordinary gravity for a ballast-active vehicle rather than computing real
-buoyancy from it. At IV's documented value, a 1,000 kg blimp got about
-12 N of upward force against Sable's roughly 9,810 N of gravity on that
-mass - it would fall, not float. `FlightForces.buoyancy(mass, gravity,
-gravityFactor)` now returns `mass * gravity * (1 - gravityFactor)`,
-mass/gravity-compatible by construction for any vehicle mass regardless of
-a pack's literal `ballastVolume` number; `gravityFactor` (IV's own gravity-
-suppression lever, clamped 0-1 by the caller) defaults to 0 when a pack
-leaves it unset, meaning a fully lighter-than-air hull by default. A
-separate `FlightForces.ballastTrim(mass, gravity, ballastControl)` adds a
-small (10% of weight) climb/descent authority from IV's ballast control
-input, instead of also being tied to the literal `ballastVolume` number.
-`FlightForcesTest` covers: full neutral buoyancy at the unset (0)
-gravityFactor default, zero buoyant lift at gravityFactor=1 (no
-suppression), partial suppression at a fractional gravityFactor, trim
-that is zero at centered control, a small fraction of weight (not
-overwhelming it) at full control, sign-flips with control direction, and
-clamps beyond ±1 input. It also adds the integration-level seam test
-review asked for: a representative 1,000 kg blimp at the unset gravityFactor
-default and centered ballast control nets exactly zero vertical force
-against its own weight - not three orders of magnitude off, as the
-original `rho*V*g` calculation was.
+**Blimp buoyancy, corrected after review - twice.** The first revision
+computed buoyancy as `rho_air * ballastVolume * g`, treating IV's
+`ballastVolume` field as a literal displaced-air volume. Review (PR #5)
+found this incompatible with IV's own contract: `ballastVolume` is
+normally `emptyMass / 1000` - a small control-authority number, not an SI
+volume sized to displace the vehicle's mass. At IV's documented value, a
+1,000 kg blimp got about 12 N of upward force against Sable's roughly
+9,810 N of gravity on that mass - it would fall, not float.
+
+The first correction made buoyancy mass/gravity-compatible but gated and
+scaled it on the JSON `gravityFactor` field, on the assumption that
+`gravityFactor` was IV's own gravity-suppression lever. A second review
+round, with pinned IV source rechecked more closely
+(`EntityVehicleF_Physics.java:263-275,490-491` at commit
+`6a1e7b416c1361534ac40ca699261a4fc89d28eb`), found that assumption wrong in
+both directions: IV keys gravity suppression to whether `ballastVolumeVar`
+(initialized from `ballastVolume`) is active/nonzero, not to
+`gravityFactor` at all, and an unset raw `gravityFactor` (0) actually
+resolves to a runtime `gravityFactorVar` default of **1** (full gravity) -
+the opposite of what the first correction assumed. That version would have
+wrongly floated a blimp with no configured `ballastVolume`, and wrongly
+dropped one with an active `ballastVolume` but an explicit
+`gravityFactor=1`.
+
+`FlightForces.blimpBuoyancy(mass, gravity, ballastVolume, ballastControl)`
+now replaces the `gravityFactor`-based `buoyancy` method entirely: it
+returns 0 when `ballastVolume <= 0` (ordinary gravity, matching IV with no
+ballast configured), and otherwise the vehicle's full weight as upward
+lift plus `FlightForces.ballastTrim`'s small climb/descent authority -
+gated purely on ballast activation, with no `gravityFactor` parameter to
+misuse. `FlightForcesTest` covers both seam cases review named: (a)
+`ballastVolume=0` nets zero buoyant force regardless of ballast control,
+and (b) `ballastVolume>0` nets full neutral buoyancy, demonstrated
+independent of any `gravityFactor` value since the method takes none. It
+also keeps the representative 1,000 kg blimp integration-level seam test
+from the first round, re-pointed at `blimpBuoyancy`'s active-ballast case.
 
 **Rotorcraft exclusion, added after review.** Review also found
 `Classification.eligible` activated every `isAircraft` definition,
@@ -133,11 +141,11 @@ a standard Gradle/mod-loader build) confirmed `Classification.java`,
 `FlightForces.java`, and the updated `PhysicsBridge.java` compile cleanly
 against IV's real `JSONVehicle.motorized` fields (`wingArea`, `wingSpan`,
 `aileronArea`, `elevatorArea`, `rudderArea`, `tailDistance`,
-`crossSectionalArea`, `gravityFactor`, `dragCoefficient`),
+`crossSectionalArea`, `ballastVolume`, `dragCoefficient`),
 `JSONPart.JSONPartPropeller.isRotor`, and `EntityVehicleF_Physics`'s real
 control-input vars, `ballastControlVar`, and `MAX_*_ANGLE` constants, and
-that all 45 tests in `FlightForcesTest`, the updated `ClassificationTest`,
-and `TireForcesTest` pass under a manually assembled JUnit Platform
+that all 50 tests in `FlightForcesTest`, the updated `ClassificationTest`,
+`TireForcesTest`, and `TowingForcesTest` pass under a manually assembled JUnit Platform
 launcher. This is evidence the new code compiles and its pure functions
 behave as specified - it is not the hosted Gradle build, is not the
 `runtime-smoke` Mixin-apply check, and proves nothing about in-game flight

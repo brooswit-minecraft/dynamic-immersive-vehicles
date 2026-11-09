@@ -219,11 +219,12 @@ public final class PhysicsBridge {
    * any vehicle with an installed rotor propeller on IV's native physics instead): no wheels, so
    * this applies {@link FlightForces} instead of the raycast suspension/friction loop above -
    * wing lift, parasitic+induced drag, aileron/elevator/rudder control torques, throttle-linear
-   * thrust from any running engine, and - for a blimp - mass/gravity-compatible neutral-buoyancy
-   * lift plus ballast trim (not IV's literal {@code ballastVolume}; see
-   * {@link FlightForces#buoyancy}). {@code tuning.driveForce} is reused as this vehicle's max
-   * thrust, the same way it is reused as max drive force for a ground vehicle - one shared,
-   * per-car-overridable propulsive-force knob rather than a second config field.
+   * thrust from any running engine, and - for a blimp with a configured ballastVolume - mass/
+   * gravity-compatible neutral-buoyancy lift plus ballast trim, gated and scaled the way IV's
+   * own ballast system is (see {@link FlightForces#blimpBuoyancy}), not a literal Archimedes
+   * calculation on that field's raw number. {@code tuning.driveForce} is reused as this
+   * vehicle's max thrust, the same way it is reused as max drive force for a ground vehicle -
+   * one shared, per-car-overridable propulsive-force knob rather than a second config field.
    */
   private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
    var motorized = v.definition.motorized;
@@ -241,12 +242,10 @@ public final class PhysicsBridge {
    double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
    double lift=FlightForces.aeroForce(liftCoeff,motorized.wingArea,dynamicPressure);
    double drag=FlightForces.aeroForce(dragCoeff,referenceArea,dynamicPressure);
-   // Neutral-buoyancy lift scaled to this vehicle's own weight (see FlightForces.buoyancy), not
-   // IV's literal ballastVolume - that field is normally emptyMass/1000, a small control-
-   // authority number, not an SI volume sized to displace the vehicle's mass.
+   // Gated on ballastVolume being configured/nonzero, matching IV's own ballast-active
+   // condition, not on gravityFactor (see FlightForces.blimpBuoyancy for why).
    double buoyant=motorized.isBlimp
-     ? FlightForces.buoyancy(mass,9.81,Math.max(0,Math.min(1,motorized.gravityFactor)))
-       + FlightForces.ballastTrim(mass,9.81,v.ballastControlVar.currentValue)
+     ? FlightForces.blimpBuoyancy(mass,9.81,motorized.ballastVolume,v.ballastControlVar.currentValue)
      : 0;
    double throttle=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running) throttle=v.throttleVar.currentValue;

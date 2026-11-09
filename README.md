@@ -28,12 +28,15 @@ each vehicle from IV's own definition at the moment it is needed:
   separate flight force model instead of the ground solver - wing lift
   (thin-airfoil lift slope with a hard stall cutoff), parasitic+induced drag,
   aileron/elevator/rudder control torques, and throttle-linear thrust from
-  any running engine. A blimp additionally gets mass/gravity-compatible
-  neutral-buoyancy lift plus ballast trim - *not* a literal displaced-air
-  calculation on IV's `ballastVolume` field, which is normally
-  `emptyMass / 1000` (a small control-authority number, not an SI volume
-  sized to displace the vehicle's mass) and would net only a few newtons
-  against Sable's full gravity on the vehicle's real mass. See
+  any running engine. A blimp with a configured, nonzero `ballastVolume`
+  additionally gets mass/gravity-compatible neutral-buoyancy lift plus
+  ballast trim - gated and scaled the way IV's own ballast system is, not a
+  literal displaced-air calculation on that field's raw number (which is
+  normally `emptyMass / 1000`, a small control-authority number, not an SI
+  volume sized to displace the vehicle's mass) and not tied to
+  `gravityFactor`, whose own IV runtime default actually resolves to full
+  gravity when a pack leaves it unset. A blimp with no configured
+  `ballastVolume` gets ordinary gravity, matching IV. See
   [`FlightForces`](src/main/java/io/github/brooswitminecraft/div/FlightForces.java)
   for the exact model and its stated simplifications (no post-stall/spin
   behavior, no advance-ratio propeller falloff, no altitude/weather air

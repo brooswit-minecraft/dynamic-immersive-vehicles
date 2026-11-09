@@ -58,32 +58,43 @@ class FlightForcesTest {
   assertEquals(5000, FlightForces.thrust(0.5,10000), 1e-9);
  }
 
- @Test void unsetGravityFactorMeansFullyNeutralBuoyancy() {
-  // The reviewed-and-fixed defect: buoyancy must be mass/gravity-compatible, not tied to IV's
-  // literal ballastVolume (normally emptyMass/1000, not an SI volume). A representative 1,000 kg
-  // blimp with the unset (0) gravityFactor default must get its full weight back as lift.
+ @Test void ballastVolumeUnconfiguredMeansNoBuoyancyAtAll() {
+  // Review finding (round 2): gravity suppression in pinned IV source is keyed to whether
+  // ballastVolume is configured/active (ballastVolumeVar > 0), not to gravityFactor - whose own
+  // runtime default actually resolves to full gravity (1) when a pack leaves it unset. Seam case
+  // (a) from review: an isBlimp vehicle with ballastVolume=0 must get ordinary gravity, i.e. no
+  // buoyant force from this method at all, regardless of ballastControl.
+  assertEquals(0, FlightForces.blimpBuoyancy(1000,9.81,0,0));
+  assertEquals(0, FlightForces.blimpBuoyancy(1000,9.81,0,1));
+ }
+
+ @Test void ballastVolumeActiveGivesFullNeutralBuoyancyRegardlessOfGravityFactor() {
+  // Seam case (b) from review: ballastVolume>0 (ballast active) must net full weight back as
+  // lift (centered ballast control), independent of any gravityFactor value - this method takes
+  // no gravityFactor parameter at all, so there is nothing for a pack's explicit gravityFactor=1
+  // (or any other value) to wrongly suppress; IV's own gravity suppression doesn't key off it
+  // either, per the pinned source the review cited.
   double mass = 1000, gravity = 9.81;
-  assertEquals(mass*gravity, FlightForces.buoyancy(mass,gravity,0), 1e-9);
- }
-
- @Test void fullGravityFactorMeansNoBuoyantLift() {
-  assertEquals(0, FlightForces.buoyancy(1000,9.81,1), 1e-9);
- }
-
- @Test void partialGravityFactorSuppressesOnlyThatFraction() {
-  double mass = 1000, gravity = 9.81, gravityFactor = 0.25;
-  assertEquals(mass*gravity*0.75, FlightForces.buoyancy(mass,gravity,gravityFactor), 1e-9);
+  assertEquals(mass*gravity, FlightForces.blimpBuoyancy(mass,gravity,1,0), 1e-9);
+  // IV's documented ballastVolume magnitude (emptyMass/1000) is just "nonzero" to this method -
+  // the literal number must not matter, only activation.
+  assertEquals(mass*gravity, FlightForces.blimpBuoyancy(mass,gravity,1.0,0), 1e-9);
  }
 
  @Test void representativeBlimpNetsNearZeroVerticalForceAtNeutralBallast() {
-  // The integration-level seam the review asked for: a representative mass/ballast combination
-  // (1,000 kg blimp, unset gravityFactor, centered ballast control) must leave buoyancy within a
-  // small trim band of Sable's own gravity pull on that mass - not off by three orders of
-  // magnitude the way the old rho*V*g-on-ballastVolume calculation was.
+  // The integration-level seam the first review round asked for: a representative mass/ballast
+  // combination (1,000 kg blimp, active ballastVolume, centered ballast control) must leave
+  // buoyancy exactly matching Sable's own gravity pull on that mass - not off by three orders of
+  // magnitude the way the original rho*V*g-on-ballastVolume calculation was.
   double mass = 1000, gravity = 9.81;
-  double buoyant = FlightForces.buoyancy(mass,gravity,0) + FlightForces.ballastTrim(mass,gravity,0);
+  double buoyant = FlightForces.blimpBuoyancy(mass,gravity,1,0);
   double sableGravityPull = mass*gravity;
   assertEquals(sableGravityPull, buoyant, 1e-9, "centered ballast control: exactly neutral");
+ }
+
+ @Test void blimpBuoyancyIncludesBallastTrim() {
+  double mass = 1000, gravity = 9.81;
+  assertEquals(mass*gravity + mass*gravity*0.1, FlightForces.blimpBuoyancy(mass,gravity,1,1), 1e-9);
  }
 
  @Test void ballastTrimIsZeroAtCenteredControl() {
