@@ -337,22 +337,48 @@ state (matching IV's own rule).
    `reconcileHitch` now returns `boolean` (`false` on a caught failure, instead
    of silently returning) so `active()` can decide what the failure means for the
    body it is holding. `PhysicsBridge.rollBackOnHitchFailure(alreadyActive)` -
-   `!alreadyActive` - is the exact, pulled-out, unit-tested decision: `active()`
-   rolls back (`deactivate(v)`, removing the body and returning `false` so IV's
-   native hitch motion is authoritative again that tick) only when the body was
-   **just** constructed this same call; an already-healthy body from a previous
-   tick is never torn down merely because a later reconcile attempt failed - the
-   same non-destructive guarantee `deferToNativeHitch` already provides when a
-   towing vehicle's body disappears. `HitchRegistryTest`'s
-   `firstActivationHitchFailureRollsBackTheJustCreatedBodyWithNoLeak` and
-   `anAlreadyActiveBodySurvivesAFailedReconcileAttempt` exercise this exact
-   production composition - a real `BodyRegistry` alongside a real
-   `HitchRegistry`, calling the real `PhysicsBridge.rollBackOnHitchFailure` - for
-   both halves of the decision, including a full retry-and-succeed cycle after
-   a rolled-back first attempt. Retrying is still not cached as permanently
-   broken either way, since the anchors are computed from live poses that can
-   change every tick, unlike a chassis definition's fixed geometry (there is no
-   hitch analogue of `InvalidChassisGeometry`).
+   `!alreadyActive` - is the decision; rolling back means removing the body and
+   returning `false` so IV's native hitch motion is authoritative again that
+   tick, and it only applies when the body was **just** constructed this same
+   call - an already-healthy body from a previous tick is never torn down merely
+   because a later reconcile attempt failed, the same non-destructive guarantee
+   `deferToNativeHitch` already provides when a towing vehicle's body disappears.
+
+   A third review round found the FIRST version of this fix's own tests
+   insufficient, even though the source-level fix was already correct: they drove
+   `HitchRegistry.reconcile` and `rollBackOnHitchFailure` separately and glued the
+   exception-to-boolean conversion and rollback together by hand, so they stayed
+   green even if `active()` itself stopped calling either one correctly - not a
+   production integration seam. The actual `activate -> reconcile -> conditional
+   rollback` composition is now its own generic method,
+   `PhysicsBridge.reconcileOrRollBack(bodyRegistry, hitchRegistry, key,
+   alreadyActive, reconcile, removeBody)`, parameterized over the body registry's
+   key/value types exactly like `activateOrClassify` already is for plain body
+   construction; `active()` calls this exact method with its own real
+   `registry`/`hitches`/`Body::remove`. `HitchRegistryTest` now drives this real
+   method directly (not a reimplementation) with a real `BodyRegistry`/
+   `HitchRegistry` and fake body/removal callbacks:
+   `reconcileOrRollBackRollsBackANewlyActivatedBodyOnFirstFailureWithExactlyOneRemoval`
+   asserts the `false` result, exactly one real removal callback (the actual
+   body, not just a counter), and the hitch-registry entry also cleared;
+   `reconcileOrRollBackPreservesAnAlreadyActiveBodyOnFailure` asserts an
+   already-active body survives untouched, with no removal callback at all;
+   `reconcileOrRollBackSucceedsWithoutRemovalWhenReconcileSucceeds` and
+   `retryAfterARolledBackFirstActivationSucceedsCleanly` cover the success path
+   and a full rollback-then-retry-and-succeed cycle. Retrying is still not cached
+   as permanently broken either way, since the anchors are computed from live
+   poses that can change every tick, unlike a chassis definition's fixed geometry
+   (there is no hitch analogue of `InvalidChassisGeometry`).
+
+   **Separately-tracked integration hold, not resolved by this fix:** this PR's
+   branch is still based on main at MINECRAFT-495 (`7b97198`), while the ticket's
+   prescribed merge order is boats (MINECRAFT-494/PR#4) -> rotorcraft
+   (MINECRAFT-497/PR#6) -> hitches (this PR, #7). Review has repeatedly noted #7
+   cannot be accepted as the every-vehicle integrated head until #4 and #6 merge
+   first; this branch will be rebased onto that integrated main, their
+   PhysicsBridge/Classification behavior preserved, and exact-head build/
+   runtime-smoke rerun once they do. Nothing in this PR can resolve that hold
+   on its own.
 
 **What remains unexercised by any unit test, the same shape of gap
 `PhysicsBridgeClassificationTest`'s own note below already describes for
@@ -370,7 +396,7 @@ real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
 `BoxPhysicsObject.getPose()`, and IV's real
 `minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
 fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
-`.mounted`, `.restricted`), and that all 99 tests across the full suite
+`.mounted`, `.restricted`), and that all 101 tests across the full suite
 (`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
 `FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
 `PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is

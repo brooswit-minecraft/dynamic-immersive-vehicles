@@ -59,73 +59,79 @@ class HitchRegistryTest {
   assertTrue(hitches.isJointed("trailer"), "a later call with a working constructor must still succeed");
  }
 
- @Test void firstActivationHitchFailureRollsBackTheJustCreatedBodyWithNoLeak() {
-  // Second finding from external review: mirrors active()'s own composition (a real
-  // BodyRegistry alongside this registry, exactly as PhysicsBridge wires them) and calls the
-  // real production decision, PhysicsBridge.rollBackOnHitchFailure - a trailer body constructed
-  // THIS call, whose very first hitch-reconcile attempt then fails, must be rolled back
-  // entirely: a brand new, never-jointed body is neither coupled nor on native fallback, so
-  // leaving it live is not a coherent state, even though it is log-free and leak-free at the
-  // registry level alone.
+ /**
+  * These four exercise PhysicsBridge.reconcileOrRollBack(...) directly - the exact production
+  * composition active() calls, with a real BodyRegistry/HitchRegistry and fake body/removal
+  * callbacks - not a reimplementation of its exception-to-boolean/rollback logic inline. This is
+  * the production-used integration-seam regression external review's second round explicitly
+  * required: the prior version of these tests drove HitchRegistry.reconcile and
+  * PhysicsBridge.rollBackOnHitchFailure separately and glued them together by hand, which stayed
+  * green even if active() itself stopped calling either one correctly.
+  */
+ @Test void reconcileOrRollBackRollsBackANewlyActivatedBodyOnFirstFailureWithExactlyOneRemoval() {
   var bodies = new BodyRegistry<String, Object>();
   var hitches = new HitchRegistry<String>();
-  int[] bodyRemovals = {0};
-
-  boolean alreadyActive = bodies.isActive("trailer");
-  assertFalse(alreadyActive);
-  assertTrue(bodies.activateOnce("trailer", Object::new));
-
-  boolean hitchOk;
-  try {
-   hitches.reconcile("trailer", "truck", () -> { throw new RuntimeException("invalid anchor/configuration this tick"); });
-   hitchOk = true;
-  } catch (RuntimeException e) {
-   hitchOk = false;
-  }
-  assertFalse(hitchOk);
-
-  if (!hitchOk && PhysicsBridge.rollBackOnHitchFailure(alreadyActive)) {
-   if (bodies.deactivate("trailer") != null) bodyRemovals[0]++;
-  }
-
-  assertFalse(bodies.isActive("trailer"), "the just-created body must be rolled back, not left dangling unjointed");
-  assertFalse(hitches.isJointed("trailer"));
-  assertEquals(1, bodyRemovals[0], "exactly one removal - no leak, no double-removal");
-
-  // Retry next tick, as a fresh first activation, with a working hitch creator must succeed.
-  assertFalse(bodies.isActive("trailer"));
-  bodies.activateOnce("trailer", Object::new);
+  Object body = new Object();
+  bodies.activate("trailer", body); // simulates activateOrClassify having just constructed it this call
   boolean[] jointRemoved = {false};
-  hitches.reconcile("trailer", "truck", () -> fakeJoint(jointRemoved));
-  assertTrue(bodies.isActive("trailer"));
-  assertTrue(hitches.isJointed("trailer"));
+  hitches.reconcile("trailer", "truck", () -> fakeJoint(jointRemoved)); // a stale joint must also be released on rollback
+  List<Object> removed = new ArrayList<>();
+
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", false, () -> false, removed::add);
+
+  assertFalse(result, "must report false - IV's native hitch motion is authoritative again this tick");
+  assertFalse(bodies.isActive("trailer"), "the just-created body must be rolled back, not left dangling unjointed");
+  assertFalse(hitches.isJointed("trailer"), "the hitch-registry entry must also be released");
+  assertEquals(List.of(body), removed, "exactly one actual body-removal callback, with the real body - no leak, no double-removal");
  }
 
- @Test void anAlreadyActiveBodySurvivesAFailedReconcileAttempt() {
+ @Test void reconcileOrRollBackPreservesAnAlreadyActiveBodyOnFailure() {
   // The other half of the same production decision: a body that already existed before this
   // call (healthy, from a previous tick) must never be rolled back merely because a later
   // reconcile attempt fails - the same non-destructive guarantee deferToNativeHitch already
   // provides when a towing vehicle's body disappears. Only the stale/failed joint is retried.
   var bodies = new BodyRegistry<String, Object>();
   var hitches = new HitchRegistry<String>();
-  bodies.activateOnce("trailer", Object::new);
+  Object body = new Object();
+  bodies.activate("trailer", body);
+  List<Object> removed = new ArrayList<>();
 
-  boolean alreadyActive = bodies.isActive("trailer");
-  assertTrue(alreadyActive);
-  boolean hitchOk;
-  try {
-   hitches.reconcile("trailer", "truck", () -> { throw new RuntimeException("invalid anchor/configuration this tick"); });
-   hitchOk = true;
-  } catch (RuntimeException e) {
-   hitchOk = false;
-  }
-  assertFalse(hitchOk);
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", true, () -> false, removed::add);
 
-  if (!hitchOk && PhysicsBridge.rollBackOnHitchFailure(alreadyActive)) {
-   bodies.deactivate("trailer");
-  }
+  assertTrue(result, "an already-active body must stay Sable-active despite the failed reconcile");
+  assertTrue(bodies.isActive("trailer"));
+  assertSame(body, bodies.get("trailer"));
+  assertTrue(removed.isEmpty(), "no removal callback for an already-active body");
+ }
 
-  assertTrue(bodies.isActive("trailer"), "an already-active body must survive a failed reconcile attempt");
+ @Test void reconcileOrRollBackSucceedsWithoutRemovalWhenReconcileSucceeds() {
+  var bodies = new BodyRegistry<String, Object>();
+  var hitches = new HitchRegistry<String>();
+  bodies.activate("trailer", new Object());
+  List<Object> removed = new ArrayList<>();
+
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", false, () -> true, removed::add);
+
+  assertTrue(result);
+  assertTrue(bodies.isActive("trailer"));
+  assertTrue(removed.isEmpty());
+ }
+
+ @Test void retryAfterARolledBackFirstActivationSucceedsCleanly() {
+  var bodies = new BodyRegistry<String, Object>();
+  var hitches = new HitchRegistry<String>();
+  bodies.activate("trailer", new Object());
+  List<Object> removed = new ArrayList<>();
+  PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", false, () -> false, removed::add);
+  assertFalse(bodies.isActive("trailer"));
+
+  // Next tick: a fresh first activation (alreadyActive is false again) with a working reconcile.
+  Object retryBody = new Object();
+  bodies.activate("trailer", retryBody);
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", false, () -> true, removed::add);
+  assertTrue(result);
+  assertTrue(bodies.isActive("trailer"));
+  assertSame(retryBody, bodies.get("trailer"));
  }
 
  @Test void reconcileCreatesExactlyOneJointForActiveTowingAndTrailerKeys() {

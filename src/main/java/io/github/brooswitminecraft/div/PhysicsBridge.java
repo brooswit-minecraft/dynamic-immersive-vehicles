@@ -26,6 +26,8 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
@@ -76,8 +78,26 @@ public final class PhysicsBridge {
   boolean alreadyActive = registry.isActive(v);
   boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, () -> new Body(server,v,tuning(definition)));
   if (!activated) return false;
-  if (!reconcileHitch(v, towedByConnection) && rollBackOnHitchFailure(alreadyActive)) return deactivate(v);
-  return true;
+  return reconcileOrRollBack(registry, hitches, v, alreadyActive, () -> reconcileHitch(v, towedByConnection), Body::remove);
+ }
+ /**
+  * The exact reconcile-then-rollback composition {@code active()} performs once its body is
+  * already active (freshly constructed this call, or kept from a previous tick): runs
+  * {@code reconcile}, and on failure, rolls back - releasing {@code key}'s hitch-registry entry
+  * and removing its body via {@code removeBody} - only if {@link #rollBackOnHitchFailure} says
+  * the body was not already active before this call. Generic over the body registry's key/value
+  * types and the hitch registry's key type so it is testable with fake bodies/joints/removal
+  * callbacks instead of a live entity/Sable runtime - {@code active()} calls this exact method
+  * with its own real {@code registry}/{@code hitches}/{@code Body::remove}. Returns whether the
+  * vehicle remains Sable-active after this call.
+  */
+ static <K, B> boolean reconcileOrRollBack(BodyRegistry<K, B> bodyRegistry, HitchRegistry<K> hitchRegistry,
+     K key, boolean alreadyActive, BooleanSupplier reconcile, Consumer<B> removeBody) {
+  if (reconcile.getAsBoolean() || !rollBackOnHitchFailure(alreadyActive)) return true;
+  B old = bodyRegistry.deactivate(key);
+  hitchRegistry.release(key);
+  if (old != null) removeBody.accept(old);
+  return false;
  }
  /**
   * Whether a failed hitch-reconcile attempt must roll back (deactivate/remove) the body
