@@ -53,16 +53,103 @@ it cannot observe vehicle spawn, boarding, driving, physics, or lifecycle
 behavior — those remain untested by this job. A failure here is reported as
 a startup/Mixin/dependency hazard, not a code-logic defect.
 
-## Classification tests (MINECRAFT-492, added 2026-11-08)
+## Classification tests (MINECRAFT-492, added 2026-11-08; updated MINECRAFT-495)
 
 `ClassificationTest` and `OverridesTest` run the real IV JSON definition types
 (`JSONVehicle`, `JSONPart.JSONPartGroundDevice`) and the override opt-out/
 validation logic without a live entity, world, or Sable runtime. They cover:
 default-eligible ground vehicles at wheel counts other than four, tracked
 vehicles, mixed wheel+track chassis, the no-config-entry default-enabled
-case, explicit per-car opt-out, aircraft/blimp exclusion, pontoon/skid-only
-(boat) exclusion, a missing `motorized` section, and a null ground-device
-entry among installed parts.
+case, explicit per-car opt-out, pontoon/skid-only (boat) exclusion, a missing
+`motorized` section, and a null ground-device entry among installed parts.
+Aircraft and blimps are now covered as an eligible category requiring no
+ground-contact device at all (`isFlightVehicle`), still excluded by an
+explicit opt-out or an active tow, and now also excluded when any installed
+propeller is a rotor (`isRotor`, see below) - a helicopter must stay on IV's
+native physics, not be given wing lift it has no wings for.
+
+## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
+
+`FlightForcesTest` exercises every pure function in `FlightForces` - the
+flight-domain analogue of `TireForcesTest` for the ground solver - with no
+live entity, world, or Sable runtime: dynamic pressure scaling, a lift
+coefficient that is zero at zero angle of attack, grows linearly with angle,
+clamps at a hard stall rather than growing further, and is antisymmetric
+about zero; induced drag that is zero with no wing (`aspectRatio <= 0`) and
+grows with lift otherwise; aerodynamic force as a simple coefficient/area/
+pressure product; control-surface force that is zero at zero deflection and
+flips sign with it; and throttle-linear thrust that is zero at zero
+throttle. `PhysicsBridge`'s own flight step (force/torque application
+against a live rigid body) is not unit-tested, the same way the ground
+solver's wheel loop in `Body.step` is not - both are only exercised, where
+they are exercised at all, by the acceptance list below.
+
+**Blimp buoyancy, corrected after review - twice.** The first revision
+computed buoyancy as `rho_air * ballastVolume * g`, treating IV's
+`ballastVolume` field as a literal displaced-air volume. Review (PR #5)
+found this incompatible with IV's own contract: `ballastVolume` is
+normally `emptyMass / 1000` - a small control-authority number, not an SI
+volume sized to displace the vehicle's mass. At IV's documented value, a
+1,000 kg blimp got about 12 N of upward force against Sable's roughly
+9,810 N of gravity on that mass - it would fall, not float.
+
+The first correction made buoyancy mass/gravity-compatible but gated and
+scaled it on the JSON `gravityFactor` field, on the assumption that
+`gravityFactor` was IV's own gravity-suppression lever. A second review
+round, with pinned IV source rechecked more closely
+(`EntityVehicleF_Physics.java:263-275,490-491` at commit
+`6a1e7b416c1361534ac40ca699261a4fc89d28eb`), found that assumption wrong in
+both directions: IV keys gravity suppression to whether `ballastVolumeVar`
+(initialized from `ballastVolume`) is active/nonzero, not to
+`gravityFactor` at all, and an unset raw `gravityFactor` (0) actually
+resolves to a runtime `gravityFactorVar` default of **1** (full gravity) -
+the opposite of what the first correction assumed. That version would have
+wrongly floated a blimp with no configured `ballastVolume`, and wrongly
+dropped one with an active `ballastVolume` but an explicit
+`gravityFactor=1`.
+
+`FlightForces.blimpBuoyancy(mass, gravity, ballastVolume, ballastControl)`
+now replaces the `gravityFactor`-based `buoyancy` method entirely: it
+returns 0 when `ballastVolume <= 0` (ordinary gravity, matching IV with no
+ballast configured), and otherwise the vehicle's full weight as upward
+lift plus `FlightForces.ballastTrim`'s small climb/descent authority -
+gated purely on ballast activation, with no `gravityFactor` parameter to
+misuse. `FlightForcesTest` covers both seam cases review named: (a)
+`ballastVolume=0` nets zero buoyant force regardless of ballast control,
+and (b) `ballastVolume>0` nets full neutral buoyancy, demonstrated
+independent of any `gravityFactor` value since the method takes none. It
+also keeps the representative 1,000 kg blimp integration-level seam test
+from the first round, re-pointed at `blimpBuoyancy`'s active-ballast case.
+
+**Rotorcraft exclusion, added after review.** Review also found
+`Classification.eligible` activated every `isAircraft` definition,
+including helicopters, while `PhysicsBridge.stepFlight` supplies only wing
+lift and forward thrust - a zero-wing-area helicopter got zero lift and
+forward-only thrust after IV's native solver was cancelled for it.
+`Classification.isRotor(JSONPart.JSONPartPropeller)` now checks IV's own
+`isRotor` flag, and `eligible` excludes any flight vehicle with an installed
+rotor propeller, leaving it on IV's native physics. `ClassificationTest`
+covers: a fixed-wing aircraft with an ordinary (non-rotor) propeller stays
+eligible, a rotorcraft is excluded even though `isAircraft` is set, a rotor
+among multiple installed propellers still excludes, and a null propeller
+list entry is ignored rather than throwing.
+
+A local, non-CI sanity check (`javac --release 21 -proc:none` against the
+real `mts.jar`/Sable 2.0.5/joml jars pulled from this host's Gradle cache,
+the same API-check approach as the recovered-prototype evidence above, not
+a standard Gradle/mod-loader build) confirmed `Classification.java`,
+`FlightForces.java`, and the updated `PhysicsBridge.java` compile cleanly
+against IV's real `JSONVehicle.motorized` fields (`wingArea`, `wingSpan`,
+`aileronArea`, `elevatorArea`, `rudderArea`, `tailDistance`,
+`crossSectionalArea`, `ballastVolume`, `dragCoefficient`),
+`JSONPart.JSONPartPropeller.isRotor`, and `EntityVehicleF_Physics`'s real
+control-input vars, `ballastControlVar`, and `MAX_*_ANGLE` constants, and
+that all 50 tests in `FlightForcesTest`, the updated `ClassificationTest`,
+`TireForcesTest`, and `TowingForcesTest` pass under a manually assembled JUnit Platform
+launcher. This is evidence the new code compiles and its pure functions
+behave as specified - it is not the hosted Gradle build, is not the
+`runtime-smoke` Mixin-apply check, and proves nothing about in-game flight
+behavior.
 
 `BodyRegistryTest` exercises `BodyRegistry`, the actual production
 bookkeeping class PhysicsBridge relies on for its lifecycle/no-double-
@@ -122,8 +209,21 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   chunk unload/reload, world restart, and removal all behave as intended.
 - A car with `"enabled": false` in the JSON override continues to use
   ordinary IV physics.
-- An aircraft, a blimp, and a pontoon/skid-only boat hull all continue to use
-  ordinary IV physics (documented exclusions, not a defect).
+- A pontoon/skid-only boat hull continues to use ordinary IV physics
+  (documented exclusion, not a defect).
+- An aircraft spawns, can be boarded, and gets Sable flight physics with no
+  config entry: throttle produces forward thrust, pitch/roll/yaw respond to
+  elevator/aileron/rudder input, and the craft can take off, climb, bank, and
+  land without IV's native `getForcesAndMotions` also moving it.
+- A blimp spawns, gets Sable flight physics, and holds a stable
+  near-neutral altitude (mass/gravity-compatible buoyancy, not a fall)
+  with ballast-control climb/descent trim distinct from an aircraft's
+  wing-based lift.
+- An aircraft or blimp with `"enabled": false` in the JSON override continues
+  to use ordinary IV physics.
+- A helicopter (an `isAircraft` vehicle with an installed `isRotor`
+  propeller) continues to use ordinary IV physics (documented exclusion,
+  not a defect) - no wing lift is applied to it.
 - A trailer actively hitched behind a car continues to follow via IV's own
   hitch code, with no double movement, whether or not the towing car has
   Sable physics.
@@ -135,5 +235,8 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   what remains unaddressed (the trailer's own coupled body/constraint).
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
-playable-MVP claim for any category above. Heavy build/decompile/game work
-must not run on TayneStation.
+playable-MVP claim for any category above - ground, flight, or boat. The
+flight force model in particular (`FlightForces`/`PhysicsBridge.stepFlight`)
+is proven only at the pure-function level above; nothing here has confirmed an
+aircraft/blimp is flyable, stable, or even stays airborne in an actual game.
+Heavy build/decompile/game work must not run on TayneStation.
