@@ -621,15 +621,17 @@ public final class PhysicsBridge {
     // what stepGround computed) vs "applied" (local-frame, what Sable actually receives) per
     // ticket comment 52976's ask, so a forensic replay doesn't need to re-derive the local
     // transform itself from a possibly-imprecise logged orientation.
-    String requestedImpulseWorld=vfull(new Vector3d(force).mul(DT)), requestedPointWorld=vfull(point);
-    if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
-      +" radius="+radius+" arm="+vfull(arm)+" rayStart="+vfull(start)+" rayEnd="+vfull(end)+" rayLength="+length
-      +" hit="+vfull(new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z))
-      +" distance="+hit.getLocation().distanceTo(vec(start))+" compression="+compression
-      +" anchorVerticalVelocity="+localVelocity.dot(up)+" point="+requestedPointWorld
-      +" localVelocity(anchor-sampled)="+vfull(localVelocity)+" contactVelocity(contact-sampled)="+vfull(contactVelocity)
-      +" speed="+speed+" sideSpeed="+sideSpeed+" lateralSlipBudgetTarget="+lateralSlipBudgetTarget
-      +" normal="+normal+" tire="+tire+" requestedImpulseWorld="+requestedImpulseWorld);
+    if (debugThisTick) {
+     String requestedImpulseWorld=vfull(new Vector3d(force).mul(DT)), requestedPointWorld=vfull(point);
+     LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+       +" radius="+radius+" arm="+vfull(arm)+" rayStart="+vfull(start)+" rayEnd="+vfull(end)+" rayLength="+length
+       +" hit="+vfull(new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z))
+       +" distance="+hit.getLocation().distanceTo(vec(start))+" compression="+compression
+       +" anchorVerticalVelocity="+localVelocity.dot(up)+" point="+requestedPointWorld
+       +" localVelocity(anchor-sampled)="+vfull(localVelocity)+" contactVelocity(contact-sampled)="+vfull(contactVelocity)
+       +" speed="+speed+" sideSpeed="+sideSpeed+" lateralSlipBudgetTarget="+lateralSlipBudgetTarget
+       +" normal="+normal+" tire="+tire+" requestedImpulseWorld="+requestedImpulseWorld);
+    }
     Vector3d appliedPointLocal=inverse.transform(point), appliedImpulseLocal=inverse.transform(force.mul(DT));
     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
       +" appliedPointLocal="+vfull(appliedPointLocal)+" appliedImpulseLocal="+vfull(appliedImpulseLocal));
