@@ -141,7 +141,8 @@ public final class PhysicsBridge {
   // (or anything else) ever sees them: a vehicle with no definition, or with a ground part that
   // itself has no definition, must be excluded here rather than throw.
   JSONVehicle definition = v.definition;
-  if (definition == null) return deactivate(v);
+  boolean isClient = v.world.isClient();
+  if (definition == null) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "noDefinition"); return deactivate(v); }
   String key = definition.packID + ":" + definition.systemName;
   var installedGroundDevices = installedGroundDevices(v);
   var installedPropellers = installedPropellers(v);
@@ -153,22 +154,26 @@ public final class PhysicsBridge {
   // why: BuoyantBody has no pose/anchor API for a joint to connect to).
   boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, optedOut);
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
-  if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
+  if (brokenDefinitions.contains(definition)) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "brokenDefinition:"+key); return deactivate(v); }
+  if (!ground && !floating) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "ineligible:"+key); return deactivate(v); }
   replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, old -> { hitches.release(v); old.remove(); });
   boolean alreadyActive = registry.isActive(v);
   boolean towingVehicleActive = ground && towed && isHitchableBody(towedByConnection.towingVehicle);
   var decision = ground
-    ? decide(true, v.world.isClient(), towed, alreadyActive, towingVehicleActive)
-    : (v.world.isClient() ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
-  Body.logClassification(key, ground, floating, decision);
+    ? decide(true, isClient, towed, alreadyActive, towingVehicleActive)
+    : (isClient ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
+  GroundContactDiagnostics.logClassification(v.uniqueUUID, isClient, key, ground, floating, decision.toString());
   if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
   if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
   var level = ((WorldAccessor)v.world).div$level();
-  if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
+  if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) {
+   GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "noServerLevelOrContainer:"+key);
+   return false;
+  }
   Supplier<VehicleBody> construct = ground
     ? () -> new Body(server,v,tuning(definition))
     : () -> new BuoyantBody(server,v,tuning(definition));
-  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, Body.instrumentedConstruct(construct, key));
+  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, GroundContactDiagnostics.instrumentedConstruct(construct, v.uniqueUUID, key));
   if (!activated || !ground) return activated;
   // Evaluated BEFORE reconcileHitch runs: HitchRegistry.reconcile already clears any existing
   // entry - valid/matching or not - before attempting to (re)create one, so this is the only
@@ -425,67 +430,19 @@ public final class PhysicsBridge {
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
-  // Opt-in, self-limiting diagnostic for the still-open initial-placement/asymmetric-support
-  // question (John's exact report: flat-ground sinks and tilts left with banging on placement;
-  // on a hill it rolls down without sinking, then flips while driving - see ticket comment
-  // 52846/52847). Off by default; enabled only via -Ddiv.debugGroundContact=true.
-  //
-  // First attempt used System.out.println directly and produced ZERO records in latest.log/
-  // debug.log on the actual hosted/launcher runtime (confirmed by a real manual test - comment
-  // 52877): stdout capture cannot be assumed in that environment. Routed through LogUtils'
-  // SLF4J logger instead, which goes through Minecraft's own configured Log4j appenders and is
-  // the same mechanism every other mod's logging relies on to actually reach latest.log/
-  // debug.log. Deliberately NOT referenced from the outer PhysicsBridge class or from
-  // activateOrClassify's generic signature (see gravityMagnitude's fate earlier on this branch,
-  // and PhysicsBridgeClassificationTest's direct calls to activateOrClassify with fake generic
-  // types): a Minecraft/SLF4J-typed method on the outer class or in that generic method would
-  // make the JVM's class-verifier require Log4j/SLF4J to be resolvable just to LOAD
-  // PhysicsBridge.class, breaking every pure-function unit test that merely references the
-  // outer class - this diagnostic is confined to Body's own class file instead, which pure
-  // tests never load.
-  //
-  // Logs each wheel's support-ray geometry/result and that tick's suspension/tire inputs for a
-  // bounded number of ticks per activated body (DEBUG_GROUND_CONTACT_TICKS, ~10s at 20tps - long
-  // enough to capture placement settling, short enough that it is not permanent instrumentation
-  // or unbounded spam), plus - per the manual test's own finding that missing activation/
-  // construction-failure visibility could not distinguish "no contact logged" from "Sable never
-  // took over this vehicle at all" - the classification/activation decision and any swallowed
-  // construction exception for every vehicle, so a reproduction can be captured and compared
-  // flat-vs-hill without reading or dumping any world/personal data beyond this one vehicle's
-  // own physics state.
-  private static final boolean DEBUG_GROUND_CONTACT = Boolean.getBoolean("div.debugGroundContact");
+  // Opt-in, self-limiting wheel-contact trace for the still-open initial-placement/asymmetric-
+  // support rollover question (see GroundContactDiagnostics' class doc for the full history/
+  // rationale, and why a Minecraft/SLF4J-typed diagnostic is safe to reference from Body but not
+  // from the outer PhysicsBridge class or activateOrClassify's generic signature). Logs each
+  // wheel's support-ray geometry/result and that tick's suspension/tire inputs for a bounded
+  // number of ticks per activated body (DEBUG_GROUND_CONTACT_TICKS, ~10s at 20tps - long enough
+  // to capture placement settling, short enough that it is not permanent instrumentation or
+  // unbounded spam). Activation/classification/construction-failure visibility now lives on
+  // GroundContactDiagnostics instead, called directly from active() (outer class) - that part
+  // needs to run even for a vehicle that never reaches Body at all.
+  private static final boolean DEBUG_GROUND_CONTACT = GroundContactDiagnostics.ENABLED;
   private static final int DEBUG_GROUND_CONTACT_TICKS = 200;
   private static final Logger LOGGER = LogUtils.getLogger();
-  static {
-   if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] diagnostics ENABLED (-Ddiv.debugGroundContact=true)");
-  }
-  /** Logs this vehicle's classification/activation decision - called unconditionally from
-   * active() (outer class) every tick a vehicle is seen, independent of whether it ends up a
-   * Body, a BuoyantBody, or inactive, so "never reached the ground solver" is distinguishable
-   * from "reached it but logged nothing." No-op (and no logger call at all) when the diagnostic
-   * is disabled, so this costs nothing in the default/released configuration. */
-  static void logClassification(String key, boolean ground, boolean floating, ActivationDecision decision) {
-   if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] classify key={} ground={} floating={} decision={}", key, ground, floating, decision);
-  }
-  /** Wraps a body-construction supplier so a swallowed InvalidChassisGeometry/RuntimeException
-   * (activateOrClassify's own job to catch and classify - this does not change that outcome,
-   * only observes it) and a successful construction are both logged with this vehicle's
-   * definition key, before the exception or result reaches activateOrClassify unchanged. Returns
-   * the original supplier unchanged when the diagnostic is disabled - zero overhead/behavior
-   * change in the default/released configuration, confirmed by the full existing test suite. */
-  static Supplier<VehicleBody> instrumentedConstruct(Supplier<VehicleBody> construct, String key) {
-   if (!DEBUG_GROUND_CONTACT) return construct;
-   return () -> {
-    try {
-     VehicleBody body = construct.get();
-     LOGGER.info("[DIV debugGroundContact] constructed key={} class={}", key, body.getClass().getSimpleName());
-     return body;
-    } catch (RuntimeException ex) {
-     LOGGER.warn("[DIV debugGroundContact] constructionFailed key={} exception={} message={}", key, ex.getClass().getName(), ex.getMessage());
-     throw ex;
-    }
-   };
-  }
   private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
   final ServerLevel level;
   final Overrides.Tuning tuning;
