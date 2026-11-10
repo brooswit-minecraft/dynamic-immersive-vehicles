@@ -41,14 +41,13 @@ class UnevenTerrainPassiveStabilityTest {
   // 0.3m suspension travel, representative of ordinary uneven ground, not an extreme case.
   double[] terrainHeight={0.02, 0.0, 0.0, 0.0};
   int ticks=400;
-  double maxOmega=0, maxTiltDegrees=0;
+  double maxOmega=0, maxTiltDegrees=0, midwayOmega=0;
   Vector3d velocity=new Vector3d(0,0,0);
   Vector3d angular=new Vector3d(0,0,0); // no seed - the terrain bump alone is the asymmetry
   Quaterniond orientation=new Quaterniond();
   double bodyPositionY=0.9036;
   Vector3d inertiaBody=inertiaBody();
   double spring=suspensionSpring(4), damper=suspensionDamper(spring,4);
-  double[] lastOmegaWindow=new double[20]; int windowIdx=0;
   for (int t=0;t<ticks;t++) {
    Quaterniond inverse=new Quaterniond(orientation).conjugate();
    Vector3d velocity0=new Vector3d(velocity), angular0=new Vector3d(angular);
@@ -93,14 +92,22 @@ class UnevenTerrainPassiveStabilityTest {
    double tiltDegrees=Math.toDegrees(Math.acos(Math.max(-1,Math.min(1,upNow.y))));
    maxOmega=Math.max(maxOmega, angular.length());
    maxTiltDegrees=Math.max(maxTiltDegrees, tiltDegrees);
-   lastOmegaWindow[windowIdx%lastOmegaWindow.length]=angular.length(); windowIdx++;
+   if (t==ticks/2) midwayOmega=angular.length();
    if (t%50==0 || t==ticks-1) System.out.println("[UnevenTerrainPassiveStabilityTest] t="+t+" |angular|="+angular.length()+" tilt="+tiltDegrees+"deg");
   }
-  double lastWindowMax=0; for (double v : lastOmegaWindow) lastWindowMax=Math.max(lastWindowMax,v);
-  System.out.println("[UnevenTerrainPassiveStabilityTest] maxOmega="+maxOmega+" maxTiltDegrees="+maxTiltDegrees+" lastWindowMaxOmega="+lastWindowMax);
+  double finalOmega=angular.length();
+  System.out.println("[UnevenTerrainPassiveStabilityTest] maxOmega="+maxOmega+" maxTiltDegrees="+maxTiltDegrees
+    +" midwayOmega(t="+(ticks/2)+")="+midwayOmega+" finalOmega(t="+(ticks-1)+")="+finalOmega);
   assertTrue(maxTiltDegrees < 30,
     "a small 2cm single-wheel terrain bump, fully undriven, should settle into a modest steady tilt, not a large rollover - got maxTiltDegrees="+maxTiltDegrees);
-  assertTrue(lastWindowMax <= maxOmega,
-    "angular velocity in the final 20 ticks should not exceed the trajectory's own peak - i.e. it should have settled/bounded, not still be growing toward a new peak at the end of the window - peak="+maxOmega+" last-window-max="+lastWindowMax);
+  // Review (comment 53080) correctly caught that comparing a trailing window's max against the
+  // WHOLE RUN's max (which necessarily includes that same trailing window) is tautologically true
+  // even under monotonic growth. A genuine trend check instead: the back HALF of the run
+  // (midway to final) must not still be growing by more than a small margin - if it were still
+  // climbing toward a new peak, finalOmega would exceed midwayOmega by much more than this.
+  assertTrue(finalOmega <= midwayOmega*1.1,
+    "angular velocity should not still be meaningfully growing in the back half of the run - if it "
+    +"were a genuine runaway rather than settling, finalOmega would exceed midwayOmega by more than "
+    +"a small margin - midwayOmega="+midwayOmega+" finalOmega="+finalOmega);
  }
 }
