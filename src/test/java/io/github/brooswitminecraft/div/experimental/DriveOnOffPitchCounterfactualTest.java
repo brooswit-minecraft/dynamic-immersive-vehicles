@@ -21,24 +21,33 @@ import static org.junit.jupiter.api.Assertions.*;
  * at the point drive was applied) and compares relative behavior (drive on vs off) rather than
  * claiming to reproduce the real capture tick-for-tick.
  *
- * <p><b>Result:</b> full-throttle (8000N) from rest unloads the front axle almost immediately
- * (front normal reaches 0 by tick 20) and pitches the chassis nose-up rapidly (49 degrees by
- * tick 20), continuing past vertical into a full tumble (both front and rear normal reach 0 -
- * fully airborne - by tick 40, pitch oscillating 32-69 degrees through tick 159) rather than
- * settling into a bounded wheelie. The undriven baseline stays essentially level (under 1 degree)
- * over the same window. Realized longitudinal impulse correctly drops to 0 once normal force (and
- * therefore the friction budget) reaches 0 - the friction model is NOT requesting force it has no
- * traction to deliver once airborne.
+ * <p><b>Corrected after review (comment 53076):</b> the per-wheel solver outputs
+ * ({@code tire.longitudinal()}) are FORCES (newtons), not impulses - an earlier version of this
+ * test mislabeled them; fixed throughout. Tilt is now measured as the angle between the current
+ * and initial up-vectors ({@code acos(up.dot(initialUp))}), not {@code asin(forward.y)} - asin's
+ * range is only [-90,90] degrees, so it cannot distinguish tilt past 90 degrees (a real tilt of
+ * 100 degrees and one of 80 degrees can report similarly), which made an earlier version's
+ * "oscillating pitch" past the first 90 degrees at least partly a measurement artifact, not
+ * necessarily real dynamics. The harness also has no chassis-collision/ground-recovery model, so
+ * behavior well after the vehicle goes airborne is not meaningful production evidence - the
+ * raycast-against-a-flat-plane model implicitly assumes a mostly-upright body. For both reasons,
+ * this test now reports and asserts on the FIRST support-loss and FIRST-45-degree-tilt ticks
+ * specifically, not a late post-airborne sample.
  *
- * <p>This is qualitatively consistent with a real wheelie/flip mechanism (drive force unloads the
- * front, pitch grows) but is quantitatively MUCH faster/more extreme than the real captured
- * window5 (pitch only 6/22/45 degrees at ticks 120/125/131, not yet a full tumble) - most likely
- * because this counterfactual applies full throttle instantly from a dead stop at tick 0, while
- * the real capture's own throttle/brake activity began around tick 69 (comment 53064), not tick
- * 0, and may not have been full throttle instantly either. This timing/initial-condition mismatch
- * is NOT resolved here - the two are not yet on a comparable timeline, so the specific degree
- * values should not be compared tick-for-tick against the real capture, only the qualitative
- * drive-on-vs-off direction.
+ * <p><b>Result:</b> full-throttle (8000N) from rest unloads the front axle almost immediately and
+ * reaches a 45-degree tilt (by the up-vector measure) within the first several ticks - see the
+ * printed onset ticks in the test output for the exact current values. The undriven baseline
+ * stays essentially level over the same window. Realized longitudinal force correctly drops to 0
+ * once normal force (and therefore the friction budget) reaches 0 - the friction model is NOT
+ * requesting force it has no traction to deliver once airborne.
+ *
+ * <p>This onset is qualitatively consistent with a real wheelie/flip mechanism (drive force
+ * unloads the front, tilt grows) but its onset timing is much faster than the real captured
+ * window5 (tilt only 6/22/45 degrees at ticks 120/125/131). A cold-start-vs-real-control-history
+ * difference (this counterfactual applies full throttle instantly from a dead stop at tick 0,
+ * while the real capture's own throttle/brake activity began around tick 69, comment 53064) is a
+ * PLAUSIBLE contributor to that timing gap - NOT established as the cause. The two runs are not
+ * on a comparable timeline, so onset tick numbers should not be compared as if they were.
  */
 class DriveOnOffPitchCounterfactualTest {
  private static final double MASS=350.0, GRAVITY=11.0, DT=0.05, FRICTION=1.0, SUSPENSION_TRAVEL=0.3, WHEEL_RADIUS=0.375, BRAKE_FORCE=12000.0;
@@ -57,28 +66,33 @@ class DriveOnOffPitchCounterfactualTest {
  private static double suspensionDamper(double spring, int n) { return 2*Math.sqrt(spring*MASS/n)*.7; }
  private static double suspensionForce(double c, double v, double spring, double damper) { return Math.max(0, c*spring-v*damper); }
  private record WheelState(Vector3d anchorWorld, Vector3d up, boolean hit, double normal, Vector3d point, Vector3d forward, Vector3d right, boolean front) {}
- private record TickSample(int tick, double pitchDegrees, double frontNormal, double rearNormal, double commandedLongitudinal, double realizedLongitudinal) {}
+ private record TickSample(int tick, double tiltDegreesFromUp, double frontNormal, double rearNormal, double commandedLongitudinalForce, double realizedLongitudinalForce) {}
 
- @Test void drivenRunUnloadsFrontAndPitchesNoseUpFasterThanUndriven() {
+ @Test void drivenRunLosesFrontSupportAndTiltsFasterThanUndriven() {
   var driven=run(8000.0, 160);
   var undriven=run(0.0, 160);
-  TickSample drivenAt131=driven.get(131), undrivenAt131=undriven.get(131);
-  System.out.println("[DriveOnOffPitchCounterfactualTest] driven t=131: pitch="+drivenAt131.pitchDegrees()
-    +"deg frontNormal="+drivenAt131.frontNormal()+" rearNormal="+drivenAt131.rearNormal()
-    +" commandedLongitudinal="+drivenAt131.commandedLongitudinal()+" realizedLongitudinal="+drivenAt131.realizedLongitudinal());
-  System.out.println("[DriveOnOffPitchCounterfactualTest] undriven t=131: pitch="+undrivenAt131.pitchDegrees()
-    +"deg frontNormal="+undrivenAt131.frontNormal()+" rearNormal="+undrivenAt131.rearNormal());
-  for (int t : new int[]{0,20,40,60,80,100,120,125,131,140,159}) {
-   TickSample d=driven.get(t);
-   System.out.println("  driven t="+t+" pitch="+d.pitchDegrees()+"deg front="+d.frontNormal()+" rear="+d.rearNormal()
-     +" commanded="+d.commandedLongitudinal()+" realized="+d.realizedLongitudinal());
+  TickSample firstSupportLoss=driven.stream().filter(d->d.frontNormal()==0).findFirst().orElse(null);
+  TickSample first45=driven.stream().filter(d->d.tiltDegreesFromUp()>=45).findFirst().orElse(null);
+  assertNotNull(firstSupportLoss, "driven run should lose front support within the sampled window");
+  assertNotNull(first45, "driven run should reach 45 degrees of tilt within the sampled window");
+  System.out.println("[DriveOnOffPitchCounterfactualTest] driven first front-support-loss: "+firstSupportLoss);
+  System.out.println("[DriveOnOffPitchCounterfactualTest] driven first 45-degree tilt: "+first45);
+  for (int t=0; t<=Math.min(first45.tick()+5, 159); t+=5) {
+   TickSample d=driven.get(t), u=undriven.get(t);
+   System.out.println("  t="+t+" driven(tilt="+d.tiltDegreesFromUp()+"deg front="+d.frontNormal()+" rear="+d.rearNormal()
+     +" commandedForce="+d.commandedLongitudinalForce()+" realizedForce="+d.realizedLongitudinalForce()
+     +")  undriven(tilt="+u.tiltDegreesFromUp()+"deg front="+u.frontNormal()+")");
   }
-  assertTrue(Math.abs(drivenAt131.pitchDegrees()) > Math.abs(undrivenAt131.pitchDegrees()),
-    "driving should pitch the vehicle more than not driving, by t=131 - driven="+drivenAt131.pitchDegrees()+" undriven="+undrivenAt131.pitchDegrees());
-  assertTrue(drivenAt131.frontNormal() < undrivenAt131.frontNormal(),
-    "driving should unload the front axle more than not driving, by t=131 - driven front="+drivenAt131.frontNormal()+" undriven front="+undrivenAt131.frontNormal());
-  for (TickSample d : driven) assertTrue(Math.abs(d.realizedLongitudinal()) <= Math.abs(d.commandedLongitudinal())+1e-6,
-    "realized longitudinal impulse must never exceed the commanded/traction-limited target at t="+d.tick()+" - commanded="+d.commandedLongitudinal()+" realized="+d.realizedLongitudinal());
+  TickSample undrivenAtFirst45Tick=undriven.get(first45.tick());
+  assertTrue(undrivenAtFirst45Tick.tiltDegreesFromUp() < first45.tiltDegreesFromUp(),
+    "at the tick the driven run first reaches 45 degrees, the undriven baseline should show much less tilt - driven="+first45.tiltDegreesFromUp()+" undriven="+undrivenAtFirst45Tick.tiltDegreesFromUp());
+  // Only check the force budget up to and including first support loss - beyond that point the
+  // harness's no-ground-recovery limitation (see class doc) makes later samples unreliable.
+  for (TickSample d : driven) {
+   if (d.tick() > firstSupportLoss.tick()) break;
+   assertTrue(Math.abs(d.realizedLongitudinalForce()) <= Math.abs(d.commandedLongitudinalForce())+1e-6,
+     "realized longitudinal FORCE must never exceed the commanded/traction-limited target at t="+d.tick()+" - commanded="+d.commandedLongitudinalForce()+" realized="+d.realizedLongitudinalForce());
+  }
  }
 
  private static java.util.List<TickSample> run(double drive, int ticks) {
@@ -129,15 +143,17 @@ class DriveOnOffPitchCounterfactualTest {
      false,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
    velocity.add(new Vector3d(solverVelocity).sub(bf));
    angular.add(new Vector3d(solverAngular).sub(ba));
-   double realizedLongitudinal=0; for (var r : results) realizedLongitudinal+=r.longitudinal();
-   double commandedLongitudinal=drive; // total commanded across all 4 wheels (driveForcePerWheel*4), before traction limiting
+   double realizedLongitudinalForce=0; for (var r : results) realizedLongitudinalForce+=r.longitudinal();
+   double commandedLongitudinalForce=drive; // total commanded force across all 4 wheels (driveForcePerWheel*4), before traction limiting
    double frontNormal=0, rearNormal=0;
    for (WheelState w : wheels) { if (!w.hit()) continue; if (w.front()) frontNormal+=w.normal(); else rearNormal+=w.normal(); }
    bodyPositionY += velocity.y*DT;
    orientation.integrate(DT, angular.x, angular.y, angular.z);
-   Vector3d forwardNow=orientation.transform(new Vector3d(0,0,1));
-   double pitchDegrees=Math.toDegrees(Math.asin(Math.max(-1,Math.min(1,forwardNow.y))));
-   samples.add(new TickSample(t, pitchDegrees, frontNormal, rearNormal, commandedLongitudinal, realizedLongitudinal));
+   // acos(up.dot(initialUp)) is well-defined over the full 0-180 degree range, unlike
+   // asin(forward.y) (range [-90,90]) which an earlier version used (review comment 53076).
+   Vector3d upNow=orientation.transform(new Vector3d(0,1,0));
+   double tiltDegreesFromUp=Math.toDegrees(Math.acos(Math.max(-1,Math.min(1,upNow.y))));
+   samples.add(new TickSample(t, tiltDegreesFromUp, frontNormal, rearNormal, commandedLongitudinalForce, realizedLongitudinalForce));
   }
   return samples;
  }
