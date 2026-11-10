@@ -427,6 +427,27 @@ public final class PhysicsBridge {
  static double suspensionDamper(double mass, int wheelCount, double spring) {
   return 2*Math.sqrt(spring*mass/wheelCount)*.7;
  }
+ /**
+  * Real rigid-body contact-point effective mass for the lateral (slip) direction at one wheel's
+  * contact point, 1/(1/mass + (point x right).I^-1.(point x right)) - standard rigid-body contact
+  * mechanics, replacing the naive mass/wheelCount split previously used in the lateral slip
+  * budget. mass/wheelCount only matches the real one-contact-arresting-itself mass when the
+  * chassis isn't rotating; once it is (the confirmed real mechanism behind the captured runaway -
+  * ticket comment 53010), that approximation requests far more lateral force than the body
+  * actually needs to arrest slip at that specific point, saturating the friction ceiling and
+  * alternating sign every tick (measured, same comment). {@code point} and {@code right} are
+  * world-frame (center-relative contact point, lateral unit axis); {@code inverseOrientation}
+  * rotates a world vector into the body's own principal-axis frame, where {@code inertiaBody}
+  * (diagonal solid-box tensor) applies. This exact tensor/point convention was validated against
+  * real production angularVelocity data to ~1e-5 rad/s over 30 real ticks across two separate
+  * placements (ticket comment 53008) before being used here.
+  */
+ static double contactLateralEffectiveMass(double mass, org.joml.Vector3dc point, org.joml.Vector3dc right, org.joml.Quaterniondc inverseOrientation, org.joml.Vector3dc inertiaBody) {
+  Vector3d torqueAxisBody=inverseOrientation.transform(new Vector3d(point).cross(right));
+  double rotationalTerm=torqueAxisBody.x*torqueAxisBody.x/inertiaBody.x()
+    +torqueAxisBody.y*torqueAxisBody.y/inertiaBody.y()+torqueAxisBody.z*torqueAxisBody.z/inertiaBody.z();
+  return 1.0/(1.0/mass+rotationalTerm);
+ }
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
@@ -474,6 +495,16 @@ public final class PhysicsBridge {
   // only reacts to the ground/flight category, not float capability) must start or stop getting
   // buoyancy on the very next tick, not stay stuck on whatever was true at construction.
   final double hullVolume;
+  // Body-local (diagonal, principal-axis) solid-box inertia tensor, derived from the SAME
+  // half-extents/mass passed to BoxPhysicsObject above - this is not a guess: Sable 2.0.5's
+  // native Rapier box collider creation (vendored Rust source, confirmed this ticket) builds
+  // its shape as cuboid(half_extents).mass(mass) with no mass-properties override, so Rapier
+  // itself derives inertia purely from this exact geometry/mass via the standard solid-box
+  // formula - verified against real captured production angularVelocity data (ticket comment
+  // 53008/53010): predicted-vs-actual Δω from this exact tensor matched to ~1e-5 rad/s across
+  // 30 consecutive real ticks on two separate placements. Used only for the real per-contact
+  // effective mass below, not for anything Sable itself already integrates.
+  final Vector3d inertiaBody;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
    this.flight=Classification.isFlightVehicle(v.definition);
@@ -489,6 +520,7 @@ public final class PhysicsBridge {
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
    halfExtents=new Vector3d(half);
    this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
+   inertiaBody=new Vector3d(mass/3*(half.y*half.y+half.z*half.z),mass/3*(half.x*half.x+half.z*half.z),mass/3*(half.x*half.x+half.y*half.y));
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
@@ -613,7 +645,8 @@ public final class PhysicsBridge {
     double longitudinal=braking ? -Math.signum(speed)*Math.min(tuning.brakeForce/wheels.size(),Math.abs(speed)*mass/wheels.size()/DT) : drive/wheels.size();
     if (skidSteer) longitudinal*=1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE);
     longitudinal-=speed*20;
-    double lateralSlipBudgetTarget=-sideSpeed*mass/wheels.size()/DT;
+    double lateralEffectiveMass=PhysicsBridge.contactLateralEffectiveMass(mass,point,right,inverse,inertiaBody);
+    double lateralSlipBudgetTarget=-sideSpeed*lateralEffectiveMass/DT;
     var tire=TireForces.friction(longitudinal,lateralSlipBudgetTarget,normal,tuning.friction);
     Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
     // Captured BEFORE the world-frame point/force below are mutated in place into the
