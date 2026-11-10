@@ -60,6 +60,30 @@ class HitchRegistryTest {
   assertTrue(hitches.isJointed("trailer"), "a later call with a working constructor must still succeed");
  }
 
+ @Test void reconcileTreatsANullCreatedHandleAsAFailedCreateNotAHealthyJoint() {
+  // Self-review kickback (comment 52759, head 8515052): a null result from create() is a
+  // different failure shape than a thrown exception, but must be treated identically - the
+  // no-op condition's own existing == null check (needed to tell "never jointed" apart from "an
+  // existing handle has since gone invalid") cannot also distinguish a key genuinely absent from
+  // the map from one explicitly mapped to a stored null handle. Left unhandled, a null create()
+  // result would be recorded as this trailer's partner forever, and every later reconcile call
+  // for the SAME desired partner would then silently no-op as if already healthily jointed -
+  // active() stays true (suppressing IV's native hitch authority) while no Sable constraint
+  // actually exists, with no retry ever attempted again.
+  var hitches = new HitchRegistry<String>();
+  assertThrows(RuntimeException.class, () -> hitches.reconcile("trailer", "truck", () -> null));
+  assertFalse(hitches.isJointed("trailer"), "a null handle must not be recorded as a joint");
+  assertNull(hitches.partnerOf("trailer"));
+  assertFalse(hitches.isCoherentlyJointedTo("trailer", "truck"));
+
+  // A later call for the SAME desired partner must actually retry create() again, not silently
+  // no-op against the (absent, since nothing was stored) prior attempt.
+  boolean[] removed = {false};
+  hitches.reconcile("trailer", "truck", () -> fakeJoint(removed));
+  assertTrue(hitches.isJointed("trailer"), "a later call with a working constructor must still succeed");
+  assertTrue(hitches.isCoherentlyJointedTo("trailer", "truck"));
+ }
+
  /**
   * These exercise PhysicsBridge.reconcileOrRollBack(...) directly - the exact production
   * composition active() calls, with a real BodyRegistry/HitchRegistry and fake body/removal

@@ -952,6 +952,37 @@ testing gap documented elsewhere in this file; this test instead exercises
 the real `compensableConnection`/`HitchRegistry.isCoherentlyJointedTo`
 composition it is built from, directly.
 
+**A null constraint handle treated as a healthy joint forever, found by a
+third self-review kickback at head `8515052` (Jira comment 52759).**
+`HitchRegistry.reconcile` stored whatever `create.get()` returned,
+unconditionally, then recorded the partner. If `create` ever returns
+`null` instead of throwing (rather than a thrown exception, which the
+existing `reconcileLeavesNoPartialStateWhenCreateThrowsAndCanRetryAfter`
+test already covered), the registry ends up with a recorded partner but
+`joints.get(trailer) == null` - and the no-op condition's own
+`existing == null` half (needed so a trailer with NO joint yet, as opposed
+to one whose existing handle has since gone invalid, isn't wrongly forced
+through a release/recreate cycle every tick) cannot tell that apart from a
+key simply absent from the map. So every later `reconcile` call for the
+*same* desired partner silently no-op'd forever, as if already correctly
+jointed - `active()` stays `true` (still suppressing IV's native hitch
+authority) while no Sable constraint has ever actually existed, with no
+retry ever attempted again. The same partial-authority shape as the first
+rollback fix above, from a third distinct cause.
+
+Fixed by checking `create.get()`'s result for `null` and throwing
+(`IllegalStateException`) before storing anything, exactly where a thrown
+exception from `create` itself would already be - so a `null` result now
+rolls back through the identical existing catch-and-retry path at the
+caller (`PhysicsBridge.reconcileHitch`/`reconcileOrRollBack`) with no
+separate handling needed there. `HitchRegistryTest
+.reconcileTreatsANullCreatedHandleAsAFailedCreateNotAHealthyJoint` is the
+regression itself: a `null`-returning `create` throws, leaves neither a
+joint nor a partner recorded (`isJointed`/`partnerOf`/
+`isCoherentlyJointedTo` all confirm nothing was stored), and a later call
+for the same desired partner correctly retries `create()` again rather
+than no-op'ing against the absent prior attempt.
+
 None of the above prove any in-game driving/flight/boat/towing behavior -
 see the acceptance list below.
 

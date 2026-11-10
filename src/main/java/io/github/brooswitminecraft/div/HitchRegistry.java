@@ -44,13 +44,28 @@ final class HitchRegistry<K> {
   * and, only if {@code desired} is non-null, constructs exactly one new one via {@code create}.
   * {@code create} is never called when the existing joint already matches and is valid, and
   * never called at all when {@code desired} is {@code null}.
+  *
+  * <p>A {@code null} result from {@code create} is treated as a failed creation, exactly like a
+  * thrown exception - neither {@code joints} nor {@code partners} records anything for
+  * {@code trailer} (self-review finding, MINECRAFT-498 post-integration: an earlier revision
+  * stored the raw, possibly-null result unconditionally; the no-op condition above's own
+  * {@code existing == null} half - needed to tell "never jointed" from "jointed with a since-
+  * invalidated handle" apart from a currently-valid one - cannot also distinguish a key absent
+  * from the map from a key explicitly mapped to {@code null}, so a stored null handle was
+  * silently treated as an already-healthy joint to {@code desired} forever after, never retried
+  * or cleared). Throwing here instead means a null result rolls back exactly like any other
+  * failed {@code create} call through the existing catch-and-retry path at the caller
+  * ({@code PhysicsBridge.reconcileHitch}/{@code reconcileOrRollBack}) - no separate handling is
+  * needed there.
   */
  void reconcile(K trailer, K desired, Supplier<PhysicsConstraintHandle> create) {
   PhysicsConstraintHandle existing = joints.get(trailer);
   if (Objects.equals(desired, partners.get(trailer)) && (existing == null || existing.isValid())) return;
   release(trailer);
   if (desired == null) return;
-  joints.put(trailer, create.get());
+  PhysicsConstraintHandle created = create.get();
+  if (created == null) throw new IllegalStateException("create() returned a null constraint handle");
+  joints.put(trailer, created);
   partners.put(trailer, desired);
  }
  /**
