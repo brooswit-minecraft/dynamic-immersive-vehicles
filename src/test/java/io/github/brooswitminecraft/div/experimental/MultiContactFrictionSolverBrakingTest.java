@@ -58,38 +58,34 @@ class MultiContactFrictionSolverBrakingTest {
   }
  }
 
- @Test void lowSpeedBrakingAtARealisticOffCenterContactReducesSpeedStablyWithoutOvershoot() {
+ @Test void lowSpeedBrakingAtARealisticOffCenterContactCancelsContactSlipNotNecessarilyComVelocity() {
   // Review (comment 53034): test realistic contact height/inertia and low-speed coupled
   // response, not only the COM case - a real wheel contact is well below the COM, giving genuine
   // rotational coupling the COM case (zero moment arm) cannot exercise at all.
   //
-  // Unlike the COM case, a SINGLE isolated off-center contact does NOT converge toward rest -
-  // it converges to a stable PARTIAL-cancellation fixed point (same structural reason lateral's
-  // effective-mass correction does for an isolated off-center point: some of the correction
-  // legitimately goes into induced rotation instead of fully arresting translation at that one
-  // point). Measured here: ~68% of the initial speed remains, essentially independent of
-  // iteration count (1 vs 8 passes agree to <1% of initial speed) - that is the correct signature
-  // of a converged, stable fixed point, not under-iteration. The property actually worth
-  // asserting is what matters physically: braking reduces speed, doesn't reverse it, and the
-  // result doesn't depend on how many passes were used (already converged, not still changing).
+  // Review ALSO corrected my first reading of this result (comment 53040): the solver targets
+  // and cancels the CONTACT-POINT slip - (angular x point + velocity).dot(forward) - not the
+  // COM velocity directly. An isolated off-center contact legitimately leaves most of the COM
+  // velocity in place (~68% of it, here), compensated by induced rotation, while the actual
+  // slip AT THAT CONTACT POINT is cancelled almost completely (measured: COM residual ~6.8e-3
+  // for a 1e-2 initial speed, but contact-point slip residual ~8e-5 - two orders of magnitude
+  // smaller). That is the solver doing exactly what it is designed to do, not an under-
+  // cancellation - so this test asserts the CONTACT slip converges toward zero, and separately
+  // reports (without asserting smallness of) the COM velocity residual, rather than conflating
+  // the two quantities the way an earlier version of this test did.
   Vector3d offCenterPoint=new Vector3d(0.35,-0.9,0.625); // representative of the real ATV geometry (ticket chassisReceipt)
   Vector3d inertia=new Vector3d(150,150,45); // representative diagonal solid-box tensor, same order as the real ATV's
   for (double initialSpeed : new double[]{0.01,-0.01,0.1,-0.1}) {
-   double[] finalSpeeds=new double[4]; int[] counts={1,2,4,8};
-   for (int idx=0; idx<counts.length; idx++) {
+   for (int n : new int[]{1,2,4,8}) {
     Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
     Vector3d angular=new Vector3d(0,0,0);
     var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(offCenterPoint,FORWARD,RIGHT,NORMAL,1.0)};
-    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,counts[idx]);
-    finalSpeeds[idx]=velocity.dot(FORWARD);
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,n);
     assertTrue(Double.isFinite(angular.length()), "off-center braking must not produce a non-finite induced angular velocity");
-    assertTrue(Math.signum(finalSpeeds[idx])==Math.signum(initialSpeed) || Math.abs(finalSpeeds[idx])<1e-9,
-      "speed="+initialSpeed+" n="+counts[idx]+": must not overshoot past zero, got "+finalSpeeds[idx]);
-    assertTrue(Math.abs(finalSpeeds[idx]) < Math.abs(initialSpeed),
-      "speed="+initialSpeed+" n="+counts[idx]+": braking must reduce speed magnitude, got "+finalSpeeds[idx]+" from "+initialSpeed);
+    double contactSlip=new Vector3d(angular).cross(offCenterPoint).add(velocity).dot(FORWARD);
+    assertTrue(Math.abs(contactSlip) < Math.abs(initialSpeed)*0.05,
+      "speed="+initialSpeed+" n="+n+": the ACTUAL contact-point slip (not COM velocity) should be nearly cancelled - got contactSlip="+contactSlip+" from initial "+initialSpeed+" (COM velocity residual="+velocity.dot(FORWARD)+", expected to remain substantial - compensated by induced rotation, not a failure)");
    }
-   for (double fs : finalSpeeds) assertEquals(finalSpeeds[0], fs, Math.abs(initialSpeed)*0.01,
-     "speed="+initialSpeed+": result should already be converged (stable fixed point), not still changing materially with more passes - "+java.util.Arrays.toString(finalSpeeds));
   }
  }
 
