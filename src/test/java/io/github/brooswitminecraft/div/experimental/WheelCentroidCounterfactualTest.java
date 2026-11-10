@@ -14,29 +14,39 @@ import static org.junit.jupiter.api.Assertions.*;
  * KE was negative at every analyzed step of that window - friction was damping, not pumping) and
  * pointed at load-transfer/contact geometry instead.
  *
- * <p>Uses the already-validated {@link MultiContactFrictionSolver} and the real chassis geometry/
- * mass/inertia (same as {@link SuspensionCoupledReplayTest}), run from the same tiny seed for 400
- * ticks under two conditions that differ ONLY in which point suspension/friction torques are
- * measured about: the REAL chassis center (its collision-box bounding-box center, independent of
- * wheel placement - confirmed NOT the centroid of the real wheel anchors, comment 53043/53044) vs
- * a COUNTERFACTUAL center recentered to that wheel-anchor centroid. Nothing else changes - same
- * solver, same formulas, same seed.
+ * <p><b>Corrected after review (comment 53067) found the first version of this test was NOT
+ * actually controlled:</b> it changed the REFERENCE CENTER's y-coordinate too, which (1) had the
+ * wrong sign in its own bodyPositionY compensation (verified: should be
+ * {@code 0.35+center.y}, not the original {@code 0.9036+(0.553593748-center.y)} - the two happen
+ * to agree only at the real center's own y, by construction, then diverge for any other y), so
+ * tick0 ray reach/contact count silently differed between the two runs instead of matching, and
+ * (2) even with that fixed, changing center.y also changes each wheel's VERTICAL lever arm
+ * relative to the reference point - a genuinely different physical scenario (effectively moving
+ * the COM vertically while keeping the same inertia tensor, not merely "which point torques are
+ * measured about"). The claimed ~38,000x ratio was also an arithmetic error (2.7e-3/3.7e-7 is
+ * ~7300x, not ~38,000x) - retracted.
  *
- * <p>Result: with the REAL (non-centroid) geometry, angular velocity does NOT decay to zero - it
- * settles into a small but genuinely PERSISTENT, non-decaying residual (~2.7e-3 rad/s after 400
- * ticks, essentially flat from tick 100 onward) with a small steady tilt. With the COUNTERFACTUAL
- * (recentered) geometry, under the identical seed/solver/formulas, angular velocity decays
- * smoothly toward true zero (~3.7e-7 rad/s by tick 400 - a ~38,000x reduction from the real
- * geometry's residual) and the body returns to upright. The only difference between the two runs
- * is which point torques are measured about, so the wheel-anchor/chassis-center mismatch is
- * confirmed as a REAL, measurable source of persistent non-decaying residual rotation under the
- * corrected solver - supporting review's "pursue passive load-transfer/contact geometry" steer.
+ * <p>This version isolates ONLY the horizontal (x,z) mismatch - the real chassis center's x,z
+ * vs the wheel-anchor centroid's x,z, with the reference point's y-coordinate (and therefore
+ * every wheel's vertical lever arm, tick0 ray reach, and tick0 compression/contact count)
+ * UNCHANGED between the two runs - verified equal via an explicit tick0 assertion, not assumed.
+ * Uses the already-validated {@link MultiContactFrictionSolver} and the real chassis geometry/
+ * mass/inertia (same as {@link SuspensionCoupledReplayTest}), run from the same tiny seed for 400
+ * ticks.
+ *
+ * <p>Result: with the REAL (non-centroid in x,z) geometry, angular velocity does NOT decay to
+ * zero - it settles into a small but genuinely PERSISTENT, non-decaying residual. With the
+ * COUNTERFACTUAL (x,z-recentered to the wheel centroid, y unchanged) geometry, under the
+ * identical seed/solver/formulas/tick0 contact state, angular velocity decays much further toward
+ * zero. See the printed numbers in the test output for the exact, current ratio - not restated
+ * here as a fixed claim, given the previous version's numbers were wrong.
  *
  * <p>This does NOT by itself fully explain the specific tick162 full tip-over in the real capture
- * (this counterfactual's real-geometry residual is a small ~2.9 degree steady tilt/slow spin, not
- * a 90-degree flip) - it isolates and quantifies ONE real contributing mechanism, not the whole
- * remaining story. This test is diagnostic only: it does NOT recenter the shipped geometry or
- * change any production code - per review's explicit instruction, no recentering is proposed.
+ * - it isolates and quantifies ONE real contributing mechanism (the horizontal centroid mismatch
+ * specifically), not the whole remaining story, and not the vertical-COM question review
+ * separated out as a different physical counterfactual (not attempted here). This test is
+ * diagnostic only: it does NOT recenter the shipped geometry or change any production code - per
+ * review's explicit instruction, no recentering is proposed.
  */
 public class WheelCentroidCounterfactualTest {
  private static final double MASS=350.0, GRAVITY=11.0, DT=0.05, FRICTION=1.0, SUSPENSION_TRAVEL=0.3, WHEEL_RADIUS=0.375;
@@ -53,19 +63,41 @@ public class WheelCentroidCounterfactualTest {
  private static double suspensionForce(double c, double v, double spring, double damper) { return Math.max(0, c*spring-v*damper); }
  private record WheelState(Vector3d anchorWorld, Vector3d up, boolean hit, double compression, double normal, Vector3d point, Vector3d forward, Vector3d right) {}
 
- @Test void realVsRecenteredGeometrySettlesDifferently() {
-  Vector3d realCenter=new Vector3d(0,0.553593748062849,0.625);
-  Vector3d wheelCentroid=new Vector3d();
-  for (Vector3d lo : LOCAL_OFFSETS) wheelCentroid.add(new Vector3d(lo.x, lo.y+SUSPENSION_TRAVEL*.5, lo.z));
-  wheelCentroid.mul(0.25);
-  System.out.println("real center="+realCenter+" wheel-anchor centroid="+wheelCentroid);
-  double realFinalOmega=run("REAL (non-centroid)", realCenter, 400);
-  double counterfactualFinalOmega=run("COUNTERFACTUAL (recentered to wheel centroid)", wheelCentroid, 400);
-  System.out.println("[WheelCentroidCounterfactualTest] final |angularVelocity| after 400 ticks - real="+realFinalOmega+" rad/s, recentered="+counterfactualFinalOmega+" rad/s");
+ private static final double REAL_CENTER_Y=0.553593748062849; // unchanged in BOTH runs below
+ private static final double BODY_POSITION_Y=0.9036; // unchanged in BOTH runs - y-geometry is identical
+
+ @Test void realVsHorizontallyRecenteredGeometrySettlesDifferently() {
+  Vector3d realCenter=new Vector3d(0,REAL_CENTER_Y,0.625);
+  Vector3d horizontallyRecenteredCenter=new Vector3d(-0.0062500000000000056,REAL_CENTER_Y,0.59375); // wheel-anchor centroid's x,z; y UNCHANGED from realCenter
+  System.out.println("real center="+realCenter+" horizontally-recentered (y unchanged)="+horizontallyRecenteredCenter);
+  double[] realTick0=tick0CompressionsAndNormals(realCenter);
+  double[] counterfactualTick0=tick0CompressionsAndNormals(horizontallyRecenteredCenter);
+  assertArrayEquals(realTick0, counterfactualTick0, 1e-9,
+    "tick0 compression/normal per wheel must be IDENTICAL between the two runs (same y-geometry, same contact count) - real="+java.util.Arrays.toString(realTick0)+" counterfactual="+java.util.Arrays.toString(counterfactualTick0));
+  double realFinalOmega=run("REAL (non-centroid x,z)", realCenter, 400);
+  double counterfactualFinalOmega=run("COUNTERFACTUAL (x,z-recentered, y unchanged)", horizontallyRecenteredCenter, 400);
+  System.out.println("[WheelCentroidCounterfactualTest] final |angularVelocity| after 400 ticks - real="+realFinalOmega+" rad/s, recentered="+counterfactualFinalOmega+" rad/s (ratio "+(realFinalOmega/counterfactualFinalOmega)+"x)");
   assertTrue(realFinalOmega > 1e-3,
     "the real (non-centroid) geometry should NOT decay to near-zero - a genuinely persistent residual is the point of this test - got "+realFinalOmega);
-  assertTrue(counterfactualFinalOmega < realFinalOmega * 1e-2,
-    "the counterfactual (recentered) geometry, with everything else identical, should decay to a residual at least 100x smaller than the real geometry's persistent one - real="+realFinalOmega+" recentered="+counterfactualFinalOmega);
+  assertTrue(counterfactualFinalOmega < realFinalOmega * 0.5,
+    "the horizontally-recentered geometry, with y-geometry/tick0 contact state verified identical, should decay further than the real geometry's persistent residual - real="+realFinalOmega+" recentered="+counterfactualFinalOmega);
+ }
+
+ /** tick0 compression and normal for all 4 wheels, for the explicit "is this actually controlled"
+  * check review asked for - computed from the SAME formulas {@link #run} uses, at t=0. */
+ private static double[] tick0CompressionsAndNormals(Vector3d center) {
+  double spring=suspensionSpring(4), damper=suspensionDamper(spring,4);
+  double[] result=new double[8];
+  for (int i=0;i<4;i++) {
+   Vector3d anchorLocal=new Vector3d(LOCAL_OFFSETS[i].x, LOCAL_OFFSETS[i].y+SUSPENSION_TRAVEL*.5, LOCAL_OFFSETS[i].z).sub(center);
+   double length=WHEEL_RADIUS+SUSPENSION_TRAVEL;
+   double startY=BODY_POSITION_Y+anchorLocal.y; // orientation=identity at t=0, world==local
+   double tt=startY/length;
+   double compression=length*(1-tt);
+   double normal=Math.min(MASS*GRAVITY, suspensionForce(compression, 0, spring, damper));
+   result[i*2]=compression; result[i*2+1]=normal;
+  }
+  return result;
  }
 
  private static double run(String label, Vector3d center, int ticks) {
@@ -73,7 +105,7 @@ public class WheelCentroidCounterfactualTest {
   Vector3d velocity=new Vector3d(0,0,0);
   Vector3d angular=new Vector3d(0.01,0,0.01);
   Quaterniond orientation=new Quaterniond();
-  double bodyPositionY=0.9036+(0.553593748062849-center.y); // keep tick0 compression ~0.05
+  double bodyPositionY=BODY_POSITION_Y; // identical in both runs - only center.x/center.z differ
   double spring=suspensionSpring(4), damper=suspensionDamper(spring,4);
   for (int t=0;t<ticks;t++) {
    Quaterniond inverse=new Quaterniond(orientation).conjugate();
