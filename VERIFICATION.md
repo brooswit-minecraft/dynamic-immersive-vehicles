@@ -913,6 +913,45 @@ first-activation retry case). The two pre-existing "preserves" and
 via `isCoherentlyJointedTo` rather than `isJointed`, for fidelity to what a
 real caller now actually passes.
 
+**The same plain-membership gap, found by external review (wroosbit,
+CHANGES_REQUESTED on PR #7 @ `6f4abea`, comment 52756) in a second call
+site this branch's own fix above had not reached.**
+`PhysicsBridge.unjointedTowingThrust`'s double-count exclusion used
+`hitches.isJointed(towed)` - the identical plain-joint-map-membership gap
+`reconcileOrRollBack` had just been corrected for, in the one remaining
+place it was never updated. Worse, it wasn't even scoped to the *current*
+towing vehicle: `isJointed(towed)` is true if `towed` is jointed to
+*any* towing vehicle, not specifically the one whose
+`unjointedTowingThrust` call is asking. Two distinct ways this understated
+a towing vehicle's compensation: an invalid handle (stale, from a towing
+vehicle that lost its body) still read as "jointed," and a trailer
+recently switched to a *different* towing vehicle than the one currently
+asking still read as "jointed" too - in both cases no valid Sable
+constraint actually transmits that trailer's thrust to *this* towing
+vehicle, so excluding it from the compensation sum silently dropped real
+towing-thrust compensation that MINECRAFT-496 established and this branch
+must preserve.
+
+Fixed by replacing `hitches.isJointed(towed)` with
+`hitches.isCoherentlyJointedTo(towed, v)` - scoped to exactly the towing
+vehicle `v` whose recursive sum is being computed, using the same
+validity-and-partner-aware check the rollback fix above introduced.
+`compensableConnection`'s second parameter was renamed from `jointed` to
+`coherentlyJointed` to match (its own boolean logic, `!mounted &&
+!coherentlyJointed`, is unchanged - only the caller-supplied fact is
+stronger now).
+
+`HitchRegistryTest.compensableConnectionCompositionExcludesOnlyAValidCurrentPartnerJoint`
+is the production-seam regression review required: a valid joint to
+exactly the current towing vehicle is excluded (as before), while a joint
+to a *different* towing vehicle and an invalidated handle to the same
+recorded partner both still contribute - the exact two cases review named.
+`unjointedTowingThrust`'s own recursive walk over real `TowingConnection`/
+`EntityVehicleF_Physics` graphs remains in the same live-entity/world
+testing gap documented elsewhere in this file; this test instead exercises
+the real `compensableConnection`/`HitchRegistry.isCoherentlyJointedTo`
+composition it is built from, directly.
+
 None of the above prove any in-game driving/flight/boat/towing behavior -
 see the acceptance list below.
 

@@ -386,4 +386,25 @@ class HitchRegistryTest {
   assertFalse(bodies.isActive("trailer"));
   assertFalse(bodies.isActive("truck"));
  }
+
+ @Test void compensableConnectionCompositionExcludesOnlyAValidCurrentPartnerJoint() {
+  // External review finding (comment 52756, head 6f4abea): PhysicsBridge.unjointedTowingThrust
+  // used hitches.isJointed(towed) for its double-count exclusion - the same plain-map-membership
+  // gap reconcileOrRollBack had, and not even scoped to the CURRENT towing vehicle. No valid
+  // Sable constraint transmits a trailer's thrust to a towing vehicle it either has no valid
+  // handle to, or is jointed to a DIFFERENT towing vehicle than the one asking - both cases must
+  // still contribute to compensation, exactly once, only the valid-current-partner case must not.
+  var hitches = new HitchRegistry<String>();
+  boolean[] removed = {false};
+  hitches.reconcile("trailer", "truck", () -> fakeJoint(removed));
+
+  assertFalse(PhysicsBridge.compensableConnection(false, hitches.isCoherentlyJointedTo("trailer", "truck")),
+    "a valid joint to exactly the current towing vehicle already reaches it mechanically - must be excluded");
+  assertTrue(PhysicsBridge.compensableConnection(false, hitches.isCoherentlyJointedTo("trailer", "another-truck")),
+    "jointed to a DIFFERENT towing vehicle - this one still gets no mechanical thrust, must still contribute");
+
+  removed[0] = true; // the underlying constraint went invalid out-of-band
+  assertTrue(PhysicsBridge.compensableConnection(false, hitches.isCoherentlyJointedTo("trailer", "truck")),
+    "an invalid handle transmits no force at all, even to its own recorded partner - must still contribute");
+ }
 }

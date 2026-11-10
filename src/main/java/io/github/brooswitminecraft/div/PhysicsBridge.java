@@ -315,19 +315,23 @@ public final class PhysicsBridge {
   * The portion of IV's own getRecursiveTowingThrust() a towing Sable body must still replicate
   * as a compensation impulse (see TowingForces): the same recursion IV's own method performs
   * (a {@code mounted} connection never contributes, matching IV's own rule), except that any
-  * immediate towed vehicle which already has an active hitch joint (and everything further
-  * recursed through it) is skipped entirely - its own engine thrust is now applied directly to
-  * its own Sable body by its own {@code stepGround} call and already reaches {@code v}
-  * mechanically through the joint Sable itself solves, so replicating it again here would
-  * double-count it (MINECRAFT-498 self-review finding). An un-jointed towed vehicle (still on
-  * IV's native hitch code - see {@code active()}'s ordering wait) has no such path, so its full
-  * contribution is still replicated exactly as MINECRAFT-496 established.
+  * immediate towed vehicle which already has a valid, coherent hitch joint to exactly {@code v}
+  * (and everything further recursed through it) is skipped entirely - its own engine thrust is
+  * now applied directly to its own Sable body by its own {@code stepGround} call and already
+  * reaches {@code v} mechanically through the joint Sable itself solves, so replicating it again
+  * here would double-count it (MINECRAFT-498 self-review finding). A towed vehicle with no such
+  * joint - still on IV's native hitch code (see {@code active()}'s ordering wait), or whose prior
+  * joint went invalid/pointed at a different (e.g. previous) towing vehicle (external review
+  * finding: plain joint-map membership is not enough here either, the same gap
+  * {@code reconcileOrRollBack} had - see {@link HitchRegistry#isCoherentlyJointedTo}) - has no
+  * such mechanical path to {@code v}, so its full contribution is still replicated exactly as
+  * MINECRAFT-496 established.
   */
  private static double unjointedTowingThrust(EntityVehicleF_Physics v) {
   double thrust = 0;
   for (TowingConnection connection : v.towingConnections) {
    EntityVehicleF_Physics towed = connection.towedVehicle;
-   if (!compensableConnection(connection.hitchConnection.mounted, hitches.isJointed(towed))) continue;
+   if (!compensableConnection(connection.hitchConnection.mounted, hitches.isCoherentlyJointedTo(towed, v))) continue;
    var accessor = (VehicleTowingAccessor)(Object)towed;
    thrust += accessor.div$getThrustForceValue() + unjointedTowingThrust(towed);
   }
@@ -339,13 +343,17 @@ public final class PhysicsBridge {
   * pulled out as a pure boolean seam so it is testable without a live entity/world/Sable
   * runtime. A {@code mounted} connection never contributes (matching IV's own
   * getRecursiveTowingThrust rule - a mounted vehicle, e.g. a flatbed's cargo, is not treated as
-  * adding towing thrust). An unmounted connection contributes only while its towed vehicle is
-  * NOT {@code jointed} - once jointed, that vehicle's engine thrust already reaches the towing
-  * body mechanically through the Sable joint, and compensating for it again here would double-
-  * count it (the MINECRAFT-498 self-review regression this seam exists to pin).
+  * adding towing thrust). An unmounted connection contributes only while its towed vehicle is NOT
+  * {@code coherentlyJointed} - a valid handle to exactly this towing vehicle, from
+  * {@link HitchRegistry#isCoherentlyJointedTo} - since only then does that vehicle's engine
+  * thrust already reach the towing body mechanically through the Sable joint; compensating for
+  * it again here would double-count it (the MINECRAFT-498 self-review regression this seam
+  * exists to pin). An invalid handle or one pointed at a different (e.g. previous) towing vehicle
+  * is NOT {@code coherentlyJointed}, and must still contribute - no valid constraint actually
+  * transmits that thrust in either case (external review finding, comment 52756).
   */
- static boolean compensableConnection(boolean mounted, boolean jointed) {
-  return !mounted && !jointed;
+ static boolean compensableConnection(boolean mounted, boolean coherentlyJointed) {
+  return !mounted && !coherentlyJointed;
  }
  /**
   * The exact classification active() applies to a construction failure, as a seam testable

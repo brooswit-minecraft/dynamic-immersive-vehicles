@@ -115,11 +115,15 @@ class PhysicsBridgeClassificationTest {
   assertTrue(PhysicsBridge.compensableConnection(false, false));
  }
 
- @Test void aJointedConnectionIsNeverCompensable() {
+ @Test void aCoherentlyJointedConnectionIsNeverCompensable() {
   // MINECRAFT-498 self-review regression (second finding): once a towed vehicle has its own
-  // Sable body and hitch joint, its engine thrust is applied directly to its own body and
-  // already reaches the towing vehicle mechanically through the joint. Compensating for it
-  // again here would propel a powered trailer twice.
+  // Sable body and a valid, coherent hitch joint to this towing vehicle, its engine thrust is
+  // applied directly to its own body and already reaches the towing vehicle mechanically through
+  // the joint. Compensating for it again here would propel a powered trailer twice. (The
+  // "coherentlyJointed" flag itself - a valid handle to exactly the current towing vehicle, not
+  // mere joint-map membership - is what HitchRegistry.isCoherentlyJointedTo computes; see
+  // HitchRegistryTest.compensableConnectionCompositionExcludesOnlyAValidCurrentPartnerJoint for
+  // that real composition, external review comment 52756.)
   assertFalse(PhysicsBridge.compensableConnection(false, true));
  }
 
