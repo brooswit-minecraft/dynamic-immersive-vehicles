@@ -70,10 +70,10 @@ public class WheelCentroidCounterfactualTest {
   Vector3d realCenter=new Vector3d(0,REAL_CENTER_Y,0.625);
   Vector3d horizontallyRecenteredCenter=new Vector3d(-0.0062500000000000056,REAL_CENTER_Y,0.59375); // wheel-anchor centroid's x,z; y UNCHANGED from realCenter
   System.out.println("real center="+realCenter+" horizontally-recentered (y unchanged)="+horizontallyRecenteredCenter);
-  double[] realTick0=tick0CompressionsAndNormals(realCenter);
-  double[] counterfactualTick0=tick0CompressionsAndNormals(horizontallyRecenteredCenter);
+  double[] realTick0=tick0Compressions(realCenter);
+  double[] counterfactualTick0=tick0Compressions(horizontallyRecenteredCenter);
   assertArrayEquals(realTick0, counterfactualTick0, 1e-9,
-    "tick0 compression/normal per wheel must be IDENTICAL between the two runs (same y-geometry, same contact count) - real="+java.util.Arrays.toString(realTick0)+" counterfactual="+java.util.Arrays.toString(counterfactualTick0));
+    "tick0 compression per wheel must be IDENTICAL between the two runs (same y-geometry, same contact count) - real="+java.util.Arrays.toString(realTick0)+" counterfactual="+java.util.Arrays.toString(counterfactualTick0));
   double realFinalOmega=run("REAL (non-centroid x,z)", realCenter, 400);
   double counterfactualFinalOmega=run("COUNTERFACTUAL (x,z-recentered, y unchanged)", horizontallyRecenteredCenter, 400);
   System.out.println("[WheelCentroidCounterfactualTest] final |angularVelocity| after 400 ticks - real="+realFinalOmega+" rad/s, recentered="+counterfactualFinalOmega+" rad/s (ratio "+(realFinalOmega/counterfactualFinalOmega)+"x)");
@@ -83,19 +83,24 @@ public class WheelCentroidCounterfactualTest {
     "the horizontally-recentered geometry, with y-geometry/tick0 contact state verified identical, should decay further than the real geometry's persistent residual - real="+realFinalOmega+" recentered="+counterfactualFinalOmega);
  }
 
- /** tick0 compression and normal for all 4 wheels, for the explicit "is this actually controlled"
-  * check review asked for - computed from the SAME formulas {@link #run} uses, at t=0. */
- private static double[] tick0CompressionsAndNormals(Vector3d center) {
-  double spring=suspensionSpring(4), damper=suspensionDamper(spring,4);
-  double[] result=new double[8];
+ /** tick0 COMPRESSION ONLY for all 4 wheels, for the explicit "is this actually controlled" check
+  * review asked for. Review (comment 53069) correctly caught that an earlier version of this
+  * helper also claimed NORMAL-force equality using a hardcoded normalSpeed=0, which does not
+  * match {@code run}'s real initial state ({@code run} seeds a nonzero angular velocity, so its
+  * actual tick0 localVelocity.dot(up) - and therefore the damper-driven part of normal - is
+  * nonzero and genuinely DIFFERENT between the two centers, since the same angular seed crossed
+  * with two different anchorWorld positions gives different values; that difference is part of
+  * what this test is exploring, not a confound to assert away). Narrowed to compression, which
+  * depends only on geometry/position (bodyPositionY, anchorLocal.y) and is correctly identical
+  * between the two runs regardless of the angular seed. */
+ private static double[] tick0Compressions(Vector3d center) {
+  double[] result=new double[4];
   for (int i=0;i<4;i++) {
    Vector3d anchorLocal=new Vector3d(LOCAL_OFFSETS[i].x, LOCAL_OFFSETS[i].y+SUSPENSION_TRAVEL*.5, LOCAL_OFFSETS[i].z).sub(center);
    double length=WHEEL_RADIUS+SUSPENSION_TRAVEL;
    double startY=BODY_POSITION_Y+anchorLocal.y; // orientation=identity at t=0, world==local
    double tt=startY/length;
-   double compression=length*(1-tt);
-   double normal=Math.min(MASS*GRAVITY, suspensionForce(compression, 0, spring, damper));
-   result[i*2]=compression; result[i*2+1]=normal;
+   result[i]=length*(1-tt);
   }
   return result;
  }
