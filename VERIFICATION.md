@@ -856,6 +856,63 @@ jointed survives a later transient reconcile failure. The two
 newly-activated-body and retry cases are unaffected, since a key that has
 never been reconciled is never-jointed either way.
 
+**Invalid/mismatched existing joint torn down by a failed rebuild, found by
+a second self-review kickback at head `41e8242` (Jira comment 52750).**
+The fix above was still incomplete: it computed `wasJointed` from
+`HitchRegistry.isJointed(v)`, plain joint-map membership, which says
+nothing about whether that joint's handle is still valid or whether it
+still points at the current desired partner. `HitchRegistry.reconcile`
+tears down an existing joint that is either invalid OR pointed at the
+wrong partner - via its own internal `release(trailer)` - *before* even
+attempting to construct its replacement. So by the time a replacement
+`create()` call fails, the "already jointed" state `isJointed` reported a
+moment earlier no longer exists; `reconcileOrRollBack` was reading a fact
+about a joint that `reconcile` itself had just destroyed, and wrongly
+preserving the body as if it still had a working joint, reproducing the
+exact partial-authority condition the first fix was meant to close -
+`active()` still suppresses IV's native hitch-following, but no Sable
+joint exists either.
+
+The actual fact needed is `HitchRegistry.isCoherentlyJointedTo(trailer,
+desired)` (new method): a still-valid handle to exactly `desired`,
+mirroring `reconcile`'s own no-op condition exactly, so
+`isCoherentlyJointedTo(...)` being true implies a `reconcile` call with
+that same `desired` is guaranteed to be a no-op (never calls `release` or
+`create`, and so can never throw). `active()` now derives the actual
+`desired` partner from the already-computed `towingVehicleActive` flag
+(the identical `isHitchableBody` check `reconcileHitch`'s own `desired`
+uses internally, so this mirrors it exactly rather than duplicating a
+second copy of that check that could drift) and passes
+`hitches.isCoherentlyJointedTo(v, desired)` into `reconcileOrRollBack`
+instead of `hitches.isJointed(v)`.
+
+One consequence worth stating plainly: given this corrected fact, an
+already-coherently-jointed trailer can now never actually reach
+`reconcileOrRollBack`'s rollback branch in real production use at all -
+reconcile only calls `create()` (the only thing that can throw) when NOT
+already coherently jointed, so any real failure necessarily means
+`wasJointed` was already `false`. `rollBackOnHitchFailure`'s
+parameterization is kept anyway (not collapsed to an unconditional `true`)
+since it still documents and directly unit-tests the intended contract
+independent of what the current `HitchRegistry` implementation happens to
+make reachable.
+
+`HitchRegistryTest` adds: `isCoherentlyJointedToDistinguishesValidityAndPartnerFromMereMembership`
+(direct coverage of the new method's three distinguishing cases - valid/
+matching, valid/wrong-partner, invalid/same-partner - against plain
+`isJointed`, which conflates all of them as "true"); the regression itself,
+`reconcileOrRollBackRollsBackOnFailedRebuildOfAnInvalidExistingJoint`
+(an invalidated handle to the correct partner, failed rebuild, rolls back
+with no leaked body or stale entry) and
+`reconcileOrRollBackRollsBackOnFailedSwitchFromAMismatchedExistingJoint`
+(the switch-partner shape of the same gap); and
+`retryAfterARolledBackInvalidJointRebuildSucceedsCleanly` (the rolled-back
+body's next-tick retry still succeeds cleanly, same as the original
+first-activation retry case). The two pre-existing "preserves" and
+"never-jointed" tests were updated to compute their `wasJointed` argument
+via `isCoherentlyJointedTo` rather than `isJointed`, for fidelity to what a
+real caller now actually passes.
+
 None of the above prove any in-game driving/flight/boat/towing behavior -
 see the acceptance list below.
 

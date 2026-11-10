@@ -8,6 +8,7 @@ import org.joml.Vector3dc;
 import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -107,7 +108,7 @@ class HitchRegistryTest {
   bodies.activate("trailer", body); // simulates a body that already existed before this tick
   List<Object> removed = new ArrayList<>();
 
-  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", hitches.isJointed("trailer"), () -> false, removed::add);
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", hitches.isCoherentlyJointedTo("trailer", "truck"), () -> false, removed::add);
 
   assertFalse(result, "an active-but-never-jointed body must roll back on its first failed hitch attempt, same as a brand-new one");
   assertFalse(bodies.isActive("trailer"), "the pre-existing but never-coupled body must not be left stranded unjointed");
@@ -115,11 +116,15 @@ class HitchRegistryTest {
  }
 
  @Test void reconcileOrRollBackPreservesACoherentlyJointedBodyOnTransientFailure() {
-  // The other half of the same production decision: a trailer already coherently jointed to its
-  // current desired partner before this call (healthy, from a previous tick) must never be
-  // rolled back merely because a later reconcile attempt fails - the same non-destructive
-  // guarantee deferToNativeHitch already provides when a towing vehicle's body disappears. Only
-  // the stale/failed joint is retried; the body itself survives.
+  // The other half of the same production decision: a trailer already coherently jointed - a
+  // valid handle to exactly its current desired partner - before this call (healthy, from a
+  // previous tick) must never be rolled back merely because a later reconcile attempt fails -
+  // the same non-destructive guarantee deferToNativeHitch already provides when a towing
+  // vehicle's body disappears. Only the stale/failed joint is retried; the body itself survives.
+  // (Note: in real production use, HitchRegistry.reconcile would itself never even attempt - let
+  // alone fail - a reconcile call while already coherently jointed to the same desired partner;
+  // this test exercises reconcileOrRollBack's own documented contract directly, as a pure seam,
+  // independent of whether the real HitchRegistry could ever actually reach this exact input.)
   var bodies = new BodyRegistry<String, Object>();
   var hitches = new HitchRegistry<String>();
   Object body = new Object();
@@ -128,12 +133,123 @@ class HitchRegistryTest {
   hitches.reconcile("trailer", "truck", () -> fakeJoint(jointRemoved)); // establishes the prior healthy joint
   List<Object> removed = new ArrayList<>();
 
-  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", hitches.isJointed("trailer"), () -> false, removed::add);
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", hitches.isCoherentlyJointedTo("trailer", "truck"), () -> false, removed::add);
 
   assertTrue(result, "a coherently-jointed body must stay Sable-active despite the failed reconcile");
   assertTrue(bodies.isActive("trailer"));
   assertSame(body, bodies.get("trailer"));
   assertTrue(removed.isEmpty(), "no removal callback for a previously-jointed body");
+ }
+
+ @Test void reconcileOrRollBackRollsBackOnFailedRebuildOfAnInvalidExistingJoint() {
+  // The exact gap the second self-review kickback found (comment 52750, head 41e8242):
+  // HitchRegistry.reconcile tears down an existing joint whose handle has gone invalid before
+  // even attempting its replacement - so by the time that replacement fails, the trailer has no
+  // joint at all, not the "already healthy" state plain isJointed map membership would have
+  // reported. wasJointed must come from isCoherentlyJointedTo (valid handle, correct partner),
+  // evaluated BEFORE this attempt, so this case rolls back exactly like a never-jointed body.
+  var bodies = new BodyRegistry<String, Object>();
+  var hitches = new HitchRegistry<String>();
+  Object body = new Object();
+  bodies.activate("trailer", body);
+  boolean[] staleRemoved = {false};
+  hitches.reconcile("trailer", "truck", () -> fakeJoint(staleRemoved));
+  staleRemoved[0] = true; // the underlying constraint went invalid out-of-band
+  boolean wasJointed = hitches.isCoherentlyJointedTo("trailer", "truck");
+  assertFalse(wasJointed, "an invalid handle is not a coherent joint, even to the correct partner");
+  List<Object> removed = new ArrayList<>();
+  BooleanSupplier reconcile = () -> {
+   try {
+    hitches.reconcile("trailer", "truck", () -> { throw new RuntimeException("rebuild failed this tick"); });
+    return true;
+   } catch (RuntimeException transientFailure) {
+    return false;
+   }
+  };
+
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", wasJointed, reconcile, removed::add);
+
+  assertFalse(result, "a failed rebuild of an invalidated joint must roll back - IV's native hitch motion becomes authoritative again");
+  assertFalse(bodies.isActive("trailer"));
+  assertFalse(hitches.isJointed("trailer"), "the destroyed stale entry must not be left behind either");
+  assertEquals(List.of(body), removed);
+ }
+
+ @Test void reconcileOrRollBackRollsBackOnFailedSwitchFromAMismatchedExistingJoint() {
+  // Same gap, the switch-partner shape: HitchRegistry.reconcile releases the OLD, still-valid
+  // joint before attempting the new partner, since the partner no longer matches desired - a
+  // failed attach to the new partner must not leave the trailer thinking it is still coupled to
+  // the old one.
+  var bodies = new BodyRegistry<String, Object>();
+  var hitches = new HitchRegistry<String>();
+  Object body = new Object();
+  bodies.activate("trailer", body);
+  hitches.reconcile("trailer", "truck-1", () -> fakeJoint(new boolean[1]));
+  boolean wasJointed = hitches.isCoherentlyJointedTo("trailer", "truck-2"); // the NEW desired partner
+  assertFalse(wasJointed, "a joint to a different partner is not coherently jointed to the new desired one");
+  List<Object> removed = new ArrayList<>();
+  BooleanSupplier reconcile = () -> {
+   try {
+    hitches.reconcile("trailer", "truck-2", () -> { throw new RuntimeException("attach failed this tick"); });
+    return true;
+   } catch (RuntimeException transientFailure) {
+    return false;
+   }
+  };
+
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", wasJointed, reconcile, removed::add);
+
+  assertFalse(result);
+  assertFalse(bodies.isActive("trailer"));
+  assertFalse(hitches.isJointed("trailer"));
+  assertEquals(List.of(body), removed);
+ }
+
+ @Test void retryAfterARolledBackInvalidJointRebuildSucceedsCleanly() {
+  var bodies = new BodyRegistry<String, Object>();
+  var hitches = new HitchRegistry<String>();
+  bodies.activate("trailer", new Object());
+  boolean[] staleRemoved = {false};
+  hitches.reconcile("trailer", "truck", () -> fakeJoint(staleRemoved));
+  staleRemoved[0] = true;
+  List<Object> removed = new ArrayList<>();
+  BooleanSupplier failingReconcile = () -> {
+   try {
+    hitches.reconcile("trailer", "truck", () -> { throw new RuntimeException("rebuild failed this tick"); });
+    return true;
+   } catch (RuntimeException transientFailure) {
+    return false;
+   }
+  };
+  PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", hitches.isCoherentlyJointedTo("trailer", "truck"), failingReconcile, removed::add);
+  assertFalse(bodies.isActive("trailer"));
+
+  // Next tick: a fresh first activation (still never coherently jointed) with a working rebuild.
+  Object retryBody = new Object();
+  bodies.activate("trailer", retryBody);
+  BooleanSupplier workingReconcile = () -> {
+   hitches.reconcile("trailer", "truck", () -> fakeJoint(new boolean[1]));
+   return true;
+  };
+  boolean result = PhysicsBridge.reconcileOrRollBack(bodies, hitches, "trailer", hitches.isCoherentlyJointedTo("trailer", "truck"), workingReconcile, removed::add);
+  assertTrue(result);
+  assertTrue(bodies.isActive("trailer"));
+  assertSame(retryBody, bodies.get("trailer"));
+  assertTrue(hitches.isJointed("trailer"));
+ }
+
+ @Test void isCoherentlyJointedToDistinguishesValidityAndPartnerFromMereMembership() {
+  var hitches = new HitchRegistry<String>();
+  assertFalse(hitches.isCoherentlyJointedTo("trailer", "truck"), "never jointed at all");
+
+  boolean[] removed = {false};
+  hitches.reconcile("trailer", "truck", () -> fakeJoint(removed));
+  assertTrue(hitches.isCoherentlyJointedTo("trailer", "truck"), "valid handle, matching partner");
+  assertFalse(hitches.isCoherentlyJointedTo("trailer", "truck-2"), "valid handle, but wrong desired partner");
+
+  removed[0] = true; // the underlying constraint went invalid out-of-band
+  assertFalse(hitches.isCoherentlyJointedTo("trailer", "truck"), "same partner, but handle now invalid");
+  assertTrue(hitches.isJointed("trailer"), "mere map membership still reports true - the exact distinction this method exists for");
  }
 
  @Test void reconcileOrRollBackSucceedsWithoutRemovalWhenReconcileSucceeds() {

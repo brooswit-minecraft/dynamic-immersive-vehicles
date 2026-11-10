@@ -21,6 +21,23 @@ final class HitchRegistry<K> {
  boolean isJointed(K trailer) { return joints.containsKey(trailer); }
  K partnerOf(K trailer) { return partners.get(trailer); }
  /**
+  * Whether {@code trailer} currently holds a joint to exactly {@code desired}, with a still-
+  * valid handle - the stronger fact {@code PhysicsBridge.reconcileOrRollBack} needs to tell a
+  * previously healthy hitch (safe to preserve if a later reconcile attempt fails) from a stale,
+  * invalid, or mismatched-partner one. Plain map membership ({@link #isJointed}) is not enough
+  * for that: {@link #reconcile} tears down an invalid or mismatched existing joint regardless of
+  * whether its replacement succeeds, so by the time a failed replacement is discovered, the old
+  * entry this trailer "was jointed" to is already gone - checking only {@code isJointed} before
+  * that call wrongly treats the about-to-be-destroyed stale entry as equivalent to a currently
+  * healthy one. This mirrors {@link #reconcile}'s own no-op condition exactly, so
+  * {@code isCoherentlyJointedTo(trailer, desired)} being true implies a {@link #reconcile} call
+  * with that same {@code desired} would be a no-op (never call {@code release} or {@code create}).
+  */
+ boolean isCoherentlyJointedTo(K trailer, K desired) {
+  PhysicsConstraintHandle existing = joints.get(trailer);
+  return existing != null && existing.isValid() && Objects.equals(partners.get(trailer), desired);
+ }
+ /**
   * Brings {@code trailer}'s joint in line with {@code desired} (its towing-vehicle key, or
   * {@code null} if it should have no joint right now): does nothing if already correctly
   * jointed to {@code desired} with a still-valid handle, otherwise releases any existing joint
