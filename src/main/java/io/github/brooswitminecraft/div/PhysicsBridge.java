@@ -173,7 +173,7 @@ public final class PhysicsBridge {
   Supplier<VehicleBody> construct = ground
     ? () -> new Body(server,v,tuning(definition))
     : () -> new BuoyantBody(server,v,tuning(definition));
-  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, GroundContactDiagnostics.instrumentedConstruct(construct, v.uniqueUUID, key));
+  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, GroundContactDiagnostics.instrumentedConstruct(construct, v.uniqueUUID, isClient, key));
   if (!activated || !ground) return activated;
   // Evaluated BEFORE reconcileHitch runs: HitchRegistry.reconcile already clears any existing
   // entry - valid/matching or not - before attempting to (re)create one, so this is the only
@@ -554,7 +554,9 @@ public final class PhysicsBridge {
    double damper=suspensionDamper(mass,wheels.size(),spring);
    boolean contact=false;
    boolean debugThisTick=DEBUG_GROUND_CONTACT && debugGroundContactTicksRemaining>0;
-   if (debugThisTick) LOGGER.info("[DIV debugGroundContact] mass="+mass+" gravity="+gravity
+   int debugTick=DEBUG_GROUND_CONTACT_TICKS-debugGroundContactTicksRemaining;
+   if (debugThisTick) LOGGER.info("[DIV debugGroundContact] entity="+v.uniqueUUID+" side="+(v.world.isClient()?"client":"server")+" tick="+debugTick
+     +" mass="+mass+" gravity="+gravity
      +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+pose.position()
      +" up="+up+" linearVelocity="+velocity+" angularVelocity="+angular);
    for(var wheel:wheels) {

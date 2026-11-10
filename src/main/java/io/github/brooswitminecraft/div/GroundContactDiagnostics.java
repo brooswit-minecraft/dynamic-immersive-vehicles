@@ -39,14 +39,26 @@ import java.util.function.Supplier;
  *  the failure mode this diagnostic exists to catch), two identical vehicles of the same
  *  definition were not distinguishable from each other, and the earliest-return paths
  *  (ineligible/broken-definition/no sub-level container) were not logged at all (comment 52889).</li>
- *  <li>v3 (this version) logs per-ENTITY (by {@code uniqueUUID}, so two identical ATVs are
- *  distinguishable) and only on an actual transition in that entity's own classification/
- *  activation/early-return state - not every tick - bounding output to real state changes rather
- *  than call frequency; tags client vs. server side; covers the early ineligible/broken-
- *  definition/no-container returns explicitly; and the startup marker is called directly from
- *  the mod's actual constructor ({@code DynamicImmersiveVehicles}), independent of any vehicle
- *  ever reaching {@code Body} at all, so logging readiness is verifiable even when every vehicle
- *  falls back early.</li>
+ *  <li>v3 logged per-ENTITY (by {@code uniqueUUID}, so two identical ATVs are distinguishable)
+ *  and only on an actual transition in that entity's own classification/activation/early-return
+ *  state - not every tick - bounding output to real state changes rather than call frequency;
+ *  tagged client vs. server side; covered the early ineligible/broken-definition/no-container
+ *  returns explicitly; and the startup marker was called directly from the mod's actual
+ *  constructor ({@code DynamicImmersiveVehicles}), independent of any vehicle ever reaching
+ *  {@code Body} at all - but two gaps remained (comment 52897): {@code instrumentedConstruct}
+ *  still logged every construction attempt unconditionally (a RETRYABLE construction failure -
+ *  anything but {@code InvalidChassisGeometry} - is retried every tick by {@code
+ *  activateOrClassify} with no cache, so a sustained failure would still log forever); and the
+ *  transition state was keyed by entity UUID alone, not UUID+side, so in an integrated/
+ *  singleplayer environment where the same entity's client and server logical sides both call
+ *  {@code active()}, their two independently-alternating decisions (a client side always reports
+ *  {@code CLIENT_ACTIVE}; the server computes the real one) would look like a continuous
+ *  client/server/client/server transition and log forever too.</li>
+ *  <li>v4 (this version) keys every transition - construction included - by entity UUID AND
+ *  side together, so each side's own history is tracked independently and neither alternates
+ *  the other into permanent "transitioning." Construction now goes through the same bounded
+ *  transition helper as classification/early-return, so a sustained retryable construction
+ *  failure logs once, not every tick.</li>
  * </ul>
  */
 final class GroundContactDiagnostics {
@@ -59,15 +71,18 @@ final class GroundContactDiagnostics {
  static void logStartupMarker() {
   if (ENABLED) LOGGER.info("[DIV debugGroundContact] diagnostics ENABLED (-Ddiv.debugGroundContact=true) - mod startup reached");
  }
- // Per-entity (java.util.UUID, not per-definition - two identical ATVs must be distinguishable)
- // last-logged state string. A line is only emitted when this entity's own state actually
- // changes (including the first observation, from no prior entry), not on every active() call -
- // active() runs every tick for every vehicle, client and server, so logging unconditionally
- // there would be unbounded spam (the exact v2 regression comment 52889 found).
- private static final Map<UUID, String> lastLogged = new ConcurrentHashMap<>();
+ // Keyed by entity UUID AND side together (a plain string key, "<uuid>:client"/"<uuid>:server"),
+ // not UUID alone: in an integrated/singleplayer environment the same entity's client and server
+ // logical sides both call active() independently, and conflating their two separately-
+ // alternating histories into one entry would make every call look like a transition forever
+ // (comment 52897). A line is only emitted when THIS side's own state for this entity actually
+ // changes (including the first observation), not on every call - active() runs every tick for
+ // every vehicle, so logging unconditionally would be unbounded spam (comment 52889).
+ private static final Map<String, String> lastLogged = new ConcurrentHashMap<>();
+ private static String sideKey(UUID entityId, boolean isClient) { return entityId + ":" + (isClient ? "client" : "server"); }
  private static void logOnTransition(UUID entityId, boolean isClient, String state, String line) {
   if (!ENABLED) return;
-  if (!state.equals(lastLogged.put(entityId, state))) LOGGER.info(line, entityId, isClient ? "client" : "server");
+  if (!state.equals(lastLogged.put(sideKey(entityId, isClient), state))) LOGGER.info(line, entityId, isClient ? "client" : "server");
  }
  /** Logs one of active()'s own early-return reasons (no definition, ineligible for either
   * domain, or a cached-broken definition) - the paths a vehicle can fall back on before any
@@ -83,18 +98,23 @@ final class GroundContactDiagnostics {
  /** Wraps a body-construction supplier so a swallowed InvalidChassisGeometry/RuntimeException
   * (activateOrClassify's own job to catch and classify - this does not change that outcome, only
   * observes it) and a successful construction are both logged with this entity's identity and
-  * definition key, before the exception or result reaches activateOrClassify unchanged. Returns
-  * the original supplier unchanged when the diagnostic is disabled - zero overhead/behavior
-  * change in the default/released configuration. */
- static <T> Supplier<T> instrumentedConstruct(Supplier<T> construct, UUID entityId, String key) {
+  * definition key, before the exception or result reaches activateOrClassify unchanged - but
+  * only on a transition in THIS entity+side's own last construction outcome, since a retryable
+  * (non-InvalidChassisGeometry) failure is retried every tick with no cache and would otherwise
+  * log forever. Returns the original supplier unchanged when the diagnostic is disabled - zero
+  * overhead/behavior change in the default/released configuration. */
+ static <T> Supplier<T> instrumentedConstruct(Supplier<T> construct, UUID entityId, boolean isClient, String key) {
   if (!ENABLED) return construct;
   return () -> {
    try {
     T body = construct.get();
-    LOGGER.info("[DIV debugGroundContact] constructed entity={} key="+key+" class={}", entityId, body.getClass().getSimpleName());
+    String className = body.getClass().getSimpleName();
+    logOnTransition(entityId, isClient, "construct:ok:"+className,
+      "[DIV debugGroundContact] constructed entity={} side={} key="+key+" class="+className);
     return body;
    } catch (RuntimeException ex) {
-    LOGGER.warn("[DIV debugGroundContact] constructionFailed entity={} key="+key+" exception={} message={}", entityId, ex.getClass().getName(), ex.getMessage());
+    logOnTransition(entityId, isClient, "construct:fail:"+ex.getClass().getName()+":"+ex.getMessage(),
+      "[DIV debugGroundContact] constructionFailed entity={} side={} key="+key+" exception="+ex.getClass().getName()+" message="+ex.getMessage());
     throw ex;
    }
   };
