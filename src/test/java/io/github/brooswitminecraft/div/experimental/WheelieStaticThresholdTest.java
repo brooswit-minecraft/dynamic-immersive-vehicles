@@ -19,38 +19,48 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code driveForce * cgHeight == mass*gravity*rearAxleToCgHorizontalDistance}, i.e.
  * {@code thresholdDriveForce = mass*gravity*rearAxleToCgHorizontalDistance/cgHeight}.
  *
- * <p>This does not model suspension/solver dynamics at all - it is the simplest possible
- * "could this even happen on paper" check, deliberately smaller in scope than a full simulation,
- * to establish whether "overly easy wheelies" is consistent with the vehicle's own configured
- * numbers before attempting anything more elaborate (or any code change).
+ * <p><b>Correction (ticket comment 53072):</b> review caught a geometry substitution error - the
+ * real ray distance from anchor to ground is {@code wheelRadius+suspensionTravel-compression}
+ * (the full ray length minus how much of it the hit consumed), NOT {@code wheelRadius+compression}
+ * as this originally used. Also, tick0's compression (0.05) is a falling/transient value, not
+ * static equilibrium - the equilibrium compression (where spring force exactly balances each
+ * wheel's share of weight, by the suspensionSpring formula's own construction) is
+ * {@code suspensionTravel/2 = 0.15}. Corrected CG height below uses the right formula and the
+ * equilibrium compression, matching review's own figure (~0.8036, not the original ~0.7036).
+ *
+ * <p><b>Also per review: this static/scalar result must NOT be used to conclude drive tuning is
+ * the root cause.</b> Real tire force is traction-limited (roughly weight*mu near rest) and
+ * load-dependent, not simply "commanded force vs a static threshold" - a trivial
+ * 0&lt;positive-threshold assertion is not the requested dynamic counterfactual. This class is
+ * kept only as a corrected, disclosed background calculation; see
+ * {@link DriveOnOffPitchCounterfactualTest} for the actual dynamic drive-on/off analysis review
+ * asked for, which tracks realized (not commanded) impulse and front/rear support unloading
+ * over time against the real captured pitch onset.
  */
 class WheelieStaticThresholdTest {
  private static final double MASS=350.0, GRAVITY=11.0, WHEEL_RADIUS=0.375, SUSPENSION_TRAVEL=0.3, MAX_DRIVE_FORCE=8000.0;
  // Real chassisReceipt/wheel values (ticket comment 52984/52985).
  private static final double CENTER_Y=0.553593748062849;
  private static final double REAR_Z=-0.0625, FRONT_Z=1.25, CG_Z=0.625; // LOCAL_OFFSETS z-values + chassisReceipt center.z
- private static final double STATIC_COMPRESSION=0.05; // real logged tick0 compression
+ private static final double EQUILIBRIUM_COMPRESSION=SUSPENSION_TRAVEL/2; // 0.15 - static rest, not the tick0 transient (0.05)
 
- @Test void realDriveForceExceedsTheStaticWheelieThreshold() {
-  double cgHeightAboveGround=CENTER_Y-((0.125+SUSPENSION_TRAVEL*.5)-(WHEEL_RADIUS+STATIC_COMPRESSION));
-  double rearAxleToCgHorizontal=CG_Z-REAR_Z;
-  double frontAxleToCgHorizontal=FRONT_Z-CG_Z;
-  double thresholdDriveForce=MASS*GRAVITY*rearAxleToCgHorizontal/cgHeightAboveGround;
-  System.out.println("[WheelieStaticThresholdTest] cgHeightAboveGround="+cgHeightAboveGround
-    +" rearAxleToCgHorizontal="+rearAxleToCgHorizontal+" frontAxleToCgHorizontal="+frontAxleToCgHorizontal
-    +" staticWheelieThresholdDriveForce="+thresholdDriveForce+" N, configured max drive="+MAX_DRIVE_FORCE+" N"
-    +" (ratio "+(MAX_DRIVE_FORCE/thresholdDriveForce)+"x)");
-  assertTrue(thresholdDriveForce > 0 && thresholdDriveForce < MAX_DRIVE_FORCE,
-    "the real vehicle's own configured max drive force ("+MAX_DRIVE_FORCE+" N) should already exceed "
-    +"the static front-axle-unload threshold ("+thresholdDriveForce+" N) computed purely from its own "
-    +"mass/wheelbase/CG height - if so, a wheelie at or near full throttle is consistent with the "
-    +"vehicle's own configured numbers, not necessarily a solver/friction-model defect");
+ private static final double ANCHOR_Y=0.125+SUSPENSION_TRAVEL*.5; // real localOffset.y + travel*.5, before subtracting center
+
+ @Test void correctedCgHeightMatchesReviewsFigure() {
+  double groundHeightRelativeToOrigin=ANCHOR_Y-(WHEEL_RADIUS+SUSPENSION_TRAVEL-EQUILIBRIUM_COMPRESSION);
+  double cgHeightAboveGround=CENTER_Y-groundHeightRelativeToOrigin;
+  System.out.println("[WheelieStaticThresholdTest] corrected cgHeightAboveGround="+cgHeightAboveGround+" (review's figure: ~0.80359)");
+  assertEquals(0.803593748062849, cgHeightAboveGround, 1e-9);
  }
 
- @Test void zeroDriveNeverExceedsAnyPositiveThreshold() {
-  // The "same controls with drive=0" diagnostic case review asked for - trivial by construction,
-  // stated explicitly rather than skipped: zero drive force cannot exceed a threshold that is a
-  // positive multiple of mass*gravity*distance/height (all positive for this real geometry).
-  assertTrue(0.0 < MASS*GRAVITY*(CG_Z-REAR_Z)/(CENTER_Y-((0.125+SUSPENSION_TRAVEL*.5)-(WHEEL_RADIUS+STATIC_COMPRESSION))));
+ @Test void staticThresholdIsBelowMaxDriveButNotUsedToConcludeRootCause() {
+  double groundHeightRelativeToOrigin=ANCHOR_Y-(WHEEL_RADIUS+SUSPENSION_TRAVEL-EQUILIBRIUM_COMPRESSION);
+  double cgHeightAboveGround=CENTER_Y-groundHeightRelativeToOrigin;
+  double rearAxleToCgHorizontal=CG_Z-REAR_Z;
+  double thresholdDriveForce=MASS*GRAVITY*rearAxleToCgHorizontal/cgHeightAboveGround;
+  System.out.println("[WheelieStaticThresholdTest] corrected staticWheelieThresholdDriveForce="+thresholdDriveForce
+    +" N, configured max drive="+MAX_DRIVE_FORCE+" N (ratio "+(MAX_DRIVE_FORCE/thresholdDriveForce)+"x) - "
+    +"background context only, NOT a root-cause conclusion (see class doc)");
+  assertTrue(thresholdDriveForce > 0 && thresholdDriveForce < MAX_DRIVE_FORCE);
  }
 }
