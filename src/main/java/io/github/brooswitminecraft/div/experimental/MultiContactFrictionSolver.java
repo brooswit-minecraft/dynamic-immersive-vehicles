@@ -49,7 +49,17 @@ public final class MultiContactFrictionSolver {
   * rad/s over 30 real ticks across two separate placements (ticket comment 53008).
   */
  public static double contactLateralEffectiveMass(double mass, Vector3dc point, Vector3dc right, Quaterniondc inverseOrientation, Vector3dc inertiaBody) {
-  Vector3d torqueAxisBody=inverseOrientation.transform(new Vector3d(point).cross(right));
+  return contactEffectiveMass(mass,point,right,inverseOrientation,inertiaBody);
+ }
+ /**
+  * Same formula as {@link #contactLateralEffectiveMass}, generalized to any contact-plane
+  * direction - review (comment 53034) correctly noted the braking self-limit was still using
+  * mass/wheelCount rather than a real directional effective mass the way lateral does, which is
+  * the exact same potential error 53010/53011/53022 identified for lateral, just in the forward
+  * direction instead of right.
+  */
+ public static double contactEffectiveMass(double mass, Vector3dc point, Vector3dc direction, Quaterniondc inverseOrientation, Vector3dc inertiaBody) {
+  Vector3d torqueAxisBody=inverseOrientation.transform(new Vector3d(point).cross(direction));
   double rotationalTerm=torqueAxisBody.x*torqueAxisBody.x/inertiaBody.x()
     +torqueAxisBody.y*torqueAxisBody.y/inertiaBody.y()+torqueAxisBody.z*torqueAxisBody.z/inertiaBody.z();
   return 1.0/(1.0/mass+rotationalTerm);
@@ -118,8 +128,13 @@ public final class MultiContactFrictionSolver {
     // overshoot/growth); at low speed the increment shrinks with speed and accumulates smoothly
     // toward full cancellation instead of oscillating like the old single-shot lateral code did.
     double prescribedLongitudinal; double brakeIncrement;
-    if (braking) { prescribedLongitudinal=0; brakeIncrement=-Math.signum(speed)*Math.abs(speed)*mass/n/dt*c.skidSteerMultiplier(); }
-    else { prescribedLongitudinal=driveForcePerWheel*c.skidSteerMultiplier(); brakeIncrement=0; }
+    if (braking) {
+     prescribedLongitudinal=0;
+     // Real forward-direction contact effective mass (review comment 53034), not mass/wheelCount -
+     // the exact same correction lateral already got, now applied here too.
+     double longitudinalEffectiveMass=contactEffectiveMass(mass,c.point(),c.forward(),inverseOrientation,inertiaBody);
+     brakeIncrement=-Math.signum(speed)*Math.abs(speed)*longitudinalEffectiveMass/dt*c.skidSteerMultiplier();
+    } else { prescribedLongitudinal=driveForcePerWheel*c.skidSteerMultiplier(); brakeIncrement=0; }
     double candidateBrakeConstraint=Math.max(-brakeForcePerWheel,Math.min(brakeForcePerWheel,accBrakeConstraint[i]+brakeIncrement));
     accBrakeConstraint[i]=candidateBrakeConstraint;
     double longitudinalTarget=prescribedLongitudinal+rollingResistance+candidateBrakeConstraint;

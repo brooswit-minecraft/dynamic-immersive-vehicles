@@ -29,15 +29,67 @@ class MultiContactFrictionSolverBrakingTest {
   return velocity.dot(FORWARD);
  }
 
- @Test void lowSpeedBrakingConvergesTowardRestWithoutReversalBothSigns() {
-  for (double initialSpeed : new double[]{0.5, -0.5}) { // low enough that the self-limiting branch binds, not the brakeForce cap
+ /**
+  * Review (comment 53034) caught that my first version of this test used ±0.5, which at
+  * mass=350, dt=0.05, brakeForce=1000 is still FORCE-CAPPED (the self-limiting branch only
+  * binds below brakeForcePerWheel*dt/mass = 0.142857 m/s) - it never exercised the regime this
+  * test is named for. Using ±0.01 and ±0.1 instead, both genuinely below that threshold.
+  *
+  * <p>Review also caught that a real, tiny, EXPLAINABLE sign reversal exists even with the fix:
+  * at a COM contact, one pass's brake correction exactly cancels the measured speed via the
+  * effective-mass formula, but rolling resistance (-speed*20, a separate, independent damping
+  * term, not part of the braking accumulator) ALSO removes a small amount of speed in the SAME
+  * pass - together they remove very slightly more than the original speed, overshooting past
+  * zero by an amount proportional to rolling resistance's own (much smaller) contribution. This
+  * is asserted explicitly and bounded below, not hidden behind a loose "near zero" tolerance.
+  */
+ @Test void lowSpeedBrakingConvergesTowardRestWithATinyExplainableOvershootBothSigns() {
+  for (double initialSpeed : new double[]{0.01, -0.01, 0.1, -0.1}) { // genuinely below the 0.142857 self-limiting threshold
    for (int n : new int[]{1,2,4,8}) {
     double finalSpeed=finalSpeed(initialSpeed, true, 0, n);
-    assertTrue(Math.abs(finalSpeed) <= Math.abs(initialSpeed) + 1e-9,
-      "speed="+initialSpeed+" n="+n+": braking must not increase speed magnitude, got "+finalSpeed);
-    assertTrue(Math.signum(finalSpeed) == Math.signum(initialSpeed) || Math.abs(finalSpeed) < 1e-9,
-      "speed="+initialSpeed+" n="+n+": braking must not reverse direction (overshoot past zero), got "+finalSpeed);
+    // Bound: the overshoot comes from rolling resistance's contribution to the SAME pass that
+    // cancels the bulk of the speed via the brake accumulator - its magnitude is at most on the
+    // order of initialSpeed*20*dt/mass (one pass's rolling-resistance deceleration), not
+    // unbounded or growing with iteration count.
+    double maxExplainableOvershoot=Math.abs(initialSpeed)*20*DT/MASS*2; // x2 margin
+    assertTrue(Math.abs(finalSpeed) <= maxExplainableOvershoot,
+      "speed="+initialSpeed+" n="+n+": braking should reach (approximately) rest, with any overshoot bounded by rolling resistance's own small contribution (bound "+maxExplainableOvershoot+") - got "+finalSpeed);
    }
+  }
+ }
+
+ @Test void lowSpeedBrakingAtARealisticOffCenterContactReducesSpeedStablyWithoutOvershoot() {
+  // Review (comment 53034): test realistic contact height/inertia and low-speed coupled
+  // response, not only the COM case - a real wheel contact is well below the COM, giving genuine
+  // rotational coupling the COM case (zero moment arm) cannot exercise at all.
+  //
+  // Unlike the COM case, a SINGLE isolated off-center contact does NOT converge toward rest -
+  // it converges to a stable PARTIAL-cancellation fixed point (same structural reason lateral's
+  // effective-mass correction does for an isolated off-center point: some of the correction
+  // legitimately goes into induced rotation instead of fully arresting translation at that one
+  // point). Measured here: ~68% of the initial speed remains, essentially independent of
+  // iteration count (1 vs 8 passes agree to <1% of initial speed) - that is the correct signature
+  // of a converged, stable fixed point, not under-iteration. The property actually worth
+  // asserting is what matters physically: braking reduces speed, doesn't reverse it, and the
+  // result doesn't depend on how many passes were used (already converged, not still changing).
+  Vector3d offCenterPoint=new Vector3d(0.35,-0.9,0.625); // representative of the real ATV geometry (ticket chassisReceipt)
+  Vector3d inertia=new Vector3d(150,150,45); // representative diagonal solid-box tensor, same order as the real ATV's
+  for (double initialSpeed : new double[]{0.01,-0.01,0.1,-0.1}) {
+   double[] finalSpeeds=new double[4]; int[] counts={1,2,4,8};
+   for (int idx=0; idx<counts.length; idx++) {
+    Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
+    Vector3d angular=new Vector3d(0,0,0);
+    var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(offCenterPoint,FORWARD,RIGHT,NORMAL,1.0)};
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,counts[idx]);
+    finalSpeeds[idx]=velocity.dot(FORWARD);
+    assertTrue(Double.isFinite(angular.length()), "off-center braking must not produce a non-finite induced angular velocity");
+    assertTrue(Math.signum(finalSpeeds[idx])==Math.signum(initialSpeed) || Math.abs(finalSpeeds[idx])<1e-9,
+      "speed="+initialSpeed+" n="+counts[idx]+": must not overshoot past zero, got "+finalSpeeds[idx]);
+    assertTrue(Math.abs(finalSpeeds[idx]) < Math.abs(initialSpeed),
+      "speed="+initialSpeed+" n="+counts[idx]+": braking must reduce speed magnitude, got "+finalSpeeds[idx]+" from "+initialSpeed);
+   }
+   for (double fs : finalSpeeds) assertEquals(finalSpeeds[0], fs, Math.abs(initialSpeed)*0.01,
+     "speed="+initialSpeed+": result should already be converged (stable fixed point), not still changing materially with more passes - "+java.util.Arrays.toString(finalSpeeds));
   }
  }
 
@@ -70,12 +122,18 @@ class MultiContactFrictionSolverBrakingTest {
  }
 
  @Test void brakingAndLateralDemandShareTheFrictionCircleCorrectly() {
-  // A contact with BOTH a large lateral slip AND braking active should still respect the
-  // combined friction circle (not exceed normal*friction in combined magnitude).
-  Vector3d velocity=new Vector3d(FORWARD).mul(0.3).add(new Vector3d(RIGHT).mul(0.3));
+  // Review (comment 53034): this test's name/comment claimed friction-circle compliance but
+  // only asserted finiteness. Assert the actual returned force magnitude directly against
+  // mu*normal, using a demand large enough to actually saturate the circle (small inputs like
+  // the previous version's 0.3/0.3 m/s never got near the budget, so compliance was untested).
+  Vector3d velocity=new Vector3d(FORWARD).mul(50).add(new Vector3d(RIGHT).mul(50)); // large demand, well over budget
   Vector3d angular=new Vector3d(0,0,0);
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  double magnitude=Math.hypot(results[0].longitudinal(),results[0].lateral());
+  double budget=NORMAL*FRICTION;
+  assertTrue(magnitude <= budget+1e-6,
+    "combined braking+lateral force magnitude ("+magnitude+") must not exceed the friction budget mu*normal ("+budget+")");
   assertTrue(Double.isFinite(velocity.x) && Double.isFinite(velocity.z), "combined braking+lateral demand must produce finite velocity, got "+velocity);
  }
 
