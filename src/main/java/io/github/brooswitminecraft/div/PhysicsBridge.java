@@ -579,13 +579,24 @@ public final class PhysicsBridge {
     double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
-    double speed=localVelocity.dot(forward), sideSpeed=localVelocity.dot(right);
+    // Friction/slip must be sampled at the point the tire impulse is actually applied (the
+    // terrain hit, `point` below), not at the suspension anchor (`arm`, used only for the
+    // vertical damping sample above - correct there, since that's the point whose own motion
+    // determines the raycast length's rate of change). Those two points differ by roughly
+    // radius+compression along `up`; on a rotating chassis, velocity differs between them by
+    // angular x that offset, so reusing the anchor-sampled velocity here fed a spurious lateral
+    // slip signal proportional to the chassis's own roll/pitch rate back into friction every
+    // tick - a growing feedback loop, not a one-off error (confirmed root cause: ticket comment
+    // 52906's captured data shows exactly this growth pattern, alternating lateral forces
+    // +4,-3,+13,-30,+69,-178 N before gross tilt, on an initially level, undriven vehicle).
+    Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
+    Vector3d contactVelocity=new Vector3d(angular).cross(point).add(velocity);
+    double speed=contactVelocity.dot(forward), sideSpeed=contactVelocity.dot(right);
     double longitudinal=braking ? -Math.signum(speed)*Math.min(tuning.brakeForce/wheels.size(),Math.abs(speed)*mass/wheels.size()/DT) : drive/wheels.size();
     if (skidSteer) longitudinal*=1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE);
     longitudinal-=speed*20;
     var tire=TireForces.friction(longitudinal,-sideSpeed*mass/wheels.size()/DT,normal,tuning.friction);
     Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
-    Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
       +" radius="+radius+" rayStart="+vec(start)+" rayEnd="+vec(end)+" hit="+hit.getLocation()
       +" distance="+hit.getLocation().distanceTo(vec(start))+" compression="+compression
