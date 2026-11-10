@@ -6,6 +6,7 @@ import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
+import dev.ryanhcode.sable.physics.config.dimension_physics.DimensionPhysicsData;
 import io.github.brooswitminecraft.div.mixin.VehicleTowingAccessor;
 import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.baseclasses.TowingConnection;
@@ -388,15 +389,27 @@ public final class PhysicsBridge {
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**
   * Per-wheel suspension spring rate {@code stepGround} divides the vehicle's full static load
-  * across: calibrated so that, under even per-wheel load (mass*9.81/wheelCount), the per-wheel
+  * across: calibrated so that, under even per-wheel load (mass*gravity/wheelCount), the per-wheel
   * {@link TireForces#suspension} force exactly balances gravity at HALF of
   * {@code suspensionTravel} compressed - the ride-height equilibrium this ticket's own triage
-  * (comment 52830) already derived algebraically. Extracted as its own seam (same value,
-  * verbatim) so a settling simulation can exercise the exact production constant instead of a
-  * hand-copied formula that could silently drift from it.
+  * (comment 52830) derived algebraically, generalized from that comment's own assumed 9.81 to
+  * whichever gravity magnitude is actually configured. {@code gravity} must be this level's own
+  * actual configured gravity magnitude (read fresh by {@code stepGround} every tick, via Sable's
+  * {@code DimensionPhysicsData.getGravity}) - NOT a hardcoded Earth 9.81. Confirmed root cause
+  * (bytecode-verified against the exact pinned dependency, {@code sable-neoforge-1.21.1:2.0.5}):
+  * {@code DimensionPhysics.DEFAULT_GRAVITY} is {@code (0,-11,0)}, not {@code (0,-9.81,0)} - this
+  * class previously hard-coded 9.81 here (and in the per-wheel normal clamp below) while the
+  * vehicle's actual Sable rigid body falls under 11 m/s^2. Calibrating the spring for a lighter
+  * gravity than the body actually experiences under-supports its real weight, so it settles with
+  * MORE compression than the intended half-travel equilibrium - sitting lower/closer to the
+  * ground by travel*.5*(11/9.81-1), about 18mm at the shared 0.3m default travel - a small but
+  * real, persistent, shared (not ATV-specific) sinking, exactly matching the reported "sinks into
+  * the ground a bit." Extracted as its own seam (same formula, now parameterized rather than a
+  * hand-copied constant) so a settling simulation can exercise it at both the correct and the
+  * previously-assumed gravity.
   */
- static double suspensionSpring(double mass, int wheelCount, double suspensionTravel) {
-  return mass*9.81/(wheelCount*suspensionTravel*.5);
+ static double suspensionSpring(double mass, int wheelCount, double suspensionTravel, double gravity) {
+  return mass*gravity/(wheelCount*suspensionTravel*.5);
  }
  /**
   * Per-wheel suspension damping rate - critically-damped-ish (0.7x the critical damping
@@ -546,7 +559,18 @@ public final class PhysicsBridge {
    // keep steering the wheels marked turnsWithSteer. Both can coexist on the same chassis.
    boolean skidSteer=v.definition.motorized != null && v.definition.motorized.hasSkidSteer;
    var wheels=groundContacts(v);
-   double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel);
+   // Read fresh every tick (never cached - a datapack reload or per-dimension override must take
+   // effect on the very next tick, the same "re-derive every tick" discipline this class already
+   // applies to installed parts). Magnitude, not just the Y component, so this stays correct even
+   // for a dimension whose configured gravity vector is not purely vertical - the same pattern
+   // Sable's own code uses at this exact call (see e.g. its Create-compat ejector mixin). Kept
+   // here on Body rather than as an outer static method: Body already depends on ServerLevel/
+   // Sable types throughout, while the outer class's static methods are deliberately
+   // Minecraft-type-free so they stay loadable and testable without a live Minecraft/NeoForge
+   // runtime (see VERIFICATION.md) - adding a ServerLevel-typed method to the outer class would
+   // pull that requirement into every one of its pure-function unit tests.
+   double gravity=DimensionPhysicsData.getGravity(level).length();
+   double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel,gravity);
    double damper=suspensionDamper(mass,wheels.size(),spring);
    boolean contact=false;
    // World-frame sum of this tick's wheel torque impulses (point x force*DT, about the COM) -
@@ -565,7 +589,7 @@ public final class PhysicsBridge {
     if(hit.getType()==HitResult.Type.MISS) { wheel.contactThisTick=false; continue; }
     double compression=length-hit.getLocation().distanceTo(vec(start));
     Vector3d localVelocity=new Vector3d(angular).cross(arm).add(velocity);
-    double normal=Math.min(mass*9.81,TireForces.suspension(compression,localVelocity.dot(up),spring,damper));
+    double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),spring,damper));
     double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
