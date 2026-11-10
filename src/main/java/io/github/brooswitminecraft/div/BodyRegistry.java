@@ -1,8 +1,8 @@
 package io.github.brooswitminecraft.div;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
-import java.util.function.Consumer;
 import java.util.function.Supplier;
 /**
  * Pure bookkeeping, by identity, for "does this key currently own a constructed body". A
@@ -32,10 +32,16 @@ final class BodyRegistry<K, B> {
   activate(key, construct.get());
   return true;
  }
- void removeIf(BiPredicate<K, B> predicate, Consumer<B> onRemove) {
+ /**
+  * {@code onRemove} receives the key as well as the body - unlike the single-key {@code
+  * deactivate}, a bulk sweep (cleanup/unload) is also where PhysicsBridge must release any hitch
+  * joint keyed by that same entity (either as the towed side's own joint, or as a towing
+  * vehicle whose trailers' joints must be released), which needs the key, not just the body.
+  */
+ void removeIf(BiPredicate<K, B> predicate, BiConsumer<K, B> onRemove) {
   active.entrySet().removeIf(e -> {
    if (!predicate.test(e.getKey(), e.getValue())) return false;
-   onRemove.accept(e.getValue());
+   onRemove.accept(e.getKey(), e.getValue());
    return true;
   });
  }

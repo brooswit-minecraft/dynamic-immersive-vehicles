@@ -1,11 +1,14 @@
 package io.github.brooswitminecraft.div;
 
+import dev.ryanhcode.sable.api.physics.constraint.GenericConstraintConfiguration;
+import dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
 import io.github.brooswitminecraft.div.mixin.VehicleTowingAccessor;
 import io.github.brooswitminecraft.div.mixin.WorldAccessor;
+import minecrafttransportsimulator.baseclasses.TowingConnection;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
@@ -23,6 +26,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -34,6 +38,11 @@ public final class PhysicsBridge {
  // bad content-pack definition is retried, and logged, once rather than every tick for every
  // vehicle instance of that definition.
  private static final Set<JSONVehicle> brokenDefinitions = Collections.newSetFromMap(new IdentityHashMap<>());
+ // Live hitch-joint bookkeeping, keyed by the trailer entity - see HitchRegistry for why this is
+ // its own class (a testable seam, independent of Body/live Sable types). Only ever keyed by a
+ // vehicle whose active VehicleBody is a Body (ground/flight/rotor) - a BuoyantBody has no
+ // pose/anchor API for a joint to connect to; see Classification's class doc.
+ private static final HitchRegistry<EntityVehicleF_Physics> hitches = new HitchRegistry<>();
  static final double DT = .05;
  private PhysicsBridge() {}
  private static Overrides.Tuning tuning(JSONVehicle definition) {
@@ -133,23 +142,218 @@ public final class PhysicsBridge {
   String key = definition.packID + ":" + definition.systemName;
   var installedGroundDevices = installedGroundDevices(v);
   var installedPropellers = installedPropellers(v);
-  boolean towed = v.towedByConnection != null, optedOut = Overrides.isOptedOut(key);
-  boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
+  TowingConnection towedByConnection = v.towedByConnection;
+  boolean towed = towedByConnection != null, optedOut = Overrides.isOptedOut(key);
+  // Hitch coupling (and the ordering wait/rollback it needs) applies only to the ground/flight/
+  // rotor domain - all three share one Body implementation. A float-only hull's activelyTowed
+  // gate stays exactly as floatEligible already enforces it (see Classification's class doc for
+  // why: BuoyantBody has no pose/anchor API for a joint to connect to).
+  boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, optedOut);
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
-  replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, VehicleBody::remove);
-  if (v.world.isClient()) return true;
+  replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, old -> { hitches.release(v); old.remove(); });
+  boolean alreadyActive = registry.isActive(v);
+  boolean towingVehicleActive = ground && towed && isHitchableBody(towedByConnection.towingVehicle);
+  var decision = ground
+    ? decide(true, v.world.isClient(), towed, alreadyActive, towingVehicleActive)
+    : (v.world.isClient() ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
+  if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
+  if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
   Supplier<VehicleBody> construct = ground
     ? () -> new Body(server,v,tuning(definition))
     : () -> new BuoyantBody(server,v,tuning(definition));
-  return activateOrClassify(registry, brokenDefinitions, v, definition, construct);
+  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, construct);
+  if (!activated || !ground) return activated;
+  // Evaluated BEFORE reconcileHitch runs: HitchRegistry.reconcile already clears any existing
+  // entry - valid/matching or not - before attempting to (re)create one, so this is the only
+  // point that can still tell whether the trailer entered this attempt coherently jointed to its
+  // actual current desired partner (towingVehicleActive already recomputes the identical
+  // isHitchableBody check reconcileHitch's own `desired` uses, so this mirrors it exactly rather
+  // than duplicating a second, possibly-diverging copy of that check) - see
+  // reconcileOrRollBack/rollBackOnHitchFailure and HitchRegistry.isCoherentlyJointedTo for why
+  // that, not alreadyActive or mere joint-map membership, is the fact that actually matters.
+  EntityVehicleF_Physics desired = towingVehicleActive ? towedByConnection.towingVehicle : null;
+  return reconcileOrRollBack(registry, hitches, v, hitches.isCoherentlyJointedTo(v, desired), () -> reconcileHitch(v, towedByConnection), VehicleBody::remove);
+ }
+ /** Whether the given towing vehicle's own active VehicleBody is a Body (ground/flight/rotor) -
+  * the only domain a hitch joint can connect to - rather than a BuoyantBody or no body at all. */
+ private static boolean isHitchableBody(EntityVehicleF_Physics towingVehicle) {
+  return registry.get(towingVehicle) instanceof Body;
+ }
+ /**
+  * The exact reconcile-then-rollback composition {@code active()} performs once its body is
+  * already active (freshly constructed this call, or kept from a previous tick): runs
+  * {@code reconcile}, and on failure, rolls back - releasing {@code key}'s hitch-registry entry
+  * and removing its body via {@code removeBody} - only if {@link #rollBackOnHitchFailure} says
+  * {@code key} did not already enter this attempt coherently jointed ({@code wasJointed} must be
+  * {@link HitchRegistry#isCoherentlyJointedTo}, not mere map membership - see
+  * {@link #rollBackOnHitchFailure}'s own doc for why). Generic over the body
+  * registry's key/value types and the hitch registry's key type so it is testable with fake
+  * bodies/joints/removal callbacks instead of a live entity/Sable runtime - {@code active()}
+  * calls this exact method with its own real {@code registry}/{@code hitches}/
+  * {@code VehicleBody::remove}. Returns whether the vehicle remains Sable-active after this call.
+  */
+ static <K, B> boolean reconcileOrRollBack(BodyRegistry<K, B> bodyRegistry, HitchRegistry<K> hitchRegistry,
+     K key, boolean wasJointed, BooleanSupplier reconcile, Consumer<B> removeBody) {
+  if (reconcile.getAsBoolean() || !rollBackOnHitchFailure(wasJointed)) return true;
+  B old = bodyRegistry.deactivate(key);
+  hitchRegistry.release(key);
+  if (old != null) removeBody.accept(old);
+  return false;
+ }
+ /**
+  * Whether a failed hitch-reconcile attempt must roll back (deactivate/remove) the body
+  * {@code active()} is holding, pulled out as a pure boolean seam. {@code wasJointed} must be
+  * {@link HitchRegistry#isCoherentlyJointedTo} - a still-valid handle to exactly the current
+  * desired partner, evaluated BEFORE this attempt - not whether its body merely already existed,
+  * and not mere joint-map membership either: both weaker facts can be true for a joint
+  * {@link HitchRegistry#reconcile} is about to tear down anyway (an invalid handle, or one
+  * pointed at a different partner) before even attempting the replacement whose failure this
+  * seam is reacting to. A body with no coherent joint entering this attempt - brand new this
+  * call, an existing body being hitched for the first time, or one whose prior joint was already
+  * stale/mismatched - that then fails its hitch attempt is neither coupled nor on native
+  * fallback - {@code active()} returning true for it has already suppressed IV's own native
+  * hitch-following - so leaving it live, unjointed, would strand it with no authority moving it
+  * at all. (Two self-review findings, MINECRAFT-498 post-integration: the first version of this
+  * check used {@code alreadyActive} instead, wrongly preserving a body merely because it
+  * predated this tick's first hitch attempt; the second used plain {@code isJointed} instead,
+  * wrongly treating a joint {@code reconcile} was about to invalidate-and-replace as equivalent
+  * to a currently healthy one.) Given the corrected fact, an already-coherently-jointed trailer
+  * can never actually reach this seam's rollback branch in production at all -
+  * {@link HitchRegistry#reconcile} only ever calls its {@code create} supplier (the only thing
+  * that can throw) when the trailer is NOT already coherently jointed to {@code desired} - but
+  * the parameter is kept (rather than deleting this function) since it still documents and
+  * directly tests the intended contract: rollback happens whenever there was no prior coherent
+  * joint to fall back on, full stop.
+  */
+ static boolean rollBackOnHitchFailure(boolean wasJointed) {
+  return !wasJointed;
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
   VehicleBody old = registry.deactivate(v);
-  if (old != null) old.remove();
+  if (old != null) { hitches.release(v); old.remove(); }
   return false;
+ }
+ enum ActivationDecision { INELIGIBLE, CLIENT_ACTIVE, DEFER_TO_NATIVE, ACTIVATE }
+ /**
+  * The full activation decision {@code active()} applies, pulled out as a pure seam testable
+  * without a live entity/world/registry. The client branch is resolved BEFORE the server-only
+  * hitch-ordering wait, and deliberately ignores {@code alreadyActive}/{@code towingVehicleActive}
+  * entirely: the body and hitch registries are populated only by server-side code (inside the
+  * {@code !isClient} branch of {@code active()}), so a client-side towed entity's own registry
+  * lookups are permanently false regardless of the server's real state. Applying
+  * {@code deferToNativeHitch} to the client the same way as the server would make a client-side
+  * towed vehicle defer to IV's native hitch code forever, even once the server has actually
+  * jointed it - the client would keep running IV's own force/movement path while the server
+  * independently runs Sable, a single-authority violation this bridge is required not to have.
+  * This was a real regression found by external review: an earlier revision evaluated the
+  * hitch-ordering wait before the client/server branch instead of after it.
+  */
+ static ActivationDecision decide(boolean eligible, boolean isClient, boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
+  if (!eligible) return ActivationDecision.INELIGIBLE;
+  if (isClient) return ActivationDecision.CLIENT_ACTIVE;
+  if (deferToNativeHitch(towed, alreadyActive, towingVehicleActive)) return ActivationDecision.DEFER_TO_NATIVE;
+  return ActivationDecision.ACTIVATE;
+ }
+ /**
+  * Whether an otherwise-eligible towed vehicle must still defer to IV's native hitch code this
+  * tick rather than get (or keep) a Sable body - the server-only half of the decision
+  * {@code decide()} applies, pulled out as its own pure boolean seam. Only a vehicle that is
+  * {@code towed} can ever defer. On FIRST activation ({@code !alreadyActive}), it defers until
+  * its towing vehicle has its own active body to joint against - a transient ordering wait, not
+  * a permanent exclusion. An ALREADY-active trailer (its own Sable body already exists) must
+  * never be deferred/torn down just because its towing vehicle's body has since gone away - it
+  * stays an unjointed, free-rolling Sable vehicle instead; only its stale joint, not its body, is
+  * {@code reconcileHitch}'s job to release in that case. This was a real regression caught by
+  * self-review before this ticket's first external review: an earlier revision applied this wait
+  * unconditionally, deactivating (destroying) an already-active trailer's body the moment its
+  * towing vehicle's body disappeared.
+  */
+ static boolean deferToNativeHitch(boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
+  return towed && !alreadyActive && !towingVehicleActive;
+ }
+ /**
+  * Brings this trailer's hitch joint in line with {@code connection}: builds one against its
+  * towing vehicle's active body if it does not have one yet (or had one to a different towing
+  * vehicle, or its old joint went invalid), removes a stale one if it is no longer towed (or its
+  * towing vehicle is no longer active), and does nothing otherwise. Called every tick after
+  * {@code active()} confirms this vehicle (towed or not) already has a live Sable body. Returns
+  * {@code false} if joint construction itself failed (e.g. Sable's own anchor/configuration
+  * validation) rather than letting the exception escape into the vehicle's own tick -
+  * {@link HitchRegistry#reconcile} guarantees no partial joint/partner state is recorded for a
+  * failed attempt either way. The caller ({@code active()}) is the one that decides what a
+  * {@code false} result means for the body: {@link #rollBackOnHitchFailure} rolls back a body
+  * that was JUST constructed this call (there is no coherent state - neither coupled nor on
+  * native fallback - for a brand new, never-jointed body to sit in), but leaves an
+  * already-healthy body from a previous tick alone, retried next tick - not cached as
+  * permanently broken either way, since the anchors are computed from live poses that can change
+  * every tick, unlike a chassis definition's fixed geometry.
+  */
+ private static boolean reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
+  EntityVehicleF_Physics desired = connection != null && isHitchableBody(connection.towingVehicle) ? connection.towingVehicle : null;
+  try {
+   hitches.reconcile(v, desired, () -> createHitch((Body)registry.get(desired), (Body)registry.get(v), connection));
+   return true;
+  } catch (RuntimeException transientFailure) {
+   return false;
+  }
+ }
+ private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
+  var towingPose = towing.box.getPose();
+  var trailerPose = trailer.box.getPose();
+  var hitchPos = HitchJoint.anchorWorldPosition(towingPose.position(), towingPose.orientation(), towing.center,
+    new Vector3d(connection.hitchConnection.pos.x, connection.hitchConnection.pos.y, connection.hitchConnection.pos.z), new Vector3d());
+  var hookupPos = HitchJoint.anchorWorldPosition(trailerPose.position(), trailerPose.orientation(), trailer.center,
+    new Vector3d(connection.hookupConnection.pos.x, connection.hookupConnection.pos.y, connection.hookupConnection.pos.z), new Vector3d());
+  var config = new GenericConstraintConfiguration(hitchPos, hookupPos, towingPose.orientation(), trailerPose.orientation(),
+    HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
+  return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
+ }
+ /**
+  * The portion of IV's own getRecursiveTowingThrust() a towing Sable body must still replicate
+  * as a compensation impulse (see TowingForces): the same recursion IV's own method performs
+  * (a {@code mounted} connection never contributes, matching IV's own rule), except that any
+  * immediate towed vehicle which already has a valid, coherent hitch joint to exactly {@code v}
+  * (and everything further recursed through it) is skipped entirely - its own engine thrust is
+  * now applied directly to its own Sable body by its own {@code stepGround} call and already
+  * reaches {@code v} mechanically through the joint Sable itself solves, so replicating it again
+  * here would double-count it (MINECRAFT-498 self-review finding). A towed vehicle with no such
+  * joint - still on IV's native hitch code (see {@code active()}'s ordering wait), or whose prior
+  * joint went invalid/pointed at a different (e.g. previous) towing vehicle (external review
+  * finding: plain joint-map membership is not enough here either, the same gap
+  * {@code reconcileOrRollBack} had - see {@link HitchRegistry#isCoherentlyJointedTo}) - has no
+  * such mechanical path to {@code v}, so its full contribution is still replicated exactly as
+  * MINECRAFT-496 established.
+  */
+ private static double unjointedTowingThrust(EntityVehicleF_Physics v) {
+  double thrust = 0;
+  for (TowingConnection connection : v.towingConnections) {
+   EntityVehicleF_Physics towed = connection.towedVehicle;
+   if (!compensableConnection(connection.hitchConnection.mounted, hitches.isCoherentlyJointedTo(towed, v))) continue;
+   var accessor = (VehicleTowingAccessor)(Object)towed;
+   thrust += accessor.div$getThrustForceValue() + unjointedTowingThrust(towed);
+  }
+  return thrust;
+ }
+ /**
+  * Whether one towing connection's towed-vehicle contribution belongs in
+  * {@code unjointedTowingThrust}'s sum - the exact per-connection decision that sum applies,
+  * pulled out as a pure boolean seam so it is testable without a live entity/world/Sable
+  * runtime. A {@code mounted} connection never contributes (matching IV's own
+  * getRecursiveTowingThrust rule - a mounted vehicle, e.g. a flatbed's cargo, is not treated as
+  * adding towing thrust). An unmounted connection contributes only while its towed vehicle is NOT
+  * {@code coherentlyJointed} - a valid handle to exactly this towing vehicle, from
+  * {@link HitchRegistry#isCoherentlyJointedTo} - since only then does that vehicle's engine
+  * thrust already reach the towing body mechanically through the Sable joint; compensating for
+  * it again here would double-count it (the MINECRAFT-498 self-review regression this seam
+  * exists to pin). An invalid handle or one pointed at a different (e.g. previous) towing vehicle
+  * is NOT {@code coherentlyJointed}, and must still contribute - no valid constraint actually
+  * transmits that thrust in either case (external review finding, comment 52756).
+  */
+ static boolean compensableConnection(boolean mounted, boolean coherentlyJointed) {
+  return !mounted && !coherentlyJointed;
  }
  /**
   * The exact classification active() applies to a construction failure, as a seam testable
@@ -175,10 +379,10 @@ public final class PhysicsBridge {
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  public static void cleanup() {
-  registry.removeIf((v, b) -> !v.isValid, VehicleBody::remove);
+  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); });
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level() == level, VehicleBody::remove);
+  registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  private static final class Body implements VehicleBody {
@@ -310,18 +514,37 @@ public final class PhysicsBridge {
     wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
     contact=true;
    }
-   // IV would normally add getRecursiveTowingThrust() - the engine thrust of everything this
-   // vehicle is towing - straight to its own thrustForce every tick, but its getForcesAndMotions
-   // never runs once PhysicsBridge takes over (see VehicleForcesMixin), so towing would otherwise
-   // feel lighter than it should. getRecursiveTowingThrust() is in IV's own force units, where
-   // IV itself integrates it as motion.addScaled(totalForce, 1/currentMass) once per tick - not
-   // SI newtons - so it must go through the same IV-motion<->Sable-velocity conversion this class
-   // already uses on activation/writeback (v.motion * v.speedFactor * 20), scaled by this body's
-   // own mass (which may be a tuning.massKg override, not v.currentMass) to land on the matching
-   // Sable impulse. See TowingForces for the derivation.
-   double towThrust = ((VehicleTowingAccessor)(Object)v).div$getRecursiveTowingThrust();
-   if (towThrust != 0) handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.impulse(towThrust,v.speedFactor,mass,v.currentMass)));
+   double towThrust = applyTowingCompensation(v);
    return contact || drive!=0 || towThrust!=0;
+  }
+  /**
+   * IV would normally add getRecursiveTowingThrust() - the engine thrust of everything this
+   * vehicle is towing - straight to its own thrustForce every tick, but its getForcesAndMotions
+   * never runs once PhysicsBridge takes over (see VehicleForcesMixin), so towing would otherwise
+   * feel lighter than it should. That recursive sum is in IV's own force units, where IV itself
+   * integrates it as motion.addScaled(totalForce, 1/currentMass) once per tick - not SI newtons
+   * - so it must go through the same IV-motion<->Sable-velocity conversion this class already
+   * uses on activation/writeback (v.motion * v.speedFactor * 20), scaled by this body's own
+   * mass (which may be a tuning.massKg override, not v.currentMass) to land on the matching
+   * Sable impulse. See TowingForces for the derivation. unjointedTowingThrust (not IV's own
+   * getRecursiveTowingThrust() directly) is what must be replicated here: a towed vehicle that
+   * already has its own Sable body and hitch joint (MINECRAFT-498) applies its own engine thrust
+   * directly via its own step call, which already reaches this vehicle mechanically through the
+   * joint Sable itself solves - replicating that portion again here would double-count it.
+   *
+   * <p>Shared by all three step methods, not just stepGround: this vehicle's own category does
+   * not change whether something it is towing can still be on IV's native hitch fallback (the
+   * first-activation ordering wait, or a towed float-only hull with no hitch-capable body at
+   * all) - a flight or rotor towing vehicle needs this compensation exactly as much as a ground
+   * one does, since Sable taking over its force path (VehicleForcesMixin) suppresses IV's own
+   * getRecursiveTowingThrust() call for it regardless of category (self-review finding: an
+   * earlier revision applied this only from stepGround, silently dropping a flight/rotor towing
+   * vehicle's compensation for any trailer still on native fallback).
+   */
+  private double applyTowingCompensation(EntityVehicleF_Physics v) {
+   double towThrust = unjointedTowingThrust(v);
+   if (towThrust != 0) handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.impulse(towThrust,v.speedFactor,mass,v.currentMass)));
+   return towThrust;
   }
   /**
    * Fixed-wing aircraft and blimps (never a rotorcraft - {@code Body.step} routes any vehicle
@@ -373,6 +596,7 @@ public final class PhysicsBridge {
    double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure)*tailArm;
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
+   applyTowingCompensation(v);
    return true;
   }
   /**
@@ -417,6 +641,7 @@ public final class PhysicsBridge {
    double yawTorque=RotorForces.yawTorque(rudderDeflection,thrust,tailArm);
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
+   applyTowingCompensation(v);
    return true;
   }
  }

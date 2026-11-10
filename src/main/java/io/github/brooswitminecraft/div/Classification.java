@@ -3,9 +3,9 @@ import minecrafttransportsimulator.jsondefs.JSONPart;
 import minecrafttransportsimulator.jsondefs.JSONVehicle;
 import java.util.List;
 /**
- * Pure category decision: does this vehicle definition, in this towing/opt-out state, get a
- * Sable body at all? Operates only on IV's plain JSON definition types, so it needs no live
- * entity, world, or Sable runtime and can run as an ordinary unit test.
+ * Pure category decision: does this vehicle definition, in this opt-out state, get a Sable body
+ * at all? Operates only on IV's plain JSON definition types, so it needs no live entity, world,
+ * or Sable runtime and can run as an ordinary unit test.
  *
  * <p>This bridge currently models four categories: a ground vehicle with at least one wheel or
  * track contact device (of any count, {@link #eligible}), a fixed-wing aircraft or blimp (flight
@@ -21,9 +21,20 @@ import java.util.List;
  * float devices alongside its wheel or flight forces in the same tick (see PhysicsBridge's
  * amphibious handling) - combined domain forces, not a silent water-behavior exclusion for a
  * vehicle that happens to drive or fly. A skid-only vehicle that neither drives nor floats (e.g.
- * a grounded skid helicopter with no canFloat skid), a vehicle actively hitched behind another,
- * and an explicit per-car opt-out are all excluded on purpose, not missed by accident. See
- * README.md for the follow-up tasks tracking each remaining gap.
+ * a grounded skid helicopter with no canFloat skid) and an explicit per-car opt-out are excluded
+ * on purpose, not missed by accident. See README.md for the follow-up tasks tracking each
+ * remaining gap.
+ *
+ * <p>A vehicle actively hitched behind another (a trailer) is eligible via {@link #eligible} on
+ * the same terms as any other vehicle in its own category - ground, flight, or rotorcraft, all
+ * three sharing one {@code PhysicsBridge.Body} implementation - which gives it its own Sable body
+ * jointed to its towing vehicle's body (see {@link HitchJoint}; the joint math itself is domain-
+ * agnostic, since it only connects two already-classified bodies), rather than excluding it to
+ * IV's native position-snap. {@link #floatEligible} still gates on {@code activelyTowed}: a
+ * float-only hull's own {@code BuoyantBody} has no pose/anchor API for a hitch joint to connect
+ * to (see {@code VehicleBody}, deliberately minimal), so a towed boat stays on IV's native hitch
+ * code - a concrete, citable API gap, not an invented restriction, and a natural follow-up once
+ * that API exists rather than something this task attempts speculatively.
  */
 public final class Classification {
  private Classification() {}
@@ -64,19 +75,25 @@ public final class Classification {
     && (definition.motorized.isAircraft || definition.motorized.isBlimp);
  }
  public static boolean eligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices,
-     List<JSONPart.JSONPartPropeller> installedPropellers, boolean activelyTowed, boolean optedOut) {
-  if (optedOut || activelyTowed) return false;
+     List<JSONPart.JSONPartPropeller> installedPropellers, boolean optedOut) {
+  if (optedOut) return false;
   if (definition == null || definition.motorized == null) return false;
   // An installed rotor propeller always makes this a rotorcraft, independent of the
   // isAircraft/isBlimp flag: review found a vehicle with an actual installed isRotor propeller
   // but no aircraft/blimp flag was previously either deactivated (no wheels) or stuck on the
   // ground solver (with wheels), its rotor never getting lift/control. Rotor physics must be
-  // driven by the actual installed part, not gated on a definition flag it doesn't need.
+  // driven by the actual installed part, not gated on a definition flag it doesn't need. A
+  // towed rotorcraft is eligible on the same terms as any other rotorcraft - see the class doc
+  // for why towed status alone no longer excludes any of this method's three categories.
   if (isRotorcraft(installedPropellers)) return true;
   // Fixed-wing and blimp are eligible here too - PhysicsBridge.Body picks FlightForces once it
   // has the live installed-propeller list; this pure category decision does not need to
   // distinguish them from each other.
   if (isFlightVehicle(definition)) return true;
+  // A towed ground vehicle (trailer) is eligible on the same terms as any other ground
+  // vehicle - PhysicsBridge is the one that additionally requires its towing vehicle to already
+  // have an active Sable body before actually constructing the trailer's, since that is what the
+  // hitch joint connects to; that dependency needs the registry, not this pure classification.
   return installedGroundDevices.stream().anyMatch(Classification::isDrivableGroundDevice);
  }
  /**

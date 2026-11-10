@@ -1,4 +1,4 @@
-# Verification, 2026-11-08
+# Verification, 2026-11-09
 
 ## Recovered prototype evidence (not current CI evidence)
 
@@ -63,16 +63,44 @@ vehicles, mixed wheel+track chassis, the no-config-entry default-enabled
 case, explicit per-car opt-out, a missing `motorized` section, and a null
 ground-device entry among installed parts. Aircraft and blimps are now
 covered as an eligible category requiring no ground-contact device at all
-(`isFlightVehicle`), still excluded by an explicit opt-out or an active tow.
-A rotorcraft (any installed `isRotor` propeller, see `isRotorcraft` below)
-is eligible the same way, checked directly against the installed part
-before the `isAircraft`/`isBlimp` flag or ground devices are even
-considered - a rotor-carrying vehicle with neither flag set, or one with
-wheels, is still eligible as a rotorcraft rather than deactivated or stuck
-on the ground solver (a gap the first actual Wroosbit review found; see the
+(`isFlightVehicle`), still excluded by an explicit opt-out. A rotorcraft
+(any installed `isRotor` propeller, see `isRotorcraft` below) is eligible
+the same way, checked directly against the installed part before the
+`isAircraft`/`isBlimp` flag or ground devices are even considered - a
+rotor-carrying vehicle with neither flag set, or one with wheels, is still
+eligible as a rotorcraft rather than deactivated or stuck on the ground
+solver (a gap the first actual Wroosbit review found; see the
 production-seam section below for the full fix). `PhysicsBridge.Body`
 routes it to the rotor force model instead of the fixed-wing model, which
 has no wing for a rotorcraft to act on.
+
+**Towed status removed from `Classification.eligible` entirely (MINECRAFT-498,
+scope correction after owner clarification).** An earlier revision of this
+task excluded a towed flight vehicle (and, separately, a towed rotorcraft)
+from eligibility while making a towed ground vehicle eligible - a
+ground-only interpretation of "coupled trailer category." The ticket's
+actual owner clarified that authorization is every IV vehicle, not
+ground-only, and that hitch coupling must extend to any category this
+bridge already models (not inventing support where IV or this bridge
+categorically cannot). Since the hitch joint itself (`HitchJoint`/
+`PhysicsBridge.createHitch`) is domain-agnostic - it only connects two
+already-classified Sable bodies by their own connection-point anchors -
+nothing about it actually required gating on domain. The `activelyTowed`
+parameter was dead code once that gate was removed from ground, flight, and
+rotorcraft alike, so it was deleted from `Classification.eligible`'s
+signature rather than left unused; `PhysicsBridge.active()` no longer
+passes it. `Classification.floatEligible` keeps its own `activelyTowed`
+parameter unchanged: a float-only hull's `BuoyantBody` (see `VehicleBody`,
+deliberately minimal) has no pose/anchor API for a hitch joint to connect
+to, a concrete API gap unrelated to towed status itself, so a towed boat
+still falls back to IV's native hitch code regardless.
+`ClassificationTest`'s towed-specific `eligible()` cases were removed (the
+parameter they exercised no longer exists) and replaced where needed with
+eligibility-confirming cases (e.g. `installedRotorPropellerStillExcludedByOptOut`,
+covering what remains excludable now that towed status alone no longer is);
+the actual towed-vehicle behavior (the ordering wait, joint create/release)
+is exercised at the `PhysicsBridge`/`HitchRegistry` level instead, where it
+now genuinely lives.
 
 ## Buoyancy tests (MINECRAFT-494, added 2026-11-08; updated for amphibious handling)
 
@@ -387,6 +415,246 @@ behave as specified - it is not the hosted Gradle build, is not the
 `runtime-smoke` Mixin-apply check, and proves nothing about in-game flight
 behavior.
 
+## Trailer hitch joint tests (MINECRAFT-498, added 2026-11-09)
+
+`ClassificationTest` now covers the changed rule: a towed ground vehicle
+(trailer) is eligible on the same terms as any other ground vehicle
+(`activelyTowedGroundVehicleIsNowEligibleForItsOwnHitchedBody`), still
+excluded by its own opt-out
+(`activelyTowedGroundVehicleOptOutStillExcludes`), while a towed flight
+vehicle stays excluded (`activelyTowedAircraftIsExcluded`, unchanged) -
+trailer bodies are a ground-domain-only feature in this change.
+
+`HitchJointTest` exercises every pure function in the new `HitchJoint`
+module - the hitch-domain analogue of `TireForcesTest`/`FlightForcesTest` -
+with no live entity, world, or Sable runtime: anchor-world-position at an
+identity pose (local offset minus center, no rotation), the same anchor
+under a 90-degree yaw (confirming the offset is rotated before
+translating, not after), and that it writes into and returns the exact
+`dest` instance passed in (the calling convention `PhysicsBridge.createHitch`
+relies on for each anchor). Locked-axis selection is covered for all three
+`JSONConnection` flag combinations - ordinary (linear only), `mounted`
+(every axis, fully rigid), `restricted` (linear plus yaw/roll, pitch free)
+- and that `mounted` takes precedence when both flags are set.
+
+**Lifecycle regression, caught by self-review before external review.** The
+first revision's `active()` applied the towing-vehicle-ordering wait
+unconditionally: once a trailer's own body was already active, if its
+towing vehicle later lost its own body (opt-out, despawn, chunk unload),
+the same guard that correctly defers a trailer's *first* activation also
+deactivated - destroyed - the trailer's already-active body, instead of
+leaving it as an unjointed, free-rolling Sable vehicle and only releasing
+the now-stale joint (`reconcileHitch`'s job). The fix pulls that decision
+out into a pure, package-private seam, `PhysicsBridge.deferToNativeHitch
+(towed, alreadyActive, towingVehicleActive)`, so it is testable without a
+live entity/registry: it defers only when `towed && !alreadyActive &&
+!towingVehicleActive`. `PhysicsBridgeClassificationTest` now covers all
+four cases - first activation waits, first activation proceeds once the
+towing vehicle has a body, an already-active trailer is never deferred
+even once its towing vehicle's body is gone (the regression itself), and
+an untowed vehicle never defers regardless of the other two flags.
+
+**Production-used hitch lifecycle seam, added after a second self-review round.**
+The first fix above (`deferToNativeHitch`) only tested a pure boolean helper, not the
+production `active()`/`reconcileHitch()`/`release` call paths themselves - review
+correctly found that gap: it could not establish that losing a towing vehicle's body
+releases the real joint while the trailer's body survives, or that `cleanup()`/
+`unload()` release joints before bodies. The hitch-joint bookkeeping previously
+inlined in `PhysicsBridge` (two `IdentityHashMap`s) is now its own class,
+`HitchRegistry<K>` - generic over the key type and built only against
+`PhysicsConstraintHandle` (a small Sable interface with no live-runtime dependency
+of its own), the same kind of seam `BodyRegistry` already provides for body
+lifecycle. `PhysicsBridge.reconcileHitch`/`active()`/`cleanup()`/`unload()` now all
+delegate to one `HitchRegistry` instance instead of managing the maps directly.
+
+`HitchRegistryTest` exercises this actual production class - not a parallel
+reimplementation - with fake `String` keys and a fake `GenericConstraintHandle`
+(the same non-sealed Sable subinterface real hitch joints use; `PhysicsConstraintHandle`
+itself is sealed and cannot be implemented directly). It covers: exactly one joint
+is constructed for a newly-jointed pair and reconciling again against the same
+valid partner does not construct a second one; reconciling to a `null` desired
+partner releases without ever calling `create`; **the regression itself** - a
+separate fake `BodyRegistry<String,Object>` stands in for real `Body` lifecycle,
+proving that releasing the towing vehicle's joint-registry entry never touches the
+trailer's still-active body (`HitchRegistry` has no way to reach a body at all -
+only keys and joint handles); releasing a key drops joints it holds as either the
+trailer or the towing side; releasing a key with no joint in either role is a
+no-op; an existing joint is rebuilt if it has gone invalid even for the same
+partner; switching to a different towing vehicle releases the old joint before
+building the new one; and a bulk sweep (mirroring `cleanup()`/`unload()`'s
+`BiConsumer`) releases every joint before its body, leaking none.
+
+`BodyRegistryTest`'s `removeIf` test now also asserts the bulk-removal
+callback receives the key, not just the body (`PhysicsBridge.releaseHitch`
+needs the entity to find and release any hitch joint keyed to it during a
+`cleanup()`/`unload()` sweep, which a body-only callback could not give it).
+
+**Towing-force double-count regression, caught by a third self-review round.**
+`Body.stepGround` still replicated IV's own `getRecursiveTowingThrust()` verbatim
+as a compensation impulse on the towing vehicle's Sable body - the exact
+MINECRAFT-496 fix, unmodified. That recursive sum includes
+`towedVehicle.thrustForceValue` for every towed vehicle in the chain, but a towed
+vehicle that is now Sable-active and jointed (this task's own change) also applies
+its own engine thrust directly to its own body via its own `stepGround` call, which
+already reaches the towing vehicle mechanically through the hitch joint Sable
+itself solves. Left unmodified, a powered trailer would be propelled twice: once
+by its own body's drive force, and again by the towing vehicle's now-stale
+compensation for the same thrust.
+
+The fix replaces the direct `getRecursiveTowingThrust()` call with
+`PhysicsBridge.unjointedTowingThrust(v)`, a private recursive sum this bridge
+performs itself - mirroring IV's own recursion and its `mounted`-connection skip
+exactly, except that any immediate towed vehicle already reported `isJointed` by
+`HitchRegistry` (and everything recursed through it) is skipped entirely, since
+that whole subtree's thrust already propagates through its own independently-
+Sable-simulated body and joint. Reading each towed vehicle's own
+`thrustForceValue` (previously only reachable via IV's own recursive method,
+never per-level) required a second mixin accessor on `VehicleTowingAccessor`
+(`@Accessor("thrustForceValue")`, alongside the existing `@Invoker` for the
+recursive method).
+
+The actual per-connection inclusion decision - `!mounted && !jointed` - is pulled
+out as its own pure, unit-tested seam, `PhysicsBridge.compensableConnection(mounted,
+jointed)`, the same kind of extraction `deferToNativeHitch` already used for the
+prior lifecycle regression: the full recursive walk over real `TowingConnection`/
+`EntityVehicleF_Physics` objects cannot be unit-tested without a live world (the
+same documented limitation as `active()` itself, below), but the decision it makes
+at each connection can be, and is: `PhysicsBridgeClassificationTest` now also
+covers an unjointed, unmounted connection staying compensable (MINECRAFT-496's
+original case, preserved), a jointed connection never being compensable (this
+regression), and a mounted connection never being compensable regardless of joint
+state (matching IV's own rule).
+
+**Two findings from external review (wroosbit, CHANGES_REQUESTED on PR #7 @
+`d30b35e`), both now fixed.**
+
+1. **Client-side single-authority violation.** `active()` evaluated
+   `deferToNativeHitch` (which depends on `registry.isActive(...)`) BEFORE the
+   `v.world.isClient()` branch. The body/hitch registries are populated only by
+   server-side code (inside that same branch's `else`), so a client-side towed
+   entity's own `alreadyActive`/`towingVehicleActive` lookups are permanently
+   `false` regardless of what the server has actually done - `deferToNativeHitch`
+   then returns `true` forever for a towed client entity, so `active()` returns
+   `false` on the client even once the server has genuinely built and jointed a
+   Sable body for it. The client keeps running IV's native force/movement path
+   while the server independently runs Sable - exactly the dual-authority
+   condition this ticket requires there be none of. Fix: the full decision is now
+   its own enum-returning seam, `PhysicsBridge.decide(eligible, isClient, towed,
+   alreadyActive, towingVehicleActive)`, which resolves the client branch first
+   and unconditionally (`CLIENT_ACTIVE` for any eligible client call, regardless
+   of the other three flags) - the server-only hitch-ordering wait
+   (`deferToNativeHitch`) is only ever consulted once `isClient` is already known
+   `false`. `active()` now calls `decide(...)` instead of inlining the two
+   checks in the wrong order. `PhysicsBridgeClassificationTest` covers the exact
+   regression (`clientNeverConsultsTheServerOnlyHitchOrderingWait`: `CLIENT_ACTIVE`
+   for every combination of towed/alreadyActive/towingVehicleActive once
+   `isClient` is true) plus the ineligible and server-side cases (first-activation
+   wait, already-active-trailer non-deferral, ordinary-vehicle activation) as a
+   single coherent seam, superseding the narrower `deferToNativeHitch`-only
+   tests from the prior round (kept alongside it, since `deferToNativeHitch`
+   remains its own callable piece `decide` delegates to).
+
+2. **Unhandled hitch-construction failure, corrected twice.** `reconcileHitch`
+   called `HitchRegistry.reconcile(..., () -> createHitch(...))` with no failure
+   path; if constraint creation threw (e.g. Sable's own anchor/configuration
+   validation), the exception would escape through `active()` into the
+   vehicle's own tick, after the trailer's body was already live - a partial-
+   failure case the ticket explicitly requires cleanup for.
+
+   The first fix made `reconcileHitch` swallow the exception
+   (`try`/`catch (RuntimeException)`), relying on `HitchRegistry.reconcile`'s own
+   contract - proved directly by `reconcileLeavesNoPartialStateWhenCreateThrowsAndCanRetryAfter`,
+   mirroring `BodyRegistry`'s existing "untouched on failure" guarantee - that a
+   failed `create` call records neither a joint nor a partner. A second review
+   round found this incomplete: it left the vehicle's own **body** untouched in
+   every case, including the first activation that the body itself was
+   constructed for. A brand-new, never-jointed body after a failed first attempt
+   is neither coupled nor on native fallback - not a coherent state, even though
+   nothing leaked at the registry level alone - and silently retrying forever in
+   that half-built state was exactly what review flagged.
+
+   `reconcileHitch` now returns `boolean` (`false` on a caught failure, instead
+   of silently returning) so `active()` can decide what the failure means for the
+   body it is holding. `PhysicsBridge.rollBackOnHitchFailure(alreadyActive)` -
+   `!alreadyActive` - is the decision; rolling back means removing the body and
+   returning `false` so IV's native hitch motion is authoritative again that
+   tick, and it only applies when the body was **just** constructed this same
+   call - an already-healthy body from a previous tick is never torn down merely
+   because a later reconcile attempt failed, the same non-destructive guarantee
+   `deferToNativeHitch` already provides when a towing vehicle's body disappears.
+
+   A third review round found the FIRST version of this fix's own tests
+   insufficient, even though the source-level fix was already correct: they drove
+   `HitchRegistry.reconcile` and `rollBackOnHitchFailure` separately and glued the
+   exception-to-boolean conversion and rollback together by hand, so they stayed
+   green even if `active()` itself stopped calling either one correctly - not a
+   production integration seam. The actual `activate -> reconcile -> conditional
+   rollback` composition is now its own generic method,
+   `PhysicsBridge.reconcileOrRollBack(bodyRegistry, hitchRegistry, key,
+   alreadyActive, reconcile, removeBody)`, parameterized over the body registry's
+   key/value types exactly like `activateOrClassify` already is for plain body
+   construction; `active()` calls this exact method with its own real
+   `registry`/`hitches`/`Body::remove`. `HitchRegistryTest` now drives this real
+   method directly (not a reimplementation) with a real `BodyRegistry`/
+   `HitchRegistry` and fake body/removal callbacks:
+   `reconcileOrRollBackRollsBackANewlyActivatedBodyOnFirstFailureWithExactlyOneRemoval`
+   asserts the `false` result, exactly one real removal callback (the actual
+   body, not just a counter), and the hitch-registry entry also cleared;
+   `reconcileOrRollBackPreservesAnAlreadyActiveBodyOnFailure` asserts an
+   already-active body survives untouched, with no removal callback at all;
+   `reconcileOrRollBackSucceedsWithoutRemovalWhenReconcileSucceeds` and
+   `retryAfterARolledBackFirstActivationSucceedsCleanly` cover the success path
+   and a full rollback-then-retry-and-succeed cycle. Retrying is still not cached
+   as permanently broken either way, since the anchors are computed from live
+   poses that can change every tick, unlike a chassis definition's fixed geometry
+   (there is no hitch analogue of `InvalidChassisGeometry`).
+
+   **Separately-tracked integration hold, not resolved by this fix:** this PR's
+   branch is still based on main at MINECRAFT-495 (`7b97198`), while the ticket's
+   prescribed merge order is boats (MINECRAFT-494/PR#4) -> rotorcraft
+   (MINECRAFT-497/PR#6) -> hitches (this PR, #7). Review has repeatedly noted #7
+   cannot be accepted as the every-vehicle integrated head until #4 and #6 merge
+   first; this branch will be rebased onto that integrated main, their
+   PhysicsBridge/Classification behavior preserved, and exact-head build/
+   runtime-smoke rerun once they do. Nothing in this PR can resolve that hold
+   on its own.
+
+**What remains unexercised by any unit test, the same shape of gap
+`PhysicsBridgeClassificationTest`'s own note below already describes for
+plain activation:** `PhysicsBridge.active()`'s own ordering wait (a trailer
+deferring until its towing vehicle's body exists), `reconcileHitch`'s
+create/replace/release transitions, and `createHitch`/`releaseHitch`
+against a live Sable body and constraint - all of these need a live
+`EntityVehicleF_Physics`/`ServerLevel`/Sable `SubLevelContainer`, for the
+same reason documented below (the `(WorldAccessor)v.world` mixin cast). A
+local, non-CI `javac --release 21 -proc:none` API-check (same approach as
+the recovered-prototype/rotorcraft-exclusion evidence above) against the
+real Sable 2.0.5 jar confirmed `PhysicsBridge`'s new code compiles against
+`dev.ryanhcode.sable.api.physics.constraint.GenericConstraintConfiguration`/
+`PhysicsConstraintHandle`/`ConstraintJointAxis`, `PhysicsPipeline.addConstraint`,
+`BoxPhysicsObject.getPose()`, and IV's real
+`minecrafttransportsimulator.baseclasses.TowingConnection`/`JSONConnection`
+fields (`hitchConnection`/`hookupConnection`/`towingVehicle`, `.pos`,
+`.mounted`, `.restricted`), and that all 101 tests across the full suite
+(`ClassificationTest`, `HitchJointTest`, `BodyRegistryTest`,
+`FlightForcesTest`, `TireForcesTest`, `OverridesTest`,
+`PhysicsBridgeClassificationTest`, `TowingForcesTest`) pass. This is
+evidence the new code compiles and its pure functions behave as specified -
+it is not the hosted Gradle build, is not the `runtime-smoke` Mixin-apply
+check, and proves nothing about in-game hitch behavior.
+
+A `testImplementation 'org.joml:joml:1.10.5'` dependency was added
+(`build.gradle`): the neoForge moddev plugin only wires JOML into the
+`main` sourceSet it treats as a mod, and `PhysicsBridgeClassificationTest`
+loading the real `PhysicsBridge` class now requires resolving JOML types
+(`GenericConstraintConfiguration`'s `Vector3dc`/`Quaterniondc` parameters)
+at class-verification time even though that test never constructs a hitch
+joint itself - without it, that test failed with
+`NoClassDefFoundError: org/joml/Vector3dc`, caught locally before this was
+ever pushed to CI. The version is pinned to the one NeoForge's own
+dependency resolution already strictly constrains main's `compileClasspath`
+to, not a separately chosen version.
+
 `BodyRegistryTest` exercises `BodyRegistry`, the actual production
 bookkeeping class PhysicsBridge relies on for its lifecycle/no-double-
 physics guarantee, using plain keys and dummy bodies instead of a live
@@ -504,6 +772,217 @@ real vehicle's body is actually constructed once, removed on opt-out/
 towing, and never duplicated end-to-end therefore remains proven only by
 the acceptance list below, not by any unit test in this repository.
 
+**All-category towing-thrust compensation gap, found by self-review at head
+`c5dec29` (post-integration).** This branch's generalization made flight and
+rotorcraft trailers hitchable, but `PhysicsBridge.unjointedTowingThrust`'s
+compensation impulse was only ever applied from `Body.stepGround` -
+`stepFlight` and `stepRotor` never called it. Since any Sable-active towing
+vehicle has its native `getForcesAndMotions`/`getRecursiveTowingThrust` call
+suppressed regardless of its own category (`VehicleForcesMixin`), a flight
+or rotorcraft vehicle towing a still-unjointed trailer (the first-activation
+ordering wait, or a towed float-only hull with no hitch-capable body at
+all) silently dropped that compensation entirely - exactly the scope gap
+the all-category generalization was supposed to close, now reintroduced at
+the force-application level instead of the classification level. Fixed by
+extracting the existing impulse-application half of `stepGround`'s towing
+logic into `Body.applyTowingCompensation(v)`, now called identically from
+`stepGround`, `stepFlight`, and `stepRotor`'s own tails - the same shared,
+category-agnostic seam `unjointedTowingThrust`/`compensableConnection`
+already were, now actually wired to every category that can produce one.
+
+No new pure-function seam was extracted for this fix, unlike the prior
+rollback/ordering regressions above: `unjointedTowingThrust`'s own
+per-connection decision (`compensableConnection`) was already correct and
+already domain-agnostic (it takes no category parameter at all) - already
+covered by `PhysicsBridgeClassificationTest`'s existing
+`compensableConnection` cases, which needed no change. This was purely a
+call-site wiring gap (two of three dispatch branches never invoking an
+already-correct shared method), in the same `Body`-construction-requires-a-
+live-`ServerLevel`/Sable-runtime testing gap documented just above for
+`stepGround`'s wheel loop and the rest of `Body.step` - there is no way to
+unit-test that `stepFlight`/`stepRotor` actually call
+`applyTowingCompensation` without constructing a live `Body`. The structural
+guarantee against this regression recurring is that all three step methods
+now call the one shared private method rather than duplicating (or, as
+happened here, omitting) the impulse-application logic inline.
+
+**Partial-authority lifecycle gap on a first failed hitch attempt, found by
+self-review kickback at head `f1330c1` (Jira comment 52740).** The rollback
+decision in `reconcileOrRollBack`/`rollBackOnHitchFailure` was keyed on
+`alreadyActive` - whether the trailer's *body* already existed before this
+call - not on whether it was already *coherently jointed*. Those are not the
+same fact: a vehicle can be Sable-active and untowed for any number of
+ticks (its own category needs no tow connection to be eligible) and then
+get hitched for the first time later. On that first hitch attempt,
+`alreadyActive` was already `true` (the body predates this call), so a
+failed `create()` was wrongly treated as "an already-healthy joint's
+transient rebuild failure" and the body was preserved - but there was never
+a joint to begin with. The result: `active()` still returns `true` (IV's
+own native hitch-following stays suppressed for this entity, same as any
+other Sable-active vehicle), yet no Sable joint exists either - neither
+authority is actually moving this trailer relative to its towing vehicle,
+strictly worse than either one alone.
+
+The actual fact `rollBackOnHitchFailure` needs is whether `key` was already
+coherently jointed (a valid handle to its current desired partner)
+*entering* this attempt, which `HitchRegistry.isJointed(key)` answers
+directly - and must be read before `reconcileHitch` runs, since
+`HitchRegistry.reconcile` itself already clears any existing entry (valid
+or not) before attempting to (re)create one, so it is the only point that
+can still observe the prior state. `active()` now passes
+`hitches.isJointed(v)` (evaluated eagerly, before the `reconcileHitch`
+closure is even constructed) into `reconcileOrRollBack` instead of
+`alreadyActive`; `rollBackOnHitchFailure`'s parameter was renamed to
+`wasJointed` to match, with no change to its own boolean logic
+(`!wasJointed`) - only to what fact its caller now supplies. This also
+means `alreadyActive` fully stops being needed by this seam: a body that is
+genuinely new this call is necessarily never-jointed too (a key can only
+ever appear in `HitchRegistry` once its body already existed on some prior
+call), so `wasJointed` subsumes the brand-new-body case without a separate
+check.
+
+`HitchRegistryTest` now drives this real production composition with the
+corrected fact: `reconcileOrRollBackRollsBackAnActiveButNeverJointedBodyOnFirstHitchFailure`
+is the regression itself - an active, never-jointed body whose first hitch
+attempt fails is rolled back exactly like a brand-new one, not preserved.
+`reconcileOrRollBackPreservesACoherentlyJointedBodyOnTransientFailure`
+(renamed from the prior, now-corrected
+`reconcileOrRollBackPreservesAnAlreadyActiveBodyOnFailure`, which had
+exercised exactly the buggy case above without a real joint ever
+established) now actually builds a real joint via `hitches.reconcile(...)`
+first, so the fact it passes to `reconcileOrRollBack` matches what a real
+caller would observe, and proves a body that WAS already coherently
+jointed survives a later transient reconcile failure. The two
+newly-activated-body and retry cases are unaffected, since a key that has
+never been reconciled is never-jointed either way.
+
+**Invalid/mismatched existing joint torn down by a failed rebuild, found by
+a second self-review kickback at head `41e8242` (Jira comment 52750).**
+The fix above was still incomplete: it computed `wasJointed` from
+`HitchRegistry.isJointed(v)`, plain joint-map membership, which says
+nothing about whether that joint's handle is still valid or whether it
+still points at the current desired partner. `HitchRegistry.reconcile`
+tears down an existing joint that is either invalid OR pointed at the
+wrong partner - via its own internal `release(trailer)` - *before* even
+attempting to construct its replacement. So by the time a replacement
+`create()` call fails, the "already jointed" state `isJointed` reported a
+moment earlier no longer exists; `reconcileOrRollBack` was reading a fact
+about a joint that `reconcile` itself had just destroyed, and wrongly
+preserving the body as if it still had a working joint, reproducing the
+exact partial-authority condition the first fix was meant to close -
+`active()` still suppresses IV's native hitch-following, but no Sable
+joint exists either.
+
+The actual fact needed is `HitchRegistry.isCoherentlyJointedTo(trailer,
+desired)` (new method): a still-valid handle to exactly `desired`,
+mirroring `reconcile`'s own no-op condition exactly, so
+`isCoherentlyJointedTo(...)` being true implies a `reconcile` call with
+that same `desired` is guaranteed to be a no-op (never calls `release` or
+`create`, and so can never throw). `active()` now derives the actual
+`desired` partner from the already-computed `towingVehicleActive` flag
+(the identical `isHitchableBody` check `reconcileHitch`'s own `desired`
+uses internally, so this mirrors it exactly rather than duplicating a
+second copy of that check that could drift) and passes
+`hitches.isCoherentlyJointedTo(v, desired)` into `reconcileOrRollBack`
+instead of `hitches.isJointed(v)`.
+
+One consequence worth stating plainly: given this corrected fact, an
+already-coherently-jointed trailer can now never actually reach
+`reconcileOrRollBack`'s rollback branch in real production use at all -
+reconcile only calls `create()` (the only thing that can throw) when NOT
+already coherently jointed, so any real failure necessarily means
+`wasJointed` was already `false`. `rollBackOnHitchFailure`'s
+parameterization is kept anyway (not collapsed to an unconditional `true`)
+since it still documents and directly unit-tests the intended contract
+independent of what the current `HitchRegistry` implementation happens to
+make reachable.
+
+`HitchRegistryTest` adds: `isCoherentlyJointedToDistinguishesValidityAndPartnerFromMereMembership`
+(direct coverage of the new method's three distinguishing cases - valid/
+matching, valid/wrong-partner, invalid/same-partner - against plain
+`isJointed`, which conflates all of them as "true"); the regression itself,
+`reconcileOrRollBackRollsBackOnFailedRebuildOfAnInvalidExistingJoint`
+(an invalidated handle to the correct partner, failed rebuild, rolls back
+with no leaked body or stale entry) and
+`reconcileOrRollBackRollsBackOnFailedSwitchFromAMismatchedExistingJoint`
+(the switch-partner shape of the same gap); and
+`retryAfterARolledBackInvalidJointRebuildSucceedsCleanly` (the rolled-back
+body's next-tick retry still succeeds cleanly, same as the original
+first-activation retry case). The two pre-existing "preserves" and
+"never-jointed" tests were updated to compute their `wasJointed` argument
+via `isCoherentlyJointedTo` rather than `isJointed`, for fidelity to what a
+real caller now actually passes.
+
+**The same plain-membership gap, found by external review (wroosbit,
+CHANGES_REQUESTED on PR #7 @ `6f4abea`, comment 52756) in a second call
+site this branch's own fix above had not reached.**
+`PhysicsBridge.unjointedTowingThrust`'s double-count exclusion used
+`hitches.isJointed(towed)` - the identical plain-joint-map-membership gap
+`reconcileOrRollBack` had just been corrected for, in the one remaining
+place it was never updated. Worse, it wasn't even scoped to the *current*
+towing vehicle: `isJointed(towed)` is true if `towed` is jointed to
+*any* towing vehicle, not specifically the one whose
+`unjointedTowingThrust` call is asking. Two distinct ways this understated
+a towing vehicle's compensation: an invalid handle (stale, from a towing
+vehicle that lost its body) still read as "jointed," and a trailer
+recently switched to a *different* towing vehicle than the one currently
+asking still read as "jointed" too - in both cases no valid Sable
+constraint actually transmits that trailer's thrust to *this* towing
+vehicle, so excluding it from the compensation sum silently dropped real
+towing-thrust compensation that MINECRAFT-496 established and this branch
+must preserve.
+
+Fixed by replacing `hitches.isJointed(towed)` with
+`hitches.isCoherentlyJointedTo(towed, v)` - scoped to exactly the towing
+vehicle `v` whose recursive sum is being computed, using the same
+validity-and-partner-aware check the rollback fix above introduced.
+`compensableConnection`'s second parameter was renamed from `jointed` to
+`coherentlyJointed` to match (its own boolean logic, `!mounted &&
+!coherentlyJointed`, is unchanged - only the caller-supplied fact is
+stronger now).
+
+`HitchRegistryTest.compensableConnectionCompositionExcludesOnlyAValidCurrentPartnerJoint`
+is the production-seam regression review required: a valid joint to
+exactly the current towing vehicle is excluded (as before), while a joint
+to a *different* towing vehicle and an invalidated handle to the same
+recorded partner both still contribute - the exact two cases review named.
+`unjointedTowingThrust`'s own recursive walk over real `TowingConnection`/
+`EntityVehicleF_Physics` graphs remains in the same live-entity/world
+testing gap documented elsewhere in this file; this test instead exercises
+the real `compensableConnection`/`HitchRegistry.isCoherentlyJointedTo`
+composition it is built from, directly.
+
+**A null constraint handle treated as a healthy joint forever, found by a
+third self-review kickback at head `8515052` (Jira comment 52759).**
+`HitchRegistry.reconcile` stored whatever `create.get()` returned,
+unconditionally, then recorded the partner. If `create` ever returns
+`null` instead of throwing (rather than a thrown exception, which the
+existing `reconcileLeavesNoPartialStateWhenCreateThrowsAndCanRetryAfter`
+test already covered), the registry ends up with a recorded partner but
+`joints.get(trailer) == null` - and the no-op condition's own
+`existing == null` half (needed so a trailer with NO joint yet, as opposed
+to one whose existing handle has since gone invalid, isn't wrongly forced
+through a release/recreate cycle every tick) cannot tell that apart from a
+key simply absent from the map. So every later `reconcile` call for the
+*same* desired partner silently no-op'd forever, as if already correctly
+jointed - `active()` stays `true` (still suppressing IV's native hitch
+authority) while no Sable constraint has ever actually existed, with no
+retry ever attempted again. The same partial-authority shape as the first
+rollback fix above, from a third distinct cause.
+
+Fixed by checking `create.get()`'s result for `null` and throwing
+(`IllegalStateException`) before storing anything, exactly where a thrown
+exception from `create` itself would already be - so a `null` result now
+rolls back through the identical existing catch-and-retry path at the
+caller (`PhysicsBridge.reconcileHitch`/`reconcileOrRollBack`) with no
+separate handling needed there. `HitchRegistryTest
+.reconcileTreatsANullCreatedHandleAsAFailedCreateNotAHealthyJoint` is the
+regression itself: a `null`-returning `create` throws, leaves neither a
+joint nor a partner recorded (`isJointed`/`partnerOf`/
+`isCoherentlyJointedTo` all confirm nothing was stored), and a later call
+for the same desired partner correctly retries `create()` again rather
+than no-op'ing against the absent prior attempt.
+
 None of the above prove any in-game driving/flight/boat/towing behavior -
 see the acceptance list below.
 
@@ -562,15 +1041,58 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   from its float devices visibly active at the same time as rotor thrust/
   attitude control, with no double-counted propeller thrust from the rotor
   itself (see `BuoyantForces`'s rotor exclusion).
-- A trailer actively hitched behind a car continues to follow via IV's own
-  hitch code, with no double movement, whether or not the towing car has
-  Sable physics.
-- A car towing a trailer (empty, then loaded/with its own engine where the
-  pack allows it) accelerates and holds speed noticeably closer to IV's own
-  unmodified behavior than before this change, since `getRecursiveTowingThrust`
-  is now replicated as a center-of-mass impulse on the towing vehicle's Sable
-  body (`TowingForces`/`VehicleTowingAccessor`) - see README.md "Scope" for
-  what remains unaddressed (the trailer's own coupled body/constraint).
+- A trailer hitched behind a car whose own body is not yet active (opted
+  out, or not yet server-side) continues to follow via IV's own hitch code,
+  with no double movement, for as long as that ordering dependency holds.
+- A trailer hitched behind a car with an active Sable body gets its own
+  Sable body jointed to the car's, with no double movement (IV's native
+  hitch-following code does not also move it once `PhysicsBridge.active()`
+  returns true for the trailer) and no position-snap jitter; the trailer's
+  own wheels/suspension respond to terrain independently of the towing car,
+  while the hitch keeps the two bodies coupled. This holds for a towing
+  vehicle in any of the ground/flight/rotorcraft categories (e.g. a towed
+  glider behind an aircraft, or a towed cart behind a car) - the joint math
+  is domain-agnostic, so this is the same mechanism in every case, not a
+  separate implementation per category.
+- The joint's locked rotation matches the connection's own flags: an
+  ordinary hitch lets the trailer swing/pitch/roll independently (settling
+  upright on its own wheels), a `restricted` connection allows only pitch,
+  and a `mounted` connection (e.g. a flatbed) stays fully rigid relative to
+  the towing vehicle.
+- Detaching a trailer at runtime releases the joint; the trailer continues
+  as an ordinary free-rolling Sable vehicle in its own category (coasting,
+  steerable if pushed, responsive to terrain) with no stale joint pulling it
+  toward the vehicle it was released from.
+- The towing vehicle despawning, unloading its chunk, or losing its own
+  Sable body for any other reason releases the joint without an error or a
+  leaked body; the trailer's own body survives as an unjointed vehicle.
+- A vehicle towing an UNPOWERED trailer (no engine) accelerates and holds
+  speed noticeably closer to IV's own unmodified behavior than before
+  MINECRAFT-496, since that trailer stays unjointed-equivalent for
+  compensation purposes (`thrustForceValue` is zero either way) while now
+  also getting real suspension/drag from its own coupled body.
+- A vehicle towing a POWERED trailer (its own engine, where the pack allows
+  it) is propelled by that trailer's thrust exactly once - through the
+  trailer's own Sable body and the hitch joint - not twice: the towing
+  vehicle's `TowingForces` compensation must not also add the trailer's
+  thrust once the trailer is jointed (`PhysicsBridge.unjointedTowingThrust`/
+  `compensableConnection` - the MINECRAFT-498 self-review regression this
+  task's own change introduced and then fixed). During the brief ordering
+  wait before the trailer has its own body, the towing vehicle's
+  compensation still applies (matching MINECRAFT-496, unchanged for that
+  window).
+- A towed float-only hull (boat) continues to use ordinary IV physics - not
+  a towing-specific exclusion, but because its `BuoyantBody` has no pose/
+  anchor API for a hitch joint to connect to (a concrete, citable API gap;
+  see README.md's exclusions list), regardless of whether its towing
+  vehicle itself has an active Sable body.
+- An aircraft, blimp, or helicopter towing an unjointed trailer (a towed
+  boat, or any towed vehicle still in the brief first-activation ordering
+  wait) still gets the same towing-thrust compensation impulse a ground
+  towing vehicle does - not lighter than it should feel on that axis just
+  because the towing vehicle itself is flying - while a jointed flight/
+  rotor-towed trailer is not double-compensated, on the same terms as a
+  jointed ground trailer.
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
 playable-MVP claim for any category above - ground, flight, or boat. The

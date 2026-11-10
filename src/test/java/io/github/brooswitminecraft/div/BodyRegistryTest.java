@@ -89,10 +89,12 @@ class BodyRegistryTest {
   registry.activate("keep", new Object());
   registry.activate("drop", new Object());
   List<Object> destroyed = new ArrayList<>();
-  registry.removeIf((key, body) -> key.equals("drop"), destroyed::add);
+  List<String> destroyedKeys = new ArrayList<>();
+  registry.removeIf((key, body) -> key.equals("drop"), (key, body) -> { destroyedKeys.add(key); destroyed.add(body); });
   assertTrue(registry.isActive("keep"));
   assertFalse(registry.isActive("drop"));
   assertEquals(1, destroyed.size());
+  assertEquals(List.of("drop"), destroyedKeys, "onRemove must receive the key too, not just the body");
  }
 
  @Test void keysAreComparedByIdentityNotEquality() {
