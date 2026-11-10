@@ -481,23 +481,37 @@ public final class PhysicsBridge {
     wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
     contact=true;
    }
-   // IV would normally add getRecursiveTowingThrust() - the engine thrust of everything this
-   // vehicle is towing - straight to its own thrustForce every tick, but its getForcesAndMotions
-   // never runs once PhysicsBridge takes over (see VehicleForcesMixin), so towing would otherwise
-   // feel lighter than it should. That recursive sum is in IV's own force units, where IV itself
-   // integrates it as motion.addScaled(totalForce, 1/currentMass) once per tick - not SI newtons
-   // - so it must go through the same IV-motion<->Sable-velocity conversion this class already
-   // uses on activation/writeback (v.motion * v.speedFactor * 20), scaled by this body's own
-   // mass (which may be a tuning.massKg override, not v.currentMass) to land on the matching
-   // Sable impulse. See TowingForces for the derivation. unjointedTowingThrust (not IV's own
-   // getRecursiveTowingThrust() directly) is what must be replicated here: a towed vehicle that
-   // already has its own Sable body and hitch joint (MINECRAFT-498) applies its own engine
-   // thrust directly via its own stepGround call, which already reaches this vehicle mechanically
-   // through the joint Sable itself solves - replicating that portion again here would double-
-   // count it.
+   double towThrust = applyTowingCompensation(v);
+   return contact || drive!=0 || towThrust!=0;
+  }
+  /**
+   * IV would normally add getRecursiveTowingThrust() - the engine thrust of everything this
+   * vehicle is towing - straight to its own thrustForce every tick, but its getForcesAndMotions
+   * never runs once PhysicsBridge takes over (see VehicleForcesMixin), so towing would otherwise
+   * feel lighter than it should. That recursive sum is in IV's own force units, where IV itself
+   * integrates it as motion.addScaled(totalForce, 1/currentMass) once per tick - not SI newtons
+   * - so it must go through the same IV-motion<->Sable-velocity conversion this class already
+   * uses on activation/writeback (v.motion * v.speedFactor * 20), scaled by this body's own
+   * mass (which may be a tuning.massKg override, not v.currentMass) to land on the matching
+   * Sable impulse. See TowingForces for the derivation. unjointedTowingThrust (not IV's own
+   * getRecursiveTowingThrust() directly) is what must be replicated here: a towed vehicle that
+   * already has its own Sable body and hitch joint (MINECRAFT-498) applies its own engine thrust
+   * directly via its own step call, which already reaches this vehicle mechanically through the
+   * joint Sable itself solves - replicating that portion again here would double-count it.
+   *
+   * <p>Shared by all three step methods, not just stepGround: this vehicle's own category does
+   * not change whether something it is towing can still be on IV's native hitch fallback (the
+   * first-activation ordering wait, or a towed float-only hull with no hitch-capable body at
+   * all) - a flight or rotor towing vehicle needs this compensation exactly as much as a ground
+   * one does, since Sable taking over its force path (VehicleForcesMixin) suppresses IV's own
+   * getRecursiveTowingThrust() call for it regardless of category (self-review finding: an
+   * earlier revision applied this only from stepGround, silently dropping a flight/rotor towing
+   * vehicle's compensation for any trailer still on native fallback).
+   */
+  private double applyTowingCompensation(EntityVehicleF_Physics v) {
    double towThrust = unjointedTowingThrust(v);
    if (towThrust != 0) handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.impulse(towThrust,v.speedFactor,mass,v.currentMass)));
-   return contact || drive!=0 || towThrust!=0;
+   return towThrust;
   }
   /**
    * Fixed-wing aircraft and blimps (never a rotorcraft - {@code Body.step} routes any vehicle
@@ -549,6 +563,7 @@ public final class PhysicsBridge {
    double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure)*tailArm;
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
+   applyTowingCompensation(v);
    return true;
   }
   /**
@@ -593,6 +608,7 @@ public final class PhysicsBridge {
    double yawTorque=RotorForces.yawTorque(rudderDeflection,thrust,tailArm);
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
+   applyTowingCompensation(v);
    return true;
   }
  }

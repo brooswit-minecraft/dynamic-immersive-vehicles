@@ -772,6 +772,40 @@ real vehicle's body is actually constructed once, removed on opt-out/
 towing, and never duplicated end-to-end therefore remains proven only by
 the acceptance list below, not by any unit test in this repository.
 
+**All-category towing-thrust compensation gap, found by self-review at head
+`c5dec29` (post-integration).** This branch's generalization made flight and
+rotorcraft trailers hitchable, but `PhysicsBridge.unjointedTowingThrust`'s
+compensation impulse was only ever applied from `Body.stepGround` -
+`stepFlight` and `stepRotor` never called it. Since any Sable-active towing
+vehicle has its native `getForcesAndMotions`/`getRecursiveTowingThrust` call
+suppressed regardless of its own category (`VehicleForcesMixin`), a flight
+or rotorcraft vehicle towing a still-unjointed trailer (the first-activation
+ordering wait, or a towed float-only hull with no hitch-capable body at
+all) silently dropped that compensation entirely - exactly the scope gap
+the all-category generalization was supposed to close, now reintroduced at
+the force-application level instead of the classification level. Fixed by
+extracting the existing impulse-application half of `stepGround`'s towing
+logic into `Body.applyTowingCompensation(v)`, now called identically from
+`stepGround`, `stepFlight`, and `stepRotor`'s own tails - the same shared,
+category-agnostic seam `unjointedTowingThrust`/`compensableConnection`
+already were, now actually wired to every category that can produce one.
+
+No new pure-function seam was extracted for this fix, unlike the prior
+rollback/ordering regressions above: `unjointedTowingThrust`'s own
+per-connection decision (`compensableConnection`) was already correct and
+already domain-agnostic (it takes no category parameter at all) - already
+covered by `PhysicsBridgeClassificationTest`'s existing
+`compensableConnection` cases, which needed no change. This was purely a
+call-site wiring gap (two of three dispatch branches never invoking an
+already-correct shared method), in the same `Body`-construction-requires-a-
+live-`ServerLevel`/Sable-runtime testing gap documented just above for
+`stepGround`'s wheel loop and the rest of `Body.step` - there is no way to
+unit-test that `stepFlight`/`stepRotor` actually call
+`applyTowingCompensation` without constructing a live `Body`. The structural
+guarantee against this regression recurring is that all three step methods
+now call the one shared private method rather than duplicating (or, as
+happened here, omitting) the impulse-application logic inline.
+
 None of the above prove any in-game driving/flight/boat/towing behavior -
 see the acceptance list below.
 
@@ -875,6 +909,13 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   anchor API for a hitch joint to connect to (a concrete, citable API gap;
   see README.md's exclusions list), regardless of whether its towing
   vehicle itself has an active Sable body.
+- An aircraft, blimp, or helicopter towing an unjointed trailer (a towed
+  boat, or any towed vehicle still in the brief first-activation ordering
+  wait) still gets the same towing-thrust compensation impulse a ground
+  towing vehicle does - not lighter than it should feel on that axis just
+  because the towing vehicle itself is flying - while a jointed flight/
+  rotor-towed trailer is not double-compensated, on the same terms as a
+  jointed ground trailer.
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
 playable-MVP claim for any category above - ground, flight, or boat. The
