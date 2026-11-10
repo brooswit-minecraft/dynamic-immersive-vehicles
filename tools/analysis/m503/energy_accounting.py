@@ -22,7 +22,7 @@ def quat_to_matrix(x,y,z,w):
      [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
 
 header_re = re.compile(
- r"entity=(?P<entity>[0-9a-f-]+) side=server tick=(?P<tick>\d+) mass=(?P<mass>[\d.]+) gravity=(?P<g>[\d.]+) wheels=\d+ "
+ r"entity=(?P<entity>[0-9a-f-]+) side=server tick=(?P<tick>\d+) mass=(?P<mass>[\d.]+) gravity=(?P<g>[\d.]+) (?:solver=\S+ iterations=\d+ )?wheels=\d+ "
  r"spring=[\d.]+ damper=[\d.]+ pose\.position=\([^)]+\) orientation=\((?P<q>[^)]+)\) up=\([^)]+\) "
  r"linearVelocity=\((?P<v>[^)]+)\) angularVelocity=\((?P<omega>[^)]+)\)")
 wheel_re = re.compile(

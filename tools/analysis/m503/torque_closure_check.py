@@ -14,7 +14,7 @@ def quat_to_matrix(x,y,z,w):
     ])
 
 header_re = re.compile(
- r"entity=(?P<entity>[0-9a-f-]+) side=server tick=(?P<tick>\d+) mass=(?P<mass>[\d.]+) gravity=[\d.]+ wheels=\d+ "
+ r"entity=(?P<entity>[0-9a-f-]+) side=server tick=(?P<tick>\d+) mass=(?P<mass>[\d.]+) gravity=[\d.]+ (?:solver=\S+ iterations=\d+ )?wheels=\d+ "
  r"spring=[\d.]+ damper=[\d.]+ pose\.position=\([^)]+\) orientation=\((?P<q>[^)]+)\) up=\([^)]+\) "
  r"linearVelocity=\([^)]+\) angularVelocity=\((?P<omega>[^)]+)\)")
 

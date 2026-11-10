@@ -43,7 +43,13 @@ results below are independently reproducible, not just prose claims.
 cd tools/analysis/m503
 python3 torque_closure_check.py
 python3 energy_accounting.py   # asserts its own closure residuals; exits nonzero if any fail
+python3 test_header_format_compat.py   # both scripts' header regex vs. OLD and NEW log formats
 ```
+
+`test_header_format_compat.py` guards against review comment 53054: production wiring (c521a69)
+added a `solver=... iterations=...` segment to the per-tick header between `gravity=` and
+`wheels=` so a capture can prove which code path produced it - both scripts' header regex were
+updated to accept that segment optionally, so older (pre-c521a69) captures still parse too.
 
 ## Relationship to the Java experiment
 
