@@ -83,6 +83,45 @@ class PhysicsBridgeStepperTest {
   assertEquals(new PhysicsBridge.TickPlan(PhysicsBridge.Stepper.ROTOR, true), PhysicsBridge.planTick(false, true, installedPropellers));
  }
 
+ private static JSONPart.JSONPartGroundDevice pontoon() {
+  var g = new JSONPart.JSONPartGroundDevice();
+  g.canFloat = true;
+  return g;
+ }
+ private static JSONPart.JSONPartGroundDevice wheel() {
+  return new JSONPart.JSONPartGroundDevice();
+ }
+
+ @Test void liveFloatDeviceAddRemoveTransitionTogglesBuoyancyEachTick() {
+  // Self-review finding: Body previously cached floatCapable once at construction, so
+  // installing or removing a canFloat device afterward (which doesn't itself change the
+  // ground/flight category, so never triggers replaceIfCategoryChanged) left buoyancy
+  // permanently stuck on whatever was true when the body was built. The fix is that Body.step
+  // now passes hasFloatDevice(v) - freshly computed from the vehicle's current parts - into
+  // planTick every tick, the same uncached pattern already proven for rotor add/remove above.
+  //
+  // A coordinator-relayed review of the first fix correctly found this test was not actually
+  // exercising that seam: it hand-fed false/true/false straight into planTick, so a regression
+  // that went back to caching floatCapable would stay green. This drives the exact production
+  // decision - PhysicsBridge.hasFloatDevice(List<JSONPartGroundDevice>), the pure function
+  // hasFloatDevice(EntityVehicleF_Physics) delegates to - over a mutable installed-ground-device
+  // list, installing and removing a real non-spare canFloat device through it, the same way
+  // liveRotorAddRemoveTransitionSwitchesSolversEachTick mutates a propeller list through
+  // selectStepper. Reintroducing a cached floatCapable field would make this fail: the second
+  // and third assertions would see whatever boolean was captured from the first.
+  var installedGroundDevices = new ArrayList<JSONPart.JSONPartGroundDevice>();
+  installedGroundDevices.add(wheel());
+  var installedPropellers = List.<JSONPart.JSONPartPropeller>of();
+  assertFalse(PhysicsBridge.hasFloatDevice(installedGroundDevices), "no float device yet");
+  assertFalse(PhysicsBridge.planTick(false, PhysicsBridge.hasFloatDevice(installedGroundDevices), installedPropellers).appliesBuoyancy());
+  installedGroundDevices.add(pontoon());
+  assertTrue(PhysicsBridge.hasFloatDevice(installedGroundDevices), "float device just installed");
+  assertTrue(PhysicsBridge.planTick(false, PhysicsBridge.hasFloatDevice(installedGroundDevices), installedPropellers).appliesBuoyancy());
+  installedGroundDevices.remove(installedGroundDevices.size() - 1);
+  assertFalse(PhysicsBridge.hasFloatDevice(installedGroundDevices), "float device just removed");
+  assertFalse(PhysicsBridge.planTick(false, PhysicsBridge.hasFloatDevice(installedGroundDevices), installedPropellers).appliesBuoyancy());
+ }
+
  @Test void rotorAndNonRotorPropellerThrustOwnershipPartitionsWithNoOverlapOrGap() {
   // The other half of the rotor+float composition: when a tick plan selects ROTOR, the rotor
   // propeller's own thrust comes from stepRotor using the same installedPropellers list passed

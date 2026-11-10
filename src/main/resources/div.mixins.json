@@ -1,1 +1,1 @@
-{"required":true,"minVersion":"0.8","package":"io.github.brooswitminecraft.div.mixin","compatibilityLevel":"JAVA_21","mixins":["VehicleForcesMixin","VehicleMovementMixin","VehicleTowingAccessor","WorldAccessor"],"injectors":{"defaultRequire":1}}
+{"required":true,"minVersion":"0.8","package":"io.github.brooswitminecraft.div.mixin","compatibilityLevel":"JAVA_21","mixins":["VehicleForcesMixin","VehicleMovementMixin","VehicleTowingAccessor","WorldAccessor","PartEngineAccessor","PartPropellerAccessor"],"injectors":{"defaultRequire":1}}

@@ -219,7 +219,7 @@ class ClassificationTest {
   // guard independently keeps it false - the two classifications are mutually exclusive for
   // every input, so PhysicsBridge.active() can never pick both a Body and a BuoyantBody for the
   // same vehicle. PhysicsBridge.Body still applies BuoyantForces for this vehicle's float
-  // devices alongside its rotor forces - see PhysicsBridge.Body.floatCapable.
+  // devices alongside its rotor forces - see PhysicsBridge.planTick.
   var v = motorized();
   v.motorized.isAircraft = true;
   var installedGroundDevices = List.of(pontoon());

@@ -72,9 +72,34 @@ each vehicle from IV's own definition at the moment it is needed:
   local Minecraft water surface; a hull resting unevenly in the water is
   righted by that per-device force distribution rather than a separate
   stability calculation. Installed non-rotor `PartPropeller`s add forward/
-  reverse thrust, steered by the rudder input, but only while the propeller
-  itself is underwater - one above the surface produces no thrust, same as a
-  real propeller spinning free in air.
+  reverse thrust, steered by the rudder input, allocated per actual
+  engine-to-propeller linkage rather than one vehicle-wide signal applied to
+  every installed propeller. IV exposes neither that linkage nor a
+  propeller's live RPM through its public API, so this bridge reads them the
+  same way it already reads `EntityVehicleF_Physics`'s own protected
+  `getRecursiveTowingThrust()` for towing (see
+  [`PartEngineAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartEngineAccessor.java)/
+  [`PartPropellerAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartPropellerAccessor.java),
+  version-pinned `@Accessor` Mixins, not an edit to IV's own source). Thrust
+  direction comes from the propeller's own public `desiredLinearVelocity`
+  (driven by `currentPitch` - a fixed sign for a static-pitch propeller, or
+  one swung between forward and reverse by `vehicle.reverseThrustVar` for a
+  dynamic-pitch one), never from engine transmission gear state: a propeller
+  has no gearbox of its own, so an engine sitting in neutral still drives a
+  turning, correctly-pitched propeller, and a dynamic-pitch propeller
+  reversed via `reverseThrustVar` thrusts backward even while the
+  transmission itself stays in a forward gear (see
+  [`Buoyancy.signedPropellerDrive`](src/main/java/io/github/brooswitminecraft/div/Buoyancy.java)).
+  A propeller thrusts only while it is underwater, not destroyed/removed
+  (`isActiveVar`), not a spare, actually turning (`currentRPM` away from
+  zero), and linked to a currently-running engine - an unpowered,
+  disconnected, or spare propeller produces no thrust regardless of
+  throttle, submersion, or any other engine's signal. The shared per-car
+  `propellerForce` budget is split only across the non-rotor propellers
+  actually operational this tick (linked, active, turning) - a vehicle with
+  one powered propeller and one unpowered one gives the powered propeller
+  the full configured thrust, not half of it just because a second,
+  unpowered propeller also happens to be installed.
 - **Amphibious and float-equipped flight/rotor vehicles** (a drivable wheel/
   track device, a fixed-wing/blimp flag, or a rotor propeller, AND at least
   one `canFloat` device on the same chassis - an amphibious car, a seaplane,
@@ -154,10 +179,12 @@ after changes.
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
 fully submerged, since a real hull is not a solid box), `waterDrag`, and
-`propellerForce` (split evenly across installed non-rotor propellers) - are
-ignored by a ground/flight vehicle with no float device, and
-`suspensionTravel`/`friction`/`driveForce`/`brakeForce` are ignored by a
-float-only hull. A copyable example is also available at
+`propellerForce` (split evenly across the non-rotor propellers actually
+operational this tick - linked to a running engine, active, and turning -
+not every installed propeller) - are ignored by a ground/flight vehicle
+with no float device, and `suspensionTravel`/`friction`/`driveForce`/
+`brakeForce` are ignored by a float-only hull. A copyable example is also
+available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
 
 ## Build

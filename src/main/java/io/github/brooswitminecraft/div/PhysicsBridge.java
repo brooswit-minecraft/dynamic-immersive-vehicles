@@ -46,25 +46,37 @@ public final class PhysicsBridge {
       && Classification.isDrivableGroundDevice(g.definition.ground))
     .map(p -> (PartGroundDevice)p).toList();
  }
- /** Every currently-installed ground device's JSON definition, recomputed fresh from the
-  * vehicle's current parts each time it is called. */
+ /** Every currently-installed, non-spare ground device's JSON definition, recomputed fresh from
+  * the vehicle's current parts each time it is called. Spares carry no hull/ground support of
+  * their own (MTS's own VehicleGroundDeviceBox excludes them from support the same way); a
+  * spare must not count toward either domain's eligibility. */
  private static List<JSONPart.JSONPartGroundDevice> installedGroundDevices(EntityVehicleF_Physics v) {
-  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && g.definition != null)
+  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && !g.isSpare && g.definition != null)
     .map(p -> ((PartGroundDevice)p).definition.ground).toList();
  }
- /** Every currently-installed propeller's JSON definition, recomputed fresh from the vehicle's
-  * current parts each time it is called - never cached, so a rotor added/removed/replaced after
-  * activation is reflected on the very next tick. */
+ /** Every currently-installed, non-spare propeller's JSON definition, recomputed fresh from the
+  * vehicle's current parts each time it is called - never cached, so a rotor added/removed/
+  * replaced after activation is reflected on the very next tick. A spare rotor must not
+  * suppress or grant eligibility: it isn't an operational part of the chassis (same reasoning
+  * as excluding spare ground devices above). */
  private static List<JSONPart.JSONPartPropeller> installedPropellers(EntityVehicleF_Physics v) {
-  return v.allParts.stream().filter(p -> p instanceof PartPropeller pr && pr.definition != null)
+  return v.allParts.stream().filter(p -> p instanceof PartPropeller pr && !pr.isSpare && pr.definition != null)
     .map(p -> ((PartPropeller)p).definition.propeller).toList();
  }
- /** Whether this vehicle has any installed canFloat ground device, regardless of what other
-  * domain (ground/flight) it is also eligible for - the amphibious/float-equipped-flight-vehicle
-  * combined-forces case PhysicsBridge.Body's step() handles alongside its primary domain. */
+ /** Whether this vehicle has any installed, non-spare canFloat ground device, regardless of
+  * what other domain (ground/flight) it is also eligible for - the amphibious/float-equipped-
+  * flight-vehicle combined-forces case PhysicsBridge.Body's step() handles alongside its
+  * primary domain. */
  private static boolean hasFloatDevice(EntityVehicleF_Physics v) {
-  return v.allParts.stream().anyMatch(p -> p instanceof PartGroundDevice g && g.definition != null
-      && Classification.isFloatDevice(g.definition.ground));
+  return hasFloatDevice(installedGroundDevices(v));
+ }
+ /** The pure decision {@link #hasFloatDevice(EntityVehicleF_Physics)} delegates to, over the
+  * same already-live-filtered (non-spare) JSON list {@link #installedGroundDevices} produces -
+  * extracted so a float device installed or removed through this exact seam, not a hand-picked
+  * boolean, is provable without a live entity/Sable runtime (see {@code PhysicsBridgeStepperTest}),
+  * the same way {@link #selectStepper} is tested over a mutable propeller list. */
+ static boolean hasFloatDevice(List<JSONPart.JSONPartGroundDevice> installedGroundDevices) {
+  return installedGroundDevices.stream().anyMatch(Classification::isFloatDevice);
  }
  /** Which force model {@code Body.step} dispatches to this tick - the literal decision it makes,
   * extracted so the "live rotor add/remove switches solvers" behavior is testable without a
@@ -82,7 +94,9 @@ public final class PhysicsBridge {
  }
  /** The full per-tick plan {@code Body.step} composes: which primary force model to run, and
   * whether to additionally apply {@link BuoyantForces} this tick (independent of which primary
-  * model ran - see {@link Body#floatCapable}). Extracted as its own testable collaborator so the
+  * model ran - {@code floatCapable} is re-read from the vehicle's live parts every tick by the
+  * caller, never cached, so installing/removing a float device takes effect on the next tick).
+  * Extracted as its own testable collaborator so the
   * rotor+float composition (a floating rotorcraft gets both ROTOR's own thrust and buoyancy on
   * its float devices, with rotor thrust never double-counted by {@code BuoyantForces}'s own
   * underwater-propeller pass) is provable without a live entity/Sable runtime - see
@@ -182,8 +196,12 @@ public final class PhysicsBridge {
   // buoyancy/water-drag/underwater-propeller forces applied to its float devices in the same
   // tick - combined domain forces rather than its water behavior silently dropping out just
   // because it was classified eligible here for driving or flying. hullVolume is cheap to
-  // compute unconditionally and only used when floatCapable.
-  final boolean floatCapable;
+  // compute unconditionally and only used when float-capable. Float capability itself is NOT
+  // cached here: it must be re-read from the vehicle's current parts every tick in step(), the
+  // same way installedPropellers already is - a canFloat device installed or removed after
+  // this body is already active (without itself triggering replaceIfCategoryChanged, which
+  // only reacts to the ground/flight category, not float capability) must start or stop getting
+  // buoyancy on the very next tick, not stay stuck on whatever was true at construction.
   final double hullVolume;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
@@ -199,7 +217,6 @@ public final class PhysicsBridge {
    center=new Vector3d(min).add(max).mul(.5);
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
    this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
-   this.floatCapable = hasFloatDevice(v);
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
@@ -232,7 +249,10 @@ public final class PhysicsBridge {
    // unconditionally (not gated on flight) - an installed rotor drives ROTOR dispatch even on a
    // vehicle with no aircraft/blimp flag (see Classification#isRotorcraft and selectStepper).
    var installedPropellers = installedPropellers(v);
-   var plan = planTick(flight, floatCapable, installedPropellers);
+   // Also re-derived every tick, not cached at construction (self-review finding): a canFloat
+   // device installed or removed later doesn't change the ground/flight category, so it never
+   // triggers replaceIfCategoryChanged - this is the only place that would otherwise notice.
+   var plan = planTick(flight, hasFloatDevice(v), installedPropellers);
    boolean primaryAwake = switch (plan.stepper()) {
     case GROUND -> stepGround(v,pose,q,inverse,angular,velocity,up);
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);

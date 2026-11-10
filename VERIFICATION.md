@@ -126,12 +126,13 @@ was factored out of `BuoyantBody` specifically so `PhysicsBridge`'s `Body`
 (ground or flight) can call the same per-float buoyancy/water-drag/
 propeller-thrust logic alongside its own wheel/track or flight/rotor forces
 in the same tick, whenever any installed ground device is `canFloat`
-(`Body.floatCapable`, computed once at construction from the vehicle's
-installed parts at that time - this one field is not re-derived per tick
-the way the rotor/float-propeller-radius decision inside `stepRotor` is,
-since a float device being physically bolted on or off mid-flight is not a
-case this bridge treats as a realistic "missing/changed parts" scenario the
-way an installed propeller is). This is not a new classification: it is the
+(`hasFloatDevice(v)`, re-derived from the vehicle's live installed parts
+every tick by `Body.step` and passed straight into `planTick` - not cached
+at construction; an earlier version of this fix did cache it in a
+`floatCapable` field, which self-review correctly flagged, since installing
+or removing a float device afterward doesn't change the ground/flight
+category and so never triggers `replaceIfCategoryChanged` either, leaving
+nothing else to notice the change). This is not a new classification: it is the
 existing ground or flight/rotor domain from `eligible()`, with buoyancy
 layered on top at the force-application level rather than the
 classification level. `BuoyantForces` itself excludes any installed rotor
@@ -144,6 +145,119 @@ only submersion would not have caught this without the explicit exclusion.
 Like the rest of `BuoyantForces`, the actual combined force application
 against a live rigid body is exercised only by the in-game acceptance list
 below.
+
+**Spare-part and propeller-activity findings, corrected after review.**
+Review (PR #4) found two further defects at the live head:
+
+1. Neither `PhysicsBridge.active()`'s `installedGroundDevices` nor
+   `BuoyantForces.floats()` excluded `APart.isSpare`. MTS's own
+   `VehicleGroundDeviceBox` excludes spare ground devices from support the
+   same way; left unfiltered here, a spare pontoon could activate buoyancy,
+   receive force at its spare mounting location, and dilute
+   `volumePerFloat` away from the floats actually holding the hull up.
+   Both call sites now filter `!g.isSpare` before building their working
+   set, and `BuoyantForces`'s propeller loop does the same for
+   `PartPropeller.isSpare`.
+2. `BuoyantForces.apply(...)` took a single `drive` value from *any*
+   running `PartEngine` - reassigning it on every running engine found, so
+   a later engine silently overwrote an earlier one's sign/throttle on a
+   multi-engine vehicle - and applied it to every installed propeller with
+   no check that the propeller itself was active. See the Mixin-accessor
+   correction immediately below for the full fix.
+3. (Found by self-review, PR #4) `PhysicsBridge.active()`'s
+   `installedPropellers` - the list `Classification.eligible`/
+   `floatEligible` use for the `isRotor` exclusion - did not exclude
+   `PartPropeller.isSpare` either, so a spare rotor could suppress ground
+   or float eligibility for a chassis whose only rotor was a non-functional
+   spare. Filtered the same way as (1).
+
+**Per-propeller drive state via Mixin accessors, added after a reviewer
+directive.** The first correction above only gated thrust on
+`propeller.isActiveVar.isActive` (destroyed/removed), which review (and
+then the ticket's actual stakeholder) correctly rejected as an incomplete
+stand-in for "this propeller is actually being driven" - `isActiveVar`
+says nothing about engine linkage or RPM, so one running engine still
+drove every active, non-spare propeller on the vehicle regardless of
+whether that engine was connected to it at all. Per instruction, this was
+corrected by reading IV's actual state rather than documenting the gap
+away: `PartEngine.linkedPropellers` and `PartPropeller.currentRPM` are
+both private with no public accessor (confirmed via `javap`), so two new
+version-pinned `@Accessor` Mixins -
+[`PartEngineAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartEngineAccessor.java)
+and
+[`PartPropellerAccessor`](src/main/java/io/github/brooswitminecraft/div/mixin/PartPropellerAccessor.java)
+- expose them, the same pattern this codebase already uses for
+`EntityVehicleF_Physics.getRecursiveTowingThrust()` (`VehicleTowingAccessor`)
+and the client world field (`WorldAccessor`); no IV source is edited or
+redistributed. `BuoyantForces.apply(...)` now builds a per-propeller drive
+map from each running engine's actual `linkedPropellers`, and gates thrust
+on `isActiveVar.isActive` **and** `|currentRPM| > 0` together - a
+propeller with no driving engine, or linked but stalled, produces zero
+thrust even if some other engine on the vehicle is running at full
+throttle.
+
+`BuoyancyTest.inactivePropellerProducesNoThrustEvenWhenSubmergedAtFullThrottle`
+covers the `propellerActive` (destroyed/removed-or-not-turning) gate at
+the pure-function level. The actual Mixin accessor reads, the per-engine
+linkage map, and the `isSpare` filtering in (1)/(3) still require a live
+`PartEngine`/`PartPropeller` pair and remain in the same live-entity/
+`ServerLevel`/Sable-runtime testing gap as the rest of `BuoyantForces` -
+exercised only by the in-game acceptance list below, not by any unit test
+in this repository.
+
+**Thrust-share dilution, corrected after a second exact-head review.**
+The Mixin-accessor correction above fixed *which* propellers can thrust,
+but `BuoyantForces.apply(...)` still divided `tuning.propellerForce` by
+the count of every non-spare installed propeller before checking which
+of them were actually operational - so a vehicle with one powered
+propeller and one unpowered one correctly zeroed the unpowered one's
+thrust, but still only gave the powered propeller half the configured
+budget. This was exactly the "dilute the configured thrust share" half of
+the original finding that the Mixin-accessor fix had not yet addressed.
+`Buoyancy.perOperationalPropellerForce(propellerForceBudget,
+operationalCount)` (new, pure function) now computes the per-propeller
+share from only the propellers `BuoyantForces` has already determined are
+operational this tick (driven by a linked, running engine; active;
+turning) - a non-operational propeller is excluded from the denominator
+entirely, not merely zeroed after an equal split.
+`BuoyancyTest.mixedPoweredAndUnpoweredPropellerSetGivesFullAllocationToThePoweredOneAndZeroToTheOther`
+and `...twoOperationalPropellersSplitTheBudgetEvenly` cover the extracted
+allocation seam the review asked for at the pure-function level - the
+exact "one linked/turning propeller plus one unpowered propeller" case,
+and the even-split multi-propeller case. Which specific propellers end up
+in the operational set each tick still requires a live
+`PartEngine`/`PartPropeller` pair, same testing gap as the rest of this
+file.
+
+**Propeller thrust direction, corrected after a third exact-head review
+(post-reconciliation).** The allocation fix above still derived each
+propeller's signed drive from `Math.signum(engine.currentGearVar.currentValue)
+* throttle` - transmission gear state, not propeller direction. Review
+correctly identified this as wrong: confirmed via `javap` against the
+pinned IV 7926606 bytecode, `PartPropeller.update()` computes
+`currentRPM` from linked engines' `rpm / propellerGearboxRatio`
+independent of `currentGearVar` entirely, and derives its own
+`desiredLinearVelocity` (a public field) from `currentPitch` - a fixed,
+JSON-defined sign for a static-pitch propeller, or one swung between
+`+45`/`-45` by `vehicle.reverseThrustVar` for a dynamic-pitch one;
+`addToForceOutput()` then derives real thrust direction from
+`desiredLinearVelocity - airstreamLinearVelocity`, never from gear. So an
+engine sitting in neutral (`currentGearVar == 0`) produced zero bridge
+thrust for a propeller that IV itself still drove and pitched for thrust,
+and a dynamic-pitch propeller reversed via `reverseThrustVar` could keep
+receiving forward bridge thrust while the transmission stayed in a
+forward gear. Fixed by `Buoyancy.signedPropellerDrive(desiredLinearVelocity,
+throttle)` (new, pure function): `BuoyantForces.apply(...)` now reads
+each linked propeller's own public `desiredLinearVelocity` for direction
+and never consults `currentGearVar`. No new Mixin accessor was needed -
+`desiredLinearVelocity` is already a public field, confirmed via the same
+`javap` pass. `BuoyancyTest.forwardPitchPropellerDrivesForwardRegardlessOfGear`,
+`...reversedPitchPropellerDrivesInReverseAtFullThrottle`, and
+`...engineInNeutralStillDrivesAPropellerWithNonzeroPitch` cover the two
+named disagreement scenarios directly through this seam at the
+pure-function level; which value a live propeller's `desiredLinearVelocity`
+actually holds at a given tick still requires a live `PartPropeller`, same
+testing gap as the rest of this file.
 
 ## Flight force model tests (MINECRAFT-495, added 2026-11-08; corrected 2026-11-08 after review)
 
