@@ -1,0 +1,115 @@
+package io.github.brooswitminecraft.div.experimental;
+import io.github.brooswitminecraft.div.TireForces;
+import org.joml.Quaterniondc;
+import org.joml.Vector3d;
+import org.joml.Vector3dc;
+
+/**
+ * EXPERIMENTAL - not wired into {@code PhysicsBridge}/{@code Body.stepGround}, not part of any
+ * production code path. Kept here, compiled and tested, purely so an attempted fix for ticket
+ * MINECRAFT-503's rollover root cause (an independent, single-shot, per-wheel lateral slip
+ * correction that saturates friction and alternates sign every tick - real captured evidence in
+ * ticket comments 53010/53011) is inspectable and reproducible by review without being mistaken
+ * for a shipped change. See {@code MultiContactFrictionSolverExperimentTest} for the whole-
+ * vehicle replay regression against this, and ticket comments 53017/53018/53019 for the full
+ * history of what was tried, what review found wrong with each attempt, and the outstanding
+ * question about this regression's own fidelity (fixed, non-raycast normal forces, omitting the
+ * suspension's real response to tilt/load transfer - see that class's own doc for detail).
+ *
+ * <p>Three variants were tried on this ticket and are summarized here for anyone picking this up:
+ * <ol>
+ *  <li>Replace the lateral slip target's {@code mass/wheelCount} denominator with this class's
+ *  {@link #contactLateralEffectiveMass}, in a single non-iterative pass (no PGS). Reverted: it
+ *  under-corrects the case every wheel sees identical shared slip with no rotation, which
+ *  {@code mass/wheelCount} handles exactly in that one-shot form.</li>
+ *  <li>An exact simultaneous joint solve (build the real NxN "mutual effective mass" matrix and
+ *  invert/solve it for all contacts' impulses at once). Found to be SINGULAR for real coplanar
+ *  wheel contacts (confirmed via eigenvalues: rank 2 of 4) - review also pointed out a specific
+ *  analytical error in how its nullspace was characterized (ticket comment 53019); not pursued
+ *  further as a one-shot linear solve for that reason.</li>
+ *  <li>This class: a bounded (fixed iteration count), projected-Gauss-Seidel-style iterative
+ *  solve - the strategy reviewed and asked for in comment 53017. Implemented and unit-tested
+ *  below (same per-contact effective mass, but applied incrementally across bounded passes,
+ *  never inverting anything). A whole-vehicle multi-tick replay against this (see the paired
+ *  experiment test) showed only a modest improvement over the pre-fix behavior on a SIMPLIFIED
+ *  (fixed-normal-force) harness - not yet shown to resolve the real captured divergence, and
+ *  review flagged that the harness's omission of load-transfer/suspension coupling may itself be
+ *  responsible for some or all of that gap, not the solver. That is the open, unresolved question
+ *  this class exists to let review re-examine directly, rather than taking prose at its word.</li>
+ * </ol>
+ */
+public final class MultiContactFrictionSolver {
+ private MultiContactFrictionSolver() {}
+ /**
+  * Real rigid-body contact-point effective mass for the lateral (slip) direction at one wheel's
+  * contact point, 1/(1/mass + (point x right).I^-1.(point x right)) - standard rigid-body contact
+  * mechanics. {@code point}/{@code right} are world-frame; {@code inverseOrientation} rotates a
+  * world vector into the body's own principal-axis frame, where {@code inertiaBody} (diagonal
+  * solid-box tensor) applies. Validated against real production angularVelocity data to ~1e-5
+  * rad/s over 30 real ticks across two separate placements (ticket comment 53008).
+  */
+ public static double contactLateralEffectiveMass(double mass, Vector3dc point, Vector3dc right, Quaterniondc inverseOrientation, Vector3dc inertiaBody) {
+  Vector3d torqueAxisBody=inverseOrientation.transform(new Vector3d(point).cross(right));
+  double rotationalTerm=torqueAxisBody.x*torqueAxisBody.x/inertiaBody.x()
+    +torqueAxisBody.y*torqueAxisBody.y/inertiaBody.y()+torqueAxisBody.z*torqueAxisBody.z/inertiaBody.z();
+  return 1.0/(1.0/mass+rotationalTerm);
+ }
+ /** One wheel's world-frame contact geometry/inputs for {@link #solveFriction}. */
+ public record FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier) {}
+ /** One wheel's accumulated longitudinal/lateral tire force after the bounded solve. */
+ public record FrictionResult(double longitudinal, double lateral) {}
+ /** Fixed iteration bound - cheap (iterations x wheelCount simple vector ops per tick). A hard
+  * bound, not a convergence-dependent loop, so a tick's cost never varies. */
+ public static final int FRICTION_SOLVER_ITERATIONS = 4;
+ /**
+  * Bounded multi-contact friction solve: a projected-Gauss-Seidel-style iteration across all
+  * simultaneously active wheel contacts, instead of each wheel computing its lateral/
+  * longitudinal target independently from one stale per-tick velocity snapshot.
+  *
+  * <p>Each pass, for every contact: measure slip from the shared {@code workingVelocity}/
+  * {@code workingAngular} (which reflects every contact's own accumulated correction so far -
+  * this is the actual cross-contact coupling), compute this wheel's target longitudinal
+  * (unchanged drive/brake/rolling-resistance semantics) and lateral (using the real per-contact
+  * {@link #contactLateralEffectiveMass}, not mass/wheelCount - mass/wheelCount as a per-ITERATION
+  * step was tried and found numerically unstable under iteration against real geometry,
+  * diverging rather than converging) force, clamp both together to the friction circle
+  * (unchanged {@link TireForces#friction}), apply only the INCREMENT over this contact's own
+  * previously accumulated force this tick, and fold that increment's impulse into the shared
+  * working state so the next contact (and the next pass) sees it. {@code workingVelocity}/
+  * {@code workingAngular} must already reflect this tick's normal/suspension impulses (staged by
+  * the caller before calling this) - friction is solved on top of that, not before it.
+  *
+  * <p>This never requires inverting anything and does not assume any contact fully cancels its
+  * own slip in a bounded number of passes - some of the body's translational slip can legitimately
+  * end up converted to a small induced rotation instead.
+  */
+ public static FrictionResult[] solveFriction(FrictionContact[] contacts, double mass, Vector3dc inertiaBody,
+     Quaterniondc orientation, Quaterniondc inverseOrientation,
+     Vector3d workingVelocity, Vector3d workingAngular,
+     boolean braking, double brakeForcePerWheel, double driveForcePerWheel, double friction, double dt, int iterations) {
+  int n=contacts.length;
+  double[] accLong=new double[n], accLat=new double[n];
+  for (int pass=0; pass<iterations; pass++) {
+   for (int i=0; i<n; i++) {
+    var c=contacts[i];
+    Vector3d contactVelocity=new Vector3d(workingAngular).cross(c.point()).add(workingVelocity);
+    double speed=contactVelocity.dot(c.forward()), sideSpeed=contactVelocity.dot(c.right());
+    double longitudinalBase=(braking ? -Math.signum(speed)*Math.min(brakeForcePerWheel,Math.abs(speed)*mass/n/dt) : driveForcePerWheel)*c.skidSteerMultiplier();
+    double longitudinalTarget=longitudinalBase-speed*20;
+    double effectiveMass=contactLateralEffectiveMass(mass,c.point(),c.right(),inverseOrientation,inertiaBody);
+    double lateralTarget=-sideSpeed*effectiveMass/dt;
+    var tire=TireForces.friction(longitudinalTarget,lateralTarget,c.normal(),friction);
+    double deltaLong=tire.longitudinal()-accLong[i], deltaLat=tire.lateral()-accLat[i];
+    accLong[i]=tire.longitudinal(); accLat[i]=tire.lateral();
+    Vector3d impulse=new Vector3d(c.forward()).mul(deltaLong*dt).fma(deltaLat*dt,c.right());
+    workingVelocity.add(new Vector3d(impulse).div(mass));
+    Vector3d torqueBody=inverseOrientation.transform(new Vector3d(c.point()).cross(impulse));
+    Vector3d domegaBody=new Vector3d(torqueBody.x/inertiaBody.x(),torqueBody.y/inertiaBody.y(),torqueBody.z/inertiaBody.z());
+    workingAngular.add(orientation.transform(domegaBody));
+   }
+  }
+  FrictionResult[] results=new FrictionResult[n];
+  for (int i=0; i<n; i++) results[i]=new FrictionResult(accLong[i],accLat[i]);
+  return results;
+ }
+}
