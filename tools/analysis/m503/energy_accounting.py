@@ -60,16 +60,31 @@ def energy_of_group(J_list,p_list,v_list,Iworld_inv):
     domega=Iworld_inv@tauSum
     return lin+0.5*Jsum.dot(Jsum)/mass+0.5*domega.dot(tauSum)
 
-def run(path, max_tick_per_entity=9, abs_tol=0.05):
+# Expected contiguous tick range PER ENTITY in the real capture (ticket comments 52984-53007):
+# both entities have a full, unbroken 0-30 run. Entity b4ec442c additionally has two ISOLATED
+# single-tick snapshots (61, 179 - from the later braking/parkingBrake excerpts in comments
+# 52980/52981) that have no tick+1 pair in this file and are explicitly excluded below, not
+# silently skipped.
+EXPECTED_CONTIGUOUS_RANGE = range(0, 31)  # ticks 0..30 inclusive, both entities
+EXPECTED_ENTITIES = {"4b381e31-597a-471a-bc26-f25217bfd0e5", "b4ec442c-4316-49f0-a626-1db00e57211b"}
+
+def run(path, abs_tol=0.01):
     ticks=parse(path)
     entities=sorted(set(e for e,t in ticks))
     assert entities, f"parsed zero entities from {path} - regex/log format mismatch"
-    covered=0; worst_closure_err=0.0
+    assert set(entities) == EXPECTED_ENTITIES, f"expected exactly {EXPECTED_ENTITIES}, parsed {set(entities)}"
+    covered=0; worst_closure_err=0.0; excluded=[]
     for ent in entities:
-        max_tick=max(t for e,t in ticks if e==ent)
-        for t in range(0, min(max_tick_per_entity, max_tick)):
+        present=sorted(t for e,t in ticks if e==ent)
+        isolated=[t for t in present if t not in EXPECTED_CONTIGUOUS_RANGE]
+        if isolated:
+            excluded.append((ent, isolated))
+        for t in EXPECTED_CONTIGUOUS_RANGE:
+            if t == EXPECTED_CONTIGUOUS_RANGE[-1]: continue  # no t+1 pair for the last tick
             k0,k1=(ent,t),(ent,t+1)
-            if k0 not in ticks or k1 not in ticks or not ticks[k0]['wheels']: continue
+            assert k0 in ticks, f"expected tick {t} for {ent} in the contiguous 0-30 range but it's missing"
+            assert k1 in ticks, f"expected tick {t+1} for {ent} in the contiguous 0-30 range but it's missing"
+            assert len(ticks[k0]['wheels'])==4, f"{ent} t{t}: expected 4 wheel records, got {len(ticks[k0]['wheels'])}"
             d0=ticks[k0]
             R=quat_to_matrix(*d0['q']); up=R@np.array([0,1,0]); forward=R@np.array([0,0,1]); right=np.cross(up,forward)
             Iworld=R@Ibody@R.T; Iworld_inv=np.linalg.inv(Iworld)
@@ -98,8 +113,13 @@ def run(path, max_tick_per_entity=9, abs_tol=0.05):
                   f"grav={dKE_grav:9.4f} vert={dKE_vert:9.4f} tire={dKE_tire:9.4f} cross={cross:9.4f}  "
                   f"closure_err={closure_err:.6f}")
             assert closure_err < abs_tol, f"{ent} t{t}: closure residual {closure_err} exceeds tolerance {abs_tol}"
-    print(f"\ncovered {covered} tick-transitions across {len(entities)} entities; worst closure residual = {worst_closure_err:.6f} J")
-    assert covered > 0, "zero tick-transitions covered - parser matched headers but no wheel lines, or ticks dict empty"
+    expected_covered = len(EXPECTED_ENTITIES) * (len(EXPECTED_CONTIGUOUS_RANGE) - 1)
+    print(f"\ncovered {covered} tick-transitions across {len(entities)} entities (expected {expected_covered}); "
+          f"worst closure residual = {worst_closure_err:.6f} J (tolerance {abs_tol} J)")
+    if excluded:
+        print("explicitly excluded (isolated ticks with no tick+1 pair in this file):")
+        for ent, ts in excluded: print(f"  {ent[:8]}: {ts}")
+    assert covered == expected_covered, f"covered {covered} transitions, expected exactly {expected_covered} - a tick was silently skipped"
     return covered, worst_closure_err
 
 if __name__ == "__main__":

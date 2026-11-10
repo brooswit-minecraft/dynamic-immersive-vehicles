@@ -30,6 +30,12 @@ results below are independently reproducible, not just prose claims.
   that swing both ways) - **slip velocity (sideSpeed), not scalar KE, is the unambiguous
   monotonic signal**: it grows every tick from spawn with zero decay, and by tick 5 the tire
   lateral force is pinned exactly at `friction*normal` (measured ratio 1.000), alternating sign.
+  Coverage and tolerance are asserted in-script (comment 53025), not just claimed: it requires
+  exactly the two expected entities and the full contiguous tick 0-30 range for both (60
+  transitions total, not a truncated subset), explicitly reports the two isolated out-of-range
+  ticks (61, 179 - later braking/parkingBrake snapshots with no tick+1 pair in this file) as
+  excluded rather than silently skipping them, and fails loudly if any transition's closure
+  residual exceeds 0.01 J. Measured worst residual over the full 60 transitions: 0.0053 J.
 
 ## Running
 

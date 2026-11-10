@@ -1,4 +1,5 @@
 package io.github.brooswitminecraft.div.experimental;
+import io.github.brooswitminecraft.div.TireForces;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
 import org.junit.jupiter.api.Test;
@@ -6,18 +7,19 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Regression for the accumulation bug review found in {@link MultiContactFrictionSolver}
- * (comment 53022): the lateral target is a per-pass INCREMENT on top of what earlier passes
- * already accumulated (the remaining measured slip after their correction), not a one-shot
- * target that should REPLACE the running total - the earlier version did the latter, so each
- * pass's much-smaller "remaining slip" target effectively undid most of the previous pass's
- * correction, oscillating between near-full correction and near-zero correction instead of
- * converging.
+ * (comment 53022), and for the weaker version of this test review then found did not actually
+ * detect it (comment 53025): repeated SEPARATE one-pass calls each start a fresh local
+ * accumulator (it is a local variable inside {@code solveFriction}), so they never exercise the
+ * bug at all - it only appears WITHIN one multi-pass call, and only on an EVEN number of passes
+ * (each pass fully undoes the previous one, so the parity of the iteration count determines
+ * whether the final state is "fully cancelled" (odd) or "back to the original slip" (even)).
  *
- * <p>A single, unconstrained (friction never saturates), non-rotating contact isolates this
- * cleanly: with no rotational coupling at all, one contact's own effective mass for its own
- * slip direction exactly reduces to a textbook single-body case, so correct accumulation must
- * converge to (and then stay at) full slip cancellation - and calling the solver again on an
- * already-converged state must be idempotent (leave it there), not reintroduce slip.
+ * <p>This version starts from the SAME nonzero slip independently for each iteration count
+ * (1, 2, 4, 8) - not chained across calls - and additionally reproduces the OLD (pre-53022)
+ * buggy accumulation logic directly in this test so the fixed solver's behavior can be compared
+ * against it, proving this test actually discriminates: the buggy version returns to (almost)
+ * the ORIGINAL slip for every EVEN iteration count tested here, while the real, fixed
+ * {@link MultiContactFrictionSolver} converges to (and stays at) near-zero slip for every count.
  */
 class MultiContactFrictionSolverConvergenceTest {
  private static final double MASS = 350.0, DT = 0.05, FRICTION = 1.0, NORMAL = 10000; // generous, never saturates
@@ -26,27 +28,46 @@ class MultiContactFrictionSolverConvergenceTest {
  private static final Vector3d FORWARD = new Vector3d(0,0,1), RIGHT = new Vector3d(1,0,0);
  private static final Quaterniond IDENTITY = new Quaterniond();
 
- @Test void onePassOnAnUnconstrainedNonRotatingContactCancelsMostOfTheSlip() {
-  Vector3d velocity=new Vector3d(0,0,0).add(new Vector3d(RIGHT).mul(1.0)); // 1 m/s pure lateral slip
-  Vector3d angular=new Vector3d(0,0,0);
-  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,false,0,0,FRICTION,DT,1);
-  double sideSpeedRemaining=velocity.dot(RIGHT);
-  assertTrue(Math.abs(sideSpeedRemaining) < 1e-6,
-    "a single unconstrained, non-rotating contact's own slip has no rotational coupling to fight - one pass should fully cancel it (mass/wheelCount == mass here with one wheel), got remaining sideSpeed="+sideSpeedRemaining);
+ /** The OLD (pre-53022) buggy accumulation, reproduced here only to prove this test
+  * discriminates - not present in {@link MultiContactFrictionSolver} itself anymore. */
+ private static double oldBuggyFinalSideSpeed(int iterations, double initialSideSpeed) {
+  double v=initialSideSpeed, accLat=0;
+  for (int pass=0; pass<iterations; pass++) {
+   double effectiveMass=MultiContactFrictionSolver.contactLateralEffectiveMass(MASS,POINT_AT_COM,RIGHT,IDENTITY,INERTIA);
+   double target=-v*effectiveMass/DT;
+   var tire=TireForces.friction(0,target,NORMAL,FRICTION);
+   double delta=tire.lateral()-accLat;
+   accLat=tire.lateral();
+   v += delta*DT/MASS;
+  }
+  return v;
  }
 
- @Test void repeatedPassesConvergeMonotonicallyNotOscillate() {
-  Vector3d velocity=new Vector3d(RIGHT).mul(1.0);
+ private static double fixedFinalSideSpeed(int iterations, double initialSideSpeed) {
+  Vector3d velocity=new Vector3d(RIGHT).mul(initialSideSpeed);
   Vector3d angular=new Vector3d(0,0,0);
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  double[] sideSpeedAfterEachCall=new double[5];
-  for (int i=0;i<5;i++) {
-   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,false,0,0,FRICTION,DT,1);
-   sideSpeedAfterEachCall[i]=velocity.dot(RIGHT);
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,false,0,0,FRICTION,DT,iterations);
+  return velocity.dot(RIGHT);
+ }
+
+ @Test void thisTestActuallyDiscriminates_oldBuggyLogicFailsOnEvenIterationCounts() {
+  // Proves the regression below is not vacuous: reproducing the OLD accumulation exactly as it
+  // was before 53022's fix, for an EVEN number of passes, returns to (almost) the ORIGINAL
+  // slip - the bug 53025 said the previous version of this test failed to catch.
+  for (int n : new int[]{2,4,8}) {
+   double remaining=oldBuggyFinalSideSpeed(n, 1.0);
+   assertTrue(Math.abs(remaining-1.0) < 1e-6,
+     "old buggy logic at "+n+" passes should return to the ORIGINAL slip (1.0), got "+remaining+" - if this fails, the 'old buggy' reproduction above no longer matches what was actually fixed");
   }
-  for (int i=0;i<5;i++) assertTrue(Math.abs(sideSpeedAfterEachCall[i]) < 1e-6,
-    "call "+i+": sideSpeed should stay at (approximately) zero, not reintroduce slip - got "+sideSpeedAfterEachCall[i]+" (all: "+java.util.Arrays.toString(sideSpeedAfterEachCall)+")");
+ }
+
+ @Test void fixedSolverConvergesForEveryIterationCountStartingFromTheSameSlipIndependently() {
+  for (int n : new int[]{1,2,4,8}) {
+   double remaining=fixedFinalSideSpeed(n, 1.0);
+   assertTrue(Math.abs(remaining) < 1e-6,
+     "fixed solver at "+n+" passes (starting fresh from sideSpeed=1.0, not chained) should converge to near-zero slip - got "+remaining);
+  }
  }
 
  @Test void convergedStateIsIdempotentUnderFurtherSolves() {
