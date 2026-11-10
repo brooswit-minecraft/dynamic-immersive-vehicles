@@ -23,7 +23,6 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3d;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
-import org.joml.Vector3dc;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -420,45 +419,6 @@ public final class PhysicsBridge {
  static double suspensionDamper(double mass, int wheelCount, double spring) {
   return 2*Math.sqrt(spring*mass/wheelCount)*.7;
  }
- /**
-  * The solid-cuboid rotational inertia (about the box's own center, diagonal in the box's own
-  * local axes - a box is symmetric about each of them) a vehicle's envelope box actually has,
-  * given its real half-extents and mass. Confirmed root cause (decompiled against the exact
-  * pinned dependency, {@code sable-neoforge-1.21.1:2.0.5}): {@code BoxPhysicsObject} has only the
-  * scalar-mass constructor this class already used, and {@code BoxMassData} hard-codes its
-  * inertia tensor to an ISOTROPIC {@code Matrix3d().scale(mass/6.0)} - identical on every axis and
-  * completely independent of {@code halfExtents}. That value is exactly the correct solid-cuboid
-  * inertia only for a 1m-half-extent (2m) cube; {@code mass/6 = mass/3*(0.5*0.5+0.5*0.5)}. Any
-  * vehicle whose actual cross-section exceeds that reference size - every drivable ground vehicle
-  * this ticket covers, ATV included - gets LESS rotational resistance from Sable than its real
-  * footprint should produce, so a given tire/suspension roll torque spins it faster than it
-  * physically should: this is the shared mechanism behind "flips way too easily," not an
-  * ATV-specific tuning gap, and it scales with the vehicle's own size exactly the way the
-  * acceptance criteria require. There is no newer Sable API available at this pin to hand Sable a
-  * correct tensor directly (see {@code BoxMassProperties} in a later Sable version, not this one) -
-  * {@link #inertiaCorrection} is the compensating seam {@code stepGround} applies instead.
-  */
- static Matrix3d solidBoxInertia(double mass, Vector3dc halfExtents) {
-  double x=halfExtents.x(), y=halfExtents.y(), z=halfExtents.z();
-  double ix=mass/3.0*(y*y+z*z), iy=mass/3.0*(x*x+z*z), iz=mass/3.0*(x*x+y*y);
-  return new Matrix3d().scaling(ix,iy,iz);
- }
- /**
-  * The angular-velocity correction {@code stepGround} must add (via
-  * {@code RigidBodyHandle.addLinearAndAngularVelocity}, which sets velocity directly rather than
-  * dividing an impulse by inertia again) to undo Sable's fixed isotropic {@code mass/6} angular
-  * response to {@code localTorqueImpulse} (this tick's total wheel torque impulse, already
-  * rotated into the body's own local axes) and replace it with the response the vehicle's real
-  * {@link #solidBoxInertia} would have produced - a pure seam testable without a live Sable
-  * runtime. {@code localTorqueImpulse} must be the torque impulse ALREADY APPLIED to the body this
-  * tick (Sable already divided it by the isotropic tensor once); this returns only the
-  * difference, not a replacement, so a caller must add this on top, never substitute it.
-  */
- static Vector3d inertiaCorrection(double mass, Vector3dc halfExtents, Vector3dc localTorqueImpulse) {
-  Vector3d real=solidBoxInertia(mass, halfExtents).invert().transform(new Vector3d(localTorqueImpulse));
-  double isotropicInverse=6.0/mass;
-  return real.sub(new Vector3d(localTorqueImpulse).mul(isotropicInverse));
- }
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
@@ -467,7 +427,6 @@ public final class PhysicsBridge {
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
-  final Vector3d halfExtents;
   final double mass;
   final boolean flight;
   // A vehicle with a drivable wheel/track OR a flight flag AND a canFloat device (amphibious
@@ -499,7 +458,6 @@ public final class PhysicsBridge {
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
-   this.halfExtents=new Vector3d(half);
    box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
    var physics=SubLevelContainer.getContainer(level).physicsSystem();
    physics.addObject(box);
@@ -573,11 +531,6 @@ public final class PhysicsBridge {
    double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel,gravity);
    double damper=suspensionDamper(mass,wheels.size(),spring);
    boolean contact=false;
-   // World-frame sum of this tick's wheel torque impulses (point x force*DT, about the COM) -
-   // Sable already applies each wheel's torque share of applyImpulseAtPoint using its own fixed
-   // isotropic inertia (see solidBoxInertia's doc); this total is what inertiaCorrection needs to
-   // undo that and substitute the vehicle's real, size-scaled rotational response instead.
-   Vector3d worldTorqueImpulse=new Vector3d();
    for(var wheel:wheels) {
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
@@ -600,17 +553,11 @@ public final class PhysicsBridge {
     var tire=TireForces.friction(longitudinal,-sideSpeed*mass/wheels.size()/DT,normal,tuning.friction);
     Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
     Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
-    worldTorqueImpulse.add(new Vector3d(point).cross(force).mul(DT));
     handle.applyImpulseAtPoint(inverse.transform(point),inverse.transform(force.mul(DT)));
     wheel.contactThisTick=true;
     wheel.animateAsOnGround=true;
     wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
     contact=true;
-   }
-   if (contact) {
-    Vector3d localTorqueImpulse=inverse.transform(new Vector3d(worldTorqueImpulse));
-    Vector3d correction=inertiaCorrection(mass,halfExtents,localTorqueImpulse);
-    handle.addLinearAndAngularVelocity(new Vector3d(),q.transform(correction));
    }
    double towThrust = applyTowingCompensation(v);
    return contact || drive!=0 || towThrust!=0;
