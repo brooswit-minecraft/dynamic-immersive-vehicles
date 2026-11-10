@@ -422,6 +422,18 @@ public final class PhysicsBridge {
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
+  // Opt-in, self-limiting diagnostic for the still-open initial-placement/asymmetric-support
+  // question (John's exact report: flat-ground sinks and tilts left with banging on placement;
+  // on a hill it rolls down without sinking, then flips while driving - see ticket comment
+  // 52846/52847). Off by default; enabled only via -Ddiv.debugGroundContact=true. Logs each
+  // wheel's support-ray geometry/result and this tick's suspension/tire inputs to stdout for a
+  // bounded number of ticks per activated body (DEBUG_GROUND_CONTACT_TICKS, ~10s at 20tps - long
+  // enough to capture placement settling, short enough that it is not permanent instrumentation
+  // or unbounded spam) so a reproduction can be captured and compared flat-vs-hill without
+  // reading or dumping any world/personal data beyond this one vehicle's own physics state.
+  private static final boolean DEBUG_GROUND_CONTACT = Boolean.getBoolean("div.debugGroundContact");
+  private static final int DEBUG_GROUND_CONTACT_TICKS = 200;
+  private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
   final ServerLevel level;
   final Overrides.Tuning tuning;
   final BoxPhysicsObject box;
@@ -531,6 +543,10 @@ public final class PhysicsBridge {
    double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel,gravity);
    double damper=suspensionDamper(mass,wheels.size(),spring);
    boolean contact=false;
+   boolean debugThisTick=DEBUG_GROUND_CONTACT && debugGroundContactTicksRemaining>0;
+   if (debugThisTick) System.out.println("[DIV debugGroundContact] mass="+mass+" gravity="+gravity
+     +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+pose.position()
+     +" up="+up+" linearVelocity="+velocity+" angularVelocity="+angular);
    for(var wheel:wheels) {
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
@@ -539,7 +555,12 @@ public final class PhysicsBridge {
     double length=radius+tuning.suspensionTravel;
     Vector3d end=new Vector3d(start).fma(-length,up);
     var hit=level.clip(new ClipContext(vec(start),vec(end),ClipContext.Block.COLLIDER,ClipContext.Fluid.NONE,(net.minecraft.world.entity.Entity)null));
-    if(hit.getType()==HitResult.Type.MISS) { wheel.contactThisTick=false; continue; }
+    if(hit.getType()==HitResult.Type.MISS) {
+     wheel.contactThisTick=false;
+     if (debugThisTick) System.out.println("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+       +" radius="+radius+" rayStart="+vec(start)+" rayEnd="+vec(end)+" MISS");
+     continue;
+    }
     double compression=length-hit.getLocation().distanceTo(vec(start));
     Vector3d localVelocity=new Vector3d(angular).cross(arm).add(velocity);
     double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),spring,damper));
@@ -553,12 +574,17 @@ public final class PhysicsBridge {
     var tire=TireForces.friction(longitudinal,-sideSpeed*mass/wheels.size()/DT,normal,tuning.friction);
     Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
     Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
+    if (debugThisTick) System.out.println("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+      +" radius="+radius+" rayStart="+vec(start)+" rayEnd="+vec(end)+" hit="+hit.getLocation()
+      +" distance="+hit.getLocation().distanceTo(vec(start))+" compression="+compression
+      +" normal="+normal+" tire="+tire+" force="+force);
     handle.applyImpulseAtPoint(inverse.transform(point),inverse.transform(force.mul(DT)));
     wheel.contactThisTick=true;
     wheel.animateAsOnGround=true;
     wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
     contact=true;
    }
+   if (debugThisTick) debugGroundContactTicksRemaining--;
    double towThrust = applyTowingCompensation(v);
    return contact || drive!=0 || towThrust!=0;
   }
