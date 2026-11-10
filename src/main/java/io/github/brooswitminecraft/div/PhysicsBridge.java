@@ -387,6 +387,27 @@ public final class PhysicsBridge {
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**
+  * Per-wheel suspension spring rate {@code stepGround} divides the vehicle's full static load
+  * across: calibrated so that, under even per-wheel load (mass*9.81/wheelCount), the per-wheel
+  * {@link TireForces#suspension} force exactly balances gravity at HALF of
+  * {@code suspensionTravel} compressed - the ride-height equilibrium this ticket's own triage
+  * (comment 52830) already derived algebraically. Extracted as its own seam (same value,
+  * verbatim) so a settling simulation can exercise the exact production constant instead of a
+  * hand-copied formula that could silently drift from it.
+  */
+ static double suspensionSpring(double mass, int wheelCount, double suspensionTravel) {
+  return mass*9.81/(wheelCount*suspensionTravel*.5);
+ }
+ /**
+  * Per-wheel suspension damping rate - critically-damped-ish (0.7x the critical damping
+  * coefficient for this wheel's share of the sprung mass) so the settling the convergence
+  * simulation checks neither oscillates indefinitely nor is sluggish enough to look like
+  * persistent sinking. Same extraction rationale as {@link #suspensionSpring}.
+  */
+ static double suspensionDamper(double mass, int wheelCount, double spring) {
+  return 2*Math.sqrt(spring*mass/wheelCount)*.7;
+ }
+ /**
   * The solid-cuboid rotational inertia (about the box's own center, diagonal in the box's own
   * local axes - a box is symmetric about each of them) a vehicle's envelope box actually has,
   * given its real half-extents and mass. Confirmed root cause (decompiled against the exact
@@ -525,8 +546,8 @@ public final class PhysicsBridge {
    // keep steering the wheels marked turnsWithSteer. Both can coexist on the same chassis.
    boolean skidSteer=v.definition.motorized != null && v.definition.motorized.hasSkidSteer;
    var wheels=groundContacts(v);
-   double spring=mass*9.81/(wheels.size()*tuning.suspensionTravel*.5);
-   double damper=2*Math.sqrt(spring*mass/wheels.size())*.7;
+   double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel);
+   double damper=suspensionDamper(mass,wheels.size(),spring);
    boolean contact=false;
    // World-frame sum of this tick's wheel torque impulses (point x force*DT, about the COM) -
    // Sable already applies each wheel's torque share of applyImpulseAtPoint using its own fixed
