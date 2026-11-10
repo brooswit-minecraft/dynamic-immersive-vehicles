@@ -7,6 +7,8 @@ import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
 import dev.ryanhcode.sable.physics.config.dimension_physics.DimensionPhysicsData;
+import com.mojang.logging.LogUtils;
+import org.slf4j.Logger;
 import io.github.brooswitminecraft.div.mixin.VehicleTowingAccessor;
 import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.baseclasses.TowingConnection;
@@ -158,6 +160,7 @@ public final class PhysicsBridge {
   var decision = ground
     ? decide(true, v.world.isClient(), towed, alreadyActive, towingVehicleActive)
     : (v.world.isClient() ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
+  Body.logClassification(key, ground, floating, decision);
   if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
   if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
   var level = ((WorldAccessor)v.world).div$level();
@@ -165,7 +168,7 @@ public final class PhysicsBridge {
   Supplier<VehicleBody> construct = ground
     ? () -> new Body(server,v,tuning(definition))
     : () -> new BuoyantBody(server,v,tuning(definition));
-  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, construct);
+  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, Body.instrumentedConstruct(construct, key));
   if (!activated || !ground) return activated;
   // Evaluated BEFORE reconcileHitch runs: HitchRegistry.reconcile already clears any existing
   // entry - valid/matching or not - before attempting to (re)create one, so this is the only
@@ -425,14 +428,64 @@ public final class PhysicsBridge {
   // Opt-in, self-limiting diagnostic for the still-open initial-placement/asymmetric-support
   // question (John's exact report: flat-ground sinks and tilts left with banging on placement;
   // on a hill it rolls down without sinking, then flips while driving - see ticket comment
-  // 52846/52847). Off by default; enabled only via -Ddiv.debugGroundContact=true. Logs each
-  // wheel's support-ray geometry/result and this tick's suspension/tire inputs to stdout for a
+  // 52846/52847). Off by default; enabled only via -Ddiv.debugGroundContact=true.
+  //
+  // First attempt used System.out.println directly and produced ZERO records in latest.log/
+  // debug.log on the actual hosted/launcher runtime (confirmed by a real manual test - comment
+  // 52877): stdout capture cannot be assumed in that environment. Routed through LogUtils'
+  // SLF4J logger instead, which goes through Minecraft's own configured Log4j appenders and is
+  // the same mechanism every other mod's logging relies on to actually reach latest.log/
+  // debug.log. Deliberately NOT referenced from the outer PhysicsBridge class or from
+  // activateOrClassify's generic signature (see gravityMagnitude's fate earlier on this branch,
+  // and PhysicsBridgeClassificationTest's direct calls to activateOrClassify with fake generic
+  // types): a Minecraft/SLF4J-typed method on the outer class or in that generic method would
+  // make the JVM's class-verifier require Log4j/SLF4J to be resolvable just to LOAD
+  // PhysicsBridge.class, breaking every pure-function unit test that merely references the
+  // outer class - this diagnostic is confined to Body's own class file instead, which pure
+  // tests never load.
+  //
+  // Logs each wheel's support-ray geometry/result and that tick's suspension/tire inputs for a
   // bounded number of ticks per activated body (DEBUG_GROUND_CONTACT_TICKS, ~10s at 20tps - long
   // enough to capture placement settling, short enough that it is not permanent instrumentation
-  // or unbounded spam) so a reproduction can be captured and compared flat-vs-hill without
-  // reading or dumping any world/personal data beyond this one vehicle's own physics state.
+  // or unbounded spam), plus - per the manual test's own finding that missing activation/
+  // construction-failure visibility could not distinguish "no contact logged" from "Sable never
+  // took over this vehicle at all" - the classification/activation decision and any swallowed
+  // construction exception for every vehicle, so a reproduction can be captured and compared
+  // flat-vs-hill without reading or dumping any world/personal data beyond this one vehicle's
+  // own physics state.
   private static final boolean DEBUG_GROUND_CONTACT = Boolean.getBoolean("div.debugGroundContact");
   private static final int DEBUG_GROUND_CONTACT_TICKS = 200;
+  private static final Logger LOGGER = LogUtils.getLogger();
+  static {
+   if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] diagnostics ENABLED (-Ddiv.debugGroundContact=true)");
+  }
+  /** Logs this vehicle's classification/activation decision - called unconditionally from
+   * active() (outer class) every tick a vehicle is seen, independent of whether it ends up a
+   * Body, a BuoyantBody, or inactive, so "never reached the ground solver" is distinguishable
+   * from "reached it but logged nothing." No-op (and no logger call at all) when the diagnostic
+   * is disabled, so this costs nothing in the default/released configuration. */
+  static void logClassification(String key, boolean ground, boolean floating, ActivationDecision decision) {
+   if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] classify key={} ground={} floating={} decision={}", key, ground, floating, decision);
+  }
+  /** Wraps a body-construction supplier so a swallowed InvalidChassisGeometry/RuntimeException
+   * (activateOrClassify's own job to catch and classify - this does not change that outcome,
+   * only observes it) and a successful construction are both logged with this vehicle's
+   * definition key, before the exception or result reaches activateOrClassify unchanged. Returns
+   * the original supplier unchanged when the diagnostic is disabled - zero overhead/behavior
+   * change in the default/released configuration, confirmed by the full existing test suite. */
+  static Supplier<VehicleBody> instrumentedConstruct(Supplier<VehicleBody> construct, String key) {
+   if (!DEBUG_GROUND_CONTACT) return construct;
+   return () -> {
+    try {
+     VehicleBody body = construct.get();
+     LOGGER.info("[DIV debugGroundContact] constructed key={} class={}", key, body.getClass().getSimpleName());
+     return body;
+    } catch (RuntimeException ex) {
+     LOGGER.warn("[DIV debugGroundContact] constructionFailed key={} exception={} message={}", key, ex.getClass().getName(), ex.getMessage());
+     throw ex;
+    }
+   };
+  }
   private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
   final ServerLevel level;
   final Overrides.Tuning tuning;
@@ -544,7 +597,7 @@ public final class PhysicsBridge {
    double damper=suspensionDamper(mass,wheels.size(),spring);
    boolean contact=false;
    boolean debugThisTick=DEBUG_GROUND_CONTACT && debugGroundContactTicksRemaining>0;
-   if (debugThisTick) System.out.println("[DIV debugGroundContact] mass="+mass+" gravity="+gravity
+   if (debugThisTick) LOGGER.info("[DIV debugGroundContact] mass="+mass+" gravity="+gravity
      +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+pose.position()
      +" up="+up+" linearVelocity="+velocity+" angularVelocity="+angular);
    for(var wheel:wheels) {
@@ -557,7 +610,7 @@ public final class PhysicsBridge {
     var hit=level.clip(new ClipContext(vec(start),vec(end),ClipContext.Block.COLLIDER,ClipContext.Fluid.NONE,(net.minecraft.world.entity.Entity)null));
     if(hit.getType()==HitResult.Type.MISS) {
      wheel.contactThisTick=false;
-     if (debugThisTick) System.out.println("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
        +" radius="+radius+" rayStart="+vec(start)+" rayEnd="+vec(end)+" MISS");
      continue;
     }
@@ -574,7 +627,7 @@ public final class PhysicsBridge {
     var tire=TireForces.friction(longitudinal,-sideSpeed*mass/wheels.size()/DT,normal,tuning.friction);
     Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
     Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
-    if (debugThisTick) System.out.println("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+    if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
       +" radius="+radius+" rayStart="+vec(start)+" rayEnd="+vec(end)+" hit="+hit.getLocation()
       +" distance="+hit.getLocation().distanceTo(vec(start))+" compression="+compression
       +" normal="+normal+" tire="+tire+" force="+force);
