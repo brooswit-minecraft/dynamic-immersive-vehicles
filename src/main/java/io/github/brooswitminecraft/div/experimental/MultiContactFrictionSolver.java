@@ -94,11 +94,22 @@ public final class MultiContactFrictionSolver {
     var c=contacts[i];
     Vector3d contactVelocity=new Vector3d(workingAngular).cross(c.point()).add(workingVelocity);
     double speed=contactVelocity.dot(c.forward()), sideSpeed=contactVelocity.dot(c.right());
+    // Longitudinal is a PRESCRIBED target (drive/brake/rolling-resistance, a function of the
+    // vehicle's own controls and current speed, not a one-shot "cancel all slip now" formula) -
+    // recomputing it fresh each pass and replacing the prior value is correct, same as the
+    // pre-iteration single-shot code did.
     double longitudinalBase=(braking ? -Math.signum(speed)*Math.min(brakeForcePerWheel,Math.abs(speed)*mass/n/dt) : driveForcePerWheel)*c.skidSteerMultiplier();
     double longitudinalTarget=longitudinalBase-speed*20;
+    // Lateral is an ACCUMULATED CONSTRAINT CORRECTION, not a prescribed target (review comment
+    // 53022): -sideSpeed*effectiveMass/dt is "the additional force needed, beyond what's already
+    // been applied this tick, to cancel the REMAINING measured slip" - a genuine per-pass
+    // INCREMENT on top of what earlier passes already accumulated, not a replacement for it. The
+    // earlier (buggy) version replaced accLat with this pass's fresh, already-shrunk value,
+    // which discarded prior passes' correction every other pass instead of converging toward it.
     double effectiveMass=contactLateralEffectiveMass(mass,c.point(),c.right(),inverseOrientation,inertiaBody);
-    double lateralTarget=-sideSpeed*effectiveMass/dt;
-    var tire=TireForces.friction(longitudinalTarget,lateralTarget,c.normal(),friction);
+    double lateralIncrement=-sideSpeed*effectiveMass/dt;
+    double candidateLateral=accLat[i]+lateralIncrement;
+    var tire=TireForces.friction(longitudinalTarget,candidateLateral,c.normal(),friction);
     double deltaLong=tire.longitudinal()-accLong[i], deltaLat=tire.lateral()-accLat[i];
     accLong[i]=tire.longitudinal(); accLat[i]=tire.lateral();
     Vector3d impulse=new Vector3d(c.forward()).mul(deltaLong*dt).fma(deltaLat*dt,c.right());

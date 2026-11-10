@@ -34,12 +34,17 @@ class MultiContactFrictionSolverExperimentTest {
   double a=HALF_EXTENTS.x, b=HALF_EXTENTS.y, c=HALF_EXTENTS.z;
   return new Vector3d(MASS/3*(b*b+c*c), MASS/3*(a*a+c*c), MASS/3*(a*a+b*b));
  }
- // Real chassisReceipt wheel contact points, body-local, relative to COM (ticket comment 52984).
+ // Real production-LOGGED appliedPointLocal values (ticket comment 52984, tick0) - these are
+ // already body-local (inverse.transform(point), exactly what production itself computes and
+ // logs), not the world-frame `point` values re-used incorrectly in an earlier version of this
+ // test (review comment 53022: those are world-oriented offsets already baked in with the real
+ // tick0 orientation's ~49 degree yaw, not body-local - reusing them as body-local under an
+ // identity starting orientation double-applied that yaw).
  private static final Vector3d[] BODY_POINTS = {
-  new Vector3d(-0.7293008337849045,-0.903594970703125,-0.25154829325725814),
-  new Vector3d(0.6708592596412473,-0.903594970703125,0.2849523710264634),
-  new Vector3d(0.5671270377957001,-0.903594970703125,-0.4578394074356993),
-  new Vector3d(-0.6295593122761289,-0.903594970703125,0.4669740309086876),
+  new Vector3d(0.3500000000000001,-0.903594970703125,-0.6874999999999974),
+  new Vector3d(-0.37500000000000483,-0.903594970703125,0.6250000000000018),
+  new Vector3d(0.3749999999999929,-0.903594970703125,0.6250000000000024),
+  new Vector3d(-0.37499999999999645,-0.903594970703125,-0.6874999999999932),
  };
  private static final double NORMAL_PER_WHEEL = MASS*GRAVITY/4;
 
@@ -71,16 +76,21 @@ class MultiContactFrictionSolverExperimentTest {
   double maxOmega=0;
   for (int t=0;t<ticks;t++) {
    Quaterniond inverse=new Quaterniond(orientation).conjugate();
+   // Production's own convention (PhysicsBridge.java: `Vector3d up=q.transform(new
+   // Vector3d(0,1,0));`) - the body's own rotated up-axis, NOT a fixed world-up constant (review
+   // comment 53022: using fixed world-up for `right` becomes a non-orthonormal basis once the
+   // body is tilted, since forward is already rotated but up was not).
+   Vector3d up=orientation.transform(new Vector3d(0,1,0));
    Vector3d[] worldPoints=new Vector3d[4]; Vector3d[] forwards=new Vector3d[4]; Vector3d[] rights=new Vector3d[4];
    for (int i=0;i<4;i++) {
     worldPoints[i]=orientation.transform(new Vector3d(BODY_POINTS[i]));
     forwards[i]=orientation.transform(new Vector3d(0,0,1));
-    rights[i]=new Vector3d(0,1,0).cross(forwards[i]);
+    rights[i]=new Vector3d(up).cross(forwards[i]);
    }
    velocity.add(new Vector3d(0,-GRAVITY*DT,0));
    // Stage the (fixed - see class doc) vertical/normal impulses first, same staging order the
    // production code uses.
-   for (int i=0;i<4;i++) applyImpulse(worldPoints[i], new Vector3d(0,1,0).mul(NORMAL_PER_WHEEL*DT), velocity, angular, orientation, inverse, inertiaBody);
+   for (int i=0;i<4;i++) applyImpulse(worldPoints[i], new Vector3d(up).mul(NORMAL_PER_WHEEL*DT), velocity, angular, orientation, inverse, inertiaBody);
    if (useNewSolver) {
     var contacts=new MultiContactFrictionSolver.FrictionContact[4];
     for (int i=0;i<4;i++) contacts[i]=new MultiContactFrictionSolver.FrictionContact(worldPoints[i],forwards[i],rights[i],NORMAL_PER_WHEEL,1.0);
@@ -109,17 +119,22 @@ class MultiContactFrictionSolverExperimentTest {
     "the pre-fix independent mass/wheelCount computation should reproduce a runaway on the same order of magnitude as the real capture (peak |omega| > 2 rad/s within 30 ticks) on this real geometry - got "+maxOmega);
  }
 
- /** Documents the CURRENT, unresolved state rather than asserting success: the bounded solver
-  * measurably helps but does not resolve the instability in this simplified (fixed-normal-force)
-  * harness. If a future change to the solver (or a more faithful harness including suspension
-  * coupling) changes this materially, update this assertion to match - do not loosen it further
-  * without new evidence, and do not tighten it to claim resolution without a faithful harness. */
- @Test void newBoundedSolverMeasurablyHelpsButDoesNotResolveItInThisSimplifiedHarness() {
+ /** After review (comment 53022) found the accumulation bug in {@link MultiContactFrictionSolver}
+  * and the two coordinate/basis bugs this harness had (world-oriented points reused as
+  * body-local; fixed world-up instead of the body's own rotated up for the `right` axis), fixing
+  * both changed this result materially - from "modest improvement, nowhere near resolved" to a
+  * real, substantial reduction, staying under 2 rad/s where the pre-fix path still reproduces a
+  * multi-rad/s runaway on the same real geometry/seed. This STILL only tests the fixed-normal-
+  * force simplification this class's doc describes (no suspension/load-transfer coupling) - it
+  * is not yet the faithful production-path reproduction review asked for, so do not read this as
+  * "the real game is fixed," only as "the solver itself, correctly implemented, resolves the
+  * instability this simplified harness can represent." */
+ @Test void newBoundedSolverSubstantiallyResolvesItInThisSimplifiedHarness() {
   double maxOmegaOld=maxOmegaOverTicks(false, 30);
   double maxOmegaNew=maxOmegaOverTicks(true, 30);
-  assertTrue(maxOmegaNew < maxOmegaOld,
-    "expected at least some measurable improvement over the pre-fix behavior - old="+maxOmegaOld+" new="+maxOmegaNew);
-  assertTrue(maxOmegaNew > 2.0,
-    "this documents that the solver alone, in this simplified harness, does NOT bring the result back near rest (<2 rad/s) - if it now does, the fidelity gap noted in this class's doc may have been closed and this assertion should be revisited, not just loosened - old="+maxOmegaOld+" new="+maxOmegaNew);
+  assertTrue(maxOmegaNew < maxOmegaOld * 0.5,
+    "expected a substantial reduction versus the pre-fix behavior - old="+maxOmegaOld+" new="+maxOmegaNew);
+  assertTrue(maxOmegaNew < 2.0,
+    "expected the corrected solver to keep this undriven, nearly-flat seed close to rest in this simplified harness - old="+maxOmegaOld+" new="+maxOmegaNew);
  }
 }
