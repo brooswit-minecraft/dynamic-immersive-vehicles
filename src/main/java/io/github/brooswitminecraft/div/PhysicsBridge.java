@@ -474,6 +474,14 @@ public final class PhysicsBridge {
   // only reacts to the ground/flight category, not float capability) must start or stop getting
   // buoyancy on the very next tick, not stay stuck on whatever was true at construction.
   final double hullVolume;
+  // Body-local (diagonal, principal-axis) solid-box inertia tensor from the SAME half-extents/
+  // mass passed to BoxPhysicsObject above - Sable 2.0.5's native Rapier box collider creation
+  // (vendored Rust source, confirmed this ticket) builds its shape as
+  // cuboid(half_extents).mass(mass) with no mass-properties override, so Rapier derives inertia
+  // purely from this exact geometry/mass via the standard solid-box formula. Validated against
+  // real production angularVelocity data to ~1e-5 rad/s over 30 real ticks across two separate
+  // placements (ticket comment 53008). Used by the shared multi-contact friction solve below.
+  final Vector3d inertiaBody;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
    this.flight=Classification.isFlightVehicle(v.definition);
@@ -489,6 +497,7 @@ public final class PhysicsBridge {
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
    halfExtents=new Vector3d(half);
    this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
+   inertiaBody=new Vector3d(mass/3*(half.y*half.y+half.z*half.z),mass/3*(half.x*half.x+half.z*half.z),mass/3*(half.x*half.x+half.y*half.y));
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
@@ -577,6 +586,17 @@ public final class PhysicsBridge {
      +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
      +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
      +" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer);
+   // Phase 1: raycast every wheel and compute its vertical/suspension force exactly as before -
+   // suspension is per-wheel and unaffected by this change. Friction/slip is sampled at the
+   // point the tire impulse is actually applied (the terrain hit, `point` below), not the
+   // suspension anchor (`arm`, used only for the vertical damping sample - correct there, since
+   // that's the point whose own motion determines the raycast length's rate of change). Those
+   // two points differ by roughly radius+compression along `up`; on a rotating chassis, velocity
+   // differs between them by angular x that offset (fixed by sampling at `point` - 691f11b).
+   record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
+     double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
+     double skidSteerMultiplier) {}
+   List<WheelHit> hits=new java.util.ArrayList<>();
    for(var wheel:wheels) {
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
@@ -597,25 +617,41 @@ public final class PhysicsBridge {
     double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
-    // Friction/slip must be sampled at the point the tire impulse is actually applied (the
-    // terrain hit, `point` below), not at the suspension anchor (`arm`, used only for the
-    // vertical damping sample above - correct there, since that's the point whose own motion
-    // determines the raycast length's rate of change). Those two points differ by roughly
-    // radius+compression along `up`; on a rotating chassis, velocity differs between them by
-    // angular x that offset, so reusing the anchor-sampled velocity here fed a spurious lateral
-    // slip signal proportional to the chassis's own roll/pitch rate back into friction every
-    // tick - a growing feedback loop, not a one-off error (confirmed root cause: ticket comment
-    // 52906's captured data shows exactly this growth pattern, alternating lateral forces
-    // +4,-3,+13,-30,+69,-178 N before gross tilt, on an initially level, undriven vehicle).
     Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
+    double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
+    hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier));
+   }
+   // Phase 2: shared multi-contact friction solve (ticket MINECRAFT-503) - stage every wheel's
+   // own vertical/suspension impulse into a working velocity/angular estimate first (production
+   // reads velocity/angular ONCE per tick - this `velocity`/`angular` snapshot - and every
+   // wheel's force computation below uses it unchanged; only this LOCAL working copy, used to
+   // size the solved impulses, accumulates as wheels are staged/solved), then iterate
+   // io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver across all active
+   // contacts together instead of each wheel computing its target independently from the stale
+   // snapshot alone (the confirmed real mechanism behind the captured rollover - see that
+   // class's own doc and ticket comment history for the full derivation/validation). No gravity
+   // is added here - Sable's own engine owns that; `velocity`/`angular` already reflect
+   // whatever Sable has already applied this tick.
+   Vector3d workingVelocity=new Vector3d(velocity), workingAngular=new Vector3d(angular);
+   for (var h:hits) {
+    Vector3d verticalImpulse=new Vector3d(up).mul(h.normal()*DT);
+    workingVelocity.add(new Vector3d(verticalImpulse).div(mass));
+    Vector3d torqueBody=inverse.transform(new Vector3d(h.point()).cross(verticalImpulse));
+    workingAngular.add(q.transform(new Vector3d(torqueBody.x/inertiaBody.x,torqueBody.y/inertiaBody.y,torqueBody.z/inertiaBody.z)));
+   }
+   var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
+     h.point(),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
+   var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,inertiaBody,q,inverse,workingVelocity,workingAngular,
+     braking,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,DT,
+     io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+   // Phase 3: apply each wheel's final (vertical + solved tire) impulse exactly once, same
+   // application/logging shape as before.
+   for (int i=0;i<hits.size();i++) {
+    var h=hits.get(i); var wheel=h.wheel(); var tire=results[i];
+    Vector3d point=h.point(), forward=h.forward(), right=h.right();
     Vector3d contactVelocity=new Vector3d(angular).cross(point).add(velocity);
     double speed=contactVelocity.dot(forward), sideSpeed=contactVelocity.dot(right);
-    double longitudinal=braking ? -Math.signum(speed)*Math.min(tuning.brakeForce/wheels.size(),Math.abs(speed)*mass/wheels.size()/DT) : drive/wheels.size();
-    if (skidSteer) longitudinal*=1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE);
-    longitudinal-=speed*20;
-    double lateralSlipBudgetTarget=-sideSpeed*mass/wheels.size()/DT;
-    var tire=TireForces.friction(longitudinal,lateralSlipBudgetTarget,normal,tuning.friction);
-    Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
+    Vector3d force=new Vector3d(up).mul(h.normal()).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
     // Captured BEFORE the world-frame point/force below are mutated in place into the
     // local-frame values actually passed to applyImpulseAtPoint - "requested" (world-frame,
     // what stepGround computed) vs "applied" (local-frame, what Sable actually receives) per
@@ -624,13 +660,13 @@ public final class PhysicsBridge {
     if (debugThisTick) {
      String requestedImpulseWorld=vfull(new Vector3d(force).mul(DT)), requestedPointWorld=vfull(point);
      LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
-       +" radius="+radius+" arm="+vfull(arm)+" rayStart="+vfull(start)+" rayEnd="+vfull(end)+" rayLength="+length
-       +" hit="+vfull(new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z))
-       +" distance="+hit.getLocation().distanceTo(vec(start))+" compression="+compression
-       +" anchorVerticalVelocity="+localVelocity.dot(up)+" point="+requestedPointWorld
-       +" localVelocity(anchor-sampled)="+vfull(localVelocity)+" contactVelocity(contact-sampled)="+vfull(contactVelocity)
-       +" speed="+speed+" sideSpeed="+sideSpeed+" lateralSlipBudgetTarget="+lateralSlipBudgetTarget
-       +" normal="+normal+" tire="+tire+" requestedImpulseWorld="+requestedImpulseWorld);
+       +" radius="+h.radius()+" arm="+vfull(h.arm())+" rayStart="+vfull(h.start())+" rayEnd="+vfull(h.end())+" rayLength="+h.length()
+       +" hit="+vfull(new Vector3d(point).add(pose.position()))
+       +" distance="+new Vector3d(point).add(pose.position()).distance(h.start())+" compression="+h.compression()
+       +" anchorVerticalVelocity="+h.localVelocity().dot(up)+" point="+requestedPointWorld
+       +" localVelocity(anchor-sampled)="+vfull(h.localVelocity())+" contactVelocity(contact-sampled)="+vfull(contactVelocity)
+       +" speed="+speed+" sideSpeed="+sideSpeed
+       +" normal="+h.normal()+" tire="+tire+" requestedImpulseWorld="+requestedImpulseWorld);
     }
     Vector3d appliedPointLocal=inverse.transform(point), appliedImpulseLocal=inverse.transform(force.mul(DT));
     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
@@ -638,7 +674,7 @@ public final class PhysicsBridge {
     handle.applyImpulseAtPoint(appliedPointLocal,appliedImpulseLocal);
     wheel.contactThisTick=true;
     wheel.animateAsOnGround=true;
-    wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
+    wheel.angularVelocity=speed*DT/(Math.max(.05,h.radius())*2*Math.PI);
     contact=true;
    }
    if (debugThisTick) debugGroundContactTicksRemaining--;
