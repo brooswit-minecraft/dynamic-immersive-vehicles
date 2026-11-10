@@ -88,18 +88,41 @@ public final class MultiContactFrictionSolver {
      Vector3d workingVelocity, Vector3d workingAngular,
      boolean braking, double brakeForcePerWheel, double driveForcePerWheel, double friction, double dt, int iterations) {
   int n=contacts.length;
-  double[] accLong=new double[n], accLat=new double[n];
+  // accLong/accLat track the TOTAL applied-so-far longitudinal/lateral force (post friction-
+  // circle clamp) purely so each pass's impulse delta is correct - same role for both.
+  // accBrakeConstraint is SEPARATE: only braking's own self-limiting component accumulates (see
+  // below), bounded by its own brakeForcePerWheel cap independent of the combined friction
+  // circle, so it cannot be driven by (or drive) the combined clamp's scaling.
+  double[] accLong=new double[n], accLat=new double[n], accBrakeConstraint=new double[n];
   for (int pass=0; pass<iterations; pass++) {
    for (int i=0; i<n; i++) {
     var c=contacts[i];
     Vector3d contactVelocity=new Vector3d(workingAngular).cross(c.point()).add(workingVelocity);
     double speed=contactVelocity.dot(c.forward()), sideSpeed=contactVelocity.dot(c.right());
-    // Longitudinal is a PRESCRIBED target (drive/brake/rolling-resistance, a function of the
-    // vehicle's own controls and current speed, not a one-shot "cancel all slip now" formula) -
-    // recomputing it fresh each pass and replacing the prior value is correct, same as the
-    // pre-iteration single-shot code did.
-    double longitudinalBase=(braking ? -Math.signum(speed)*Math.min(brakeForcePerWheel,Math.abs(speed)*mass/n/dt) : driveForcePerWheel)*c.skidSteerMultiplier();
-    double longitudinalTarget=longitudinalBase-speed*20;
+    // Rolling resistance is a continuous, velocity-proportional damping law (F=-k*v, k=20) -
+    // recomputing it fresh from the current speed each pass is physically correct (same as a
+    // real damper), not a one-shot "cancel everything" formula, so it does not need the
+    // accumulate treatment below.
+    double rollingResistance=-speed*20;
+    // Drive is a genuinely PRESCRIBED target (a constant commanded force, not derived from
+    // current slip) - recomputing it fresh each pass and replacing the prior value is correct.
+    // Braking's own min(brakeForcePerWheel, |speed|*mass/wheelCount/dt) is NOT purely prescribed
+    // (review comment 53025): its second branch has the same "cancel in one DT" character the
+    // lateral target has, so it needs the SAME accumulate treatment lateral got in 53022 - but
+    // its OWN bound is brakeForcePerWheel, not the combined friction circle, so it accumulates
+    // into its own small accumulator capped at that bound BEFORE being combined with drive/
+    // rolling-resistance and handed to the shared friction-circle clamp (which still protects
+    // the combined lateral+longitudinal budget exactly as before). Capping the ACCUMULATOR
+    // itself (not re-deriving a fresh min() each pass) correctly handles both regimes: at high
+    // speed the first pass already saturates the cap and stays pinned there (stable, no
+    // overshoot/growth); at low speed the increment shrinks with speed and accumulates smoothly
+    // toward full cancellation instead of oscillating like the old single-shot lateral code did.
+    double prescribedLongitudinal; double brakeIncrement;
+    if (braking) { prescribedLongitudinal=0; brakeIncrement=-Math.signum(speed)*Math.abs(speed)*mass/n/dt*c.skidSteerMultiplier(); }
+    else { prescribedLongitudinal=driveForcePerWheel*c.skidSteerMultiplier(); brakeIncrement=0; }
+    double candidateBrakeConstraint=Math.max(-brakeForcePerWheel,Math.min(brakeForcePerWheel,accBrakeConstraint[i]+brakeIncrement));
+    accBrakeConstraint[i]=candidateBrakeConstraint;
+    double longitudinalTarget=prescribedLongitudinal+rollingResistance+candidateBrakeConstraint;
     // Lateral is an ACCUMULATED CONSTRAINT CORRECTION, not a prescribed target (review comment
     // 53022): -sideSpeed*effectiveMass/dt is "the additional force needed, beyond what's already
     // been applied this tick, to cancel the REMAINING measured slip" - a genuine per-pass
