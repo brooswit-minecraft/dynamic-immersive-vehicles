@@ -32,16 +32,18 @@ import java.util.function.Supplier;
 
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
 public final class PhysicsBridge {
- private static final BodyRegistry<EntityVehicleF_Physics, Body> registry = new BodyRegistry<>();
+ private static final BodyRegistry<EntityVehicleF_Physics, VehicleBody> registry = new BodyRegistry<>();
  // Vehicle definitions whose chassis geometry failed to build a Sable body once already;
  // keyed by the shared JSON definition object (one per packID:systemName, not per entity), so a
  // bad content-pack definition is retried, and logged, once rather than every tick for every
  // vehicle instance of that definition.
  private static final Set<JSONVehicle> brokenDefinitions = Collections.newSetFromMap(new IdentityHashMap<>());
  // Live hitch-joint bookkeeping, keyed by the trailer entity - see HitchRegistry for why this is
- // its own class (a testable seam, independent of Body/live Sable types).
+ // its own class (a testable seam, independent of Body/live Sable types). Only ever keyed by a
+ // vehicle whose active VehicleBody is a Body (ground/flight/rotor) - a BuoyantBody has no
+ // pose/anchor API for a joint to connect to; see Classification's class doc.
  private static final HitchRegistry<EntityVehicleF_Physics> hitches = new HitchRegistry<>();
- private static final double DT = .05;
+ static final double DT = .05;
  private PhysicsBridge() {}
  private static Overrides.Tuning tuning(JSONVehicle definition) {
   var t = Overrides.get(definition.packID + ":" + definition.systemName);
@@ -53,6 +55,84 @@ public final class PhysicsBridge {
       && Classification.isDrivableGroundDevice(g.definition.ground))
     .map(p -> (PartGroundDevice)p).toList();
  }
+ /** Every currently-installed, non-spare ground device's JSON definition, recomputed fresh from
+  * the vehicle's current parts each time it is called. Spares carry no hull/ground support of
+  * their own (MTS's own VehicleGroundDeviceBox excludes them from support the same way); a
+  * spare must not count toward either domain's eligibility. */
+ private static List<JSONPart.JSONPartGroundDevice> installedGroundDevices(EntityVehicleF_Physics v) {
+  return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && !g.isSpare && g.definition != null)
+    .map(p -> ((PartGroundDevice)p).definition.ground).toList();
+ }
+ /** Every currently-installed, non-spare propeller's JSON definition, recomputed fresh from the
+  * vehicle's current parts each time it is called - never cached, so a rotor added/removed/
+  * replaced after activation is reflected on the very next tick. A spare rotor must not
+  * suppress or grant eligibility: it isn't an operational part of the chassis (same reasoning
+  * as excluding spare ground devices above). */
+ private static List<JSONPart.JSONPartPropeller> installedPropellers(EntityVehicleF_Physics v) {
+  return v.allParts.stream().filter(p -> p instanceof PartPropeller pr && !pr.isSpare && pr.definition != null)
+    .map(p -> ((PartPropeller)p).definition.propeller).toList();
+ }
+ /** Whether this vehicle has any installed, non-spare canFloat ground device, regardless of
+  * what other domain (ground/flight) it is also eligible for - the amphibious/float-equipped-
+  * flight-vehicle combined-forces case PhysicsBridge.Body's step() handles alongside its
+  * primary domain. */
+ private static boolean hasFloatDevice(EntityVehicleF_Physics v) {
+  return hasFloatDevice(installedGroundDevices(v));
+ }
+ /** The pure decision {@link #hasFloatDevice(EntityVehicleF_Physics)} delegates to, over the
+  * same already-live-filtered (non-spare) JSON list {@link #installedGroundDevices} produces -
+  * extracted so a float device installed or removed through this exact seam, not a hand-picked
+  * boolean, is provable without a live entity/Sable runtime (see {@code PhysicsBridgeStepperTest}),
+  * the same way {@link #selectStepper} is tested over a mutable propeller list. */
+ static boolean hasFloatDevice(List<JSONPart.JSONPartGroundDevice> installedGroundDevices) {
+  return installedGroundDevices.stream().anyMatch(Classification::isFloatDevice);
+ }
+ /** Which force model {@code Body.step} dispatches to this tick - the literal decision it makes,
+  * extracted so the "live rotor add/remove switches solvers" behavior is testable without a
+  * live entity/Sable runtime (see {@code PhysicsBridgeStepperTest}), the same way
+  * {@link #activateOrClassify} extracts {@code active()}'s own failure-classification boundary. */
+ enum Stepper { GROUND, FLIGHT, ROTOR }
+ /** An installed rotor propeller always wins dispatch, independent of {@code flight}
+  * ({@code motorized.isAircraft}/{@code isBlimp}): review found a vehicle with an actual
+  * installed {@code isRotor} propeller but no aircraft/blimp flag was previously stuck on
+  * GROUND (or deactivated outright), its rotor never getting lift/control - rotor physics must
+  * be driven by the actual installed part, not gated on a definition flag it doesn't need. */
+ static Stepper selectStepper(boolean flight, List<JSONPart.JSONPartPropeller> installedPropellers) {
+  if (Classification.isRotorcraft(installedPropellers)) return Stepper.ROTOR;
+  return flight ? Stepper.FLIGHT : Stepper.GROUND;
+ }
+ /** The full per-tick plan {@code Body.step} composes: which primary force model to run, and
+  * whether to additionally apply {@link BuoyantForces} this tick (independent of which primary
+  * model ran - {@code floatCapable} is re-read from the vehicle's live parts every tick by the
+  * caller, never cached, so installing/removing a float device takes effect on the next tick).
+  * Extracted as its own testable collaborator so the
+  * rotor+float composition (a floating rotorcraft gets both ROTOR's own thrust and buoyancy on
+  * its float devices, with rotor thrust never double-counted by {@code BuoyantForces}'s own
+  * underwater-propeller pass) is provable without a live entity/Sable runtime - see
+  * {@code PhysicsBridgeStepperTest}. */
+ record TickPlan(Stepper stepper, boolean appliesBuoyancy) {}
+ static TickPlan planTick(boolean flight, boolean floatCapable, List<JSONPart.JSONPartPropeller> installedPropellers) {
+  return new TickPlan(selectStepper(flight, installedPropellers), floatCapable);
+ }
+ /**
+  * {@code registry.activateOnce} deliberately reuses an already-active body without
+  * reconstructing it (the "no double physics" guarantee) - but a vehicle's installed parts can
+  * change which body category it needs live (a rotor installed on a previously float-only hull
+  * needs a ground/flight/rotor {@code Body} instead of its {@code BuoyantBody}, or the reverse
+  * when a rotor is removed from a rotor-only hull that has no wheels), and that reuse would
+  * otherwise silently keep running the wrong - or no - force model for the vehicle's actual
+  * current parts. Generic over {@code K}/{@code B} (not tied to {@code EntityVehicleF_Physics}/
+  * {@code VehicleBody}) so this lifecycle fix is directly testable with fake keys/bodies, the
+  * same way {@link #activateOrClassify} is - see {@code PhysicsBridgeBodyReplacementTest}.
+  */
+ static <K, B> void replaceIfCategoryChanged(BodyRegistry<K, B> registry, K key, boolean neededGroundCategory,
+     java.util.function.Predicate<B> isGroundCategory, Consumer<B> remove) {
+  B existing = registry.get(key);
+  if (existing != null && isGroundCategory.test(existing) != neededGroundCategory) {
+   B old = registry.deactivate(key);
+   if (old != null) remove.accept(old);
+  }
+ }
  public static boolean active(EntityVehicleF_Physics v) {
   // Guard every dereference used to decide eligibility, in entry order, before Classification
   // (or anything else) ever sees them: a vehicle with no definition, or with a ground part that
@@ -60,25 +140,38 @@ public final class PhysicsBridge {
   JSONVehicle definition = v.definition;
   if (definition == null) return deactivate(v);
   String key = definition.packID + ":" + definition.systemName;
-  var installedGroundDevices = v.allParts.stream()
-    .filter(p -> p instanceof PartGroundDevice g && g.definition != null)
-    .map(p -> ((PartGroundDevice)p).definition.ground).toList();
-  var installedPropellers = v.allParts.stream()
-    .filter(p -> p instanceof PartPropeller pr && pr.definition != null)
-    .map(p -> ((PartPropeller)p).definition.propeller).toList();
+  var installedGroundDevices = installedGroundDevices(v);
+  var installedPropellers = installedPropellers(v);
   TowingConnection towedByConnection = v.towedByConnection;
-  boolean eligible = Classification.eligible(definition, installedGroundDevices, installedPropellers, Overrides.isOptedOut(key))
-    && !brokenDefinitions.contains(definition);
-  boolean towingVehicleActive = towedByConnection != null && registry.isActive(towedByConnection.towingVehicle);
-  var decision = decide(eligible, v.world.isClient(), towedByConnection != null, registry.isActive(v), towingVehicleActive);
-  if (decision == ActivationDecision.INELIGIBLE || decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
+  boolean towed = towedByConnection != null, optedOut = Overrides.isOptedOut(key);
+  // Hitch coupling (and the ordering wait/rollback it needs) applies only to the ground/flight/
+  // rotor domain - all three share one Body implementation. A float-only hull's activelyTowed
+  // gate stays exactly as floatEligible already enforces it (see Classification's class doc for
+  // why: BuoyantBody has no pose/anchor API for a joint to connect to).
+  boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, optedOut);
+  boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
+  if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
+  replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, old -> { hitches.release(v); old.remove(); });
+  boolean alreadyActive = registry.isActive(v);
+  boolean towingVehicleActive = ground && towed && isHitchableBody(towedByConnection.towingVehicle);
+  var decision = ground
+    ? decide(true, v.world.isClient(), towed, alreadyActive, towingVehicleActive)
+    : (v.world.isClient() ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
+  if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
   if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
   var level = ((WorldAccessor)v.world).div$level();
   if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
-  boolean alreadyActive = registry.isActive(v);
-  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, () -> new Body(server,v,tuning(definition)));
-  if (!activated) return false;
-  return reconcileOrRollBack(registry, hitches, v, alreadyActive, () -> reconcileHitch(v, towedByConnection), Body::remove);
+  Supplier<VehicleBody> construct = ground
+    ? () -> new Body(server,v,tuning(definition))
+    : () -> new BuoyantBody(server,v,tuning(definition));
+  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, construct);
+  if (!activated || !ground) return activated;
+  return reconcileOrRollBack(registry, hitches, v, alreadyActive, () -> reconcileHitch(v, towedByConnection), VehicleBody::remove);
+ }
+ /** Whether the given towing vehicle's own active VehicleBody is a Body (ground/flight/rotor) -
+  * the only domain a hitch joint can connect to - rather than a BuoyantBody or no body at all. */
+ private static boolean isHitchableBody(EntityVehicleF_Physics towingVehicle) {
+  return registry.get(towingVehicle) instanceof Body;
  }
  /**
   * The exact reconcile-then-rollback composition {@code active()} performs once its body is
@@ -88,8 +181,8 @@ public final class PhysicsBridge {
   * the body was not already active before this call. Generic over the body registry's key/value
   * types and the hitch registry's key type so it is testable with fake bodies/joints/removal
   * callbacks instead of a live entity/Sable runtime - {@code active()} calls this exact method
-  * with its own real {@code registry}/{@code hitches}/{@code Body::remove}. Returns whether the
-  * vehicle remains Sable-active after this call.
+  * with its own real {@code registry}/{@code hitches}/{@code VehicleBody::remove}. Returns
+  * whether the vehicle remains Sable-active after this call.
   */
  static <K, B> boolean reconcileOrRollBack(BodyRegistry<K, B> bodyRegistry, HitchRegistry<K> hitchRegistry,
      K key, boolean alreadyActive, BooleanSupplier reconcile, Consumer<B> removeBody) {
@@ -114,7 +207,7 @@ public final class PhysicsBridge {
   return !alreadyActive;
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
-  Body old = registry.deactivate(v);
+  VehicleBody old = registry.deactivate(v);
   if (old != null) { hitches.release(v); old.remove(); }
   return false;
  }
@@ -174,9 +267,9 @@ public final class PhysicsBridge {
   * every tick, unlike a chassis definition's fixed geometry.
   */
  private static boolean reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
-  EntityVehicleF_Physics desired = connection != null && registry.isActive(connection.towingVehicle) ? connection.towingVehicle : null;
+  EntityVehicleF_Physics desired = connection != null && isHitchableBody(connection.towingVehicle) ? connection.towingVehicle : null;
   try {
-   hitches.reconcile(v, desired, () -> createHitch(registry.get(desired), registry.get(v), connection));
+   hitches.reconcile(v, desired, () -> createHitch((Body)registry.get(desired), (Body)registry.get(v), connection));
    return true;
   } catch (RuntimeException transientFailure) {
    return false;
@@ -256,10 +349,10 @@ public final class PhysicsBridge {
   registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); });
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level == level, (v, b) -> { hitches.release(v); b.remove(); });
+  registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
- private static final class Body {
+ private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
   final ServerLevel level;
@@ -269,6 +362,18 @@ public final class PhysicsBridge {
   final Vector3d center;
   final double mass;
   final boolean flight;
+  // A vehicle with a drivable wheel/track OR a flight flag AND a canFloat device (amphibious
+  // car, float-equipped seaplane/rotorcraft, ...) gets BOTH its primary domain's forces and
+  // buoyancy/water-drag/underwater-propeller forces applied to its float devices in the same
+  // tick - combined domain forces rather than its water behavior silently dropping out just
+  // because it was classified eligible here for driving or flying. hullVolume is cheap to
+  // compute unconditionally and only used when float-capable. Float capability itself is NOT
+  // cached here: it must be re-read from the vehicle's current parts every tick in step(), the
+  // same way installedPropellers already is - a canFloat device installed or removed after
+  // this body is already active (without itself triggering replaceIfCategoryChanged, which
+  // only reacts to the ground/flight category, not float capability) must start or stop getting
+  // buoyancy on the very next tick, not stay stuck on whatever was true at construction.
+  final double hullVolume;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
    this.flight=Classification.isFlightVehicle(v.definition);
@@ -282,6 +387,7 @@ public final class PhysicsBridge {
     throw new InvalidChassisGeometry("Vehicle has no finite chassis collision volume");
    center=new Vector3d(min).add(max).mul(.5);
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
+   this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
@@ -300,15 +406,31 @@ public final class PhysicsBridge {
    }
    handle=h;
   }
-  void remove() { var c=SubLevelContainer.getContainer(level); if(c!=null)c.physicsSystem().removeObject(box); }
-  void step(EntityVehicleF_Physics v) {
+  public Object level() { return level; }
+  public void remove() { var c=SubLevelContainer.getContainer(level); if(c!=null)c.physicsSystem().removeObject(box); }
+  public void step(EntityVehicleF_Physics v) {
    box.updatePose();
    Pose3d pose=new Pose3d(box.getPose());
    Quaterniond q=new Quaterniond(pose.orientation()), inverse=new Quaterniond(q).invert();
    Vector3d velocity=handle.getLinearVelocity(new Vector3d()), angular=handle.getAngularVelocity(new Vector3d());
    Vector3d up=q.transform(new Vector3d(0,1,0));
-   boolean awake = flight ? stepFlight(v,pose,q,inverse,velocity,up) : stepGround(v,pose,q,inverse,angular,velocity,up);
-   if (awake) box.wakeUp();
+   // Re-derived from the vehicle's current parts every tick, not cached from construction: a
+   // rotor propeller installed, removed, or replaced after this body is already active must
+   // switch solvers (or rotor radius) immediately, not keep running the stale one. Computed
+   // unconditionally (not gated on flight) - an installed rotor drives ROTOR dispatch even on a
+   // vehicle with no aircraft/blimp flag (see Classification#isRotorcraft and selectStepper).
+   var installedPropellers = installedPropellers(v);
+   // Also re-derived every tick, not cached at construction (self-review finding): a canFloat
+   // device installed or removed later doesn't change the ground/flight category, so it never
+   // triggers replaceIfCategoryChanged - this is the only place that would otherwise notice.
+   var plan = planTick(flight, hasFloatDevice(v), installedPropellers);
+   boolean primaryAwake = switch (plan.stepper()) {
+    case GROUND -> stepGround(v,pose,q,inverse,angular,velocity,up);
+    case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
+    case ROTOR -> stepRotor(v,q,up,installedPropellers);
+   };
+   boolean floatAwake = plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
+   if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
    v.position.set(origin.x,origin.y,origin.z);
@@ -378,9 +500,10 @@ public final class PhysicsBridge {
    return contact || drive!=0 || towThrust!=0;
   }
   /**
-   * Fixed-wing aircraft and blimps (never a rotorcraft - {@link Classification#eligible} keeps
-   * any vehicle with an installed rotor propeller on IV's native physics instead): no wheels, so
-   * this applies {@link FlightForces} instead of the raycast suspension/friction loop above -
+   * Fixed-wing aircraft and blimps (never a rotorcraft - {@code Body.step} routes any vehicle
+   * with an installed rotor propeller to {@link #stepRotor} instead, since it has no wing for
+   * this method's lift model to act on): no wheels, so this applies {@link FlightForces} instead
+   * of the raycast suspension/friction loop above -
    * wing lift, parasitic+induced drag, aileron/elevator/rudder control torques, throttle-linear
    * thrust from any running engine, and - for a blimp with a configured ballastVolume - mass/
    * gravity-compatible neutral-buoyancy lift plus ballast trim, gated and scaled the way IV's
@@ -424,6 +547,50 @@ public final class PhysicsBridge {
    double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure)*wingArm;
    double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure)*tailArm;
    double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure)*tailArm;
+   Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
+   handle.applyTorqueImpulse(torque.mul(DT));
+   return true;
+  }
+  /**
+   * A rotorcraft (installed rotor propeller - {@link Classification#isRotorcraft}): no wing, so
+   * {@link FlightForces}'s angle-of-attack lift has nothing to act on. Collective pitch from
+   * throttle supplies vertical thrust ({@link RotorForces#lift}); cyclic tilt from elevator/
+   * aileron input steers that thrust vector forward/sideways for the hover-to-forward-flight
+   * transition ({@link RotorForces#verticalComponent}/{@link RotorForces#horizontalComponent})
+   * and separately drives attitude torque ({@link RotorForces#cyclicTorque}); rudder input
+   * supplies yaw/anti-torque authority ({@link RotorForces#yawTorque}). {@code tuning.driveForce}
+   * is reused as this vehicle's max rotor thrust, the same shared propulsive-force knob as the
+   * ground and fixed-wing categories. {@code installedPropellers} is this tick's live installed-
+   * parts list (see {@link PhysicsBridge#installedPropellers}), not a value cached from
+   * construction, so the rotor radius below tracks a rotor added/removed/replaced in flight. A
+   * float-equipped rotorcraft (amphibious helicopter) additionally gets {@link BuoyantForces}
+   * applied by the caller when landed/floating on water - this method supplies only the rotor's
+   * own thrust/attitude, which stays correct either way since a rotor sitting above a floating
+   * hull is never itself submerged.
+   */
+  private boolean stepRotor(EntityVehicleF_Physics v, Quaterniond q, Vector3d up, List<JSONPart.JSONPartPropeller> installedPropellers) {
+   var motorized = v.definition.motorized;
+   Vector3d forward=q.transform(new Vector3d(0,0,1));
+   Vector3d right=new Vector3d(up).cross(forward);
+   double throttle=0;
+   for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running) throttle=v.throttleVar.currentValue;
+   double collective=RotorForces.collective(throttle);
+   double thrust=RotorForces.lift(collective,tuning.driveForce);
+   double tiltPitch=RotorForces.cyclicTilt(Math.toRadians(v.elevatorInputVar.currentValue));
+   double tiltRoll=RotorForces.cyclicTilt(Math.toRadians(v.aileronInputVar.currentValue));
+   double tiltMagnitude=Math.hypot(tiltPitch,tiltRoll);
+   double vertical=RotorForces.verticalComponent(thrust,tiltMagnitude);
+   double forwardComp=RotorForces.horizontalComponent(thrust,tiltPitch);
+   double lateralComp=RotorForces.horizontalComponent(thrust,tiltRoll);
+   Vector3d force=new Vector3d(up).mul(vertical).fma(forwardComp,forward).fma(lateralComp,right);
+   handle.applyLinearImpulse(force.mul(DT));
+   double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
+   double rotorRadiusMeters=RotorForces.rotorRadiusMeters(installedPropellers.stream()
+     .filter(Classification::isRotor).mapToDouble(p -> p.diameter).max().orElse(0));
+   double rollTorque=RotorForces.cyclicTorque(tiltRoll,thrust,rotorRadiusMeters);
+   double pitchTorque=RotorForces.cyclicTorque(tiltPitch,thrust,rotorRadiusMeters);
+   double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
+   double yawTorque=RotorForces.yawTorque(rudderDeflection,thrust,tailArm);
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
    return true;
