@@ -444,11 +444,22 @@ public final class PhysicsBridge {
   private static final int DEBUG_GROUND_CONTACT_TICKS = 200;
   private static final Logger LOGGER = LogUtils.getLogger();
   private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
+  /** Full-precision "(x,y,z)" - JOML's own Vector3d.toString() truncates to a handful of
+   * significant digits (ticket comment 52975 found this made exact forensic reconstruction of a
+   * captured log impossible for anything logged via direct string concatenation of a Vector3dc).
+   * Every per-tick/per-wheel diagnostic value below goes through this (or a bare double, which
+   * Java's own string concatenation already prints at full precision) instead. */
+  private static String vfull(org.joml.Vector3dc v) { return "("+v.x()+","+v.y()+","+v.z()+")"; }
+  private static String qfull(org.joml.Quaterniondc q) { return "("+q.x()+","+q.y()+","+q.z()+","+q.w()+")"; }
   final ServerLevel level;
   final Overrides.Tuning tuning;
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
+  // Diagnostic-only (ticket comment 52976's "collider dimensions and center" ask) - the live
+  // Sable box already has this via box.getHalfExtents(), but keeping our own copy avoids adding
+  // a new BoxPhysicsObject accessor dependency to this already-large diagnostic surface.
+  final Vector3d halfExtents;
   final double mass;
   final boolean flight;
   // A vehicle with a drivable wheel/track OR a flight flag AND a canFloat device (amphibious
@@ -476,10 +487,15 @@ public final class PhysicsBridge {
     throw new InvalidChassisGeometry("Vehicle has no finite chassis collision volume");
    center=new Vector3d(min).add(max).mul(.5);
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
+   halfExtents=new Vector3d(half);
    this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
+   if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] chassisReceipt entity="+v.uniqueUUID+" key="+v.definition.packID+":"+v.definition.systemName
+     +" mass="+mass+" center="+vfull(center)+" halfExtents="+vfull(halfExtents)+" hullVolume="+hullVolume
+     +" suspensionTravel="+tuning.suspensionTravel+" friction="+tuning.friction+" driveForce="+tuning.driveForce+" brakeForce="+tuning.brakeForce
+     +" nativeInertia=unavailable (Sable 2.0.5's BoxPhysicsObject exposes no native inertia/mass-properties query API - confirmed by its decompiled source; see ticket comment history)");
    box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
    var physics=SubLevelContainer.getContainer(level).physicsSystem();
    physics.addObject(box);
@@ -557,8 +573,10 @@ public final class PhysicsBridge {
    int debugTick=DEBUG_GROUND_CONTACT_TICKS-debugGroundContactTicksRemaining;
    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] entity="+v.uniqueUUID+" side="+(v.world.isClient()?"client":"server")+" tick="+debugTick
      +" mass="+mass+" gravity="+gravity
-     +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+pose.position()
-     +" up="+up+" linearVelocity="+velocity+" angularVelocity="+angular);
+     +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+vfull(pose.position())+" orientation="+qfull(q)
+     +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
+     +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
+     +" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer);
    for(var wheel:wheels) {
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
@@ -570,7 +588,7 @@ public final class PhysicsBridge {
     if(hit.getType()==HitResult.Type.MISS) {
      wheel.contactThisTick=false;
      if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
-       +" radius="+radius+" rayStart="+vec(start)+" rayEnd="+vec(end)+" MISS");
+       +" radius="+radius+" arm="+vfull(arm)+" rayStart="+vfull(start)+" rayEnd="+vfull(end)+" rayLength="+length+" MISS");
      continue;
     }
     double compression=length-hit.getLocation().distanceTo(vec(start));
@@ -595,13 +613,27 @@ public final class PhysicsBridge {
     double longitudinal=braking ? -Math.signum(speed)*Math.min(tuning.brakeForce/wheels.size(),Math.abs(speed)*mass/wheels.size()/DT) : drive/wheels.size();
     if (skidSteer) longitudinal*=1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE);
     longitudinal-=speed*20;
-    var tire=TireForces.friction(longitudinal,-sideSpeed*mass/wheels.size()/DT,normal,tuning.friction);
+    double lateralSlipBudgetTarget=-sideSpeed*mass/wheels.size()/DT;
+    var tire=TireForces.friction(longitudinal,lateralSlipBudgetTarget,normal,tuning.friction);
     Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
+    // Captured BEFORE the world-frame point/force below are mutated in place into the
+    // local-frame values actually passed to applyImpulseAtPoint - "requested" (world-frame,
+    // what stepGround computed) vs "applied" (local-frame, what Sable actually receives) per
+    // ticket comment 52976's ask, so a forensic replay doesn't need to re-derive the local
+    // transform itself from a possibly-imprecise logged orientation.
+    String requestedImpulseWorld=vfull(new Vector3d(force).mul(DT)), requestedPointWorld=vfull(point);
     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
-      +" radius="+radius+" rayStart="+vec(start)+" rayEnd="+vec(end)+" hit="+hit.getLocation()
+      +" radius="+radius+" arm="+vfull(arm)+" rayStart="+vfull(start)+" rayEnd="+vfull(end)+" rayLength="+length
+      +" hit="+vfull(new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z))
       +" distance="+hit.getLocation().distanceTo(vec(start))+" compression="+compression
-      +" normal="+normal+" tire="+tire+" force="+force);
-    handle.applyImpulseAtPoint(inverse.transform(point),inverse.transform(force.mul(DT)));
+      +" anchorVerticalVelocity="+localVelocity.dot(up)+" point="+requestedPointWorld
+      +" localVelocity(anchor-sampled)="+vfull(localVelocity)+" contactVelocity(contact-sampled)="+vfull(contactVelocity)
+      +" speed="+speed+" sideSpeed="+sideSpeed+" lateralSlipBudgetTarget="+lateralSlipBudgetTarget
+      +" normal="+normal+" tire="+tire+" requestedImpulseWorld="+requestedImpulseWorld);
+    Vector3d appliedPointLocal=inverse.transform(point), appliedImpulseLocal=inverse.transform(force.mul(DT));
+    if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+      +" appliedPointLocal="+vfull(appliedPointLocal)+" appliedImpulseLocal="+vfull(appliedImpulseLocal));
+    handle.applyImpulseAtPoint(appliedPointLocal,appliedImpulseLocal);
     wheel.contactThisTick=true;
     wheel.animateAsOnGround=true;
     wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
