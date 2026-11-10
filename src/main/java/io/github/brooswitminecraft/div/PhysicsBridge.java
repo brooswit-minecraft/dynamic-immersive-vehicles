@@ -582,6 +582,9 @@ public final class PhysicsBridge {
    int debugTick=DEBUG_GROUND_CONTACT_TICKS-debugGroundContactTicksRemaining;
    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] entity="+v.uniqueUUID+" side="+(v.world.isClient()?"client":"server")+" tick="+debugTick
      +" mass="+mass+" gravity="+gravity
+     // solver/iterations identity (review comment 53052) - so a capture taken against this build
+     // can be proven to have come from this path, not an older single-shot per-wheel one.
+     +" solver=MultiContactFrictionSolver iterations="+io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS
      +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+vfull(pose.position())+" orientation="+qfull(q)
      +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
      +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
@@ -659,14 +662,24 @@ public final class PhysicsBridge {
     // transform itself from a possibly-imprecise logged orientation.
     if (debugThisTick) {
      String requestedImpulseWorld=vfull(new Vector3d(force).mul(DT)), requestedPointWorld=vfull(point);
+     // lateralSlipBudgetTarget: kept under its EXACT original field name (not renamed) so the
+     // already-committed analysis scripts (tools/analysis/m503/) keep parsing without
+     // modification (review comment 53052: silently breaking that regex would zero-parse every
+     // wheel, not error) - but it is now the OLD (pre-solver) single-shot mass/wheelCount value,
+     // computed here ONLY for diagnostic comparison against older captures, NOT used by the
+     // actual physics above (that comes from the solved `tire` result instead). Also keeps
+     // `tire=Force[...]` in the exact shape those scripts already parse - a bare record
+     // toString() here would silently print `FrictionResult[...]` instead.
+     double lateralSlipBudgetTarget=-sideSpeed*mass/wheels.size()/DT;
      LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
        +" radius="+h.radius()+" arm="+vfull(h.arm())+" rayStart="+vfull(h.start())+" rayEnd="+vfull(h.end())+" rayLength="+h.length()
        +" hit="+vfull(new Vector3d(point).add(pose.position()))
        +" distance="+new Vector3d(point).add(pose.position()).distance(h.start())+" compression="+h.compression()
        +" anchorVerticalVelocity="+h.localVelocity().dot(up)+" point="+requestedPointWorld
        +" localVelocity(anchor-sampled)="+vfull(h.localVelocity())+" contactVelocity(contact-sampled)="+vfull(contactVelocity)
-       +" speed="+speed+" sideSpeed="+sideSpeed
-       +" normal="+h.normal()+" tire="+tire+" requestedImpulseWorld="+requestedImpulseWorld);
+       +" speed="+speed+" sideSpeed="+sideSpeed+" lateralSlipBudgetTarget="+lateralSlipBudgetTarget
+       +" normal="+h.normal()+" tire=Force[longitudinal="+tire.longitudinal()+", lateral="+tire.lateral()+"]"
+       +" requestedImpulseWorld="+requestedImpulseWorld);
     }
     Vector3d appliedPointLocal=inverse.transform(point), appliedImpulseLocal=inverse.transform(force.mul(DT));
     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset

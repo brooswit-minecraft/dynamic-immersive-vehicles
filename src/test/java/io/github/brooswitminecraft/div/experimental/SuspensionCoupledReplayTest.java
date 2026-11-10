@@ -104,26 +104,35 @@ class SuspensionCoupledReplayTest {
    Vector3d velocity0=new Vector3d(velocity), angular0=new Vector3d(angular);
    WheelState[] wheels=new WheelState[WHEEL_COUNT];
    for (int i=0;i<WHEEL_COUNT;i++) wheels[i]=raycastWheel(i,bodyPositionY,orientation,velocity0,angular0,spring,damper);
-   // Gravity, and all impulses, accumulate into the WORKING state (what the real body actually
-   // ends the tick with) - never back into the frozen velocity0/angular0 snapshot used for force
-   // computation.
-   velocity.add(new Vector3d(0,-GRAVITY*DT,0));
+   // Review (comment 53052): Body.stepGround never adds a gravity term at all - Sable's own
+   // engine owns that, entirely separately from the custom suspension/friction impulses
+   // PhysicsBridge applies. The solver's working state (what sizes its targets) must therefore
+   // reflect velocity/angular PLUS this tick's support impulses ONLY, never gravity - matching
+   // exactly what production's workingVelocity/workingAngular actually contain. A separate
+   // `velocity`/`angular` (below) still needs ITS OWN gravity term purely so THIS HARNESS (which
+   // has no real physics engine underneath it) integrates a physically correct trajectory across
+   // ticks - that term is intentionally excluded from the solver's own input.
+   Vector3d solverVelocity=new Vector3d(velocity0), solverAngular=new Vector3d(angular0);
    for (WheelState w : wheels) {
     if (!w.hit()) continue;
     Vector3d verticalImpulse=new Vector3d(w.up()).mul(w.normal()*DT);
-    velocity.add(new Vector3d(verticalImpulse).div(MASS));
+    solverVelocity.add(new Vector3d(verticalImpulse).div(MASS));
     Vector3d torqueBody=inverse.transform(new Vector3d(w.point()).cross(verticalImpulse));
-    angular.add(orientation.transform(new Vector3d(torqueBody.x/inertiaBody.x,torqueBody.y/inertiaBody.y,torqueBody.z/inertiaBody.z)));
+    solverAngular.add(orientation.transform(new Vector3d(torqueBody.x/inertiaBody.x,torqueBody.y/inertiaBody.y,torqueBody.z/inertiaBody.z)));
    }
+   velocity.add(new Vector3d(0,-GRAVITY*DT,0)); // harness-only gravity, kept OUT of solverVelocity above
+   velocity.add(new Vector3d(solverVelocity).sub(velocity0)); // fold the same support impulses into the real tracked state
+   angular.add(new Vector3d(solverAngular).sub(angular0));
    if (useNewSolver) {
     java.util.List<WheelState> active=new java.util.ArrayList<>();
     for (WheelState w : wheels) if (w.hit()) active.add(w);
     var contacts=new MultiContactFrictionSolver.FrictionContact[active.size()];
     for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0); }
-    // solveFriction's own working state IS deliberately continuously-updating (that coupling is
-    // the fix); it starts from the real post-gravity-and-suspension velocity/angular, consistent
-    // with production staging suspension before friction.
-    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,velocity,angular,false,0,0,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+    Vector3d beforeFrictionVelocity=new Vector3d(solverVelocity), beforeFrictionAngular=new Vector3d(solverAngular);
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,false,0,0,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+    // Fold the solved friction impulses' effect into the real (gravity-inclusive) tracked state.
+    velocity.add(new Vector3d(solverVelocity).sub(beforeFrictionVelocity));
+    angular.add(new Vector3d(solverAngular).sub(beforeFrictionAngular));
    } else {
     // All 4 wheels' targets computed from the SAME frozen velocity0/angular0 (not the updating
     // working state) - the actual pre-fix defect, not a sequential variant of it. Includes
