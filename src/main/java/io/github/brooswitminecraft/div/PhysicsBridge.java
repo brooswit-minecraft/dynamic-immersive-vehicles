@@ -166,7 +166,12 @@ public final class PhysicsBridge {
     : () -> new BuoyantBody(server,v,tuning(definition));
   boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, construct);
   if (!activated || !ground) return activated;
-  return reconcileOrRollBack(registry, hitches, v, alreadyActive, () -> reconcileHitch(v, towedByConnection), VehicleBody::remove);
+  // Evaluated BEFORE reconcileHitch runs: HitchRegistry.reconcile already clears any existing
+  // entry (valid or not) before attempting to (re)create one, so this is the only point that can
+  // still tell whether the trailer entered this attempt coherently jointed - see
+  // reconcileOrRollBack/rollBackOnHitchFailure for why that, not alreadyActive, is the fact that
+  // actually matters.
+  return reconcileOrRollBack(registry, hitches, v, hitches.isJointed(v), () -> reconcileHitch(v, towedByConnection), VehicleBody::remove);
  }
  /** Whether the given towing vehicle's own active VehicleBody is a Body (ground/flight/rotor) -
   * the only domain a hitch joint can connect to - rather than a BuoyantBody or no body at all. */
@@ -178,15 +183,15 @@ public final class PhysicsBridge {
   * already active (freshly constructed this call, or kept from a previous tick): runs
   * {@code reconcile}, and on failure, rolls back - releasing {@code key}'s hitch-registry entry
   * and removing its body via {@code removeBody} - only if {@link #rollBackOnHitchFailure} says
-  * the body was not already active before this call. Generic over the body registry's key/value
-  * types and the hitch registry's key type so it is testable with fake bodies/joints/removal
-  * callbacks instead of a live entity/Sable runtime - {@code active()} calls this exact method
-  * with its own real {@code registry}/{@code hitches}/{@code VehicleBody::remove}. Returns
-  * whether the vehicle remains Sable-active after this call.
+  * {@code key} did not already enter this attempt coherently jointed. Generic over the body
+  * registry's key/value types and the hitch registry's key type so it is testable with fake
+  * bodies/joints/removal callbacks instead of a live entity/Sable runtime - {@code active()}
+  * calls this exact method with its own real {@code registry}/{@code hitches}/
+  * {@code VehicleBody::remove}. Returns whether the vehicle remains Sable-active after this call.
   */
  static <K, B> boolean reconcileOrRollBack(BodyRegistry<K, B> bodyRegistry, HitchRegistry<K> hitchRegistry,
-     K key, boolean alreadyActive, BooleanSupplier reconcile, Consumer<B> removeBody) {
-  if (reconcile.getAsBoolean() || !rollBackOnHitchFailure(alreadyActive)) return true;
+     K key, boolean wasJointed, BooleanSupplier reconcile, Consumer<B> removeBody) {
+  if (reconcile.getAsBoolean() || !rollBackOnHitchFailure(wasJointed)) return true;
   B old = bodyRegistry.deactivate(key);
   hitchRegistry.release(key);
   if (old != null) removeBody.accept(old);
@@ -194,17 +199,25 @@ public final class PhysicsBridge {
  }
  /**
   * Whether a failed hitch-reconcile attempt must roll back (deactivate/remove) the body
-  * {@code active()} just constructed this call, pulled out as a pure boolean seam. Only ever
-  * true when the body did NOT already exist before this call ({@code !alreadyActive}): a brand
-  * new, never-jointed body after a failed first attempt is neither coupled nor on native
-  * fallback - leaving it live would be the exact silently-retried-every-tick partial state
-  * external review flagged. An ALREADY-active body (healthy, from a previous tick) must never be
-  * torn down merely because a later reconcile attempt failed - the same non-destructive
-  * guarantee {@code deferToNativeHitch} already provides when a towing vehicle's body
-  * disappears; only the stale/failed joint attempt is retried next tick, not the body itself.
+  * {@code active()} is holding, pulled out as a pure boolean seam. {@code wasJointed} - whether
+  * {@code key} was already coherently jointed (a valid handle to its current desired partner)
+  * BEFORE this attempt, not whether its body merely already existed - is the fact that actually
+  * decides this: a body with no established joint yet (brand new this call, or an existing body
+  * being hitched for the first time) that then fails its hitch attempt is neither coupled nor on
+  * native fallback - {@code active()} returning true for it has already suppressed IV's own
+  * native hitch-following - so leaving it live, unjointed, would strand it with no authority
+  * moving it at all (self-review finding, MINECRAFT-498 post-integration: the original version
+  * of this check used {@code alreadyActive} instead, which wrongly preserved exactly this case
+  * whenever the trailer's body merely happened to predate this tick's first hitch attempt - e.g.
+  * a vehicle that was already Sable-active and untowed, then hitched for the first time). An
+  * already-coherently-jointed trailer (healthy from a previous tick, now needing only a rebuild
+  * because its handle went stale) must never be torn down merely because that rebuild attempt
+  * fails - the same non-destructive guarantee {@code deferToNativeHitch} already provides when a
+  * towing vehicle's body disappears; only the stale/failed joint attempt is retried next tick,
+  * not the body itself.
   */
- static boolean rollBackOnHitchFailure(boolean alreadyActive) {
-  return !alreadyActive;
+ static boolean rollBackOnHitchFailure(boolean wasJointed) {
+  return !wasJointed;
  }
  private static boolean deactivate(EntityVehicleF_Physics v) {
   VehicleBody old = registry.deactivate(v);

@@ -806,6 +806,56 @@ guarantee against this regression recurring is that all three step methods
 now call the one shared private method rather than duplicating (or, as
 happened here, omitting) the impulse-application logic inline.
 
+**Partial-authority lifecycle gap on a first failed hitch attempt, found by
+self-review kickback at head `f1330c1` (Jira comment 52740).** The rollback
+decision in `reconcileOrRollBack`/`rollBackOnHitchFailure` was keyed on
+`alreadyActive` - whether the trailer's *body* already existed before this
+call - not on whether it was already *coherently jointed*. Those are not the
+same fact: a vehicle can be Sable-active and untowed for any number of
+ticks (its own category needs no tow connection to be eligible) and then
+get hitched for the first time later. On that first hitch attempt,
+`alreadyActive` was already `true` (the body predates this call), so a
+failed `create()` was wrongly treated as "an already-healthy joint's
+transient rebuild failure" and the body was preserved - but there was never
+a joint to begin with. The result: `active()` still returns `true` (IV's
+own native hitch-following stays suppressed for this entity, same as any
+other Sable-active vehicle), yet no Sable joint exists either - neither
+authority is actually moving this trailer relative to its towing vehicle,
+strictly worse than either one alone.
+
+The actual fact `rollBackOnHitchFailure` needs is whether `key` was already
+coherently jointed (a valid handle to its current desired partner)
+*entering* this attempt, which `HitchRegistry.isJointed(key)` answers
+directly - and must be read before `reconcileHitch` runs, since
+`HitchRegistry.reconcile` itself already clears any existing entry (valid
+or not) before attempting to (re)create one, so it is the only point that
+can still observe the prior state. `active()` now passes
+`hitches.isJointed(v)` (evaluated eagerly, before the `reconcileHitch`
+closure is even constructed) into `reconcileOrRollBack` instead of
+`alreadyActive`; `rollBackOnHitchFailure`'s parameter was renamed to
+`wasJointed` to match, with no change to its own boolean logic
+(`!wasJointed`) - only to what fact its caller now supplies. This also
+means `alreadyActive` fully stops being needed by this seam: a body that is
+genuinely new this call is necessarily never-jointed too (a key can only
+ever appear in `HitchRegistry` once its body already existed on some prior
+call), so `wasJointed` subsumes the brand-new-body case without a separate
+check.
+
+`HitchRegistryTest` now drives this real production composition with the
+corrected fact: `reconcileOrRollBackRollsBackAnActiveButNeverJointedBodyOnFirstHitchFailure`
+is the regression itself - an active, never-jointed body whose first hitch
+attempt fails is rolled back exactly like a brand-new one, not preserved.
+`reconcileOrRollBackPreservesACoherentlyJointedBodyOnTransientFailure`
+(renamed from the prior, now-corrected
+`reconcileOrRollBackPreservesAnAlreadyActiveBodyOnFailure`, which had
+exercised exactly the buggy case above without a real joint ever
+established) now actually builds a real joint via `hitches.reconcile(...)`
+first, so the fact it passes to `reconcileOrRollBack` matches what a real
+caller would observe, and proves a body that WAS already coherently
+jointed survives a later transient reconcile failure. The two
+newly-activated-body and retry cases are unaffected, since a key that has
+never been reconciled is never-jointed either way.
+
 None of the above prove any in-game driving/flight/boat/towing behavior -
 see the acceptance list below.
 
