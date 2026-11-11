@@ -122,7 +122,12 @@ public final class AnchorFrameProbe {
      + "drift stayed near zero throughout, with confirmed liveness, is Sable's real convention.");
   }
  }
- private static final int MAX_WARMUP_TICKS = 100; // 5 real seconds at 20tps - generous one-time allowance for the box/handle/constraint registration race above
+ // CI run 43091100528 (after the handle-race fix) still failed after the full warmup window -
+ // both joints reported valid, but the boxes' poses never became readable. x=5000 is far enough
+ // from spawn that its chunks were very likely never loaded/generated at all in this fresh,
+ // playerless disposable world - explicitly force-loading them in start() (see below) and
+ // allowing extra time for first-time chunk generation at a remote location.
+ private static final int MAX_WARMUP_TICKS = 400; // 20 real seconds at 20tps
  private static int warmupTicksElapsed = 0;
  /** @return true if this pair's poses were actually readable this tick (and were logged);
   *  false if the native handle still was not ready (caught, not crashed, and simply retried
@@ -136,6 +141,17 @@ public final class AnchorFrameProbe {
   }
  }
 
+ /** Force-loads (and keeps loaded) the chunks a probe pair's two boxes sit in, so their physics
+  * registration does not depend on this disposable, playerless world happening to have already
+  * loaded/generated terrain at a remote test location - the real cause of CI run 43091100528's
+  * second failure (both joints reported valid; the boxes' poses simply never became readable
+  * within the full warmup window). */
+ private static void forceLoadChunksNear(ServerLevel level, Vector3d... positions) {
+  for (Vector3d pos : positions) {
+   level.setChunkForced(Math.floorDiv((int) Math.floor(pos.x), 16), Math.floorDiv((int) Math.floor(pos.z), 16), true);
+  }
+ }
+
  private static void start(ServerLevel level) {
   // ONE shared non-axis-aligned orientation for every body in both pairs (review 53246's
   // correction) - isolates this probe to the pos1/pos2 question alone, since the relative
@@ -146,6 +162,7 @@ public final class AnchorFrameProbe {
   Vector3d anchorOffsetInB = new Vector3d(0, ANCHOR_OFFSET_MAGNITUDE, 0);
 
   Vector3d posA = new Vector3d(5000, 80, 5000);
+  forceLoadChunksNear(level, posA, new Vector3d(posA).add(500, 0, 0));
   Vector3d worldG = new Vector3d(sharedQ.transform(new Vector3d(anchorOffsetInA))).add(posA);
   Vector3d posB = new Vector3d(worldG).sub(sharedQ.transform(new Vector3d(anchorOffsetInB)));
   worldProbe = buildPair(level, "world", posA, posB, sharedQ, anchorOffsetInA, anchorOffsetInB,
