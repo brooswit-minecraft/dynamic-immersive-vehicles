@@ -775,16 +775,25 @@ public final class PhysicsBridge {
    // collection (confirmed: DIV cancels performGroundOperations/replaces moveVehicle, which is
    // what normally calls updateCollisionStatuses to populate it), so for every DIV-controlled
    // vehicle it was empty/stale, making the native RPM-feedback loop always behave as if no
-   // wheel were ever grounded. Syncing it here to DIV's own real raycast result removes that
-   // staleness at the source, rather than working around its two separate downstream symptoms.
+   // wheel were ever grounded. Syncing it here to DIV's own real raycast result is NOT
+   // behavior-neutral bookkeeping (review comment 53200's correction to an earlier overclaim
+   // here) - it changes live engine RPM-feedback behavior for every DIV vehicle, on purpose, but
+   // that behavior change itself is NOT yet validated: tick-order/freshness (is this write seen
+   // by update() the same tick, every tick, regardless of per-part registration order),
+   // zero-load-HIT-vs-real-grounding (this uses the same `hits` as a ray HIT, not the
+   // positive-load gating SelfRightingAssist uses - may not be the right native semantics),
+   // material/friction state interaction, deactivation cleanup, and wheel-speed ownership once
+   // both DIV and this native loop can write wheel.angularVelocity are all still open and
+   // un-tested. Review explicitly: do not treat this as resolving the RPM conflict until that
+   // battery of tests exists - this commit is a diagnosed mechanism and a candidate fix, not a
+   // proven one, and stays out of the already-staged self-right assist comparison.
    // addToForceOutput itself (the wheelForce propulsion formula) is confirmed SEPARATELY
    // cancelled - it is only ever called from EntityVehicleF_Physics.getForcesAndMotions
    // (EntityVehicleF_Physics.java L296, inside the exact method VehicleForcesMixin cancels at
    // its HEAD for an active DIV vehicle) - so it does not run at all, and adapting its formula
    // would mean replicating the arithmetic DIV-side from the now-correctly-fed-back rpm/
    // gearRatio/axleRatio/fuelConsumption state, not invoking or re-enabling the native method.
-   // That adaptation itself remains separate, unfinished work - this sync only fixes the
-   // grounded-state staleness those live fields were already depending on.
+   // That adaptation itself remains separate, unfinished work.
    v.groundDeviceCollective.groundedGroundDevices.clear();
    for (var h : hits) v.groundDeviceCollective.groundedGroundDevices.add(h.wheel());
    // Phase 2: shared multi-contact friction solve (ticket MINECRAFT-503) - stage every wheel's
@@ -881,15 +890,16 @@ public final class PhysicsBridge {
     Vector3d selfRightTorque = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.torque(
       selfRight, bodyForward, up, bodyRight, angular, occupied, hasPositiveSupport);
     if (debugThisTick) LOGGER.info("[DIV debugGroundContact] selfRight occupied="+occupied+" totalNormalLoad="+totalNormalLoad+" torque="+vfull(selfRightTorque));
-    // LOCAL frame (comment 53189's correction - verified against Sable's own extracted source,
-    // not just another call site in this class: RigidBodyHandle.applyImpulseAtPoint requires a
-    // local-frame point/impulse, confirmed by this file's own existing inverse.transform(...)
-    // calls before every applyImpulseAtPoint above; ForceTotal (Sable's own force accumulator,
-    // which applyTorqueImpulse/applyLinearAndAngularImpulse ultimately feed into) names its own
-    // fields localForce/localTorque - consistent with the same local-frame convention, not
-    // world-frame. stepFlight/stepRotor's existing applyTorqueImpulse calls pass WORLD-frame
-    // torque directly - possibly a separate pre-existing latent bug, NOT copied here; flagged,
-    // not fixed, since that is unrelated shipped code outside this ticket's immediate change.
+    // LOCAL frame - CONFIRMED correct (comment 53200, independently verified against the real
+    // public Sable source, not just this file's own inverse.transform(...) pattern or
+    // ForceTotal's field naming as earlier reasoning here had it): RigidBodyHandle.
+    // applyTorqueImpulse->applyAngularImpulse->applyLinearAndAngularImpulse passes its torque
+    // argument unchanged through to native Rust (sable_rapier lib.rs), which rotates it by the
+    // rigid body's own current rotation before applying it - the argument is expected in LOCAL
+    // frame. stepFlight/stepRotor's existing applyTorqueImpulse calls pass WORLD-frame torque
+    // directly - now a CONFIRMED pre-existing latent bug by this same evidence, not copied here;
+    // flagged, not fixed, since that is unrelated shipped code outside this ticket's immediate
+    // change - worth its own fix, separately.
     if (selfRightTorque.lengthSquared() > 0) handle.applyTorqueImpulse(inverse.transform(new Vector3d(selfRightTorque).mul(DT)));
    }
    double towThrust = applyTowingCompensation(v);

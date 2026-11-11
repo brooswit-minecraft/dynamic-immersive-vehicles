@@ -19,18 +19,24 @@ import org.junit.jupiter.api.Test;
  * simplification - plus the self-right torque applied through {@code inverse.transform(...)}
  * before an (in-harness) application, mirroring exactly the production fix in commit a1a1211.
  *
- * <p>Does NOT prove Sable's own {@code RigidBodyHandle.applyTorqueImpulse} backend frame
- * convention - that implementation is compiled/native, not available as readable source in this
- * environment (confirmed by searching the same extracted tree used throughout this
- * investigation: only the interface, Sable's own {@code ForceTotal} accumulator, and a no-op
- * "none" implementation are present, no Rapier-backed implementation). Review (comment 53197)
- * also corrected an overclaim here: the dedicated heading-comparison test below does NOT run an
- * actual world-frame alternative and compare against it - it only runs THIS (local-frame)
- * implementation at two different headings and checks the outcome is similar either way. That is
- * real evidence this implementation is yaw-independent, which a correct local-frame transform
- * should be - but it is not a demonstration of what an incorrect world-frame version would have
- * done, and is not described as one below. Closing the actual backend-convention question still
- * needs either the real engine source or an empirical live-game observation.
+ * <p>Backend frame convention - RESOLVED (comment 53200), correcting this class's own earlier
+ * claim that the real implementation was unavailable: it IS publicly available, just not in the
+ * extracted/decompiled tree this investigation had been searching - the actual public Sable
+ * source (https://github.com/ryanhcode/sable/blob/mc1.21.1-2.0.5-neoforge/sable_rapier/src/main/rust/rapier/src/lib.rs#L1352-L1391)
+ * confirms {@code RigidBodyHandle.applyTorqueImpulse -> applyAngularImpulse ->
+ * applyLinearAndAngularImpulse} passes its torque argument unchanged through to native Rust,
+ * which rotates it by the rigid body's own current rotation before applying it - i.e. the
+ * argument IS expected in LOCAL/body frame, exactly the convention the production fix in commits
+ * a1a1211/d33d2e4 (and this harness's own application below) already assumed. Confirmed correct,
+ * not merely consistent with accumulator-field naming as the earlier, weaker version of this
+ * claim had it.
+ *
+ * <p>Review (comment 53197) separately corrected an overclaim about the dedicated
+ * heading-comparison test below: it does NOT run an actual world-frame alternative and compare
+ * against it - it only runs THIS (local-frame) implementation at two different headings and
+ * checks the outcome is similar either way. That is real evidence this implementation is
+ * yaw-independent, which a correct local-frame transform should be - but it is not, and is not
+ * described as, a demonstration of what an incorrect world-frame version would have done.
  */
 class SelfRightingPerturbedReplayTest {
  private static final double MASS=350.0, GRAVITY=11.0, DT=0.05, FRICTION=1.0, SUSPENSION_TRAVEL=0.3, WHEEL_RADIUS=0.375, LENGTH=WHEEL_RADIUS+SUSPENSION_TRAVEL;
