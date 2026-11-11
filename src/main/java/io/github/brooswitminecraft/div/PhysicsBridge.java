@@ -620,7 +620,11 @@ public final class PhysicsBridge {
      // those two: whether THIS key has an explicit Overrides.get() entry at all, and this
      // vehicle's own resolved self-right config (OFF unless that entry set all five fields).
      +" explicitOverrideEntry="+(Overrides.get(v.definition.packID+":"+v.definition.systemName)!=null)
+     // Comment 53189: "log actual five resolved assist values, not just configured=true" - a
+     // capture must be able to show what actually reached runtime, not just a boolean summary.
      +" selfRightConfigured="+(selfRight.strength()>0||selfRight.damping()>0)
+     +" selfRightStrength="+selfRight.strength()+" selfRightDamping="+selfRight.damping()+" selfRightMaxTorque="+selfRight.maxTorque()
+     +" selfRightFadeStartDegrees="+selfRight.fadeStartDegrees()+" selfRightFadeEndDegrees="+selfRight.fadeEndDegrees()
      +" nativeInertia=unavailable (Sable 2.0.5's BoxPhysicsObject exposes no native inertia/mass-properties query API - confirmed by its decompiled source; see ticket comment history)");
    box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
    var physics=SubLevelContainer.getContainer(level).physicsSystem();
@@ -828,26 +832,43 @@ public final class PhysicsBridge {
     contact=true;
    }
    if (debugThisTick) debugGroundContactTicksRemaining--;
-   // Opt-in self-righting assist (ticket comment 53182/53188) - OFF (SelfRightingAssist.OFF)
-   // for every vehicle unless its own resolved Overrides metadata sets all five selfRight*
-   // fields; see Overrides.selfRightingConfig. Occupancy: PartSeat extends APart extends
-   // AEntityF_Multipart extends AEntityE_Interactable extends AEntityD_Definable extends
-   // AEntityC_Renderable extends AEntityB_Existing, where the inherited `rider` field
-   // (IWrapperEntity, null when empty) actually lives - a seat part with a non-null rider is
-   // occupied. No vehicle-wide "all riders" collection exists; each seat tracks its own.
+   // Opt-in self-righting assist (ticket comment 53182/53188/53189/53191) - OFF
+   // (SelfRightingAssist.OFF) for every vehicle unless its own resolved Overrides metadata sets
+   // all five selfRight* fields; see Overrides.selfRightingConfig. ROLL ONLY (comment 53191:
+   // "wheelie reduction is NOT an objective" - front lift/wheelies are explicitly fine, this
+   // never touches pitch) - SelfRightingAssist's own design already guarantees that.
+   //
+   // Grounded/support (comment 53189's correction): `contact` means "at least one ray hit",
+   // including a hit with zero normal (no actual load) - NOT what "grounded" should mean for
+   // this assist. Uses actual summed positive normal load across all wheels instead, so a
+   // rear-only-support wheelie (comment 53191: "including rear-only positive support") still
+   // correctly gates as grounded, while an airborne or all-zero-load vehicle does not.
+   //
+   // Occupancy: PartSeat extends APart extends AEntityF_Multipart extends AEntityE_Interactable
+   // extends AEntityD_Definable extends AEntityC_Renderable extends AEntityB_Existing, where the
+   // inherited `rider` field (IWrapperEntity, null when empty) actually lives - confirmed
+   // against this ticket's own extracted MTS source (successful compilation), not a guess. No
+   // vehicle-wide "all riders" collection exists; each seat tracks its own.
    if (selfRight.strength()>0 || selfRight.damping()>0) {
+    double totalNormalLoad=0; for (var h : hits) totalNormalLoad += h.normal();
+    boolean hasPositiveSupport = totalNormalLoad > 0;
     boolean occupied = false;
     for (var part : v.allParts) if (part instanceof PartSeat seat && seat.rider != null) { occupied = true; break; }
     Vector3d bodyForward=q.transform(new Vector3d(0,0,1));
     Vector3d bodyRight=new Vector3d(up).cross(bodyForward);
     Vector3d selfRightTorque = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.torque(
-      selfRight, bodyForward, up, bodyRight, angular, occupied, contact);
-    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] selfRight occupied="+occupied+" grounded="+contact+" torque="+vfull(selfRightTorque));
-    // World-frame torque*DT, same convention as every other applyTorqueImpulse call in this
-    // class (e.g. stepFlight's control-surface torque just below) - Sable's own handle divides
-    // by the body's inertia tensor internally; this class never does that division itself before
-    // calling applyTorqueImpulse anywhere else, so it must not do so here either.
-    if (selfRightTorque.lengthSquared() > 0) handle.applyTorqueImpulse(new Vector3d(selfRightTorque).mul(DT));
+      selfRight, bodyForward, up, bodyRight, angular, occupied, hasPositiveSupport);
+    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] selfRight occupied="+occupied+" totalNormalLoad="+totalNormalLoad+" torque="+vfull(selfRightTorque));
+    // LOCAL frame (comment 53189's correction - verified against Sable's own extracted source,
+    // not just another call site in this class: RigidBodyHandle.applyImpulseAtPoint requires a
+    // local-frame point/impulse, confirmed by this file's own existing inverse.transform(...)
+    // calls before every applyImpulseAtPoint above; ForceTotal (Sable's own force accumulator,
+    // which applyTorqueImpulse/applyLinearAndAngularImpulse ultimately feed into) names its own
+    // fields localForce/localTorque - consistent with the same local-frame convention, not
+    // world-frame. stepFlight/stepRotor's existing applyTorqueImpulse calls pass WORLD-frame
+    // torque directly - possibly a separate pre-existing latent bug, NOT copied here; flagged,
+    // not fixed, since that is unrelated shipped code outside this ticket's immediate change.
+    if (selfRightTorque.lengthSquared() > 0) handle.applyTorqueImpulse(inverse.transform(new Vector3d(selfRightTorque).mul(DT)));
    }
    double towThrust = applyTowingCompensation(v);
    return contact || drive!=0 || towThrust!=0;

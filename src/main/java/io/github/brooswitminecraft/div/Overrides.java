@@ -186,14 +186,19 @@ public final class Overrides {
   Gson gson = new GsonBuilder().setPrettyPrinting().create();
   try {
    if (!Files.exists(path)) {
-    // mtsofficialpack:quad gets a real, working self-right EXAMPLE on a fresh install (ticket
-    // comment 53182/53188's "explicit quad roll-assist" ask) - commented-out-in-spirit by being
-    // an editable example, not force-applied to every vehicle (selfRightingConfig stays OFF for
-    // every OTHER vehicle with no entry at all). Values are a deliberately gentle "cheat a
+    // mtsofficialpack:quad gets a real, ACTIVE self-right entry on a fresh install (ticket
+    // comment 53182/53188's "explicit quad roll-assist" ask). This is a live, applied
+    // configuration the moment a fresh install's quad is driven, not a commented-out or inert
+    // example (comment 53189's correction: label it accurately as what it actually is) - an
+    // operator who doesn't want it must explicitly remove/zero it. selfRightingConfig stays OFF
+    // for every OTHER vehicle with no entry at all. Values are a deliberately gentle "cheat a
     // little" assist for this specific ~350kg ATV, not a generic default: strength/damping/
     // maxTorque chosen small relative to this vehicle's own inertiaBody.z (~44 kg*m^2, so even
     // the 600N*m maxTorque caps angular acceleration well under 15rad/s^2), fadeStart/fadeEnd
-    // (10/50deg) keeps it acting only while basically upright.
+    // (10/50deg) keeps it acting only while basically upright. An existing installation's own
+    // config file is NOT touched by this - only a genuinely fresh (non-existent) file gets it;
+    // merging these same five fields into an existing operator config is a separate, manual
+    // (or future tooling) step, not something this loader does automatically.
     var quadExample = new Tuning();
     quadExample.selfRightStrength=200.0; quadExample.selfRightDamping=80.0; quadExample.selfRightMaxTorque=600.0;
     quadExample.selfRightFadeStartDegrees=10.0; quadExample.selfRightFadeEndDegrees=50.0;
