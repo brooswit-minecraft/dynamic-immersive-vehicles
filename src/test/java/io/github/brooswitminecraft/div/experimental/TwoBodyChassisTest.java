@@ -1,4 +1,5 @@
 package io.github.brooswitminecraft.div.experimental;
+import org.joml.Quaterniond;
 import org.joml.Vector3d;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -130,5 +131,49 @@ class TwoBodyChassisTest {
   assertEquals(new Vector3d(0, -B / 2, 0), upperAnchor, "from the upper half's own center, the shared face is straight down by half its own half-height");
   assertEquals(new Vector3d(0, B / 2, 0), lowerAnchor, "from the lower half's own center, the shared face is straight up by half its own half-height");
   assertEquals(0, upperAnchor.y + lowerAnchor.y, 1e-12, "the two anchors must be exact mirror images - same physical point described from each side");
+ }
+
+ // Force ownership and pose reconstruction (ticket comment 53261).
+
+ @Test void everyRealAtvWheelAnchorBelongsToTheLowerHalf() {
+  // The real ATV's own established wheel geometry (anchor = wheel.localOffset - center) - every
+  // wheel sits below the chassis center for this vehicle, so EVERY wheel's force should belong
+  // to the lower half, not an even split - the physically correct outcome, not an edge case.
+  Vector3d center = new Vector3d(0, 0.553593748062849, 0.625);
+  Vector3d[] wheelLocalOffsets = {
+    new Vector3d(0.35, 0.125, -0.0625), new Vector3d(-0.375, 0.125, 1.25),
+    new Vector3d(0.375, 0.125, 1.25), new Vector3d(-0.375, 0.125, -0.0625)};
+  for (Vector3d offset : wheelLocalOffsets) {
+   double anchorY = offset.y - center.y;
+   assertFalse(TwoBodyChassis.isUpperHalf(anchorY), "wheel at "+offset+" has anchorY="+anchorY+" and must belong to the LOWER half, not the upper");
+  }
+ }
+
+ @Test void isUpperHalfIsExactlyGatedAtZeroNotShiftedEitherWay() {
+  assertTrue(TwoBodyChassis.isUpperHalf(0.0), "exactly at G must count as upper (the boundary convention, documented, not accidental)");
+  assertTrue(TwoBodyChassis.isUpperHalf(0.001));
+  assertFalse(TwoBodyChassis.isUpperHalf(-0.001));
+ }
+
+ @Test void vehiclePositionFromLowerBodyRecoversGExactlyWhenUnrotated() {
+  Vector3d lowerBodyPosition = new Vector3d(100, 50, 200); // G - (0,B/2,0) for some real G
+  Vector3d expectedG = new Vector3d(lowerBodyPosition).add(0, B / 2, 0);
+  Vector3d recoveredG = TwoBodyChassis.vehicleWorldPositionFromLowerBody(lowerBodyPosition, new Quaterniond(), B);
+  assertEquals(expectedG.x, recoveredG.x, 1e-9);
+  assertEquals(expectedG.y, recoveredG.y, 1e-9);
+  assertEquals(expectedG.z, recoveredG.z, 1e-9);
+ }
+
+ @Test void vehiclePositionFromLowerBodyRecoversGExactlyWhenRotated() {
+  // Build a real, non-axis-aligned orientation, place the lower body at a KNOWN offset from a
+  // chosen G under that same rotation, then confirm reconstruction recovers that exact G -
+  // round-trip correctness, not just the trivial unrotated case above.
+  Quaterniond q = new Quaterniond().rotateY(Math.toRadians(40)).rotateX(Math.toRadians(15));
+  Vector3d knownG = new Vector3d(5000, 80, 5000);
+  Vector3d lowerBodyPosition = new Vector3d(knownG).sub(q.transform(new Vector3d(TwoBodyChassis.jointAnchorLocalInLowerBody(B))));
+  Vector3d recoveredG = TwoBodyChassis.vehicleWorldPositionFromLowerBody(lowerBodyPosition, q, B);
+  assertEquals(knownG.x, recoveredG.x, 1e-9);
+  assertEquals(knownG.y, recoveredG.y, 1e-9);
+  assertEquals(knownG.z, recoveredG.z, 1e-9);
  }
 }

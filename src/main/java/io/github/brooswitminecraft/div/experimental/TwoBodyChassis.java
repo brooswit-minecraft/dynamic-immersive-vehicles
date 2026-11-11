@@ -1,4 +1,5 @@
 package io.github.brooswitminecraft.div.experimental;
+import org.joml.Quaterniond;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
 
@@ -142,4 +143,38 @@ public final class TwoBodyChassis {
   */
  public static Vector3d jointAnchorLocalInUpperBody(double halfHeightB) { return new Vector3d(0, -halfHeightB / 2, 0); }
  public static Vector3d jointAnchorLocalInLowerBody(double halfHeightB) { return new Vector3d(0, halfHeightB / 2, 0); }
+
+ /**
+  * Force ownership (ticket comment 53261's "force ownership" ask, per 53236's own warning: a
+  * wheel's impulse belongs to whichever half it is rigidly PART OF, not to some hand-rolled
+  * aggregate). A wheel's anchor local Y (relative to G, the SAME {@code anchor.y} quantity
+  * {@code Body.stepGround} already computes - {@code wheel.localOffset.sub(center)}) determines
+  * which half it is physically attached to: at or above G it is part of the upper half-box's own
+  * volume, below G it is part of the lower half's. For a typical ground vehicle every wheel sits
+  * well below the chassis center, so in practice every wheel's impulse would go to the LOWER
+  * half - that is the physically correct outcome (the "roof" of the vehicle does not touch the
+  * ground directly; it only feels wheel forces indirectly, through the joint's own constraint
+  * response), not an edge case to special-case away.
+  */
+ public static boolean isUpperHalf(double wheelAnchorLocalY) { return wheelAnchorLocalY >= 0; }
+
+ /**
+  * Pose reconstruction (ticket comment 53261's "pose reconstruction" ask): IV's own native code
+  * needs ONE coherent vehicle position/orientation to render and sync, not two independent half-
+  * body poses. Rather than averaging or picking a side ad hoc, this reconstructs G (the
+  * original, single-body geometric center every other part of this codebase's geometry is
+  * expressed relative to) from whichever half-body is chosen as the reference - the LOWER half is
+  * the natural choice (it is where the wheels/suspension forces are actually applied, so it is
+  * the half whose own motion most directly reflects ground contact) - using the SAME constant
+  * local joint-anchor offset {@link #jointAnchorLocalInLowerBody} already derived for the joint
+  * itself: G_world = lowerBodyPosition + lowerBodyOrientation.transform(jointAnchorLocalInLowerBody).
+  * Orientation is reported as the reference body's own orientation directly - the joint locks all
+  * 6 axes with an IDENTITY relative local frame (confirmed via the real native source, ticket
+  * comment 53256), so the two halves' orientations coincide whenever the joint is actually
+  * holding (barring real constraint solver slack, which is a live-runtime question this pure
+  * function cannot itself detect).
+  */
+ public static Vector3d vehicleWorldPositionFromLowerBody(Vector3d lowerBodyPosition, Quaterniond lowerBodyOrientation, double halfHeightB) {
+  return new Vector3d(lowerBodyOrientation.transform(jointAnchorLocalInLowerBody(halfHeightB))).add(lowerBodyPosition);
+ }
 }
