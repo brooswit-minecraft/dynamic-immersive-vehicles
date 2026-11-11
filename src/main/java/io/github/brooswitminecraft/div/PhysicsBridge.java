@@ -682,6 +682,15 @@ public final class PhysicsBridge {
   // wheel's actual owner is resolved to that half. Zero/unused (never read) when !twoBodyActive.
   private final double lowerMassKg, upperMassKg;
   private final Vector3d lowerInertiaBody, upperInertiaBody;
+  // Aggregate ("predictor") basis for the solver's own impulse-sizing math (review
+  // 53280/53282/53285) - the vehicle's own real total mass is just `mass` below, unconditional;
+  // aggregateInertiaBody is the two halves' combined inertia about the ASSEMBLY COM when
+  // twoBodyActive (TwoBodyChassis.aggregateInertiaAboutAssemblyCom), or exactly inertiaBody
+  // (byte-identical, zero behavior change) when !twoBodyActive. twoBodyConfig is retained only so
+  // stepGround can compute the live, orientation-dependent G->assemblyCOM lever-arm correction
+  // each tick (TwoBodyChassis.worldLeverArmCorrectionToAssemblyCom) - null/unused otherwise.
+  private final Vector3d aggregateInertiaBody;
+  private final io.github.brooswitminecraft.div.experimental.TwoBodyChassis.Config twoBodyConfig;
   // Bounded, one-time diagnostic for the mixed-ownership rejection path (review 53272's "honor
   // actual owner-half geometry or explicitly reject unsupported layouts") - logged once per Body
   // instance, not every tick, so a persistently-mixed vehicle doesn't spam the log forever.
@@ -786,9 +795,12 @@ public final class PhysicsBridge {
     upperMassKg=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.upperMassKg(mass,config);
     lowerInertiaBody=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.lowerOwnInertia(mass,half.x,half.y,half.z,config);
     upperInertiaBody=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.upperOwnInertia(mass,half.x,half.y,half.z,config);
+    aggregateInertiaBody=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.aggregateInertiaAboutAssemblyCom(mass,half.x,half.y,half.z,config);
+    twoBodyConfig=config;
    } else {
     upperBox=null; upperHandle=null; twoBodyJoint=null;
     lowerMassKg=0; upperMassKg=0; lowerInertiaBody=new Vector3d(); upperInertiaBody=new Vector3d();
+    aggregateInertiaBody=inertiaBody; twoBodyConfig=null;
     box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
     var physics=SubLevelContainer.getContainer(level).physicsSystem();
     physics.addObject(box);
@@ -926,23 +938,49 @@ public final class PhysicsBridge {
    // that's the point whose own motion determines the raycast length's rate of change). Those
    // two points differ by roughly radius+compression along `up`; on a rotating chassis, velocity
    // differs between them by angular x that offset (fixed by sampling at `point` - 691f11b).
-   // GroundOwner (review 53272/53277): a body's real mass/inertia/live velocity/angular, plus
-   // the world-frame lever-arm correction needed to re-express a G-relative point/arm relative
-   // to THAT body's own center - see TwoBodyChassis.worldLeverArmCorrection's own doc for the
-   // exact derivation and the invariant it satisfies (Cowner+(armOld+correction)==P for an
-   // arbitrary contact P, NOT "G+correction==Cowner" - an earlier version of this comment/the
-   // function itself got that distinction backwards, caught by review and by that function's own
-   // corrected test). For the single-body path this is exactly today's values (zero correction,
-   // no change) - computed once per candidate here rather than per-wheel, so Phase 1's own
-   // localVelocity/effectiveMassDamper calculations (review 53277's explicit "audit that too" -
-   // an earlier version left those using the full-vehicle mass/inertia/velocity/angular and the
-   // raw G-relative arm/point even when a wheel was two-body-owned) can use the SAME
-   // owner-correct values Phase 2/3 already do, not a second, inconsistent set.
-   record GroundOwner(RigidBodyHandle handle, double ownerMass, Vector3d ownerInertiaBody, Vector3d ownerVelocity, Vector3d ownerAngular, Vector3d leverArmCorrection) {}
-   GroundOwner lowerCandidate=new GroundOwner(handle, twoBodyActive?lowerMassKg:mass, twoBodyActive?lowerInertiaBody:inertiaBody, velocity, angular,
+   // Aggregate ("predictor") basis (review 53280/53282/53285's correction of 53272/53277): the
+   // solver's own math that DIVIDES BY AN INERTIA TENSOR to predict what velocity change a
+   // candidate impulse produces - Phase 1's effectiveMassDamper, the Phase 2 torque-accumulation
+   // loop, and MultiContactFrictionSolver.solveFriction's own mass/inertia inputs below - must
+   // use the vehicle's REAL total mass (`mass`, unconditional, nothing new) and the two halves'
+   // combined inertia ABOUT THE ASSEMBLY COM (aggregateInertiaBody), with a lever arm measured
+   // from that SAME assembly COM (predictorLeverArmCorrection) - NOT either half's own isolated
+   // mass/inertia with an owner-relative arm, confirmed by TwoBodyImpulseResponseProbe's own real
+   // CI evidence to be off by ~4-10x from the real joint-coupled response. comVelocity is the
+   // assembly's own real COM velocity (the mass-weighted average of both halves' live velocities)
+   // - the correct STARTING state for that same accumulation, since F/M always gives the COM's
+   // own velocity change regardless of where F is applied, which is a different point than
+   // either half's own center whenever the halves have unequal mass (f != 0.5) or any height at
+   // all. PURE KINEMATICS with no inertia division (Phase 1's localVelocity, Phase 3's
+   // contactVelocity and the actual native application point) stay on the owner-half-relative
+   // basis just below instead - mathematically equivalent to this COM basis for velocity
+   // sampling alone (same real shared angular velocity either way), and REQUIRED for the actual
+   // native applyImpulseAtPoint call regardless. For the single-body path this whole aggregate
+   // basis is byte-identical to today's values (predictorLeverArmCorrection is exactly the zero
+   // vector - Ccom==G always for one body - and aggregateInertiaBody==inertiaBody).
+   Vector3d predictorLeverArmCorrection=twoBodyActive
+     ? io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldLeverArmCorrectionToAssemblyCom(q,halfExtents.y,twoBodyConfig)
+     : new Vector3d();
+   Vector3d comVelocity;
+   if (twoBodyActive) {
+    Vector3d upperVelocity=upperHandle.getLinearVelocity(new Vector3d());
+    comVelocity=new Vector3d(velocity).mul(lowerMassKg).add(new Vector3d(upperVelocity).mul(upperMassKg)).div(mass);
+   } else {
+    comVelocity=velocity;
+   }
+   // GroundOwner (review 53272/53277, narrowed by 53280/53282/53285): carries ONLY what the
+   // real owning half's own native handle needs - its own live velocity/angular (for the pure-
+   // kinematics uses above) and the world-frame lever-arm correction to re-express a G-relative
+   // point/arm relative to THAT half's own center (Cowner+(armOld+correction)==P - see
+   // TwoBodyChassis.worldLeverArmCorrection's own doc). No longer carries mass/inertia - every
+   // use that divided by inertia now uses the aggregate basis above instead (review's "aggregate
+   // COM prediction basis... actual owner-local point for native application"). For the single-
+   // body path this is exactly today's values (zero correction, no change).
+   record GroundOwner(RigidBodyHandle handle, Vector3d ownerVelocity, Vector3d ownerAngular, Vector3d leverArmCorrection) {}
+   GroundOwner lowerCandidate=new GroundOwner(handle, velocity, angular,
      twoBodyActive?io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldLeverArmCorrection(q,halfExtents.y,false):new Vector3d());
    GroundOwner upperCandidate=twoBodyActive
-     ? new GroundOwner(upperHandle,upperMassKg,upperInertiaBody,upperHandle.getLinearVelocity(new Vector3d()),upperHandle.getAngularVelocity(new Vector3d()),
+     ? new GroundOwner(upperHandle,upperHandle.getLinearVelocity(new Vector3d()),upperHandle.getAngularVelocity(new Vector3d()),
          io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldLeverArmCorrection(q,halfExtents.y,true))
      : lowerCandidate; // never actually selected when !twoBodyActive (isUpperHalf is always false then) - just needs to be non-null
    // upperOwned (review 53272): this wheel's actual owner half when twoBodyActive, by
@@ -975,22 +1013,22 @@ public final class PhysicsBridge {
     Vector3d ownerArm=new Vector3d(arm).add(wheelOwner.leverArmCorrection());
     Vector3d localVelocity=new Vector3d(wheelOwner.ownerAngular()).cross(ownerArm).add(wheelOwner.ownerVelocity());
     Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
-    Vector3d ownerPoint=new Vector3d(point).add(wheelOwner.leverArmCorrection());
     // Opt-in experimental effective-mass damping candidate (ticket comments 53214/53219) - OFF
     // (EXPERIMENTAL_EFFECTIVE_MASS_DAMPING false, the shipped default) means damperResult is
     // exactly new EffectiveMassDamperResult(damper, NaN) - damperUsed==damper byte-for-byte,
-    // nothing about today's behavior changes. Sourced from the OWNING body's own real
-    // inertia/mass (full-vehicle values on the single-body path, unchanged) and this wheel's own
-    // owner-relative contact point (review 53277's same audit finding - an earlier version used
-    // the full-vehicle mass/inertiaBody and the raw G-relative point even for an upper-owned
-    // wheel) along `up` - this body's own chassis/suspension-ray direction, NOT a re-derived
-    // actual terrain surface normal (review comment 53223's correction; no geometry change, this
-    // is the same `up` the existing suspension/friction code already uses at this exact call).
-    // Satisfies comment 53219's "actual box mass/inertia and actual contact direction/arm" requirement using that
-    // direction. See PhysicsBridge.effectiveMassDamper's own doc for the guard/fallback behavior
-    // and the measured record showing this is NOT a validated fix.
+    // nothing about today's behavior changes. This formula DIVIDES by the inertia tensor it is
+    // given, so (review 53280/53282/53285) it must use the AGGREGATE mass/inertia (`mass`/
+    // aggregateInertiaBody) with a lever arm measured from the SAME assembly COM
+    // (predictorLeverArmCorrection) - a mix of owner-isolated inertia with a differently-
+    // referenced arm would be dimensionally inconsistent, not merely imprecise. For the single-
+    // body path this is exactly today's values (mass/inertiaBody, zero correction, no change).
+    // Direction `up` is this body's own chassis/suspension-ray direction, NOT a re-derived actual
+    // terrain surface normal (review comment 53223's correction; no geometry change here). See
+    // PhysicsBridge.effectiveMassDamper's own doc for the guard/fallback behavior and the
+    // measured record showing this is NOT a validated fix.
+    Vector3d predictorPoint=new Vector3d(point).add(predictorLeverArmCorrection);
     var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
-      ? effectiveMassDamper(spring,wheelOwner.ownerMass(),ownerPoint,up,inverse,wheelOwner.ownerInertiaBody(),damper)
+      ? effectiveMassDamper(spring,mass,predictorPoint,up,inverse,aggregateInertiaBody,damper)
       : new EffectiveMassDamperResult(damper, Double.NaN);
     double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),spring,damperResult.damper()));
     double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
@@ -1004,10 +1042,11 @@ public final class PhysicsBridge {
    // class-level correction for the full defect this closes). For the single-body path this is
    // exactly today's values (zero offset, no change). For two-body, resolves which SINGLE half
    // actually owns every wheel this tick (by each wheel's own real anchor Y, not an assumption),
-   // and provides that owner's own real mass/inertia/live velocity/angular plus the world-frame
-   // offset needed to re-express every G-relative point/arm below relative to that owner's own
-   // center - Sable's applyImpulseAtPoint and this class's own hand-rolled impulse-sizing math
-   // both need a lever arm relative to the body actually receiving the impulse, not G.
+   // and provides that owner's own real live velocity/angular plus the world-frame offset needed
+   // to re-express every G-relative point/arm below relative to that owner's own center - what
+   // Sable's applyImpulseAtPoint (Phase 3) and the pure-kinematics contactVelocity sampling
+   // actually need. The solver's own impulse-SIZING math (anything dividing by inertia) uses the
+   // separate aggregate basis computed above instead, not this owner resolution.
    //
    // Mixed ownership (wheels on BOTH halves this tick) is NOT supported by this single-pass
    // solver (which assumes every contact acts on one shared rigid body) - review's explicit
@@ -1146,23 +1185,30 @@ public final class PhysicsBridge {
    // class's own doc and ticket comment history for the full derivation/validation). No gravity
    // is added here - Sable's own engine owns that; `velocity`/`angular` already reflect
    // whatever Sable has already applied this tick.
-   // Every point/mass/inertia/velocity below uses `owner` (review 53272), not the raw
-   // mass/inertiaBody/velocity/angular/handle fields directly - for the single-body path (and
-   // the two-body lower-owner path) these are identical to what was here before; for an actual
-   // upper-owned wheel set they are the upper half's own real values instead.
-   Vector3d workingVelocity=new Vector3d(owner.ownerVelocity()), workingAngular=new Vector3d(owner.ownerAngular());
+   // Every point/mass/inertia/velocity below uses the AGGREGATE basis computed before Phase 1
+   // (review 53280/53282/53285 - this solver's own math divides by inertia throughout, so it
+   // must predict against the real joint-coupled response, confirmed empirically to match
+   // treating the whole assembly as one rigid body, not either half's own isolated mass/
+   // inertia). For the single-body path this is exactly today's values (mass/inertiaBody/
+   // velocity/angular, zero correction, no change).
+   Vector3d workingVelocity=new Vector3d(comVelocity), workingAngular=new Vector3d(angular);
    for (var h:hits) {
     Vector3d verticalImpulse=new Vector3d(up).mul(h.normal()*DT);
-    workingVelocity.add(new Vector3d(verticalImpulse).div(owner.ownerMass()));
-    Vector3d ownerPoint=new Vector3d(h.point()).add(owner.leverArmCorrection());
-    Vector3d torqueBody=inverse.transform(new Vector3d(ownerPoint).cross(verticalImpulse));
-    workingAngular.add(q.transform(new Vector3d(torqueBody.x/owner.ownerInertiaBody().x,torqueBody.y/owner.ownerInertiaBody().y,torqueBody.z/owner.ownerInertiaBody().z)));
+    workingVelocity.add(new Vector3d(verticalImpulse).div(mass));
+    Vector3d predictorPoint=new Vector3d(h.point()).add(predictorLeverArmCorrection);
+    Vector3d torqueBody=inverse.transform(new Vector3d(predictorPoint).cross(verticalImpulse));
+    workingAngular.add(q.transform(new Vector3d(torqueBody.x/aggregateInertiaBody.x,torqueBody.y/aggregateInertiaBody.y,torqueBody.z/aggregateInertiaBody.z)));
    }
    var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
-     new Vector3d(h.point()).add(owner.leverArmCorrection()),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
-   var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,owner.ownerMass(),owner.ownerInertiaBody(),q,inverse,workingVelocity,workingAngular,
+     new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
+   var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      braking,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,DT,
      effectiveFrictionSolverIterations());
+   // Phase 3 below returns to the OWNER-HALF basis (owner.ownerVelocity()/ownerAngular()/
+   // leverArmCorrection()/handle()) deliberately - pure kinematics (contactVelocity) is
+   // mathematically equivalent either way (same real shared angular velocity), and the actual
+   // native applyImpulseAtPoint call MUST target the real owning half's own local point
+   // regardless of which basis sized the impulse above.
    // Phase 3: apply each wheel's final (vertical + solved tire) impulse exactly once, same
    // application/logging shape as before.
    for (int i=0;i<hits.size();i++) {

@@ -211,6 +211,39 @@ class TwoBodyChassisTest {
   }
  }
 
+ /** Same invariant-checking shape as {@code worldLeverArmCorrectionSatisfiesTheActualLeverArmInvariant...}
+  * above, for {@code worldLeverArmCorrectionToAssemblyCom} instead: must round-trip to the
+  * ASSEMBLY COM (not either half's own center), AND must correctly vary with mass fraction
+  * (unlike {@code worldLeverArmCorrection}, which is f-independent) - checked at f=0.5 (where
+  * Ccom==G, so the correction is exactly zero) and f=0.4 (where it is not), at identity and a
+  * real rotation. */
+ @Test void worldLeverArmCorrectionToAssemblyComSatisfiesTheActualLeverArmInvariantForAnArbitraryContactPoint() {
+  Vector3d knownG = new Vector3d(5000, 80, 5000);
+  Vector3d contactP = new Vector3d(5000.8, 79.1, 5001.3);
+  for (Quaterniond q : new Quaterniond[]{new Quaterniond(), new Quaterniond().rotateY(Math.toRadians(40)).rotateX(Math.toRadians(15))}) {
+   Vector3d armOld = new Vector3d(contactP).sub(knownG);
+   for (var config : new TwoBodyChassis.Config[]{TwoBodyChassis.Config.DEFAULT, new TwoBodyChassis.Config(0.4)}) {
+    Vector3d assemblyComOffset = new Vector3d(0, TwoBodyChassis.assemblyComOffsetFromG(B, config), 0);
+    Vector3d ccom = new Vector3d(knownG).add(q.transform(new Vector3d(assemblyComOffset)));
+    Vector3d correction = TwoBodyChassis.worldLeverArmCorrectionToAssemblyCom(q, B, config);
+    Vector3d armNew = new Vector3d(armOld).add(correction);
+    Vector3d reconstructedP = new Vector3d(ccom).add(armNew);
+    String label = "f="+config.upperMassFraction()+" rotated="+!q.equals(new Quaterniond());
+    assertEquals(contactP.x, reconstructedP.x, 1e-9, label);
+    assertEquals(contactP.y, reconstructedP.y, 1e-9, label);
+    assertEquals(contactP.z, reconstructedP.z, 1e-9, label);
+   }
+  }
+ }
+ @Test void worldLeverArmCorrectionToAssemblyComIsExactlyZeroAtFPointFive() {
+  // Ccom==G exactly at f=0.5 (assemblyComOffsetFromG's own doc) - the correction must be the
+  // zero vector, not merely small, at every orientation.
+  for (Quaterniond q : new Quaterniond[]{new Quaterniond(), new Quaterniond().rotateY(Math.toRadians(40)).rotateX(Math.toRadians(15))}) {
+   Vector3d correction = TwoBodyChassis.worldLeverArmCorrectionToAssemblyCom(q, B, TwoBodyChassis.Config.DEFAULT);
+   assertEquals(0, correction.length(), 1e-12);
+  }
+ }
+
  @Test void lowerOwnMassAndInertiaAreLargerAtFPointFourThanAtFPointFive() {
   // f=.4 means a LIGHTER upper half / HEAVIER lower half than the even f=.5 split - a real,
   // discriminating check that different configured fractions actually produce different,

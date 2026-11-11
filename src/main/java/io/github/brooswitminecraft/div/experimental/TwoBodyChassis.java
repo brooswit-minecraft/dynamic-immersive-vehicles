@@ -180,6 +180,35 @@ public final class TwoBodyChassis {
  }
 
  /**
+  * World-frame correction to ADD to a lever arm/contact point already expressed relative to G to
+  * get the SAME point expressed relative to the ASSEMBLY'S OWN center of mass instead - the
+  * basis review 53280/53282/53285 requires for the friction solver's own IMPULSE-SIZING math
+  * (anything that divides by an inertia tensor: {@code PhysicsBridge.effectiveMassDamper}, the
+  * Phase 2 torque-accumulation loop, {@code MultiContactFrictionSolver.solveFriction}'s own mass/
+  * inertia inputs). Paired with {@link #aggregateInertiaAboutAssemblyCom} and the vehicle's real
+  * total mass - NOT either half's own isolated mass/inertia, since {@code
+  * TwoBodyImpulseResponseProbe}'s own real CI evidence confirmed the joint rigidly couples both
+  * halves into exactly one effective rigid body with THIS aggregate basis (measured angular
+  * velocity change matched the aggregate prediction to ~0.0002 rad/s, versus a ~4-10x error
+  * against treating either half as isolated).
+  *
+  * <p>Same derivation shape as {@link #worldLeverArmCorrection}: {@code armNew = P - Ccom =
+  * armOld + (G - Ccom)}, and {@code Ccom = G + orientation.transform(0, assemblyComOffsetFromG,
+  * 0)} (the assembly COM sits directly above/below G along local Y only - see
+  * {@link #assemblyComOffsetFromG}'s own derivation), so
+  * {@code (G - Ccom) = orientation.transform(0, -assemblyComOffsetFromG, 0)}.
+  *
+  * <p>NOT used for the actual native {@code applyImpulseAtPoint} call, which must stay targeted
+  * at the real owning half's own local point via {@link #worldLeverArmCorrection} instead - this
+  * method is for the solver's own PREDICTION math only, kept deliberately separate (review's
+  * "aggregate COM prediction basis... actual owner-local point for native application").
+  */
+ public static Vector3d worldLeverArmCorrectionToAssemblyCom(Quaterniond orientation, double halfHeightB, Config config) {
+  Vector3d localCorrection = new Vector3d(0, -assemblyComOffsetFromG(halfHeightB, config), 0);
+  return orientation.transform(localCorrection);
+ }
+
+ /**
   * Force ownership (ticket comment 53261's "force ownership" ask, per 53236's own warning: a
   * wheel's impulse belongs to whichever half it is rigidly PART OF, not to some hand-rolled
   * aggregate). A wheel's anchor local Y (relative to G, the SAME {@code anchor.y} quantity

@@ -95,4 +95,80 @@ class TwoBodyChassisGroundForceCompositionTest {
    }
   }
  }
+
+ /**
+  * Review 53280/53282/53285's "native known-response comparison": {@code PhysicsBridge.Body
+  * .stepGround}'s Phase 2 impulse-sizing formula shape - {@code torque = armFromAssemblyCom x
+  * impulse}, {@code deltaAngular = torque / aggregateInertiaAboutAssemblyCom} (componentwise,
+  * body-frame) - reproduces the REAL measured angular-velocity response from
+  * {@code TwoBodyImpulseResponseProbe}'s own CI run (43110930350, identity orientation, logged
+  * verbatim in ticket comment 53284) to within that run's own demonstrated ~0.0003 rad/s
+  * precision, at BOTH f=0.5 and f=0.4 - pinning the empirical evidence that justified switching
+  * Phase 2/3's mass/inertia inputs from either half's own isolated values to this aggregate
+  * basis as a permanent regression test, not a one-off CI log read that could silently stop
+  * being true again if this formula regressed.
+  *
+  * <p>Deliberately NOT re-deriving this from {@code worldLeverArmCorrectionToAssemblyCom} (that
+  * function's own invariant is already covered by {@code TwoBodyChassisTest}) - this test exists
+  * to catch the composition actually matching reality, the same role
+  * {@code ownerCorrectedLocalVelocityMatchesTrueMaterialPointVelocityOfTheOwningHalf} plays for
+  * the owner-half basis above.
+  */
+ @Test void aggregateBasisImpulseSizingMatchesTheRealMeasuredNativeResponse() {
+  double a = 0.5, halfHeightB = 1.0, c = 0.5, totalMassKg = 350.0;
+  Vector3d wheelAnchorFromG = new Vector3d(0.35, -0.65, 0.9);
+  Vector3d impulse = new Vector3d(20, 300, 50);
+  // {config, measured lowerDeltaAngular==upperDeltaAngular at tick+1, identity orientation}
+  record Case(TwoBodyChassis.Config config, Vector3d measuredDeltaAngular) {}
+  for (Case c2 : new Case[]{
+    new Case(TwoBodyChassis.Config.DEFAULT, new Vector3d(-2.074, 0.008438, 0.809)),
+    new Case(new TwoBodyChassis.Config(0.4), new Vector3d(-2.090, 0.008440, 0.8149)),
+  }) {
+   Vector3d aggregateInertia = TwoBodyChassis.aggregateInertiaAboutAssemblyCom(totalMassKg, a, halfHeightB, c, c2.config());
+   Vector3d assemblyComFromG = new Vector3d(0, TwoBodyChassis.assemblyComOffsetFromG(halfHeightB, c2.config()), 0);
+   Vector3d armFromAssemblyCom = new Vector3d(wheelAnchorFromG).sub(assemblyComFromG);
+   Vector3d torque = new Vector3d(armFromAssemblyCom).cross(impulse);
+   Vector3d predicted = new Vector3d(torque.x / aggregateInertia.x, torque.y / aggregateInertia.y, torque.z / aggregateInertia.z);
+   String label = "f=" + c2.config().upperMassFraction();
+   assertEquals(c2.measuredDeltaAngular().x, predicted.x, 0.001, label);
+   assertEquals(c2.measuredDeltaAngular().y, predicted.y, 0.001, label);
+   assertEquals(c2.measuredDeltaAngular().z, predicted.z, 0.001, label);
+  }
+ }
+
+ /**
+  * Review 53285's "nonzero rotation" validation for the aggregate basis specifically (the native
+  * CI run above is identity-orientation only, so this is the pure-math counterpart): confirms
+  * {@code PhysicsBridge.Body.stepGround} Phase 2's EXACT round-trip shape -
+  * {@code torqueBody=inverse.transform(point.cross(impulse))},
+  * {@code deltaAngular=q.transform(torqueBody/aggregateInertiaBody)} (componentwise, in BODY
+  * frame, then rotated back to world) - is mathematically equivalent, under a real non-axis-
+  * aligned orientation, to dividing the WORLD-frame torque by the correctly-rotated full
+  * (non-diagonal) world-frame inertia tensor {@code R*diag(I)*R^T}. If this round-trip were
+  * wrong (e.g. a missing or doubled rotation), it would only show up once {@code q} is non-
+  * identity - exactly what this test isolates.
+  */
+ @Test void aggregateBasisBodyFrameRoundTripMatchesTheFullyRotatedWorldInertiaTensor() {
+  Quaterniond q = new Quaterniond().rotateY(Math.toRadians(30)).rotateX(Math.toRadians(20));
+  Quaterniond inverse = new Quaterniond(q).invert();
+  Vector3d inertiaDiag = new Vector3d(5.0, 8.0, 3.0);
+  Vector3d pointWorld = new Vector3d(0.4, -0.6, 0.9);
+  Vector3d impulseWorld = new Vector3d(20, 300, 50);
+
+  Vector3d torqueWorld = new Vector3d(pointWorld).cross(impulseWorld);
+  Vector3d torqueBody = inverse.transform(new Vector3d(torqueWorld));
+  Vector3d deltaAngularBody = new Vector3d(torqueBody.x / inertiaDiag.x, torqueBody.y / inertiaDiag.y, torqueBody.z / inertiaDiag.z);
+  Vector3d viaBodyFrameRoundTrip = q.transform(new Vector3d(deltaAngularBody));
+
+  // R*diag(I)*R^T as an explicit 3x3, then solve I_world * deltaAngular = torqueWorld directly -
+  // an independent derivation using no body-frame step at all.
+  org.joml.Matrix3d rot = new org.joml.Matrix3d().set(q);
+  org.joml.Matrix3d diag = new org.joml.Matrix3d().scaling(inertiaDiag.x, inertiaDiag.y, inertiaDiag.z);
+  org.joml.Matrix3d iWorld = new org.joml.Matrix3d(rot).mul(diag).mul(new org.joml.Matrix3d(rot).transpose());
+  Vector3d viaFullWorldTensor = iWorld.invert().transform(new Vector3d(torqueWorld));
+
+  assertEquals(viaFullWorldTensor.x, viaBodyFrameRoundTrip.x, 1e-9);
+  assertEquals(viaFullWorldTensor.y, viaBodyFrameRoundTrip.y, 1e-9);
+  assertEquals(viaFullWorldTensor.z, viaBodyFrameRoundTrip.z, 1e-9);
+ }
 }
