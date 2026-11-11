@@ -45,6 +45,18 @@ import org.slf4j.Logger;
  *  removes and re-adds it (forcing a fresh {@code onAddition}/{@code addBox} attempt) rather than
  *  passively waiting on an attempt that already failed. The constraint itself is now built only
  *  AFTER both bodies in a pair are confirmed ready, not speculatively beforehand.</li>
+ *  <li>v4 (this version, per review 53256's recovered native source): review found and shared the
+ *  real upstream Rust source (sable_rapier/joints.rs and boxes.rs, pinned tag 6966d292...) - for
+ *  an ordinary (non-sublevel) box, {@code local_anchor = joint.pos - center_of_mass}, and boxes
+ *  live only in {@code rigid_bodies} not {@code level_colliders}, so {@code center_of_mass} falls
+ *  back to ZERO; {@code pos1}/{@code pos2} therefore reach Rapier as body-local offsets UNCHANGED,
+ *  and {@code local_frame1}/{@code local_frame2} go in directly as LOCAL joint-frame rotations -
+ *  NOT an echo of each body's own world orientation, which v1-v3 all assumed. Fixed: both configs
+ *  now pass IDENTITY for orientation1/orientation2 (the correct "impose no extra twist" value
+ *  under local-frame semantics, since both bodies already share one world orientation) instead of
+ *  each body's own world orientation - isolates this run to confirming the position (pos1/pos2)
+ *  question alone, per John's own "retain the empirical liveness/constraint test" instruction
+ *  even with source-level confirmation already in hand.</li>
  * </ul>
  *
  * <p>Method: two independent, non-interacting pairs of throwaway boxes, far from world origin
@@ -190,20 +202,27 @@ public final class AnchorFrameProbe {
  }
 
  private static void start(ServerLevel level) {
-  // ONE shared non-axis-aligned orientation for every body in both pairs (review 53246's
-  // correction) - isolates this probe to the pos1/pos2 question alone, since the relative
-  // target orientation is unambiguously identity regardless of which orientation1/2 semantic
-  // Sable actually uses.
+  // ONE shared non-axis-aligned orientation for every BODY in both pairs (review 53246's
+  // correction) - both bodies' own world pose, independent of what goes into the constraint
+  // config below.
   Quaterniond sharedQ = new Quaterniond().rotateY(Math.toRadians(35)).rotateX(Math.toRadians(20));
   Vector3d anchorOffsetInA = new Vector3d(0, -ANCHOR_OFFSET_MAGNITUDE, 0);
   Vector3d anchorOffsetInB = new Vector3d(0, ANCHOR_OFFSET_MAGNITUDE, 0);
+  // Review 53256's recovered native Rust source (sable_rapier/joints.rs/boxes.rs, pinned tag
+  // 6966d292) confirms local_frame1/local_frame2 reach Rapier as LOCAL joint-frame rotations
+  // relative to each body - NOT an echo of that body's own world orientation, which is what an
+  // earlier version of this probe assumed. IDENTITY is the correct "impose no extra twist" value
+  // under that confirmed convention (both bodies already share one world orientation, so their
+  // local axes already point the same way in world space - identity local frames on both sides
+  // keeps them co-aligned, matching this probe's intended zero-initial-violation setup).
+  Quaterniond jointLocalFrame = new Quaterniond();
 
   Vector3d posA = new Vector3d(5000, 80, 5000);
   forceLoadChunksNear(level, posA, new Vector3d(posA).add(500, 0, 0));
   Vector3d worldG = new Vector3d(sharedQ.transform(new Vector3d(anchorOffsetInA))).add(posA);
   Vector3d posB = new Vector3d(worldG).sub(sharedQ.transform(new Vector3d(anchorOffsetInB)));
   worldProbe = buildPair(level, "world", posA, posB, sharedQ, anchorOffsetInA, anchorOffsetInB,
-    new GenericConstraintConfiguration(worldG, worldG, sharedQ, sharedQ, HitchJoint.lockedAxes(true, false)));
+    new GenericConstraintConfiguration(worldG, worldG, jointLocalFrame, jointLocalFrame, HitchJoint.lockedAxes(true, false)));
 
   // Second pair, offset far away in X so it cannot physically interact with the first, otherwise
   // identical physical configuration but given the BODY-LOCAL hypothesis instead.
@@ -211,7 +230,7 @@ public final class AnchorFrameProbe {
   Vector3d worldG2 = new Vector3d(sharedQ.transform(new Vector3d(anchorOffsetInA))).add(posA2);
   Vector3d posB2 = new Vector3d(worldG2).sub(sharedQ.transform(new Vector3d(anchorOffsetInB)));
   localProbe = buildPair(level, "local", posA2, posB2, sharedQ, anchorOffsetInA, anchorOffsetInB,
-    new GenericConstraintConfiguration(anchorOffsetInA, anchorOffsetInB, sharedQ, sharedQ, HitchJoint.lockedAxes(true, false)));
+    new GenericConstraintConfiguration(anchorOffsetInA, anchorOffsetInB, jointLocalFrame, jointLocalFrame, HitchJoint.lockedAxes(true, false)));
 
   LOGGER.info("[DIV anchorFrameProbe] started - worldG=" + worldG + " worldG2=" + worldG2 + " probeTicks=" + PROBE_TICKS);
  }
