@@ -450,6 +450,28 @@ public final class PhysicsBridge {
   try { parsed = Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return DEFAULT_DEBUG_GROUND_CONTACT_TICKS; }
   return parsed>0 && parsed<=MAX_DEBUG_GROUND_CONTACT_TICKS ? parsed : DEFAULT_DEBUG_GROUND_CONTACT_TICKS;
  }
+ /** Documented upper bound for {@code -Ddiv.experimentalThrottleRampTicks} (ticket comment
+  * 53115) - same 1-minute-at-20tps order of magnitude as the ground-contact diagnostic window,
+  * since this is also meant to stay a bounded experimental candidate, not an unreviewed open
+  * knob. */
+ static final int MAX_EXPERIMENTAL_THROTTLE_RAMP_TICKS = 1200;
+ /**
+  * Pure parse/validate for {@code -Ddiv.experimentalThrottleRampTicks} (ticket comment 53115:
+  * "bounded OPT-IN experimental one-second (20 physics ticks) full-scale throttle-rise
+  * candidate, configurable/bypassable, no default change for other sessions/vehicles"). 0,
+  * unset, or anything invalid (non-numeric, non-positive, non-finite via a malformed string, or
+  * over the documented bound) means BYPASSED - the candidate is off, every vehicle/session gets
+  * exactly today's behavior unless explicitly opted in. Never silently falls back to some other
+  * active value - the only safe default for an unreviewed/misconfigured experimental feature is
+  * off, unlike {@link #resolveDebugGroundContactTicks} where the feature is already always-on
+  * and only its window length needs a sane fallback.
+  */
+ static int resolveExperimentalThrottleRampTicks(String raw) {
+  if (raw == null) return 0;
+  int parsed;
+  try { parsed = Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return 0; }
+  return parsed>0 && parsed<=MAX_EXPERIMENTAL_THROTTLE_RAMP_TICKS ? parsed : 0;
+ }
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
@@ -472,6 +494,20 @@ public final class PhysicsBridge {
   // never reaches Body at all.
   private static final boolean DEBUG_GROUND_CONTACT = GroundContactDiagnostics.ENABLED;
   private static final int DEBUG_GROUND_CONTACT_TICKS = resolveDebugGroundContactTicks(System.getProperty("div.debugGroundContactTicks"));
+  // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - OFF by default for
+  // every vehicle/session (EXPERIMENTAL_THROTTLE_RAMP_TICKS==0 means bypassed, see
+  // PhysicsBridge.resolveExperimentalThrottleRampTicks) unless explicitly enabled via
+  // -Ddiv.experimentalThrottleRampTicks. This is a handling DESIGN CHOICE being tested against
+  // user feedback, not a physics-derived fix - does not touch the solver/CG/friction path at
+  // all, only reshapes the commanded drive force stepGround itself computes below. Lives only
+  // on stepGround's own call path, so it is applied exactly once per actual GROUND tick and
+  // never during flight/rotor stepping (those call stepFlight/stepRotor instead - see step()).
+  // The ramp State is a per-instance (not static) field so a body replacement/deactivation
+  // (always a fresh `new Body(...)`, never field reuse - see BodyRegistry/replaceIfCategoryChanged)
+  // always starts a brand new, zeroed ramp - never carries stale effort across a swap.
+  private static final int EXPERIMENTAL_THROTTLE_RAMP_TICKS = resolveExperimentalThrottleRampTicks(System.getProperty("div.experimentalThrottleRampTicks"));
+  private final io.github.brooswitminecraft.div.experimental.DriveRateLimiter.State throttleRampState =
+    EXPERIMENTAL_THROTTLE_RAMP_TICKS>0 ? new io.github.brooswitminecraft.div.experimental.DriveRateLimiter.State() : null;
   private static final Logger LOGGER = LogUtils.getLogger();
   private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
   /** Full-precision "(x,y,z)" - JOML's own Vector3d.toString() truncates to a handful of
@@ -586,10 +622,23 @@ public final class PhysicsBridge {
    v.motion.set(velocity.x,velocity.y,velocity.z).scale(1/(20*v.speedFactor));
   }
   private boolean stepGround(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d angular, Vector3d velocity, Vector3d up) {
-   double drive=0;
+   double rawDrive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
-    drive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
+    rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
    boolean braking=v.brakeVar.isActive || v.parkingBrakeVar.isActive;
+   // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - bypassed
+   // (drive==rawDrive) unless EXPERIMENTAL_THROTTLE_RAMP_TICKS>0. The rate is THIS vehicle's own
+   // configured drive scale / the configured tick count, not a fixed newtons-per-tick constant,
+   // so it scales across vehicle types rather than needing a per-vehicle fudge factor. Braking
+   // resets the ramp's stored effort every tick it's held (DriveRateLimiter.shape) so releasing
+   // the brake can never reveal a drive ramp that silently kept climbing underneath it. Rejects
+   // a non-finite/non-positive driveForce (which would make the rate itself invalid) by falling
+   // back to the raw, unshaped value rather than dividing into a broken rate.
+   double drive=rawDrive;
+   if (throttleRampState != null && Double.isFinite(tuning.driveForce) && tuning.driveForce>0) {
+    double maxDeltaPerTick=tuning.driveForce/EXPERIMENTAL_THROTTLE_RAMP_TICKS;
+    drive=io.github.brooswitminecraft.div.experimental.DriveRateLimiter.shape(throttleRampState,rawDrive,braking,maxDeltaPerTick);
+   }
    // Tracked vehicles steer by differential track speed, not a steerable wheel; cars/trucks
    // keep steering the wheels marked turnsWithSteer. Both can coexist on the same chassis.
    boolean skidSteer=v.definition.motorized != null && v.definition.motorized.hasSkidSteer;
@@ -618,7 +667,11 @@ public final class PhysicsBridge {
      +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+vfull(pose.position())+" orientation="+qfull(q)
      +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
      +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
-     +" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer);
+     +" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer
+     // Raw vs shaped drive + ramp identity (ticket comment 53115) - driveRaw==drive and
+     // throttleRampTicks=0 together prove the experimental candidate is bypassed on this build/
+     // session; otherwise shows exactly which configured tick count shaped this tick's drive.
+     +" driveRaw="+rawDrive+" throttleRampTicks="+EXPERIMENTAL_THROTTLE_RAMP_TICKS);
    // Phase 1: raycast every wheel and compute its vertical/suspension force exactly as before -
    // suspension is per-wheel and unaffected by this change. Friction/slip is sampled at the
    // point the tire impulse is actually applied (the terrain hit, `point` below), not the

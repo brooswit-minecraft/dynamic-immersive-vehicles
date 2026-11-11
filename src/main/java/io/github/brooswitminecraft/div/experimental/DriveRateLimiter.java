@@ -32,6 +32,10 @@ public final class DriveRateLimiter {
   private double forward, reverse;
   public double forward() { return forward; }
   public double reverse() { return reverse; }
+  /** Drops both accumulators to zero - called whenever braking is active this tick (ticket
+   * comment 53115) so a drive ramp held underneath a brake can never silently keep climbing and
+   * then reveal itself the instant the brake is released. */
+  public void reset() { forward=0; reverse=0; }
  }
  private static double ratchetUp(double previous, double commandedNonNegative, double maxDeltaPerTick) {
   if (commandedNonNegative <= previous) return commandedNonNegative; // release: instant, not limited
@@ -44,5 +48,17 @@ public final class DriveRateLimiter {
   state.forward = ratchetUp(state.forward, commandedForward, maxDeltaPerTick);
   state.reverse = ratchetUp(state.reverse, commandedReverse, maxDeltaPerTick);
   return state.forward - state.reverse;
+ }
+ /** Full per-tick control shaping (ticket comment 53115): while braking is active, drive is held
+  * at zero and the stored ramp effort is reset every tick it's held - NOT merely reset-then-
+  * immediately-re-ratcheted within the same tick (an earlier draft of this did that, and it let
+  * one tick's worth of effort "floor" every tick under a held brake, so releasing the brake still
+  * revealed a one-step jump instead of a true zero - caught by this class's own integration
+  * test). Only once braking stops does the ramp begin climbing from a true zero. This is the
+  * exact composition {@code Body.stepGround} calls when the experimental candidate is enabled;
+  * extracted here, with no Minecraft dependency, so it is directly unit/integration testable. */
+ public static double shape(State state, double commandedDrive, boolean braking, double maxDeltaPerTick) {
+  if (braking) { state.reset(); return 0; }
+  return apply(state, commandedDrive, maxDeltaPerTick);
  }
 }
