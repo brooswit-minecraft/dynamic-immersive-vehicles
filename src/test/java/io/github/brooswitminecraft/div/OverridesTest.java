@@ -190,4 +190,54 @@ class OverridesTest {
   fadeEndBeyondHardCap.selfRightFadeEndDegrees = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.HARD_SAFETY_CAP_DEGREES + 1;
   assertThrows(IllegalArgumentException.class, fadeEndBeyondHardCap::validate);
  }
+
+ // Two-half chassis configuration plumbing (ticket comment 53236/53240).
+
+ @Test void upperMassFractionFallsBackToAnEvenSplitWhenUnconfigured() {
+  assertEquals(0.5, Overrides.resolved("packid:not_configured").upperMassFraction);
+ }
+
+ @Test void upperMassFractionOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.upperMassFraction = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var one = new Overrides.Tuning(); one.upperMassFraction = 1.0;
+  assertThrows(IllegalArgumentException.class, one::validate);
+  var negative = new Overrides.Tuning(); negative.upperMassFraction = -0.1;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var nan = new Overrides.Tuning(); nan.upperMassFraction = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nan::validate);
+  var inRange = new Overrides.Tuning(); inRange.upperMassFraction = 0.4;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void upperMassFractionParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.upperMassFraction = 0.6;
+   Overrides.setForTest(java.util.Map.of("packid:two_body_vehicle", override));
+   assertEquals(0.6, Overrides.resolved("packid:two_body_vehicle").upperMassFraction,
+     "an explicit operator override must take precedence over the 0.5 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void twoBodyConfigBuildsFromTheResolvedFractionAndMatchesItExactly() {
+  var resolved = Overrides.resolved("packid:not_configured");
+  var config = Overrides.twoBodyConfig(resolved, 350.0);
+  assertEquals(0.5, config.upperMassFraction());
+ }
+
+ @Test void twoBodyConfigValidatesAgainstTheRealTotalMassNotJustTheFractionInIsolation() {
+  var override = new Overrides.Tuning(); override.upperMassFraction = 0.001; // a perfectly in-range fraction...
+  try {
+   Overrides.setForTest(java.util.Map.of("packid:extreme_fraction", override));
+   var resolved = Overrides.resolved("packid:extreme_fraction");
+   assertThrows(IllegalArgumentException.class, () -> Overrides.twoBodyConfig(resolved, 100.0),
+     "...that is still unsafe for a light vehicle's real total mass - must fail here, not silently produce a near-massless half");
+   assertDoesNotThrow(() -> Overrides.twoBodyConfig(resolved, 1_000_000.0),
+     "the SAME fraction must be accepted for a heavy enough vehicle where neither half falls below the minimum");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
 }

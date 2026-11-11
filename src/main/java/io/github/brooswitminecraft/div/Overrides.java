@@ -55,6 +55,14 @@ public final class Overrides {
   public Double selfRightMaxTorque;
   public Double selfRightFadeStartDegrees;
   public Double selfRightFadeEndDegrees;
+  // Two-half chassis (ticket comment 53236/53240) - upper-half mass fraction f, defaulting to
+  // 0.5 (an even split) via FALLBACK below, same simple-field shape as suspensionTravel/friction/
+  // etc., NOT an all-or-nothing group like selfRight*. See TwoBodyChassis.Config for the actual
+  // geometry/mass/inertia math this value feeds; io.github.brooswitminecraft.div.Overrides#
+  // twoBodyConfig builds that Config from a resolved Tuning, validating against the vehicle's
+  // real total mass (not just f in isolation - see TwoBodyChassis.Config.validateAgainstTotalMass's
+  // own doc for why that distinction matters).
+  public Double upperMassFraction;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -74,6 +82,10 @@ public final class Overrides {
    double hardCap = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.HARD_SAFETY_CAP_DEGREES;
    if (selfRightFadeStartDegrees != null && !(Double.isFinite(selfRightFadeStartDegrees) && selfRightFadeStartDegrees >= 0 && selfRightFadeStartDegrees <= hardCap)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (selfRightFadeEndDegrees != null && !(Double.isFinite(selfRightFadeEndDegrees) && selfRightFadeEndDegrees > (selfRightFadeStartDegrees!=null?selfRightFadeStartDegrees:0) && selfRightFadeEndDegrees <= hardCap)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Strictly between 0 and 1, never 0/1/out-of-range - matches TwoBodyChassis.Config's own
+   // constructor validation exactly, checked again here so a malformed config entry fails loudly
+   // at load time rather than only when a vehicle actually tries to resolve a two-body config.
+   if (upperMassFraction != null && !(Double.isFinite(upperMassFraction) && upperMassFraction > 0 && upperMassFraction < 1)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -87,6 +99,7 @@ public final class Overrides {
  static {
   FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
   FALLBACK.maxSteerDegrees=30.0; FALLBACK.hullFillFactor=0.5; FALLBACK.waterDrag=400.0; FALLBACK.propellerForce=6000.0;
+  FALLBACK.upperMassFraction=0.5;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -95,6 +108,7 @@ public final class Overrides {
   c.hullFillFactor=t.hullFillFactor; c.waterDrag=t.waterDrag; c.propellerForce=t.propellerForce;
   c.selfRightStrength=t.selfRightStrength; c.selfRightDamping=t.selfRightDamping; c.selfRightMaxTorque=t.selfRightMaxTorque;
   c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
+  c.upperMassFraction=t.upperMassFraction;
   return c;
  }
  /** Builds a {@code SelfRightingAssist.Config} from a resolved Tuning (ticket comment 53182/
@@ -170,7 +184,20 @@ public final class Overrides {
   result.selfRightMaxTorque = firstNonNull(override!=null?override.selfRightMaxTorque:null, packMetadata!=null?packMetadata.selfRightMaxTorque:null, ivAdapted!=null?ivAdapted.selfRightMaxTorque:null, physicallyDerived!=null?physicallyDerived.selfRightMaxTorque:null);
   result.selfRightFadeStartDegrees = firstNonNull(override!=null?override.selfRightFadeStartDegrees:null, packMetadata!=null?packMetadata.selfRightFadeStartDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeStartDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeStartDegrees:null);
   result.selfRightFadeEndDegrees = firstNonNull(override!=null?override.selfRightFadeEndDegrees:null, packMetadata!=null?packMetadata.selfRightFadeEndDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeEndDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeEndDegrees:null);
+  result.upperMassFraction = firstNonNull(override!=null?override.upperMassFraction:null, packMetadata!=null?packMetadata.upperMassFraction:null, ivAdapted!=null?ivAdapted.upperMassFraction:null, physicallyDerived!=null?physicallyDerived.upperMassFraction:null, FALLBACK.upperMassFraction);
   return result;
+ }
+ /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}
+  * (ticket comment 53236/53240) - always resolves to a value (0.5 fallback), unlike
+  * {@link #selfRightingConfig}'s all-or-nothing gate, since an even split is a sensible default
+  * for every vehicle rather than "feature off". Validates against the vehicle's REAL total mass
+  * (not just f in isolation) so a vehicle whose actual mass makes a configured fraction unsafe
+  * (either half under the practical minimum) fails loudly here rather than silently producing a
+  * near-massless half body downstream. */
+ public static io.github.brooswitminecraft.div.experimental.TwoBodyChassis.Config twoBodyConfig(Tuning resolved, double totalMassKg) {
+  var config = new io.github.brooswitminecraft.div.experimental.TwoBodyChassis.Config(resolved.upperMassFraction);
+  config.validateAgainstTotalMass(totalMassKg);
+  return config;
  }
  /** {@link #resolved} with no pack-metadata/IV-adapted/physically-derived source yet available -
   * exactly today's two-level chain (operator override, then the documented fallback), until
