@@ -129,6 +129,41 @@ class SelfRightingAssistTest {
   assertEquals(-right.z, left.z, 1e-9);
  }
 
+ // Review comment 53186: atan2(bodyRight.y,bodyUp.y) IS degenerate when bodyForward is vertical
+ // (an extreme nose-up/down attitude) - both arguments approach zero together there.
+
+ @Test void nearVerticalForwardWithZeroRollStillProducesFiniteZeroTorque() {
+  for (double pitch : new double[]{89.99, 89.999999, -89.99}) {
+   var b=basisRollThenYaw(0, pitch, 0);
+   var t=torqueAt(TYPICAL, b, new Vector3d(0.1,0.1,0.1), true, true);
+   assertTrue(Double.isFinite(t.x) && Double.isFinite(t.y) && Double.isFinite(t.z), "pitch="+pitch+" must never produce a non-finite torque near the gimbal attitude - got "+t);
+  }
+ }
+
+ @Test void torqueFadesSmoothlyToZeroApproachingVerticalForwardEvenWithNonzeroRoll() {
+  // A small roll combined with pitch approaching 90deg - the gimbal fade must win and bring the
+  // torque down to (near) zero as pitch approaches vertical, not report an arbitrarily large or
+  // sign-flipping value from the increasingly noise-sensitive angle.
+  var moderatePitch=torqueAt(TYPICAL, basisRollThenYaw(10, 70, 0), new Vector3d(0,0,0), true, true);
+  var nearVerticalPitch=torqueAt(TYPICAL, basisRollThenYaw(10, 89.9, 0), new Vector3d(0,0,0), true, true);
+  assertTrue(nearVerticalPitch.length() < moderatePitch.length(), "torque magnitude must shrink as the vehicle's forward axis approaches vertical, not stay constant or grow");
+ }
+
+ @Test void noArbitraryRollFlipCrossingThroughNearVerticalPitchWithASmallRollPerturbation() {
+  // Two nearly-identical near-vertical attitudes differing only by a tiny roll perturbation must
+  // NOT produce wildly different (e.g. sign-flipped, large-magnitude) torques - both should be
+  // small and well-behaved because the gimbal fade dominates near this attitude either way.
+  var a=torqueAt(TYPICAL, basisRollThenYaw(1, 89.95, 0), new Vector3d(0,0,0), true, true);
+  var b=torqueAt(TYPICAL, basisRollThenYaw(-1, 89.95, 0), new Vector3d(0,0,0), true, true);
+  assertTrue(a.length() < 50 && b.length() < 50, "torque must stay small this close to vertical forward regardless of a tiny roll perturbation - got a="+a+" b="+b);
+ }
+
+ @Test void exactlyVerticalForwardProducesExactlyZeroNotNaN() {
+  var b=basisRollThenYaw(0, 90, 0);
+  var t=torqueAt(TYPICAL, b, new Vector3d(1,1,1), true, true);
+  assertEquals(0, t.length(), 1e-9, "exactly vertical forward (bodyRight.y=bodyUp.y=0, true atan2(0,0) degeneracy) must resolve to exactly zero, not NaN or an arbitrary angle");
+ }
+
  @Test void configRejectsInvalidRangesIncludingBeyondTheHardSafetyCap() {
   assertThrows(IllegalArgumentException.class, () -> new SelfRightingAssist.Config(-1, 0, 100, 10, 60));
   assertThrows(IllegalArgumentException.class, () -> new SelfRightingAssist.Config(100, -1, 100, 10, 60));

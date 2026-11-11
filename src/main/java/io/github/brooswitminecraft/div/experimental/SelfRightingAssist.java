@@ -25,8 +25,17 @@ import org.joml.Vector3d;
  * {@code bodyRight} unchanged - so {@code bodyRight.y} stays whatever it already was, and if it
  * started at exactly 0 (upright, unyawed) it STAYS 0 under pure pitch, correctly reporting zero
  * roll regardless of pitch). Both restoring torque and damping act along {@code bodyForward},
- * which is always well-defined (never degenerates), so damping is continuous straight through
- * zero bank.
+ * which is itself always well-defined, so damping is continuous straight through zero bank.
+ *
+ * <p>{@code atan2(bodyRight.y,bodyUp.y)} ITSELF, however, is NOT degeneracy-free (review comment
+ * 53186 caught this class's own earlier claim that it was): both arguments go to zero together
+ * when {@code bodyForward} is vertical (an extreme nose-up/down attitude), making the angle
+ * arbitrarily noise-sensitive right there. Gated by {@link #GIMBAL_FADE_START_R}/{@link
+ * #GIMBAL_FADE_END_R}: {@code hypot(bodyRight.y,bodyUp.y)} itself shrinks smoothly to exactly 0
+ * as {@code bodyForward} approaches vertical, so using it as its own additional fade factor
+ * reaches zero assist smoothly near that attitude instead of reporting a noisy or
+ * arbitrarily-flipping angle - "roll relative to world-up" isn't a meaningful question anyway
+ * once the vehicle is pointed straight up or down.
  *
  * <p>Units: torque in N*m (newton-meters), consistent with every other torque this mod computes
  * via {@code inertiaBody}-divided angular impulses; damping in N*m*s/rad (a true damping
@@ -84,17 +93,29 @@ public final class SelfRightingAssist {
   *  axis torque/damping act along).
   * @param bodyUp this vehicle's own current up axis, world-frame.
   * @param bodyRight this vehicle's own current right axis, world-frame. */
+ /** Below this, {@code atan2(bodyRight.y,bodyUp.y)} is numerically unstable (review comment
+  * 53186: contrary to this class's earlier claim, it IS degenerate when {@code bodyForward} is
+  * vertical - both arguments approach zero together, e.g. an extreme nose-up/down attitude, and
+  * the angle becomes arbitrarily sensitive to noise right where this matters). {@code
+  * GIMBAL_R} is {@code hypot(bodyRight.y,bodyUp.y)}, which itself shrinks smoothly to exactly 0
+  * as bodyForward approaches vertical - used as its own fade so the assist gracefully reaches
+  * zero near that attitude instead of reporting a noisy or arbitrarily-flipping angle. */
+ private static final double GIMBAL_FADE_START_R=0.2, GIMBAL_FADE_END_R=0.02;
  public static Vector3d torque(Config config, Vector3d bodyForward, Vector3d bodyUp, Vector3d bodyRight, Vector3d angularVelocity, boolean occupied, boolean grounded) {
   if (config.strength()==0 && config.damping()==0) return new Vector3d(0,0,0);
   if (!occupied || !grounded) return new Vector3d(0,0,0);
   // Signed roll about bodyForward alone, independent of pitch - see class doc for the
-  // algebraic justification. Well-defined (never degenerates) at any bank including exactly 0.
+  // algebraic justification. Degenerate only when bodyForward is near-vertical (gated below).
+  double gimbalR=Math.hypot(bodyRight.y, bodyUp.y);
+  if (!Double.isFinite(gimbalR) || gimbalR<=GIMBAL_FADE_END_R) return new Vector3d(0,0,0);
+  double gimbalFade = gimbalR>=GIMBAL_FADE_START_R ? 1.0 : (gimbalR-GIMBAL_FADE_END_R)/(GIMBAL_FADE_START_R-GIMBAL_FADE_END_R);
   double rollRadians=Math.atan2(bodyRight.y, bodyUp.y);
   double rollDegrees=Math.toDegrees(rollRadians);
   double absRollDegrees=Math.abs(rollDegrees);
   if (absRollDegrees>=HARD_SAFETY_CAP_DEGREES || absRollDegrees>=config.fadeEndDegrees()) return new Vector3d(0,0,0);
-  double fade = absRollDegrees<=config.fadeStartDegrees() ? 1.0
+  double bankFade = absRollDegrees<=config.fadeStartDegrees() ? 1.0
     : 1.0 - (absRollDegrees-config.fadeStartDegrees())/(config.fadeEndDegrees()-config.fadeStartDegrees());
+  double fade = bankFade * gimbalFade;
   Vector3d forwardUnit=new Vector3d(bodyForward).normalize();
   double restoringMagnitude=-config.strength()*fade*Math.sin(rollRadians); // negative sign: drives rollRadians toward zero
   double rollRate=angularVelocity.dot(forwardUnit); // continuous through zero bank - forwardUnit never degenerates
