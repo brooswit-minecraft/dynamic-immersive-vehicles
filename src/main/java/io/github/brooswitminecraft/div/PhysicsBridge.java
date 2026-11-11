@@ -896,30 +896,37 @@ public final class PhysicsBridge {
    // gearRatio/axleRatio/fuelConsumption state, not invoking or re-enabling the native method.
    // That adaptation itself remains separate, unfinished work.
    //
-   // MAJOR OPEN CORRECTION to this commit's own premise above, found by reading further real
-   // source (not yet runtime-confirmed - see the debug log line just below, added for exactly
-   // that): "DIV never otherwise populates this native collection... was empty/stale" may be
-   // WRONG, and this write may be overwritten the SAME tick it is made, before anything reads
-   // it. EntityManager.doTick (real pinned source) calls entity.update() (where this write
-   // happens, via moveVehicle->PhysicsBridge.step->stepGround) THEN
-   // definable.doPostUpdateLogic() on every AEntityD_Definable, including every vehicle.
-   // AEntityE_Interactable.doPostUpdateLogic unconditionally calls updateEncompassingBox()
-   // ("we can just leave this running all the time", its own comment) every tick for every
-   // entity, not just on part add/remove. AEntityVehicleD_Moving overrides
-   // updateEncompassingBox() to additionally call groundDeviceCollective.updateMembers()/
-   // updateBounds()/updateCollisions(true) - and updateCollisions CLEARS and REBUILDS
-   // groundedGroundDevices from NATIVE box-collision detection (VehicleGroundDeviceBox.
-   // updateCollisionStatuses), using vehicle.position/orientation - fields DIV itself keeps
-   // live/correct every tick (that's how a DIV vehicle visibly moves at all) - so this native
-   // recompute is NOT obviously broken/stale for a DIV vehicle; it may well produce a real,
-   // valid grounded set independently of DIV's raycast. None of this (updateEncompassingBox/
-   // doPostUpdateLogic) is cancelled by VehicleMovementMixin, which only cancels
-   // performGroundOperations and moveVehicle. If this read of the real source is right, THIS
-   // explicit write is clobbered before PartEngine.update() ever reads it on the next tick, and
-   // whatever effect commit 4e6a8f9 has (if any) comes from coincidental agreement between the
-   // two detection systems, not from this write - this needs a real runtime capture to settle,
-   // not further static reading, hence the log line immediately below. Not yet acted on
-   // (nothing here removed/changed) - reported, not resolved.
+   // MAJOR OPEN CORRECTION to this commit's own premise above. First drafted from an UNPINNED
+   // MinecraftTransportSimulator GitHub checkout (master/25.0.0) - wrong provenance, caught and
+   // corrected before this comment was finalized: re-verified every claim below by decompiling
+   // (cfr) the ACTUAL pinned dependency bytecode this build uses
+   // (~/.gradle/caches/modules-2/files-2.1/curse.maven/minecraft-transport-simulator-286703/
+   // 7926606/.../minecraft-transport-simulator-286703-7926606.jar - the exact curse.maven
+   // coordinate in build.gradle, 24.0.0 for 1.21.1 per VERIFICATION.md) - every call/line cited
+   // here was confirmed present in that real pinned jar's decompiled classes, not assumed to
+   // carry over from the wrong checkout. Still NOT runtime-confirmed (see the debug log line
+   // just below, added for exactly that):
+   //
+   // "DIV never otherwise populates this native collection... was empty/stale" may be WRONG, and
+   // this write may be overwritten the SAME tick it is made, before anything reads it.
+   // EntityManager.doTick calls entity.update() (where this write happens, via
+   // moveVehicle->PhysicsBridge.step->stepGround) THEN definable.doPostUpdateLogic() on every
+   // AEntityD_Definable, including every vehicle. AEntityE_Interactable.doPostUpdateLogic
+   // unconditionally calls updateEncompassingBox() every tick for every entity, not just on part
+   // add/remove. AEntityVehicleD_Moving overrides updateEncompassingBox() to additionally call
+   // groundDeviceCollective.updateMembers()/updateBounds()/updateCollisions(true) - and
+   // updateCollisions CLEARS and REBUILDS groundedGroundDevices from NATIVE box-collision
+   // detection (VehicleGroundDeviceBox.updateCollisionStatuses), using vehicle.position/
+   // orientation - fields DIV itself keeps live/correct every tick (that's how a DIV vehicle
+   // visibly moves at all) - so this native recompute is NOT obviously broken/stale for a DIV
+   // vehicle; it may well produce a real, valid grounded set independently of DIV's raycast.
+   // None of this (updateEncompassingBox/doPostUpdateLogic) is cancelled by VehicleMovementMixin,
+   // which only cancels performGroundOperations and moveVehicle. If this is right, THIS explicit
+   // write is clobbered before PartEngine.update() ever reads it on the next tick, and whatever
+   // effect commit 4e6a8f9 has (if any) comes from coincidental agreement between the two
+   // detection systems, not from this write - this needs a real runtime capture to settle, not
+   // further static reading, hence the log line immediately below. Not yet acted on (nothing
+   // here removed/changed) - reported, not resolved.
    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] nativeGroundedGroundDevicesBeforeSync entity="+v.uniqueUUID
      +" tick="+debugTick+" sizeBeforeDivWrite="+v.groundDeviceCollective.groundedGroundDevices.size()
      +" wheelsBeforeDivWrite="+v.groundDeviceCollective.groundedGroundDevices.stream().map(w->w.localOffset.toString()).toList());
