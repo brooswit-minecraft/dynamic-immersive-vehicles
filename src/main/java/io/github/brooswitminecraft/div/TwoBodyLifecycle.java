@@ -97,8 +97,9 @@ final class TwoBodyLifecycle {
    if (joint == null || !joint.isValid()) throw new IllegalStateException("two-body fixed joint construction failed or returned invalid");
    joint.setContactsEnabled(false);
   } catch (RuntimeException ex) {
-   physics.removeObject(upperBox);
-   physics.removeObject(lowerBox);
+   // Review 53272: attempt BOTH removals even if the first one itself throws - an exception
+   // from removing upperBox must not prevent the attempt to remove lowerBox too.
+   removeBoth(physics, upperBox, lowerBox);
    throw ex;
   }
   return new Bodies(upperBox, lowerBox, upperHandle, lowerHandle, joint);
@@ -112,8 +113,16 @@ final class TwoBodyLifecycle {
  static void remove(ServerLevel level, Bodies bodies) {
   var container = SubLevelContainer.getContainer(level);
   if (container == null) return;
-  var physics = container.physicsSystem();
-  physics.removeObject(bodies.upperBox());
-  physics.removeObject(bodies.lowerBox());
+  removeBoth(container.physicsSystem(), bodies.upperBox(), bodies.lowerBox());
  }
+
+ /** Review 53272's explicit "ensure cleanup attempts both halves even if removing one fails" -
+  * each removal is independently attempted/caught so a RuntimeException from one can never skip
+  * the other. Logging (not rethrowing) matches this being best-effort cleanup, not an operation
+  * whose own failure should mask whatever original error triggered it. */
+ private static void removeBoth(dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem physics, BoxPhysicsObject upperBox, BoxPhysicsObject lowerBox) {
+  try { physics.removeObject(upperBox); } catch (RuntimeException ex) { LOGGER.error("[DIV twoBodyLifecycle] failed to remove upper half", ex); }
+  try { physics.removeObject(lowerBox); } catch (RuntimeException ex) { LOGGER.error("[DIV twoBodyLifecycle] failed to remove lower half", ex); }
+ }
+ private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
 }

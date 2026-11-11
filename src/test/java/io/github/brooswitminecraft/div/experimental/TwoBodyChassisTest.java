@@ -176,4 +176,42 @@ class TwoBodyChassisTest {
   assertEquals(knownG.y, recoveredG.y, 1e-9);
   assertEquals(knownG.z, recoveredG.z, 1e-9);
  }
+
+ // Force-ownership lever-arm correction (review 53272) - discriminating tests at f=.5 AND f=.4
+ // with a real nonzero rotation, not only the unchanged (f-independent, zero-rotation) off-path
+ // behavior every other test in this investigation already covers.
+
+ @Test void worldOffsetFromGToOwnCenterRoundTripsToTheRealOwnerCenterUnderRotationAtBothFractions() {
+  Quaterniond q = new Quaterniond().rotateY(Math.toRadians(40)).rotateX(Math.toRadians(15));
+  Vector3d knownG = new Vector3d(5000, 80, 5000);
+  for (double f : new double[]{0.5, 0.4}) {
+   var config = new TwoBodyChassis.Config(f);
+   // Independently derive each half's real world center the same way TwoBodyLifecycle.create
+   // does (upper/lowerCenterOffsetFromG, NOT the function under test), then confirm G + the
+   // tested offset lands exactly back on that independently-derived center.
+   Vector3d upperCenter = new Vector3d(q.transform(new Vector3d(TwoBodyChassis.upperCenterOffsetFromG(B)))).add(knownG);
+   Vector3d lowerCenter = new Vector3d(q.transform(new Vector3d(TwoBodyChassis.lowerCenterOffsetFromG(B)))).add(knownG);
+   Vector3d recoveredUpperCenter = new Vector3d(knownG).add(TwoBodyChassis.worldOffsetFromGToOwnCenter(q, B, true));
+   Vector3d recoveredLowerCenter = new Vector3d(knownG).add(TwoBodyChassis.worldOffsetFromGToOwnCenter(q, B, false));
+   assertEquals(upperCenter.x, recoveredUpperCenter.x, 1e-9, "f="+f); assertEquals(upperCenter.y, recoveredUpperCenter.y, 1e-9, "f="+f); assertEquals(upperCenter.z, recoveredUpperCenter.z, 1e-9, "f="+f);
+   assertEquals(lowerCenter.x, recoveredLowerCenter.x, 1e-9, "f="+f); assertEquals(lowerCenter.y, recoveredLowerCenter.y, 1e-9, "f="+f); assertEquals(lowerCenter.z, recoveredLowerCenter.z, 1e-9, "f="+f);
+  }
+ }
+
+ @Test void lowerOwnMassAndInertiaAreLargerAtFPointFourThanAtFPointFive() {
+  // f=.4 means a LIGHTER upper half / HEAVIER lower half than the even f=.5 split - a real,
+  // discriminating check that different configured fractions actually produce different,
+  // correctly-ordered per-half mass/inertia, not just that the formulas run without error.
+  var half = new TwoBodyChassis.Config(0.5);
+  var pointFour = new TwoBodyChassis.Config(0.4);
+  double lowerMassAtHalf = TwoBodyChassis.lowerMassKg(MASS, half);
+  double lowerMassAtPointFour = TwoBodyChassis.lowerMassKg(MASS, pointFour);
+  assertTrue(lowerMassAtPointFour > lowerMassAtHalf, "f=.4 must give the lower half MORE mass than f=.5 - got half="+lowerMassAtHalf+" pointFour="+lowerMassAtPointFour);
+  var lowerInertiaAtHalf = TwoBodyChassis.lowerOwnInertia(MASS, A, B, C, half);
+  var lowerInertiaAtPointFour = TwoBodyChassis.lowerOwnInertia(MASS, A, B, C, pointFour);
+  assertTrue(lowerInertiaAtPointFour.x > lowerInertiaAtHalf.x, "more mass in the same half-geometry must mean larger inertia, not smaller or unchanged");
+  double upperMassAtHalf = TwoBodyChassis.upperMassKg(MASS, half);
+  double upperMassAtPointFour = TwoBodyChassis.upperMassKg(MASS, pointFour);
+  assertTrue(upperMassAtPointFour < upperMassAtHalf, "f=.4 must give the upper half LESS mass than f=.5 - not inverted");
+ }
 }

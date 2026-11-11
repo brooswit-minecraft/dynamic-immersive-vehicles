@@ -145,6 +145,26 @@ public final class TwoBodyChassis {
  public static Vector3d jointAnchorLocalInLowerBody(double halfHeightB) { return new Vector3d(0, halfHeightB / 2, 0); }
 
  /**
+  * World-frame offset to ADD to a point already expressed relative to G (the original single-
+  * body chassis center - what every wheel anchor/contact point in this ticket's own force code
+  * is computed relative to) to re-express that SAME point relative to the given half's own
+  * center instead (ticket comment 53272's correctness fix: {@code applyImpulseAtPoint} and this
+  * codebase's own hand-rolled impulse-sizing math both need a lever arm relative to the body
+  * actually receiving the impulse, not G). Independent of mass fraction {@code f} - this is pure
+  * geometry (the split plane's position never depends on how mass is divided across it); f only
+  * affects each half's own mass/inertia, not where its own center sits.
+  */
+ public static Vector3d worldOffsetFromGToOwnCenter(Quaterniond orientation, double halfHeightB, boolean upperOwned) {
+  // jointAnchorLocalInXBody(b) is G's own local offset FROM that body's own center (i.e.
+  // ownCenter + transform(jointAnchorLocalInXBody) == G), so the offset FROM G TO that body's
+  // own center is the NEGATION of that, transformed into world space - caught by this class's
+  // own discriminating round-trip test (worldOffsetFromGToOwnCenterRoundTripsToTheRealOwnerCenter
+  // UnderRotationAtBothFractions) failing on the very first run with the sign the other way.
+  Vector3d localOffset = upperOwned ? jointAnchorLocalInUpperBody(halfHeightB) : jointAnchorLocalInLowerBody(halfHeightB);
+  return orientation.transform(new Vector3d(localOffset).negate());
+ }
+
+ /**
   * Force ownership (ticket comment 53261's "force ownership" ask, per 53236's own warning: a
   * wheel's impulse belongs to whichever half it is rigidly PART OF, not to some hand-rolled
   * aggregate). A wheel's anchor local Y (relative to G, the SAME {@code anchor.y} quantity

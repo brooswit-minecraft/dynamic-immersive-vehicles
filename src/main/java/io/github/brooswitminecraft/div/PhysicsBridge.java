@@ -643,23 +643,51 @@ public final class PhysicsBridge {
   // Opt-in two-half chassis candidate (ticket comment 53236/53240/53261) - OFF by default for
   // every vehicle/session (TwoBodyLifecycle is never called unless set) - "keep the candidate
   // uninstalled until native validation" (comment 53268). When active, `box`/`handle` below are
-  // the LOWER half-body specifically, not a single whole-chassis box - every real wheel on this
-  // ticket's own ATV geometry belongs to the lower half (TwoBodyChassis.isUpperHalf confirmed
-  // false for all four), so every existing wheel-force/torque application site below (which all
-  // already go through `handle`) needs NO changes at all; only the position/orientation SYNC
-  // back to the vehicle (see step(), which must reconstruct G via
+  // the LOWER half-body specifically, not a single whole-chassis box.
+  //
+  // CORRECTION (review 53272): an earlier version of this comment claimed every existing wheel-
+  // force/torque application site "needs no changes at all" because every real wheel on this
+  // ticket's own ATV belongs to the lower half - WRONG. Routing to the lower handle changes the
+  // body receiving impulses from a whole-chassis box (origin at G, full mass/inertia) to a
+  // smaller half-box (origin at the lower half's own center, lower mass/inertia) - every point/
+  // lever-arm computed relative to G (every wheel's `arm`/`point`, all derived from `center`) is
+  // now wrong for `applyImpulseAtPoint` on that body, and the friction solver's impulse sizing
+  // (which takes a single shared mass/inertiaBody for every contact) was still being handed the
+  // FULL vehicle's mass/inertia while actually acting on the smaller half-body. See stepGround's
+  // own "two-body ground-force owner" resolution for the actual fix: per-tick, the wheel set's
+  // actual owner half (by TwoBodyChassis.isUpperHalf, not an assumption) is resolved once, every
+  // lever arm is re-expressed relative to THAT owner's own center (not G), and that owner's own
+  // mass/inertia/live velocity are used throughout - mixed-ownership wheel sets (not realizable
+  // for this ticket's own ATV, but not excluded by the geometry alone) are explicitly rejected
+  // (logged, forces skipped that tick) rather than silently routed to one half.
+  //
+  // The position/orientation SYNC back to the vehicle (see step(), which reconstructs G via
   // TwoBodyChassis.vehicleWorldPositionFromLowerBody rather than reading the lower body's own
-  // center directly) and construction/cleanup are two-body-aware. Uses the body-local/identity
-  // joint convention confirmed against the real native source (comment 53256), not createHitch's
-  // own (separately flagged, un-fixed) world-space/echoed-orientation convention.
+  // center directly) and construction/cleanup are the other two-body-aware call sites. Uses the
+  // body-local/identity joint convention CONFIRMED by both the real native source (comment 53256)
+  // AND a live anchor-frame probe run (comment 53273) - not createHitch's own (separately
+  // flagged, un-fixed) world-space/echoed-orientation convention. Non-ground stepper modes
+  // (flight/rotor) and towing are explicitly unsupported for a two-body vehicle for now (review's
+  // "preserve non-ground modes and towing boundaries") - see step()'s own guard.
   private static final boolean EXPERIMENTAL_TWO_BODY_CHASSIS = Boolean.getBoolean("div.experimentalTwoBodyChassis");
   final boolean twoBodyActive;
   // Non-null only when twoBodyActive - the upper half-body/handle and the fixed joint connecting
-  // it to the lower half (box/handle below). Held only for initial-velocity seeding and cleanup;
-  // no force/torque application site targets these directly (see above).
+  // it to the lower half (box/handle below). Construction/cleanup hold these; stepGround's own
+  // owner-resolution logic is what actually targets upperHandle for an upper-owned wheel set.
   private final BoxPhysicsObject upperBox;
   private final RigidBodyHandle upperHandle;
   private final PhysicsConstraintHandle twoBodyJoint;
+  // Precomputed once at construction (review 53272) - each half's own real mass/inertia, used by
+  // stepGround's owner-resolution instead of the full-vehicle mass/inertiaBody fields whenever a
+  // wheel's actual owner is resolved to that half. Zero/unused (never read) when !twoBodyActive.
+  private final double lowerMassKg, upperMassKg;
+  private final Vector3d lowerInertiaBody, upperInertiaBody;
+  // Bounded, one-time diagnostic for the mixed-ownership rejection path (review 53272's "honor
+  // actual owner-half geometry or explicitly reject unsupported layouts") - logged once per Body
+  // instance, not every tick, so a persistently-mixed vehicle doesn't spam the log forever.
+  private boolean loggedMixedOwnershipWarning = false;
+  private boolean loggedNonGroundTwoBodyWarning = false;
+  private boolean loggedTwoBodyTowingWarning = false;
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
@@ -738,16 +766,29 @@ public final class PhysicsBridge {
     // Uninstalled/unvalidated candidate (comment 53268) - any construction failure (including
     // Overrides.twoBodyConfig's own validation, e.g. an unsafe upperMassFraction for this
     // vehicle's real mass) must roll back cleanly and surface as an ordinary construction
-    // failure, exactly like the single-body path below - TwoBodyLifecycle.create already
-    // guarantees no partial state on its own failure, so no extra try/catch is needed here.
+    // failure, exactly like the single-body path below. TwoBodyLifecycle.create itself
+    // guarantees no partial state on ITS OWN failure, but review 53272 correctly caught that the
+    // two addLinearAndAngularVelocity calls AFTER a successful create() were not themselves
+    // covered - if either throws, the already-created pair/joint would leak with nothing left to
+    // clean them up. Wrapped below so both halves are removed on any post-create failure too.
     var config=Overrides.twoBodyConfig(tuning,mass);
     var bodies=TwoBodyLifecycle.create(level,position,q,half,mass,config);
+    try {
+     bodies.lowerHandle().addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+     bodies.upperHandle().addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+    } catch (RuntimeException ex) {
+     TwoBodyLifecycle.remove(level,bodies);
+     throw ex;
+    }
     box=bodies.lowerBox(); handle=bodies.lowerHandle();
     upperBox=bodies.upperBox(); upperHandle=bodies.upperHandle(); twoBodyJoint=bodies.joint();
-    handle.addLinearAndAngularVelocity(initialVelocity,new Vector3d());
-    upperHandle.addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+    lowerMassKg=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.lowerMassKg(mass,config);
+    upperMassKg=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.upperMassKg(mass,config);
+    lowerInertiaBody=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.lowerOwnInertia(mass,half.x,half.y,half.z,config);
+    upperInertiaBody=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.upperOwnInertia(mass,half.x,half.y,half.z,config);
    } else {
     upperBox=null; upperHandle=null; twoBodyJoint=null;
+    lowerMassKg=0; upperMassKg=0; lowerInertiaBody=new Vector3d(); upperInertiaBody=new Vector3d();
     box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
     var physics=SubLevelContainer.getContainer(level).physicsSystem();
     physics.addObject(box);
@@ -796,12 +837,23 @@ public final class PhysicsBridge {
    // device installed or removed later doesn't change the ground/flight category, so it never
    // triggers replaceIfCategoryChanged - this is the only place that would otherwise notice.
    var plan = planTick(flight, hasFloatDevice(v), installedPropellers);
-   boolean primaryAwake = switch (plan.stepper()) {
+   // Review 53272's "preserve non-ground modes and towing boundaries" - this unvalidated
+   // candidate is bounded to the pure ground-wheel-force path only (stepGround's own owner-
+   // resolution fix). FLIGHT/ROTOR and buoyancy both apply impulses via `handle` (now the lower
+   // half specifically) with their own lever-arm assumptions never audited for two-body
+   // correctness, unlike stepGround - rather than risk silently misapplying those, skip them
+   // entirely for a two-body vehicle (logged once) until they get the same treatment.
+   if (twoBodyActive && plan.stepper()!=Stepper.GROUND && !loggedNonGroundTwoBodyWarning) {
+    LOGGER.error("[DIV twoBodyChassis] entity="+v.uniqueUUID+" selected a non-GROUND stepper ("+plan.stepper()+") - unsupported for this candidate; skipping force application for this mode.");
+    loggedNonGroundTwoBodyWarning=true;
+   }
+   boolean skipNonGroundForTwoBody = twoBodyActive && plan.stepper()!=Stepper.GROUND;
+   boolean primaryAwake = skipNonGroundForTwoBody ? false : switch (plan.stepper()) {
     case GROUND -> stepGround(v,pose,q,inverse,angular,velocity,up);
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
     case ROTOR -> stepRotor(v,q,up,installedPropellers);
    };
-   boolean floatAwake = plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
+   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
    if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));
@@ -874,13 +926,17 @@ public final class PhysicsBridge {
    // that's the point whose own motion determines the raycast length's rate of change). Those
    // two points differ by roughly radius+compression along `up`; on a rotating chassis, velocity
    // differs between them by angular x that offset (fixed by sampling at `point` - 691f11b).
+   // upperOwned (review 53272): this wheel's actual owner half when twoBodyActive, by
+   // TwoBodyChassis.isUpperHalf on its own local anchor Y relative to G - NOT an assumption that
+   // every wheel is lower-owned. Always false when !twoBodyActive (meaningless, unused there).
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
-     double skidSteerMultiplier, double damperUsed, double effectiveMassUsed) {}
+     double skidSteerMultiplier, double damperUsed, double effectiveMassUsed, boolean upperOwned) {}
    List<WheelHit> hits=new java.util.ArrayList<>();
    for(var wheel:wheels) {
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
+    boolean upperOwned=twoBodyActive && io.github.brooswitminecraft.div.experimental.TwoBodyChassis.isUpperHalf(anchor.y);
     Vector3d arm=q.transform(new Vector3d(anchor));
     Vector3d start=new Vector3d(pose.position()).add(arm);
     double length=radius+tuning.suspensionTravel;
@@ -916,7 +972,47 @@ public final class PhysicsBridge {
     Vector3d right=new Vector3d(up).cross(forward);
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      damperResult.damper(),damperResult.effectiveMass()));
+      damperResult.damper(),damperResult.effectiveMass(),upperOwned));
+   }
+   // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
+   // class-level correction for the full defect this closes). For the single-body path this is
+   // exactly today's values (zero offset, no change). For two-body, resolves which SINGLE half
+   // actually owns every wheel this tick (by each wheel's own real anchor Y, not an assumption),
+   // and provides that owner's own real mass/inertia/live velocity/angular plus the world-frame
+   // offset needed to re-express every G-relative point/arm below relative to that owner's own
+   // center - Sable's applyImpulseAtPoint and this class's own hand-rolled impulse-sizing math
+   // both need a lever arm relative to the body actually receiving the impulse, not G.
+   //
+   // Mixed ownership (wheels on BOTH halves this tick) is NOT supported by this single-pass
+   // solver (which assumes every contact acts on one shared rigid body) - review's explicit
+   // "honor actual owner-half geometry or explicitly reject unsupported layouts" - rather than
+   // silently pick one half and misapply the other's wheels, this clears `hits` entirely so
+   // every downstream phase (native sync, friction solve, self-right support gating) correctly
+   // sees "no wheels" this tick instead of a half-wrong result. Logged once per Body instance,
+   // not every tick, so a persistently-mixed vehicle cannot spam the log forever.
+   record GroundOwner(RigidBodyHandle handle, double ownerMass, Vector3d ownerInertiaBody, Vector3d ownerVelocity, Vector3d ownerAngular, Vector3d pointOffsetWorld) {}
+   GroundOwner owner;
+   if (!twoBodyActive) {
+    owner=new GroundOwner(handle,mass,inertiaBody,velocity,angular,new Vector3d());
+   } else {
+    boolean anyUpper=false, anyLower=false;
+    for (var h:hits) { if (h.upperOwned()) anyUpper=true; else anyLower=true; }
+    if (anyUpper && anyLower) {
+     if (!loggedMixedOwnershipWarning) {
+      LOGGER.error("[DIV twoBodyChassis] entity="+v.uniqueUUID+" has ground wheels on BOTH halves this tick (mixed ownership) - unsupported layout for this candidate; skipping ground-force application until this no longer occurs. See TwoBodyChassis.isUpperHalf's own doc.");
+      loggedMixedOwnershipWarning=true;
+     }
+     hits.clear();
+     owner=new GroundOwner(handle,mass,inertiaBody,velocity,angular,new Vector3d()); // unused once hits is empty - Phase2/3 below iterate zero contacts either way
+    } else if (anyUpper) {
+     Vector3d offset=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldOffsetFromGToOwnCenter(q,halfExtents.y,true);
+     owner=new GroundOwner(upperHandle,upperMassKg,upperInertiaBody,upperHandle.getLinearVelocity(new Vector3d()),upperHandle.getAngularVelocity(new Vector3d()),offset);
+    } else {
+     // anyLower, or hits is empty (no ray hit this tick at all) - lower is the harmless default
+     // when there is nothing to own either way.
+     Vector3d offset=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldOffsetFromGToOwnCenter(q,halfExtents.y,false);
+     owner=new GroundOwner(handle,lowerMassKg,lowerInertiaBody,velocity,angular,offset);
+    }
    }
    // Native contact-ownership sync (ticket comment 53182/53182-correction): confirmed by reading
    // the real pinned MTS source (not inferred from naming) that PartEngine.update() - which DOES
@@ -1022,24 +1118,29 @@ public final class PhysicsBridge {
    // class's own doc and ticket comment history for the full derivation/validation). No gravity
    // is added here - Sable's own engine owns that; `velocity`/`angular` already reflect
    // whatever Sable has already applied this tick.
-   Vector3d workingVelocity=new Vector3d(velocity), workingAngular=new Vector3d(angular);
+   // Every point/mass/inertia/velocity below uses `owner` (review 53272), not the raw
+   // mass/inertiaBody/velocity/angular/handle fields directly - for the single-body path (and
+   // the two-body lower-owner path) these are identical to what was here before; for an actual
+   // upper-owned wheel set they are the upper half's own real values instead.
+   Vector3d workingVelocity=new Vector3d(owner.ownerVelocity()), workingAngular=new Vector3d(owner.ownerAngular());
    for (var h:hits) {
     Vector3d verticalImpulse=new Vector3d(up).mul(h.normal()*DT);
-    workingVelocity.add(new Vector3d(verticalImpulse).div(mass));
-    Vector3d torqueBody=inverse.transform(new Vector3d(h.point()).cross(verticalImpulse));
-    workingAngular.add(q.transform(new Vector3d(torqueBody.x/inertiaBody.x,torqueBody.y/inertiaBody.y,torqueBody.z/inertiaBody.z)));
+    workingVelocity.add(new Vector3d(verticalImpulse).div(owner.ownerMass()));
+    Vector3d ownerPoint=new Vector3d(h.point()).add(owner.pointOffsetWorld());
+    Vector3d torqueBody=inverse.transform(new Vector3d(ownerPoint).cross(verticalImpulse));
+    workingAngular.add(q.transform(new Vector3d(torqueBody.x/owner.ownerInertiaBody().x,torqueBody.y/owner.ownerInertiaBody().y,torqueBody.z/owner.ownerInertiaBody().z)));
    }
    var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
-     h.point(),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
-   var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,inertiaBody,q,inverse,workingVelocity,workingAngular,
+     new Vector3d(h.point()).add(owner.pointOffsetWorld()),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
+   var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,owner.ownerMass(),owner.ownerInertiaBody(),q,inverse,workingVelocity,workingAngular,
      braking,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,DT,
      effectiveFrictionSolverIterations());
    // Phase 3: apply each wheel's final (vertical + solved tire) impulse exactly once, same
    // application/logging shape as before.
    for (int i=0;i<hits.size();i++) {
     var h=hits.get(i); var wheel=h.wheel(); var tire=results[i];
-    Vector3d point=h.point(), forward=h.forward(), right=h.right();
-    Vector3d contactVelocity=new Vector3d(angular).cross(point).add(velocity);
+    Vector3d point=new Vector3d(h.point()).add(owner.pointOffsetWorld()), forward=h.forward(), right=h.right();
+    Vector3d contactVelocity=new Vector3d(owner.ownerAngular()).cross(point).add(owner.ownerVelocity());
     double speed=contactVelocity.dot(forward), sideSpeed=contactVelocity.dot(right);
     Vector3d force=new Vector3d(up).mul(h.normal()).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
     // Captured BEFORE the world-frame point/force below are mutated in place into the
@@ -1076,7 +1177,7 @@ public final class PhysicsBridge {
     Vector3d appliedPointLocal=inverse.transform(point), appliedImpulseLocal=inverse.transform(force.mul(DT));
     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
       +" appliedPointLocal="+vfull(appliedPointLocal)+" appliedImpulseLocal="+vfull(appliedImpulseLocal));
-    handle.applyImpulseAtPoint(appliedPointLocal,appliedImpulseLocal);
+    owner.handle().applyImpulseAtPoint(appliedPointLocal,appliedImpulseLocal);
     wheel.contactThisTick=true;
     wheel.animateAsOnGround=true;
     wheel.angularVelocity=speed*DT/(Math.max(.05,h.radius())*2*Math.PI);
@@ -1151,7 +1252,20 @@ public final class PhysicsBridge {
    */
   private double applyTowingCompensation(EntityVehicleF_Physics v) {
    double towThrust = unjointedTowingThrust(v);
-   if (towThrust != 0) handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.impulse(towThrust,v.speedFactor,mass,v.currentMass)));
+   if (towThrust != 0) {
+    // Review 53272's "preserve... towing boundaries" - applying at local origin (0,0,0) means
+    // the body's OWN center, which is G in the single-body path but the LOWER half's own center
+    // (not G) for a two-body vehicle - a real lever-arm mismatch never audited here, unlike
+    // stepGround's own owner-resolution fix. Skip (logged once) rather than silently misapply.
+    if (twoBodyActive) {
+     if (!loggedTwoBodyTowingWarning) {
+      LOGGER.error("[DIV twoBodyChassis] entity="+v.uniqueUUID+" has an active towing compensation thrust - unsupported for this candidate (createHitch itself has a separate, already-flagged anchor-convention issue too); skipping this impulse.");
+      loggedTwoBodyTowingWarning=true;
+     }
+    } else {
+     handle.applyImpulseAtPoint(new Vector3d(), new Vector3d(0,0,TowingForces.impulse(towThrust,v.speedFactor,mass,v.currentMass)));
+    }
+   }
    return towThrust;
   }
   /**
