@@ -895,6 +895,34 @@ public final class PhysicsBridge {
    // would mean replicating the arithmetic DIV-side from the now-correctly-fed-back rpm/
    // gearRatio/axleRatio/fuelConsumption state, not invoking or re-enabling the native method.
    // That adaptation itself remains separate, unfinished work.
+   //
+   // MAJOR OPEN CORRECTION to this commit's own premise above, found by reading further real
+   // source (not yet runtime-confirmed - see the debug log line just below, added for exactly
+   // that): "DIV never otherwise populates this native collection... was empty/stale" may be
+   // WRONG, and this write may be overwritten the SAME tick it is made, before anything reads
+   // it. EntityManager.doTick (real pinned source) calls entity.update() (where this write
+   // happens, via moveVehicle->PhysicsBridge.step->stepGround) THEN
+   // definable.doPostUpdateLogic() on every AEntityD_Definable, including every vehicle.
+   // AEntityE_Interactable.doPostUpdateLogic unconditionally calls updateEncompassingBox()
+   // ("we can just leave this running all the time", its own comment) every tick for every
+   // entity, not just on part add/remove. AEntityVehicleD_Moving overrides
+   // updateEncompassingBox() to additionally call groundDeviceCollective.updateMembers()/
+   // updateBounds()/updateCollisions(true) - and updateCollisions CLEARS and REBUILDS
+   // groundedGroundDevices from NATIVE box-collision detection (VehicleGroundDeviceBox.
+   // updateCollisionStatuses), using vehicle.position/orientation - fields DIV itself keeps
+   // live/correct every tick (that's how a DIV vehicle visibly moves at all) - so this native
+   // recompute is NOT obviously broken/stale for a DIV vehicle; it may well produce a real,
+   // valid grounded set independently of DIV's raycast. None of this (updateEncompassingBox/
+   // doPostUpdateLogic) is cancelled by VehicleMovementMixin, which only cancels
+   // performGroundOperations and moveVehicle. If this read of the real source is right, THIS
+   // explicit write is clobbered before PartEngine.update() ever reads it on the next tick, and
+   // whatever effect commit 4e6a8f9 has (if any) comes from coincidental agreement between the
+   // two detection systems, not from this write - this needs a real runtime capture to settle,
+   // not further static reading, hence the log line immediately below. Not yet acted on
+   // (nothing here removed/changed) - reported, not resolved.
+   if (debugThisTick) LOGGER.info("[DIV debugGroundContact] nativeGroundedGroundDevicesBeforeSync entity="+v.uniqueUUID
+     +" tick="+debugTick+" sizeBeforeDivWrite="+v.groundDeviceCollective.groundedGroundDevices.size()
+     +" wheelsBeforeDivWrite="+v.groundDeviceCollective.groundedGroundDevices.stream().map(w->w.localOffset.toString()).toList());
    v.groundDeviceCollective.groundedGroundDevices.clear();
    for (var h : hits) v.groundDeviceCollective.groundedGroundDevices.add(h.wheel());
    // Phase 2: shared multi-contact friction solve (ticket MINECRAFT-503) - stage every wheel's
