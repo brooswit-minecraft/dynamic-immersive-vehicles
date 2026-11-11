@@ -49,8 +49,10 @@ public final class PhysicsBridge {
  static final double DT = .05;
  private PhysicsBridge() {}
  private static Overrides.Tuning tuning(JSONVehicle definition) {
-  var t = Overrides.get(definition.packID + ":" + definition.systemName);
-  return t != null ? t : Overrides.DEFAULT;
+  // Overrides.resolved (ticket comment 53181) applies the per-field precedence chain and always
+  // returns a fully non-null Tuning - the raw Overrides.get(key) entry can now be sparse (a
+  // partial override), so callers must never read it directly.
+  return Overrides.resolved(definition.packID + ":" + definition.systemName);
  }
  /** Any ground-contact device (wheel or track) the generalized suspension/friction solver can drive. */
  private static List<PartGroundDevice> groundContacts(EntityVehicleF_Physics v) {
