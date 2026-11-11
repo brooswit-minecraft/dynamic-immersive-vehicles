@@ -6,11 +6,15 @@ import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
+import dev.ryanhcode.sable.physics.config.dimension_physics.DimensionPhysicsData;
+import com.mojang.logging.LogUtils;
+import org.slf4j.Logger;
 import io.github.brooswitminecraft.div.mixin.VehicleTowingAccessor;
 import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.baseclasses.TowingConnection;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
+import minecrafttransportsimulator.entities.instances.PartSeat;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
 import minecrafttransportsimulator.entities.instances.PartPropeller;
 import minecrafttransportsimulator.jsondefs.JSONPart;
@@ -46,8 +50,10 @@ public final class PhysicsBridge {
  static final double DT = .05;
  private PhysicsBridge() {}
  private static Overrides.Tuning tuning(JSONVehicle definition) {
-  var t = Overrides.get(definition.packID + ":" + definition.systemName);
-  return t != null ? t : Overrides.DEFAULT;
+  // Overrides.resolved (ticket comment 53181) applies the per-field precedence chain and always
+  // returns a fully non-null Tuning - the raw Overrides.get(key) entry can now be sparse (a
+  // partial override), so callers must never read it directly.
+  return Overrides.resolved(definition.packID + ":" + definition.systemName);
  }
  /** Any ground-contact device (wheel or track) the generalized suspension/friction solver can drive. */
  private static List<PartGroundDevice> groundContacts(EntityVehicleF_Physics v) {
@@ -138,7 +144,8 @@ public final class PhysicsBridge {
   // (or anything else) ever sees them: a vehicle with no definition, or with a ground part that
   // itself has no definition, must be excluded here rather than throw.
   JSONVehicle definition = v.definition;
-  if (definition == null) return deactivate(v);
+  boolean isClient = v.world.isClient();
+  if (definition == null) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "noDefinition"); return deactivate(v); }
   String key = definition.packID + ":" + definition.systemName;
   var installedGroundDevices = installedGroundDevices(v);
   var installedPropellers = installedPropellers(v);
@@ -150,21 +157,26 @@ public final class PhysicsBridge {
   // why: BuoyantBody has no pose/anchor API for a joint to connect to).
   boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, optedOut);
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
-  if ((!ground && !floating) || brokenDefinitions.contains(definition)) return deactivate(v);
+  if (brokenDefinitions.contains(definition)) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "brokenDefinition:"+key); return deactivate(v); }
+  if (!ground && !floating) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "ineligible:"+key); return deactivate(v); }
   replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, old -> { hitches.release(v); old.remove(); });
   boolean alreadyActive = registry.isActive(v);
   boolean towingVehicleActive = ground && towed && isHitchableBody(towedByConnection.towingVehicle);
   var decision = ground
-    ? decide(true, v.world.isClient(), towed, alreadyActive, towingVehicleActive)
-    : (v.world.isClient() ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
+    ? decide(true, isClient, towed, alreadyActive, towingVehicleActive)
+    : (isClient ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
+  GroundContactDiagnostics.logClassification(v.uniqueUUID, isClient, key, ground, floating, decision.toString());
   if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
   if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
   var level = ((WorldAccessor)v.world).div$level();
-  if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) return false;
+  if (!(level instanceof ServerLevel server) || SubLevelContainer.getContainer(server) == null) {
+   GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "noServerLevelOrContainer:"+key);
+   return false;
+  }
   Supplier<VehicleBody> construct = ground
     ? () -> new Body(server,v,tuning(definition))
     : () -> new BuoyantBody(server,v,tuning(definition));
-  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, construct);
+  boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, GroundContactDiagnostics.instrumentedConstruct(construct, v.uniqueUUID, isClient, key));
   if (!activated || !ground) return activated;
   // Evaluated BEFORE reconcileHitch runs: HitchRegistry.reconcile already clears any existing
   // entry - valid/matching or not - before attempting to (re)create one, so this is the only
@@ -385,14 +397,256 @@ public final class PhysicsBridge {
   registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
+ /**
+  * Per-wheel suspension spring rate {@code stepGround} divides the vehicle's full static load
+  * across: calibrated so that, under even per-wheel load (mass*gravity/wheelCount), the per-wheel
+  * {@link TireForces#suspension} force exactly balances gravity at HALF of
+  * {@code suspensionTravel} compressed - the ride-height equilibrium this ticket's own triage
+  * (comment 52830) derived algebraically, generalized from that comment's own assumed 9.81 to
+  * whichever gravity magnitude is actually configured. {@code gravity} must be this level's own
+  * actual configured gravity magnitude (read fresh by {@code stepGround} every tick, via Sable's
+  * {@code DimensionPhysicsData.getGravity}) - NOT a hardcoded Earth 9.81. Confirmed root cause
+  * (bytecode-verified against the exact pinned dependency, {@code sable-neoforge-1.21.1:2.0.5}):
+  * {@code DimensionPhysics.DEFAULT_GRAVITY} is {@code (0,-11,0)}, not {@code (0,-9.81,0)} - this
+  * class previously hard-coded 9.81 here (and in the per-wheel normal clamp below) while the
+  * vehicle's actual Sable rigid body falls under 11 m/s^2. Calibrating the spring for a lighter
+  * gravity than the body actually experiences under-supports its real weight, so it settles with
+  * MORE compression than the intended half-travel equilibrium - sitting lower/closer to the
+  * ground by travel*.5*(11/9.81-1), about 18mm at the shared 0.3m default travel - a small but
+  * real, persistent, shared (not ATV-specific) sinking, exactly matching the reported "sinks into
+  * the ground a bit." Extracted as its own seam (same formula, now parameterized rather than a
+  * hand-copied constant) so a settling simulation can exercise it at both the correct and the
+  * previously-assumed gravity.
+  */
+ static double suspensionSpring(double mass, int wheelCount, double suspensionTravel, double gravity) {
+  return mass*gravity/(wheelCount*suspensionTravel*.5);
+ }
+ /**
+  * Per-wheel suspension damping rate - critically-damped-ish (0.7x the critical damping
+  * coefficient for this wheel's share of the sprung mass) so the settling the convergence
+  * simulation checks neither oscillates indefinitely nor is sluggish enough to look like
+  * persistent sinking. Same extraction rationale as {@link #suspensionSpring}.
+  */
+ static double suspensionDamper(double mass, int wheelCount, double spring) {
+  return 2*Math.sqrt(spring*mass/wheelCount)*.7;
+ }
+ /** Default length, in ticks, of {@code Body}'s bounded ground-contact trace (ticket comment
+  * 53095/53098) when {@code -Ddiv.debugGroundContactTicks} is unset or invalid. */
+ static final int DEFAULT_DEBUG_GROUND_CONTACT_TICKS = 200;
+ /** Documented upper bound on that window: this trace is deliberately bounded instrumentation,
+  * not permanent capture (see {@code Body}'s own class doc) - 12,000 ticks (10 minutes at the
+  * fixed 20tps tick rate) is generous for a single manual test session while still refusing to
+  * let a mistyped huge value turn this into unbounded logging. */
+ static final int MAX_DEBUG_GROUND_CONTACT_TICKS = 12000;
+ /**
+  * Pure parse/validate for {@code -Ddiv.debugGroundContactTicks} (ticket comment 53095: the
+  * previous hardcoded 200-tick window, counted from placement rather than from control input,
+  * missed throttle onset that started later than ~10s after spawn; comment 53098: ship the
+  * configurable duration alone first, skip a control-triggered re-arm for now). Extracted the
+  * same way as {@link #suspensionSpring} so it is unit-testable without any Minecraft/SLF4J
+  * dependency. Never throws - anything not a positive integer within the documented bound
+  * falls back to the default.
+  */
+ static int resolveDebugGroundContactTicks(String raw) {
+  if (raw == null) return DEFAULT_DEBUG_GROUND_CONTACT_TICKS;
+  int parsed;
+  try { parsed = Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return DEFAULT_DEBUG_GROUND_CONTACT_TICKS; }
+  return parsed>0 && parsed<=MAX_DEBUG_GROUND_CONTACT_TICKS ? parsed : DEFAULT_DEBUG_GROUND_CONTACT_TICKS;
+ }
+ /** Documented upper bound for {@code -Ddiv.experimentalThrottleRampTicks} (ticket comment
+  * 53115) - same 1-minute-at-20tps order of magnitude as the ground-contact diagnostic window,
+  * since this is also meant to stay a bounded experimental candidate, not an unreviewed open
+  * knob. */
+ static final int MAX_EXPERIMENTAL_THROTTLE_RAMP_TICKS = 1200;
+ /**
+  * Pure parse/validate for {@code -Ddiv.experimentalThrottleRampTicks} (ticket comment 53115:
+  * "bounded OPT-IN experimental one-second (20 physics ticks) full-scale throttle-rise
+  * candidate, configurable/bypassable, no default change for other sessions/vehicles"). 0,
+  * unset, or anything invalid (non-numeric, non-positive, non-finite via a malformed string, or
+  * over the documented bound) means BYPASSED - the candidate is off, every vehicle/session gets
+  * exactly today's behavior unless explicitly opted in. Never silently falls back to some other
+  * active value - the only safe default for an unreviewed/misconfigured experimental feature is
+  * off, unlike {@link #resolveDebugGroundContactTicks} where the feature is already always-on
+  * and only its window length needs a sane fallback.
+  */
+ static int resolveExperimentalThrottleRampTicks(String raw) {
+  if (raw == null) return 0;
+  int parsed;
+  try { parsed = Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return 0; }
+  return parsed>0 && parsed<=MAX_EXPERIMENTAL_THROTTLE_RAMP_TICKS ? parsed : 0;
+ }
+ /** Documented upper bound for {@code -Ddiv.experimentalFrictionSolverIterations} (ticket
+  * comments 53127/53130). {@code FrictionSolverIterationCostBenchmark} measured cost scaling
+  * roughly linearly with iteration count (~0.64us/iteration/call); 256 leaves headroom above the
+  * 128 actually benchmarked while still refusing an unbounded/mistyped value. */
+ static final int MAX_EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS = 256;
+ /**
+  * Pure parse/validate for {@code -Ddiv.experimentalFrictionSolverIterations} (ticket comments
+  * 53127/53130: "bounded higher-iteration experimental candidate... preserve current production
+  * default 4"). 0, unset, or anything invalid (non-numeric, non-positive, over the documented
+  * bound) means BYPASSED - {@link io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver#FRICTION_SOLVER_ITERATIONS}
+  * (4) is used, exactly as shipped, for every vehicle/session unless explicitly opted in. Same
+  * safe-default-is-off reasoning as {@link #resolveExperimentalThrottleRampTicks} - an
+  * unreviewed experimental accuracy knob should never silently activate itself.
+  */
+ static int resolveExperimentalFrictionSolverIterations(String raw) {
+  if (raw == null) return 0;
+  int parsed;
+  try { parsed = Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return 0; }
+  return parsed>0 && parsed<=MAX_EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS ? parsed : 0;
+ }
+ private static final int EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS_RESOLVED = resolveExperimentalFrictionSolverIterations(System.getProperty("div.experimentalFrictionSolverIterations"));
+ /** The iteration count actually passed to {@code MultiContactFrictionSolver.solveFriction} this
+  * run - the experimental candidate's resolved value if opted in, else the shipped default
+  * ({@code MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS}, 4) unchanged. A plain static
+  * method on the outer class (no Minecraft/SLF4J types) so both {@code Body} and the mod's own
+  * startup marker (which runs before any {@code Body} exists) can call it. */
+ static int effectiveFrictionSolverIterations() {
+  return EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS_RESOLVED>0 ? EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS_RESOLVED
+    : io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS;
+ }
+ /** Result of {@link #effectiveMassDamper}: the damper value actually usable this tick (either
+  * the candidate or the safe fallback) paired with the raw per-contact effective mass that was
+  * attempted, logged separately so a capture can distinguish "candidate bypassed" (NaN) from
+  * "candidate attempted" (a real, possibly-degenerate number) without re-deriving it. */
+ record EffectiveMassDamperResult(double damper, double effectiveMass) {}
+ /**
+  * Opt-in per-contact damping-basis candidate (ticket comments 53214/53219): the same critical-
+  * damping-ratio formula shape {@code suspensionDamper} already uses ({@code 2*sqrt(spring*m)*.7}),
+  * but sourced from the REAL per-contact effective mass along the contact normal
+  * ({@code MultiContactFrictionSolver.contactEffectiveMass}, using this body's own actual box
+  * mass/inertia and the actual contact point/arm - comment 53219's explicit requirement) instead
+  * of the shared {@code mass/wheelCount} basis. Pure/testable, no Minecraft types, same pattern
+  * as {@link #suspensionDamper} itself.
+  *
+  * <p>{@code direction} is the real production call's chassis/suspension-ray direction (the
+  * body's own {@code up}, {@code q.transform(WORLD_UP)}) - NOT a re-derivation of the actual
+  * terrain surface normal at the hit point, which this code never computes (review comment
+  * 53223's correction to this doc's earlier imprecise wording; no geometry change - this was
+  * always what the real call site passed, see {@code Body.stepGround}'s own use of `up` for both
+  * the suspension and friction math it already shared with this candidate).
+  *
+  * <p>Guards finite/positive spring, mass, inertia components and point coordinates, a near-zero
+  * or far-from-unit {@code direction} (comment 53223: explicitly reject rather than silently
+  * normalize or divide-by-near-zero - defensive, since the real call always passes a unit
+  * q-transformed up, not a reason to redesign this method's contract), and a non-finite
+  * {@code inverseOrientation}, and catches any exception from the solver call itself, falling
+  * back to {@code fallbackDamper} (today's shared value) on any non-finite/non-positive/
+  * degenerate result - comment 53219's explicit "safe baseline fallback" requirement, so a
+  * degenerate contact (e.g. a zero/garbage inertia component, which should never happen but is
+  * not re-proven impossible here) can never produce a NaN/negative damper that would destabilize
+  * the suspension.
+  *
+  * <p>NOT shown to be a net improvement - measured across commits 29d2ed3/98bf372/90ed051/02f90a0:
+  * a real driven/recontact scenario improved dramatically at one seed and DT, but that result
+  * reversed direction at a finer timestep and did not hold across a 72-combo seed/heading/
+  * timestep sweep (candidate tipped MORE often than baseline overall). Wired here ONLY as a
+  * bounded, explicitly opt-in (default OFF - {@code -Ddiv.experimentalEffectiveMassDamping} must
+  * be set to enable it) in-game experiment per comment 53219's direct instruction to let the user
+  * play-test it despite that open uncertainty, NOT as a validated fix - see {@code Body}'s own use
+  * site for the exact opt-in flag and this ticket's comment history for the full measurement
+  * record.
+  */
+ static EffectiveMassDamperResult effectiveMassDamper(double spring, double mass, Vector3d point, Vector3d direction,
+     Quaterniond inverseOrientation, Vector3d inertiaBody, double fallbackDamper) {
+  if (!Double.isFinite(spring) || spring<=0 || !Double.isFinite(mass) || mass<=0
+    || !Double.isFinite(inertiaBody.x) || inertiaBody.x<=0
+    || !Double.isFinite(inertiaBody.y) || inertiaBody.y<=0
+    || !Double.isFinite(inertiaBody.z) || inertiaBody.z<=0
+    || !Double.isFinite(point.x) || !Double.isFinite(point.y) || !Double.isFinite(point.z)
+    || !Double.isFinite(direction.x) || !Double.isFinite(direction.y) || !Double.isFinite(direction.z)
+    || !Double.isFinite(inverseOrientation.x) || !Double.isFinite(inverseOrientation.y)
+    || !Double.isFinite(inverseOrientation.z) || !Double.isFinite(inverseOrientation.w)) {
+   return new EffectiveMassDamperResult(fallbackDamper, Double.NaN);
+  }
+  double directionLength=Math.sqrt(direction.x*direction.x+direction.y*direction.y+direction.z*direction.z);
+  if (!Double.isFinite(directionLength) || directionLength<0.9 || directionLength>1.1) {
+   // Comment 53223: reject near-zero/non-unit direction explicitly rather than silently
+   // normalizing (which would mask a caller bug) or dividing by a near-zero length. The real
+   // production call always passes a unit q-transformed up, so this never fires there.
+   return new EffectiveMassDamperResult(fallbackDamper, Double.NaN);
+  }
+  double effectiveMass;
+  try {
+   effectiveMass = io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.contactEffectiveMass(mass, point, direction, inverseOrientation, inertiaBody);
+  } catch (RuntimeException e) { return new EffectiveMassDamperResult(fallbackDamper, Double.NaN); }
+  if (!Double.isFinite(effectiveMass) || effectiveMass<=0) return new EffectiveMassDamperResult(fallbackDamper, effectiveMass);
+  double damperCandidate = 2*Math.sqrt(spring*effectiveMass)*.7;
+  if (!Double.isFinite(damperCandidate) || damperCandidate<0) return new EffectiveMassDamperResult(fallbackDamper, effectiveMass);
+  return new EffectiveMassDamperResult(damperCandidate, effectiveMass);
+ }
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
+  // Opt-in, self-limiting wheel-contact trace for the still-open initial-placement/asymmetric-
+  // support rollover question (see GroundContactDiagnostics' class doc for the full history/
+  // rationale, and why a Minecraft/SLF4J-typed diagnostic is safe to reference from Body but not
+  // from the outer PhysicsBridge class or activateOrClassify's generic signature). Logs each
+  // wheel's support-ray geometry/result and that tick's suspension/tire inputs for a bounded
+  // number of ticks per activated body, counted from ACTIVATION (placement), not from control
+  // input - comment 53095 found the previous hardcoded 200-tick (~10s) default too short to
+  // reach throttle onset in a session that idled after spawning before actually driving.
+  // DEBUG_GROUND_CONTACT_TICKS is now configurable via -Ddiv.debugGroundContactTicks (parsed
+  // once, outside the per-tick path, by PhysicsBridge.resolveDebugGroundContactTicks - see its
+  // doc for the validated bound and fallback behavior) so a longer window can be requested for a
+  // manual test session without a new build. Still bounded, still self-limiting - no
+  // control-triggered re-arm (deliberately deferred, comment 53098: unnecessary complexity for
+  // this first diagnostic-only candidate when duration alone covers the test). Activation/
+  // classification/construction-failure visibility lives on GroundContactDiagnostics instead,
+  // called directly from active() (outer class) - that part needs to run even for a vehicle that
+  // never reaches Body at all.
+  private static final boolean DEBUG_GROUND_CONTACT = GroundContactDiagnostics.ENABLED;
+  private static final int DEBUG_GROUND_CONTACT_TICKS = resolveDebugGroundContactTicks(System.getProperty("div.debugGroundContactTicks"));
+  // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - OFF by default for
+  // every vehicle/session (EXPERIMENTAL_THROTTLE_RAMP_TICKS==0 means bypassed, see
+  // PhysicsBridge.resolveExperimentalThrottleRampTicks) unless explicitly enabled via
+  // -Ddiv.experimentalThrottleRampTicks. This is a handling DESIGN CHOICE being tested against
+  // user feedback, not a physics-derived fix - does not touch the solver/CG/friction path at
+  // all, only reshapes the commanded drive force stepGround itself computes below. Lives only
+  // on stepGround's own call path, so it is applied exactly once per actual GROUND tick and
+  // never during flight/rotor stepping (those call stepFlight/stepRotor instead - see step()).
+  // The ramp State is a per-instance (not static) field so a body replacement/deactivation
+  // (always a fresh `new Body(...)`, never field reuse - see BodyRegistry/replaceIfCategoryChanged)
+  // always starts a brand new, zeroed ramp - never carries stale effort across a swap.
+  private static final int EXPERIMENTAL_THROTTLE_RAMP_TICKS = resolveExperimentalThrottleRampTicks(System.getProperty("div.experimentalThrottleRampTicks"));
+  private final io.github.brooswitminecraft.div.experimental.DriveRateLimiter.State throttleRampState =
+    EXPERIMENTAL_THROTTLE_RAMP_TICKS>0 ? new io.github.brooswitminecraft.div.experimental.DriveRateLimiter.State() : null;
+  // Opt-in experimental higher-iteration friction-solve candidate (ticket comments 53127/53130) -
+  // an accuracy comparison only, NOT an anti-roll fix or rollover cure. Bypassed
+  // (EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS==0) for every vehicle/session unless explicitly
+  // enabled via -Ddiv.experimentalFrictionSolverIterations, in which case it REPLACES the
+  // iteration count passed to solveFriction below - the shipped default
+  // (MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS, 4) and every other part of the
+  // solver/CG/geometry/support-force model are completely unchanged either way.
+  // Opt-in experimental per-contact effective-mass damping candidate (ticket comments 53214/
+  // 53219) - OFF by default for every vehicle/session unless explicitly enabled via
+  // -Ddiv.experimentalEffectiveMassDamping=true. When off, PhysicsBridge.effectiveMassDamper is
+  // never called and the per-wheel damper used below is byte-identical to today's shipped
+  // suspensionDamper(mass,wheels.size(),spring) value - comment 53219's explicit "verify opt-in
+  // off matches baseline" requirement. When on, static spring stiffness/rest-sag and every other
+  // part of the force geometry stay exactly as shipped; only the damper's inertial basis changes,
+  // per-wheel. NOT shown to be a net improvement (see PhysicsBridge.effectiveMassDamper's own doc
+  // for the measured record) - wired here as a bounded, explicitly opt-in in-game experiment at
+  // the user's own direct request (comment 53219: "let me test it"), not as a validated fix.
+  private static final boolean EXPERIMENTAL_EFFECTIVE_MASS_DAMPING = Boolean.getBoolean("div.experimentalEffectiveMassDamping");
+  private static final Logger LOGGER = LogUtils.getLogger();
+  private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
+  /** Full-precision "(x,y,z)" - JOML's own Vector3d.toString() truncates to a handful of
+   * significant digits (ticket comment 52975 found this made exact forensic reconstruction of a
+   * captured log impossible for anything logged via direct string concatenation of a Vector3dc).
+   * Every per-tick/per-wheel diagnostic value below goes through this (or a bare double, which
+   * Java's own string concatenation already prints at full precision) instead. */
+  private static String vfull(org.joml.Vector3dc v) { return "("+v.x()+","+v.y()+","+v.z()+")"; }
+  private static String qfull(org.joml.Quaterniondc q) { return "("+q.x()+","+q.y()+","+q.z()+","+q.w()+")"; }
   final ServerLevel level;
   final Overrides.Tuning tuning;
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
+  // Diagnostic-only (ticket comment 52976's "collider dimensions and center" ask) - the live
+  // Sable box already has this via box.getHalfExtents(), but keeping our own copy avoids adding
+  // a new BoxPhysicsObject accessor dependency to this already-large diagnostic surface.
+  final Vector3d halfExtents;
   final double mass;
   final boolean flight;
   // A vehicle with a drivable wheel/track OR a flight flag AND a canFloat device (amphibious
@@ -407,8 +661,20 @@ public final class PhysicsBridge {
   // only reacts to the ground/flight category, not float capability) must start or stop getting
   // buoyancy on the very next tick, not stay stuck on whatever was true at construction.
   final double hullVolume;
+  // Body-local (diagonal, principal-axis) solid-box inertia tensor from the SAME half-extents/
+  // mass passed to BoxPhysicsObject above - Sable 2.0.5's native Rapier box collider creation
+  // (vendored Rust source, confirmed this ticket) builds its shape as
+  // cuboid(half_extents).mass(mass) with no mass-properties override, so Rapier derives inertia
+  // purely from this exact geometry/mass via the standard solid-box formula. Validated against
+  // real production angularVelocity data to ~1e-5 rad/s over 30 real ticks across two separate
+  // placements (ticket comment 53008). Used by the shared multi-contact friction solve below.
+  final Vector3d inertiaBody;
+  // Opt-in self-righting assist (ticket comment 53182/53188) - resolved once at construction
+  // (same lifecycle as tuning itself), not re-resolved every tick.
+  final io.github.brooswitminecraft.div.experimental.SelfRightingAssist.Config selfRight;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
+   this.selfRight=Overrides.selfRightingConfig(tuning);
    this.flight=Classification.isFlightVehicle(v.definition);
    mass=tuning.massKg != null ? tuning.massKg : Math.max(50,v.getMass());
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
@@ -420,10 +686,31 @@ public final class PhysicsBridge {
     throw new InvalidChassisGeometry("Vehicle has no finite chassis collision volume");
    center=new Vector3d(min).add(max).mul(.5);
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
+   halfExtents=new Vector3d(half);
    this.hullVolume = half.x*2*half.y*2*half.z*2*tuning.hullFillFactor;
+   inertiaBody=new Vector3d(mass/3*(half.y*half.y+half.z*half.z),mass/3*(half.x*half.x+half.z*half.z),mass/3*(half.x*half.x+half.y*half.y));
    var r=v.orientation;
    Quaterniond q=new Quaterniond().setFromNormalized(new Matrix3d(r.m00,r.m10,r.m20,r.m01,r.m11,r.m21,r.m02,r.m12,r.m22));
    Vector3d position=q.transform(new Vector3d(center)).add(v.position.x,v.position.y,v.position.z);
+   if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] chassisReceipt entity="+v.uniqueUUID+" key="+v.definition.packID+":"+v.definition.systemName
+     +" mass="+mass+" center="+vfull(center)+" halfExtents="+vfull(halfExtents)+" hullVolume="+hullVolume
+     +" suspensionTravel="+tuning.suspensionTravel+" friction="+tuning.friction+" driveForce="+tuning.driveForce+" brakeForce="+tuning.brakeForce
+     // Provenance (ticket comment 53186/53188: "prove native/metadata values actually reached
+     // runtime rather than merely being parsed") - only the operator-override and documented-
+     // fallback levels are wired to a real source yet (comment 53181/53184), so this is exactly
+     // those two: whether THIS key has an explicit Overrides.get() entry at all, and this
+     // vehicle's own resolved self-right config (OFF unless that entry set all five fields).
+     +" explicitOverrideEntry="+(Overrides.get(v.definition.packID+":"+v.definition.systemName)!=null)
+     // Comment 53189: "log actual five resolved assist values, not just configured=true" - a
+     // capture must be able to show what actually reached runtime, not just a boolean summary.
+     +" selfRightConfigured="+(selfRight.strength()>0||selfRight.damping()>0)
+     +" selfRightStrength="+selfRight.strength()+" selfRightDamping="+selfRight.damping()+" selfRightMaxTorque="+selfRight.maxTorque()
+     +" selfRightFadeStartDegrees="+selfRight.fadeStartDegrees()+" selfRightFadeEndDegrees="+selfRight.fadeEndDegrees()
+     // Comment 53219's explicit "log effective option... in existing bounded diagnostics" - the
+     // resolved opt-in state itself, once per Body construction; per-wheel damper/effectiveMass
+     // receipt is logged separately below, every debug tick, from the real per-wheel values.
+     +" experimentalEffectiveMassDamping="+EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
+     +" nativeInertia=unavailable (Sable 2.0.5's BoxPhysicsObject exposes no native inertia/mass-properties query API - confirmed by its decompiled source; see ticket comment history)");
    box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
    var physics=SubLevelContainer.getContainer(level).physicsSystem();
    physics.addObject(box);
@@ -475,17 +762,70 @@ public final class PhysicsBridge {
    v.motion.set(velocity.x,velocity.y,velocity.z).scale(1/(20*v.speedFactor));
   }
   private boolean stepGround(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d angular, Vector3d velocity, Vector3d up) {
-   double drive=0;
+   double rawDrive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
-    drive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
+    rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
    boolean braking=v.brakeVar.isActive || v.parkingBrakeVar.isActive;
+   // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - bypassed
+   // (drive==rawDrive) unless EXPERIMENTAL_THROTTLE_RAMP_TICKS>0. The rate is THIS vehicle's own
+   // configured drive scale / the configured tick count, not a fixed newtons-per-tick constant,
+   // so it scales across vehicle types rather than needing a per-vehicle fudge factor. Braking
+   // resets the ramp's stored effort every tick it's held (DriveRateLimiter.shape) so releasing
+   // the brake can never reveal a drive ramp that silently kept climbing underneath it. Rejects
+   // a non-finite/non-positive driveForce (which would make the rate itself invalid) by falling
+   // back to the raw, unshaped value rather than dividing into a broken rate.
+   double drive=rawDrive;
+   if (throttleRampState != null && Double.isFinite(tuning.driveForce) && tuning.driveForce>0) {
+    double maxDeltaPerTick=tuning.driveForce/EXPERIMENTAL_THROTTLE_RAMP_TICKS;
+    drive=io.github.brooswitminecraft.div.experimental.DriveRateLimiter.shape(throttleRampState,rawDrive,braking,maxDeltaPerTick);
+   }
    // Tracked vehicles steer by differential track speed, not a steerable wheel; cars/trucks
    // keep steering the wheels marked turnsWithSteer. Both can coexist on the same chassis.
    boolean skidSteer=v.definition.motorized != null && v.definition.motorized.hasSkidSteer;
    var wheels=groundContacts(v);
-   double spring=mass*9.81/(wheels.size()*tuning.suspensionTravel*.5);
-   double damper=2*Math.sqrt(spring*mass/wheels.size())*.7;
+   // Read fresh every tick (never cached - a datapack reload or per-dimension override must take
+   // effect on the very next tick, the same "re-derive every tick" discipline this class already
+   // applies to installed parts). Magnitude, not just the Y component, so this stays correct even
+   // for a dimension whose configured gravity vector is not purely vertical - the same pattern
+   // Sable's own code uses at this exact call (see e.g. its Create-compat ejector mixin). Kept
+   // here on Body rather than as an outer static method: Body already depends on ServerLevel/
+   // Sable types throughout, while the outer class's static methods are deliberately
+   // Minecraft-type-free so they stay loadable and testable without a live Minecraft/NeoForge
+   // runtime (see VERIFICATION.md) - adding a ServerLevel-typed method to the outer class would
+   // pull that requirement into every one of its pure-function unit tests.
+   double gravity=DimensionPhysicsData.getGravity(level).length();
+   double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel,gravity);
+   double damper=suspensionDamper(mass,wheels.size(),spring);
    boolean contact=false;
+   boolean debugThisTick=DEBUG_GROUND_CONTACT && debugGroundContactTicksRemaining>0;
+   int debugTick=DEBUG_GROUND_CONTACT_TICKS-debugGroundContactTicksRemaining;
+   if (debugThisTick) LOGGER.info("[DIV debugGroundContact] entity="+v.uniqueUUID+" side="+(v.world.isClient()?"client":"server")+" tick="+debugTick
+     +" mass="+mass+" gravity="+gravity
+     // solver/iterations identity (review comment 53052) - so a capture taken against this build
+     // can be proven to have come from this path, not an older single-shot per-wheel one. Logs
+     // the EFFECTIVE iteration count (ticket comments 53127/53130) - equal to
+     // MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS whenever the experimental candidate
+     // is bypassed, so a capture always shows what actually ran, not just what's configured.
+     +" solver=MultiContactFrictionSolver iterations="+effectiveFrictionSolverIterations()
+     +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+vfull(pose.position())+" orientation="+qfull(q)
+     +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
+     +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
+     +" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer
+     // Raw vs shaped drive + ramp identity (ticket comment 53115) - driveRaw==drive and
+     // throttleRampTicks=0 together prove the experimental candidate is bypassed on this build/
+     // session; otherwise shows exactly which configured tick count shaped this tick's drive.
+     +" driveRaw="+rawDrive+" throttleRampTicks="+EXPERIMENTAL_THROTTLE_RAMP_TICKS);
+   // Phase 1: raycast every wheel and compute its vertical/suspension force exactly as before -
+   // suspension is per-wheel and unaffected by this change. Friction/slip is sampled at the
+   // point the tire impulse is actually applied (the terrain hit, `point` below), not the
+   // suspension anchor (`arm`, used only for the vertical damping sample - correct there, since
+   // that's the point whose own motion determines the raycast length's rate of change). Those
+   // two points differ by roughly radius+compression along `up`; on a rotating chassis, velocity
+   // differs between them by angular x that offset (fixed by sampling at `point` - 691f11b).
+   record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
+     double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
+     double skidSteerMultiplier, double damperUsed, double effectiveMassUsed) {}
+   List<WheelHit> hits=new java.util.ArrayList<>();
    for(var wheel:wheels) {
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
@@ -494,25 +834,147 @@ public final class PhysicsBridge {
     double length=radius+tuning.suspensionTravel;
     Vector3d end=new Vector3d(start).fma(-length,up);
     var hit=level.clip(new ClipContext(vec(start),vec(end),ClipContext.Block.COLLIDER,ClipContext.Fluid.NONE,(net.minecraft.world.entity.Entity)null));
-    if(hit.getType()==HitResult.Type.MISS) { wheel.contactThisTick=false; continue; }
+    if(hit.getType()==HitResult.Type.MISS) {
+     wheel.contactThisTick=false;
+     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+       +" radius="+radius+" arm="+vfull(arm)+" rayStart="+vfull(start)+" rayEnd="+vfull(end)+" rayLength="+length+" MISS");
+     continue;
+    }
     double compression=length-hit.getLocation().distanceTo(vec(start));
     Vector3d localVelocity=new Vector3d(angular).cross(arm).add(velocity);
-    double normal=Math.min(mass*9.81,TireForces.suspension(compression,localVelocity.dot(up),spring,damper));
+    Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
+    // Opt-in experimental effective-mass damping candidate (ticket comments 53214/53219) - OFF
+    // (EXPERIMENTAL_EFFECTIVE_MASS_DAMPING false, the shipped default) means damperResult is
+    // exactly new EffectiveMassDamperResult(damper, NaN) - damperUsed==damper byte-for-byte,
+    // nothing about today's behavior changes. Sourced from this body's own real inertiaBody (its
+    // actual box mass/inertia, PhysicsBridge.Body constructor) and this wheel's own real contact
+    // point (terrain hit location, same `point` used for friction below) along `up` - this
+    // body's own chassis/suspension-ray direction, NOT a re-derived actual terrain surface
+    // normal (review comment 53223's correction; no geometry change, this is the same `up`
+    // the existing suspension/friction code already uses at this exact call). Satisfies comment
+    // 53219's "actual box mass/inertia and actual contact direction/arm" requirement using that
+    // direction. See PhysicsBridge.effectiveMassDamper's own doc for the guard/fallback behavior
+    // and the measured record showing this is NOT a validated fix.
+    var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
+      ? effectiveMassDamper(spring,mass,point,up,inverse,inertiaBody,damper)
+      : new EffectiveMassDamperResult(damper, Double.NaN);
+    double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),spring,damperResult.damper()));
     double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
-    double speed=localVelocity.dot(forward), sideSpeed=localVelocity.dot(right);
-    double longitudinal=braking ? -Math.signum(speed)*Math.min(tuning.brakeForce/wheels.size(),Math.abs(speed)*mass/wheels.size()/DT) : drive/wheels.size();
-    if (skidSteer) longitudinal*=1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE);
-    longitudinal-=speed*20;
-    var tire=TireForces.friction(longitudinal,-sideSpeed*mass/wheels.size()/DT,normal,tuning.friction);
-    Vector3d force=new Vector3d(up).mul(normal).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
-    Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
-    handle.applyImpulseAtPoint(inverse.transform(point),inverse.transform(force.mul(DT)));
+    double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
+    hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
+      damperResult.damper(),damperResult.effectiveMass()));
+   }
+   // Phase 2: shared multi-contact friction solve (ticket MINECRAFT-503) - stage every wheel's
+   // own vertical/suspension impulse into a working velocity/angular estimate first (production
+   // reads velocity/angular ONCE per tick - this `velocity`/`angular` snapshot - and every
+   // wheel's force computation below uses it unchanged; only this LOCAL working copy, used to
+   // size the solved impulses, accumulates as wheels are staged/solved), then iterate
+   // io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver across all active
+   // contacts together instead of each wheel computing its target independently from the stale
+   // snapshot alone (the confirmed real mechanism behind the captured rollover - see that
+   // class's own doc and ticket comment history for the full derivation/validation). No gravity
+   // is added here - Sable's own engine owns that; `velocity`/`angular` already reflect
+   // whatever Sable has already applied this tick.
+   Vector3d workingVelocity=new Vector3d(velocity), workingAngular=new Vector3d(angular);
+   for (var h:hits) {
+    Vector3d verticalImpulse=new Vector3d(up).mul(h.normal()*DT);
+    workingVelocity.add(new Vector3d(verticalImpulse).div(mass));
+    Vector3d torqueBody=inverse.transform(new Vector3d(h.point()).cross(verticalImpulse));
+    workingAngular.add(q.transform(new Vector3d(torqueBody.x/inertiaBody.x,torqueBody.y/inertiaBody.y,torqueBody.z/inertiaBody.z)));
+   }
+   var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
+     h.point(),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
+   var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,inertiaBody,q,inverse,workingVelocity,workingAngular,
+     braking,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,DT,
+     effectiveFrictionSolverIterations());
+   // Phase 3: apply each wheel's final (vertical + solved tire) impulse exactly once, same
+   // application/logging shape as before.
+   for (int i=0;i<hits.size();i++) {
+    var h=hits.get(i); var wheel=h.wheel(); var tire=results[i];
+    Vector3d point=h.point(), forward=h.forward(), right=h.right();
+    Vector3d contactVelocity=new Vector3d(angular).cross(point).add(velocity);
+    double speed=contactVelocity.dot(forward), sideSpeed=contactVelocity.dot(right);
+    Vector3d force=new Vector3d(up).mul(h.normal()).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
+    // Captured BEFORE the world-frame point/force below are mutated in place into the
+    // local-frame values actually passed to applyImpulseAtPoint - "requested" (world-frame,
+    // what stepGround computed) vs "applied" (local-frame, what Sable actually receives) per
+    // ticket comment 52976's ask, so a forensic replay doesn't need to re-derive the local
+    // transform itself from a possibly-imprecise logged orientation.
+    if (debugThisTick) {
+     String requestedImpulseWorld=vfull(new Vector3d(force).mul(DT)), requestedPointWorld=vfull(point);
+     // lateralSlipBudgetTarget: kept under its EXACT original field name (not renamed) so the
+     // already-committed analysis scripts (tools/analysis/m503/) keep parsing without
+     // modification (review comment 53052: silently breaking that regex would zero-parse every
+     // wheel, not error) - but it is now the OLD (pre-solver) single-shot mass/wheelCount value,
+     // computed here ONLY for diagnostic comparison against older captures, NOT used by the
+     // actual physics above (that comes from the solved `tire` result instead). Also keeps
+     // `tire=Force[...]` in the exact shape those scripts already parse - a bare record
+     // toString() here would silently print `FrictionResult[...]` instead.
+     double lateralSlipBudgetTarget=-sideSpeed*mass/wheels.size()/DT;
+     LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+       +" radius="+h.radius()+" arm="+vfull(h.arm())+" rayStart="+vfull(h.start())+" rayEnd="+vfull(h.end())+" rayLength="+h.length()
+       +" hit="+vfull(new Vector3d(point).add(pose.position()))
+       +" distance="+new Vector3d(point).add(pose.position()).distance(h.start())+" compression="+h.compression()
+       +" anchorVerticalVelocity="+h.localVelocity().dot(up)+" point="+requestedPointWorld
+       +" localVelocity(anchor-sampled)="+vfull(h.localVelocity())+" contactVelocity(contact-sampled)="+vfull(contactVelocity)
+       +" speed="+speed+" sideSpeed="+sideSpeed+" lateralSlipBudgetTarget="+lateralSlipBudgetTarget
+       +" normal="+h.normal()+" tire=Force[longitudinal="+tire.longitudinal()+", lateral="+tire.lateral()+"]"
+       +" requestedImpulseWorld="+requestedImpulseWorld
+       // Comment 53219's explicit per-wheel damping/effective-mass receipt: damperUsed==the
+       // shared `damper` exactly whenever the candidate is bypassed (effectiveMassUsed logs as
+       // NaN, distinguishing "bypassed" from "attempted but degenerate/fell back" - see
+       // PhysicsBridge.effectiveMassDamper's own doc).
+       +" experimentalEffectiveMassDamping="+EXPERIMENTAL_EFFECTIVE_MASS_DAMPING+" damperUsed="+h.damperUsed()+" effectiveMassUsed="+h.effectiveMassUsed());
+    }
+    Vector3d appliedPointLocal=inverse.transform(point), appliedImpulseLocal=inverse.transform(force.mul(DT));
+    if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
+      +" appliedPointLocal="+vfull(appliedPointLocal)+" appliedImpulseLocal="+vfull(appliedImpulseLocal));
+    handle.applyImpulseAtPoint(appliedPointLocal,appliedImpulseLocal);
     wheel.contactThisTick=true;
     wheel.animateAsOnGround=true;
-    wheel.angularVelocity=speed*DT/(Math.max(.05,radius)*2*Math.PI);
+    wheel.angularVelocity=speed*DT/(Math.max(.05,h.radius())*2*Math.PI);
     contact=true;
+   }
+   if (debugThisTick) debugGroundContactTicksRemaining--;
+   // Opt-in self-righting assist (ticket comment 53182/53188/53189/53191) - OFF
+   // (SelfRightingAssist.OFF) for every vehicle unless its own resolved Overrides metadata sets
+   // all five selfRight* fields; see Overrides.selfRightingConfig. ROLL ONLY (comment 53191:
+   // "wheelie reduction is NOT an objective" - front lift/wheelies are explicitly fine, this
+   // never touches pitch) - SelfRightingAssist's own design already guarantees that.
+   //
+   // Grounded/support (comment 53189's correction): `contact` means "at least one ray hit",
+   // including a hit with zero normal (no actual load) - NOT what "grounded" should mean for
+   // this assist. Uses actual summed positive normal load across all wheels instead, so a
+   // rear-only-support wheelie (comment 53191: "including rear-only positive support") still
+   // correctly gates as grounded, while an airborne or all-zero-load vehicle does not.
+   //
+   // Occupancy: PartSeat extends APart extends AEntityF_Multipart extends AEntityE_Interactable
+   // extends AEntityD_Definable extends AEntityC_Renderable extends AEntityB_Existing, where the
+   // inherited `rider` field (IWrapperEntity, null when empty) actually lives - confirmed
+   // against this ticket's own extracted MTS source (successful compilation), not a guess. No
+   // vehicle-wide "all riders" collection exists; each seat tracks its own.
+   if (selfRight.strength()>0 || selfRight.damping()>0) {
+    double totalNormalLoad=0; for (var h : hits) totalNormalLoad += h.normal();
+    boolean hasPositiveSupport = totalNormalLoad > 0;
+    boolean occupied = false;
+    for (var part : v.allParts) if (part instanceof PartSeat seat && seat.rider != null) { occupied = true; break; }
+    Vector3d bodyForward=q.transform(new Vector3d(0,0,1));
+    Vector3d bodyRight=new Vector3d(up).cross(bodyForward);
+    Vector3d selfRightTorque = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.torque(
+      selfRight, bodyForward, up, bodyRight, angular, occupied, hasPositiveSupport);
+    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] selfRight occupied="+occupied+" totalNormalLoad="+totalNormalLoad+" torque="+vfull(selfRightTorque));
+    // LOCAL frame (comment 53189's correction - verified against Sable's own extracted source,
+    // not just another call site in this class: RigidBodyHandle.applyImpulseAtPoint requires a
+    // local-frame point/impulse, confirmed by this file's own existing inverse.transform(...)
+    // calls before every applyImpulseAtPoint above; ForceTotal (Sable's own force accumulator,
+    // which applyTorqueImpulse/applyLinearAndAngularImpulse ultimately feed into) names its own
+    // fields localForce/localTorque - consistent with the same local-frame convention, not
+    // world-frame. stepFlight/stepRotor's existing applyTorqueImpulse calls pass WORLD-frame
+    // torque directly - possibly a separate pre-existing latent bug, NOT copied here; flagged,
+    // not fixed, since that is unrelated shipped code outside this ticket's immediate change.
+    if (selfRightTorque.lengthSquared() > 0) handle.applyTorqueImpulse(inverse.transform(new Vector3d(selfRightTorque).mul(DT)));
    }
    double towThrust = applyTowingCompensation(v);
    return contact || drive!=0 || towThrust!=0;

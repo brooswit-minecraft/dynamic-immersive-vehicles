@@ -16,42 +16,193 @@ import java.util.Map;
  * eligible car. Restart to reload.
  */
 public final class Overrides {
+ /**
+  * Sparse by design (ticket comment 53181): every tunable field but {@code enabled} is a boxed
+  * {@code Double}/{@code Boolean}, not a primitive with a literal default - so Gson leaves an
+  * OMITTED field {@code null} instead of silently filling in today's shared number. That null is
+  * the signal {@link #resolved} needs to fall through to the next precedence level (pack DIV
+  * metadata, an IV-adapted native value, a physically-derived value, then the documented
+  * fallback below) rather than an operator's config looking like it explicitly chose 8000N drive
+  * force when it never mentioned drive force at all. Only the fallback level exists today - the
+  * other three are intentionally not wired yet (ticket comment 53177/53179/53181: native
+  * drive/brake/steering/tire semantics and the pack-metadata file format are still being
+  * resolved) - {@link #resolved} already has the right shape to add them without another
+  * breaking change to this class.
+  */
  public static final class Tuning {
   public Boolean enabled;
   public Double massKg;
-  public double suspensionTravel = 0.3;
-  public double friction = 1.0;
-  public double driveForce = 8000;
-  public double brakeForce = 12000;
-  public double maxSteerDegrees = 30;
+  public Double suspensionTravel;
+  public Double friction;
+  public Double driveForce;
+  public Double brakeForce;
+  public Double maxSteerDegrees;
   // Float-only hulls (boats/pontoons) only: hullFillFactor shrinks the chassis bounding-box
   // volume down to the fraction of it the actual hull displaces (a real hull is not a solid
   // box), waterDrag scales quadratic water drag, and propellerForce is the thrust budget split
   // across installed propellers.
-  public double hullFillFactor = 0.5;
-  public double waterDrag = 400;
-  public double propellerForce = 6000;
+  public Double hullFillFactor;
+  public Double waterDrag;
+  public Double propellerForce;
+  // Opt-in self-righting assist (ticket comment 53182/53188) - ALL FIVE must be explicitly set
+  // together for the assist to activate at all (see Overrides.selfRightingConfig); there is no
+  // flat fallback for any of these fields, unlike the physics defaults above - an unconfigured
+  // vehicle gets no assist, full stop. Units/semantics match io.github.brooswitminecraft.div.
+  // experimental.SelfRightingAssist.Config exactly (strength N*m, damping N*m*s/rad, maxTorque
+  // N*m, both fade angles in degrees up to that class's own HARD_SAFETY_CAP_DEGREES).
+  public Double selfRightStrength;
+  public Double selfRightDamping;
+  public Double selfRightMaxTorque;
+  public Double selfRightFadeStartDegrees;
+  public Double selfRightFadeEndDegrees;
+  /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
+   * valid as a present one; it just means "no operator override at this precedence level",
+   * never "zero" or "the documented fallback value" implicitly. */
   public void validate() {
    if (massKg != null && (!Double.isFinite(massKg) || massKg < 50 || massKg > 100000)) throw new IllegalArgumentException("massKg out of range");
-   if (!(suspensionTravel > 0 && suspensionTravel <= 1) || !(friction > 0 && friction <= 3)
-     || !(driveForce >= 0 && driveForce <= 100000) || !(brakeForce >= 0 && brakeForce <= 100000)
-     || !(maxSteerDegrees > 0 && maxSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
-   if (!(hullFillFactor > 0 && hullFillFactor <= 1) || !(waterDrag >= 0 && waterDrag <= 100000)
-     || !(propellerForce >= 0 && propellerForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (suspensionTravel != null && !(suspensionTravel > 0 && suspensionTravel <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (friction != null && !(friction > 0 && friction <= 3)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (driveForce != null && !(driveForce >= 0 && driveForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (brakeForce != null && !(brakeForce >= 0 && brakeForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (maxSteerDegrees != null && !(maxSteerDegrees > 0 && maxSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (hullFillFactor != null && !(hullFillFactor > 0 && hullFillFactor <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (waterDrag != null && !(waterDrag >= 0 && waterDrag <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (propellerForce != null && !(propellerForce >= 0 && propellerForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (selfRightStrength != null && !(Double.isFinite(selfRightStrength) && selfRightStrength >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (selfRightDamping != null && !(Double.isFinite(selfRightDamping) && selfRightDamping >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (selfRightMaxTorque != null && !(Double.isFinite(selfRightMaxTorque) && selfRightMaxTorque >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   double hardCap = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.HARD_SAFETY_CAP_DEGREES;
+   if (selfRightFadeStartDegrees != null && !(Double.isFinite(selfRightFadeStartDegrees) && selfRightFadeStartDegrees >= 0 && selfRightFadeStartDegrees <= hardCap)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (selfRightFadeEndDegrees != null && !(Double.isFinite(selfRightFadeEndDegrees) && selfRightFadeEndDegrees > (selfRightFadeStartDegrees!=null?selfRightFadeStartDegrees:0) && selfRightFadeEndDegrees <= hardCap)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
  }
- /** Shared defaults applied to any eligible vehicle with no (or no matching) override entry. */
- public static final Tuning DEFAULT = new Tuning();
+ /** Documented fallback for every field, used only once every higher precedence level (operator
+  * override, pack DIV metadata, IV-adapted native value, physically-derived value) has nothing
+  * to say - the bottom of the chain, never the implicit result of an omitted field on its own.
+  * Values/units/provenance unchanged from the shared numbers this ticket's physics work has
+  * always used: driveForce 8000N, brakeForce 12000N, suspensionTravel 0.3m, friction mu=1.0
+  * (dimensionless), maxSteerDegrees 30deg, hullFillFactor 0.5 (dimensionless), waterDrag 400
+  * (solver-internal units), propellerForce 6000N. */
+ private static final Tuning FALLBACK = new Tuning();
+ static {
+  FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
+  FALLBACK.maxSteerDegrees=30.0; FALLBACK.hullFillFactor=0.5; FALLBACK.waterDrag=400.0; FALLBACK.propellerForce=6000.0;
+ }
+ private static Tuning copy(Tuning t) {
+  Tuning c = new Tuning();
+  c.enabled=t.enabled; c.massKg=t.massKg; c.suspensionTravel=t.suspensionTravel; c.friction=t.friction;
+  c.driveForce=t.driveForce; c.brakeForce=t.brakeForce; c.maxSteerDegrees=t.maxSteerDegrees;
+  c.hullFillFactor=t.hullFillFactor; c.waterDrag=t.waterDrag; c.propellerForce=t.propellerForce;
+  c.selfRightStrength=t.selfRightStrength; c.selfRightDamping=t.selfRightDamping; c.selfRightMaxTorque=t.selfRightMaxTorque;
+  c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
+  return c;
+ }
+ /** Builds a {@code SelfRightingAssist.Config} from a resolved Tuning (ticket comment 53182/
+  * 53188) - ALL FIVE selfRight* fields must be present together, or this returns {@code
+  * SelfRightingAssist.OFF}. Deliberately all-or-nothing: a partially-configured assist has no
+  * sensible meaning (what damping should apply with a strength but no configured maxTorque?),
+  * so a vehicle must opt in with every field or get no assist at all, never a silent mix with
+  * some other default. */
+ public static io.github.brooswitminecraft.div.experimental.SelfRightingAssist.Config selfRightingConfig(Tuning resolved) {
+  if (resolved.selfRightStrength==null || resolved.selfRightDamping==null || resolved.selfRightMaxTorque==null
+    || resolved.selfRightFadeStartDegrees==null || resolved.selfRightFadeEndDegrees==null) {
+   return io.github.brooswitminecraft.div.experimental.SelfRightingAssist.OFF;
+  }
+  return new io.github.brooswitminecraft.div.experimental.SelfRightingAssist.Config(
+    resolved.selfRightStrength, resolved.selfRightDamping, resolved.selfRightMaxTorque,
+    resolved.selfRightFadeStartDegrees, resolved.selfRightFadeEndDegrees);
+ }
+ /** Review (comment 53184): the shared {@link #FALLBACK} singleton must never be handed out
+  * directly - every field on {@code Tuning} is public and mutable (required for Gson), so any
+  * caller holding the literal shared instance could corrupt the fallback every other vehicle
+  * resolves against. Returns a fresh, independently-mutable copy every call. Prefer
+  * {@link #resolved} for any new call site - this is just its zero-override, zero-metadata,
+  * zero-native-value case. */
+ public static Tuning defaultTuning() { return copy(FALLBACK); }
  private record Config(Map<String,Tuning> vehicles) {}
  private static Map<String,Tuning> vehicles = Map.of();
  public static Tuning get(String key) { return vehicles.get(key); }
  public static boolean isOptedOut(String key) { var t = vehicles.get(key); return t != null && Boolean.FALSE.equals(t.enabled); }
+ private static Double firstNonNull(Double... values) { for (Double v : values) if (v != null) return v; return null; }
+ private static Boolean firstNonNullBoolean(Boolean... values) { for (Boolean v : values) if (v != null) return v; return null; }
+ /**
+  * Per-field precedence resolution (ticket comment 53181/53184): explicit operator override
+  * (this vehicle's {@code Overrides.get(key)} entry, if any) {@literal >} pack DIV metadata
+  * {@literal >} an IV-adapted native value {@literal >} a physically-derived value {@literal >}
+  * the documented {@link #FALLBACK}. Only the operator-override and fallback levels are wired to
+  * a real source today; {@code packMetadata}/{@code ivAdapted}/{@code physicallyDerived} are
+  * accepted now (each vehicle's own per-field value, or {@code null} if that source has nothing
+  * to say for this field) so later work can plug in the pack-metadata file and native-value
+  * adapters per field, independently of each other, without another signature change here.
+  * EVERY field - including {@code enabled} and {@code massKg}, which an earlier version of this
+  * method left checking only the operator override - goes through the full chain; {@code
+  * massKg} and {@code enabled} simply have no flat {@link #FALLBACK} entry (massKg's own
+  * fallback, the vehicle's own native mass, is vehicle-INSTANCE-dependent and lives in
+  * PhysicsBridge, not a flat constant; {@code enabled} absent at every level means "use the
+  * default classification-based eligibility", not forced on or off). Always returns a fully
+  * non-null Tuning for every field that DOES have a fallback - callers never see a sparse one
+  * for those; {@code enabled}/{@code massKg} can still legitimately come back {@code null}.
+  *
+  * <p>{@code packMetadata} and {@code ivAdapted}, if supplied, are validated (comment 53184)
+  * before being used - a malformed upstream source must fail loudly here, the same as a
+  * malformed operator-override entry already does in {@link #load}, not be silently trusted.
+  */
+ public static Tuning resolved(String key, Tuning packMetadata, Tuning ivAdapted, Tuning physicallyDerived) {
+  if (packMetadata != null) packMetadata.validate();
+  if (ivAdapted != null) ivAdapted.validate();
+  if (physicallyDerived != null) physicallyDerived.validate();
+  Tuning override = vehicles.get(key);
+  Tuning result = new Tuning();
+  result.enabled = firstNonNullBoolean(override!=null?override.enabled:null, packMetadata!=null?packMetadata.enabled:null, ivAdapted!=null?ivAdapted.enabled:null, physicallyDerived!=null?physicallyDerived.enabled:null);
+  result.massKg = firstNonNull(override!=null?override.massKg:null, packMetadata!=null?packMetadata.massKg:null, ivAdapted!=null?ivAdapted.massKg:null, physicallyDerived!=null?physicallyDerived.massKg:null);
+  result.suspensionTravel = firstNonNull(override!=null?override.suspensionTravel:null, packMetadata!=null?packMetadata.suspensionTravel:null, ivAdapted!=null?ivAdapted.suspensionTravel:null, physicallyDerived!=null?physicallyDerived.suspensionTravel:null, FALLBACK.suspensionTravel);
+  result.friction = firstNonNull(override!=null?override.friction:null, packMetadata!=null?packMetadata.friction:null, ivAdapted!=null?ivAdapted.friction:null, physicallyDerived!=null?physicallyDerived.friction:null, FALLBACK.friction);
+  result.driveForce = firstNonNull(override!=null?override.driveForce:null, packMetadata!=null?packMetadata.driveForce:null, ivAdapted!=null?ivAdapted.driveForce:null, physicallyDerived!=null?physicallyDerived.driveForce:null, FALLBACK.driveForce);
+  result.brakeForce = firstNonNull(override!=null?override.brakeForce:null, packMetadata!=null?packMetadata.brakeForce:null, ivAdapted!=null?ivAdapted.brakeForce:null, physicallyDerived!=null?physicallyDerived.brakeForce:null, FALLBACK.brakeForce);
+  result.maxSteerDegrees = firstNonNull(override!=null?override.maxSteerDegrees:null, packMetadata!=null?packMetadata.maxSteerDegrees:null, ivAdapted!=null?ivAdapted.maxSteerDegrees:null, physicallyDerived!=null?physicallyDerived.maxSteerDegrees:null, FALLBACK.maxSteerDegrees);
+  result.hullFillFactor = firstNonNull(override!=null?override.hullFillFactor:null, packMetadata!=null?packMetadata.hullFillFactor:null, ivAdapted!=null?ivAdapted.hullFillFactor:null, physicallyDerived!=null?physicallyDerived.hullFillFactor:null, FALLBACK.hullFillFactor);
+  result.waterDrag = firstNonNull(override!=null?override.waterDrag:null, packMetadata!=null?packMetadata.waterDrag:null, ivAdapted!=null?ivAdapted.waterDrag:null, physicallyDerived!=null?physicallyDerived.waterDrag:null, FALLBACK.waterDrag);
+  result.propellerForce = firstNonNull(override!=null?override.propellerForce:null, packMetadata!=null?packMetadata.propellerForce:null, ivAdapted!=null?ivAdapted.propellerForce:null, physicallyDerived!=null?physicallyDerived.propellerForce:null, FALLBACK.propellerForce);
+  // Self-righting (comment 53182/53188): no FALLBACK entry - stays null (meaning "assist off",
+  // via selfRightingConfig's all-or-nothing check) unless some level actually sets it.
+  result.selfRightStrength = firstNonNull(override!=null?override.selfRightStrength:null, packMetadata!=null?packMetadata.selfRightStrength:null, ivAdapted!=null?ivAdapted.selfRightStrength:null, physicallyDerived!=null?physicallyDerived.selfRightStrength:null);
+  result.selfRightDamping = firstNonNull(override!=null?override.selfRightDamping:null, packMetadata!=null?packMetadata.selfRightDamping:null, ivAdapted!=null?ivAdapted.selfRightDamping:null, physicallyDerived!=null?physicallyDerived.selfRightDamping:null);
+  result.selfRightMaxTorque = firstNonNull(override!=null?override.selfRightMaxTorque:null, packMetadata!=null?packMetadata.selfRightMaxTorque:null, ivAdapted!=null?ivAdapted.selfRightMaxTorque:null, physicallyDerived!=null?physicallyDerived.selfRightMaxTorque:null);
+  result.selfRightFadeStartDegrees = firstNonNull(override!=null?override.selfRightFadeStartDegrees:null, packMetadata!=null?packMetadata.selfRightFadeStartDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeStartDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeStartDegrees:null);
+  result.selfRightFadeEndDegrees = firstNonNull(override!=null?override.selfRightFadeEndDegrees:null, packMetadata!=null?packMetadata.selfRightFadeEndDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeEndDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeEndDegrees:null);
+  return result;
+ }
+ /** {@link #resolved} with no pack-metadata/IV-adapted/physically-derived source yet available -
+  * exactly today's two-level chain (operator override, then the documented fallback), until
+  * those three sources actually exist. */
+ public static Tuning resolved(String key) { return resolved(key, null, null, null); }
+ /** Test-only seam (ticket comment 53184: tests must exercise an actual explicit operator entry,
+  * not only the unconfigured-key case) - {@link #load} is the only other writer, and it needs a
+  * live FML config directory a plain unit test cannot provide. Package-private: only this
+  * package's own tests may call it. */
+ static void setForTest(Map<String,Tuning> v) { vehicles = v; }
  static void load() {
   Path path = FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json");
   Gson gson = new GsonBuilder().setPrettyPrinting().create();
   try {
    if (!Files.exists(path)) {
-    Files.writeString(path, gson.toJson(new Config(Map.of("packid:vehicle", new Tuning()))));
+    // mtsofficialpack:quad gets a real, ACTIVE self-right entry on a fresh install (ticket
+    // comment 53182/53188's "explicit quad roll-assist" ask). This is a live, applied
+    // configuration the moment a fresh install's quad is driven, not a commented-out or inert
+    // example (comment 53189's correction: label it accurately as what it actually is) - an
+    // operator who doesn't want it must explicitly remove/zero it. selfRightingConfig stays OFF
+    // for every OTHER vehicle with no entry at all. Values are a deliberately gentle "cheat a
+    // little" assist for this specific ~350kg ATV, not a generic default: strength/damping/
+    // maxTorque chosen small relative to this vehicle's own inertiaBody.z (~44 kg*m^2, so even
+    // the 600N*m maxTorque caps angular acceleration well under 15rad/s^2), fadeStart/fadeEnd
+    // (10/50deg) keeps it acting only while basically upright. An existing installation's own
+    // config file is NOT touched by this - only a genuinely fresh (non-existent) file gets it;
+    // merging these same five fields into an existing operator config is a separate, manual
+    // (or future tooling) step, not something this loader does automatically.
+    var quadExample = new Tuning();
+    quadExample.selfRightStrength=200.0; quadExample.selfRightDamping=80.0; quadExample.selfRightMaxTorque=600.0;
+    quadExample.selfRightFadeStartDegrees=10.0; quadExample.selfRightFadeEndDegrees=50.0;
+    Files.writeString(path, gson.toJson(new Config(Map.of("packid:vehicle", new Tuning(), "mtsofficialpack:quad", quadExample))));
    }
    Config config = gson.fromJson(Files.readString(path), Config.class);
    if (config == null || config.vehicles == null) throw new IllegalArgumentException("missing vehicles map");
