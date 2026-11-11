@@ -927,6 +927,33 @@ public final class PhysicsBridge {
    // detection systems, not from this write - this needs a real runtime capture to settle, not
    // further static reading, hence the log line immediately below. Not yet acted on (nothing
    // here removed/changed) - reported, not resolved.
+   //
+   // The SEQUENCE itself (not yet the DATA) is now settled by source alone, confirmed against the
+   // same pinned jar: EntityManager.doTick fully processes one allNormalTickableEntities queue
+   // entry (that entity's own update() THEN its own doPostUpdateLogic()) before the outer loop
+   // advances to the next entry, and BuilderEntityExisting (platform load path, both the fresh-
+   // deploy AND the reload-from-save code paths) always calls world.addEntity(vehicle) before
+   // addPartsPostAddition (which is what adds each PART's own queue entry) - so the vehicle is
+   // always queued, and therefore always fully ticked (write THEN native overwrite), strictly
+   // before any of its own parts get ticked at all, every single pass, deterministically. The
+   // only thing a real runtime capture would still add is the DATA question: whether native
+   // updateCollisions actually agrees with DIV's own raycast in practice (moot-but-harmless) or
+   // disagrees (parts consistently act on a different grounded-state than DIV just computed).
+   //
+   // This same write/overwrite question also governs two things beyond PartEngine's RPM feedback:
+   // PartGroundDevice.update()'s own blockMaterialBelow/blockNameBelow detection (feeds real
+   // terrain friction-modifier lookups) sits directly inside the identical
+   // `groundedGroundDevices.contains(this)` gate, confirmed by exact brace-counting in the pinned
+   // decompiled source - not a separate mechanism as an earlier draft of this comment guessed. And
+   // PartGroundDevice.update() is itself a THIRD writer of wheel.angularVelocity (via
+   // getDesiredAngularVelocity(), a coarse vehicle-level groundVelocity/circumference approximation
+   // that ignores per-wheel slip/skid) under that same gate, alongside DIV's own accurate per-wheel
+   // Phase3 write and PartEngine's RPM-feedback writer - all three depend on the same open question.
+   //
+   // "Deactivation cleanup" (one of this commit's original open items) turns out to be moot: the
+   // native overwrite above runs every tick for every vehicle unconditionally, never gated on DIV
+   // being active, so there is no window where a stale DIV-written value could outlive one tick
+   // either way - nothing extra to guard on deactivation.
    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] nativeGroundedGroundDevicesBeforeSync entity="+v.uniqueUUID
      +" tick="+debugTick+" sizeBeforeDivWrite="+v.groundDeviceCollective.groundedGroundDevices.size()
      +" wheelsBeforeDivWrite="+v.groundDeviceCollective.groundedGroundDevices.stream().map(w->w.localOffset.toString()).toList());
