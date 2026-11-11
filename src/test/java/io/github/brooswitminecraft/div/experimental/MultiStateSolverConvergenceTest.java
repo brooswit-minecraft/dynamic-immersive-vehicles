@@ -5,29 +5,30 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Second of two pieces requested in ticket comment 53127: "asserted frozen-state convergence
- * against 64 across several transition/load states, including zero/low load and braking, using
- * full generalized delta (velocity and angular vector), friction bounds, and appropriate
- * projected residuals (nonzero slip at a saturated tire is not itself failure)."
+ * Second of two pieces requested in ticket comment 53127, corrected per comment 53130's review of
+ * the first attempt (a9ecf23): that attempt compared {@code abs(mag64-mag4)} (a magnitude-only
+ * diff, hiding direction changes, and labeled a "residual" when it was really just two different
+ * approximations compared) and treated a saturated contact's own cross-iteration difference as
+ * automatically "expected" rather than a real difference. Fixed here:
+ * <ul>
+ *  <li>{@code crossIterationDiff}/{@code vectorDiff} compare the full (longitudinal,lateral)
+ *  force VECTOR between two iteration counts - not just its magnitude.</li>
+ *  <li>a genuine {@code fixedPointResidual} is ALSO computed - one further sweep applied to the
+ *  SAME candidate (N vs N+1 iterations on the identical frozen input), the actual "is this near
+ *  a fixed point" question, kept explicitly distinct from a cross-iteration diff (4 vs 64, or
+ *  32 vs 64) which only says two different approximations differ, not that either has converged.
+ *  </li>
+ *  <li>saturation is reported but never used to wave away a 4-vs-64 difference as "expected" -
+ *  only persistent slip AT a stable bound is ordinary friction-circle behavior.</li>
+ * </ul>
  *
  * <p>Five frozen states, each reached by replaying the real corrected window2 schedule (see
  * {@code WindowTwoControlScheduleReplayTest}) normally up to that tick, in NORMAL wheel order and
  * the shipped 4-iteration solver (i.e. "how the shipped build would actually have gotten here"):
- * <ul>
- *  <li>t=0 - quiet baseline, symmetric load, zero drive/brake ("zero/low load").</li>
- *  <li>t=46 - mid-braking (inside the 44-48 brake window).</li>
- *  <li>t=55 - mid-throttle, first drive window (50-60).</li>
- *  <li>t=70 - further into the second drive window (67-97), more load transfer.</li>
- *  <li>t=109 - the harness's own peak-divergence tick (NOT claimed to be the real captured
- *  production state at real tick109 - comment 53127's correction - kept only as an internal
- *  convergence check on the state THIS harness itself reaches).</li>
- * </ul>
- * At each, compares the real {@code solveFriction} at iterations=4 vs 64 on the SAME frozen
- * input: full generalized velocity/angular delta (not one axis), and per-contact force magnitude
- * against its own friction bound {@code mu*normal} - a saturated contact (force at or near the
- * bound) is EXPECTED to still show a slip/force-magnitude residual between iteration counts;
- * that is correct friction-circle behavior, not a convergence failure. Only unsaturated contacts
- * are asserted to converge tightly.
+ * t=0 (zero CONTROLS, not zero/low normal load - comment 53130's correction; a separate explicit
+ * zero/low-normal-load synthetic contact check is below), t=46 (mid-braking), t=55/t=70 (mid
+ * drive), t=109 (this harness's own peak-divergence tick, not the real captured production
+ * state).
  */
 class MultiStateSolverConvergenceTest {
  private static final double MASS=350.0, GRAVITY=11.0, DT=0.05, FRICTION=1.0, SUSPENSION_TRAVEL=0.3, WHEEL_RADIUS=0.375, LENGTH=WHEEL_RADIUS+SUSPENSION_TRAVEL, BRAKE_FORCE=12000.0, MAX_DRIVE=8000.0, RAMP_RATE=400.0;
@@ -136,39 +137,80 @@ class MultiStateSolverConvergenceTest {
   return new SolveOutcome(velocity, angular, results, activeWheelIndex);
  }
 
- // Diagnostic only, deliberately not asserting a numeric convergence tolerance: an early attempt
- // at this (max(1.0, bound*0.05)) failed on an UNSATURATED braking contact at t=46 (residual 51N
- // against an 878N bound, ~6%) - a real, measured non-trivial residual, not a harness bug. Rather
- // than loosen an invented threshold until it passes (the exact overclaiming pattern flagged
- // earlier in this investigation), this reports every state/wheel's measured residual and
- // saturation status for review to read directly, instead of asserting a pass/fail line this
- // investigation has no independently-derived basis for yet.
- @Test void frozenStatesConvergenceAgainst64Iterations() {
+ /** Vector (not magnitude) difference between two FrictionResults in their own
+  * longitudinal/lateral basis - comment 53130's correction: a magnitude-only diff
+  * ({@code abs(mag64-mag4)}) hides a direction change even when it reports near-zero. */
+ private static double vectorDiff(MultiContactFrictionSolver.FrictionResult a, MultiContactFrictionSolver.FrictionResult b) {
+  return Math.hypot(b.longitudinal()-a.longitudinal(), b.lateral()-a.lateral());
+ }
+
+ // Diagnostic only, deliberately not asserting a numeric tolerance (comment 53130: "No need to
+ // assert that 4 already converges - we know it does not"). Reports TWO distinct quantities,
+ // kept explicitly separate per 53130's correction:
+ //  - crossIterationDiff(4,64): how much the 4- and 64-iteration outputs differ from EACH OTHER -
+ //    not a solver residual, just two different approximations compared.
+ //  - fixedPointResidual(N): how much ONE further sweep changes the N-iteration candidate itself
+ //    (solve at N vs N+1 on the identical frozen input) - the actual "is this near a fixed point"
+ //    question, independent of what a different N entirely produces.
+ // Saturation is reported per-contact but, per 53130, does NOT mean a 4-vs-64 difference there is
+ // "expected/converged" - only that persistent slip at the bound is not itself evidence of
+ // non-convergence; a MAGNITUDE or direction change at/near the bound is still a real difference.
+ @Test void frozenStatesCrossIterationDiffAndFixedPointResidual() {
   int[] states={0,46,55,70,109};
   for (int tick : states) {
    FrozenState frozen=freeze(tick);
    var at4=solveFrozen(frozen,4);
    var at64=solveFrozen(frozen,64);
-   double velocityDelta=new Vector3d(at64.velocityAfter()).sub(at4.velocityAfter()).length();
-   double angularDelta=new Vector3d(at64.angularAfter()).sub(at4.angularAfter()).length();
+   var at65=solveFrozen(frozen,65);
+   var at32=solveFrozen(frozen,32);
+   var at33=solveFrozen(frozen,33);
+   double velocityCrossDiff=new Vector3d(at64.velocityAfter()).sub(at4.velocityAfter()).length();
+   double angularCrossDiff=new Vector3d(at64.angularAfter()).sub(at4.angularAfter()).length();
+   double velocityFixedPointResidual64=new Vector3d(at65.velocityAfter()).sub(at64.velocityAfter()).length();
+   double angularFixedPointResidual64=new Vector3d(at65.angularAfter()).sub(at64.angularAfter()).length();
+   double velocityFixedPointResidual32=new Vector3d(at33.velocityAfter()).sub(at32.velocityAfter()).length();
+   double angularFixedPointResidual32=new Vector3d(at33.angularAfter()).sub(at32.angularAfter()).length();
+   double velocity32to64=new Vector3d(at64.velocityAfter()).sub(at32.velocityAfter()).length();
+   double angular32to64=new Vector3d(at64.angularAfter()).sub(at32.angularAfter()).length();
    System.out.println("[MultiStateSolverConvergenceTest] t="+tick+" activeWheels="+at4.activeWheelIndex().length
      +" braking="+frozen.braking()+" driveForcePerWheel="+frozen.driveForcePerWheel()
-     +" |velocityDelta(4,64)|="+velocityDelta+" |angularDelta(4,64)|="+angularDelta);
-   boolean anySaturated=false;
+     +" crossIterationDiff(4,64): |dv|="+velocityCrossDiff+" |domega|="+angularCrossDiff
+     +" fixedPointResidual(64->65): |dv|="+velocityFixedPointResidual64+" |domega|="+angularFixedPointResidual64
+     +" fixedPointResidual(32->33): |dv|="+velocityFixedPointResidual32+" |domega|="+angularFixedPointResidual32
+     +" diff(32,64): |dv|="+velocity32to64+" |domega|="+angular32to64);
    for (int k=0;k<at64.activeWheelIndex().length;k++) {
     int wheelIdx=at64.activeWheelIndex()[k];
     double normal=frozen.wheels()[wheelIdx].normal();
     double bound=FRICTION*normal;
-    var r4=at4.results()[k]; var r64=at64.results()[k];
-    double mag4=Math.hypot(r4.longitudinal(), r4.lateral());
+    var r4=at4.results()[k]; var r64=at64.results()[k]; var r65=at65.results()[k];
     double mag64=Math.hypot(r64.longitudinal(), r64.lateral());
-    boolean saturated = bound>0 && mag64 >= bound*0.98; // at/near the friction-circle bound
-    double residual=Math.abs(mag64-mag4);
-    System.out.println("[MultiStateSolverConvergenceTest]   wheel="+wheelIdx+" normal="+normal+" bound="+bound
-      +" mag4="+mag4+" mag64="+mag64+" saturated="+saturated+" residual="+residual);
-    if (saturated) anySaturated=true; // expected: slip/force residual at a saturated tire is not itself a convergence failure
+    boolean saturated = bound>0 && mag64 >= bound*0.98; // at/near the friction-circle bound - does NOT by itself excuse a cross-iteration difference
+    System.out.println("[MultiStateSolverConvergenceTest]   wheel="+wheelIdx+" normal="+normal+" bound="+bound+" mag64="+mag64+" saturated="+saturated
+      +" crossIterationVectorDiff(4,64)="+vectorDiff(r4,r64)+" fixedPointVectorResidual(64->65)="+vectorDiff(r64,r65));
    }
-   System.out.println("[MultiStateSolverConvergenceTest]   anySaturatedContact="+anySaturated);
+  }
+ }
+
+ /** Comment 53130: "t0 is zero CONTROLS, not zero/low normal load; add explicitly zero/low-load
+  * contacts." A wheel whose suspension is barely compressed (near its full-extension limit) has
+  * a near-zero normal force and therefore a near-zero friction bound - checks the solver still
+  * returns finite output and respects that (near-zero) bound rather than dividing by ~0. */
+ @Test void explicitZeroAndLowNormalLoadContactsStayFiniteAndWithinBound() {
+  Vector3d inertiaBody=inertiaBody();
+  Quaterniond orientation=new Quaterniond(), inverse=new Quaterniond();
+  double[] normals={0.0, 1e-6, 1.0, 50.0};
+  for (double normal : normals) {
+   var contacts=new MultiContactFrictionSolver.FrictionContact[]{
+     new MultiContactFrictionSolver.FrictionContact(new Vector3d(0.375,-0.15,1.25), new Vector3d(0,0,1), new Vector3d(1,0,0), normal, 1.0)};
+   Vector3d velocity=new Vector3d(0.3,0,0.1), angular=new Vector3d(0,0,0);
+   var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,velocity,angular,
+     false,0,500,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+   var r=results[0];
+   double bound=FRICTION*normal;
+   double mag=Math.hypot(r.longitudinal(), r.lateral());
+   System.out.println("[MultiStateSolverConvergenceTest] zero/low-load check normal="+normal+" bound="+bound+" longitudinal="+r.longitudinal()+" lateral="+r.lateral()+" mag="+mag);
+   assertTrue(Double.isFinite(r.longitudinal()) && Double.isFinite(r.lateral()), "normal="+normal+" must produce finite output, not NaN/Infinity from a near-zero-load division");
+   assertTrue(mag <= bound + 1e-6, "normal="+normal+" must respect its own (near-zero) friction bound="+bound+" - got mag="+mag);
   }
  }
 }
