@@ -69,6 +69,29 @@ class PhysicsBridgeEffectiveMassDamperTest {
   assertEquals(FALLBACK_DAMPER, PhysicsBridge.effectiveMassDamper(SPRING, MASS, new Vector3d(0,0,0), new Vector3d(Double.NaN,1,0), IDENTITY, INERTIA_BODY, FALLBACK_DAMPER).damper());
  }
 
+ /** Review comment 53223: explicitly reject a near-zero or far-from-unit direction rather than
+  * silently normalizing or risking a near-zero-length division - defensive only, since the real
+  * production call always passes a unit q-transformed up. */
+ @Test void nearZeroOrNonUnitDirectionFallsBackSafely() {
+  assertEquals(FALLBACK_DAMPER, PhysicsBridge.effectiveMassDamper(SPRING, MASS, new Vector3d(0,0,0), new Vector3d(0,0,0), IDENTITY, INERTIA_BODY, FALLBACK_DAMPER).damper());
+  assertEquals(FALLBACK_DAMPER, PhysicsBridge.effectiveMassDamper(SPRING, MASS, new Vector3d(0,0,0), new Vector3d(0,0.01,0), IDENTITY, INERTIA_BODY, FALLBACK_DAMPER).damper());
+  assertEquals(FALLBACK_DAMPER, PhysicsBridge.effectiveMassDamper(SPRING, MASS, new Vector3d(0,0,0), new Vector3d(0,5,0), IDENTITY, INERTIA_BODY, FALLBACK_DAMPER).damper());
+ }
+
+ /** Review comment 53223: explicitly reject a non-finite quaternion rather than letting the
+  * solver call transform garbage. */
+ @Test void nonFiniteInverseOrientationFallsBackSafely() {
+  Quaterniond broken=new Quaterniond(Double.NaN,0,0,1);
+  assertEquals(FALLBACK_DAMPER, PhysicsBridge.effectiveMassDamper(SPRING, MASS, new Vector3d(0,0,0), UP, broken, INERTIA_BODY, FALLBACK_DAMPER).damper());
+ }
+
+ @Test void aRealUnitDirectionAtTheExactBoundaryIsAccepted() {
+  // direction length exactly 1.0 (and a small epsilon around it, matching floating-point
+  // orientation transforms of a unit vector) must NOT fall back.
+  var result=PhysicsBridge.effectiveMassDamper(SPRING, MASS, new Vector3d(0.1,0.1,0.1), new Vector3d(0,1.0,0), IDENTITY, INERTIA_BODY, FALLBACK_DAMPER);
+  assertTrue(result.damper() != FALLBACK_DAMPER, "an exact unit direction must not be rejected as near-zero/non-unit");
+ }
+
  /** Comment 53219's explicit "verify opt-in off matches baseline" - this is the production call
   * site's own contract: when the flag is off, Body.stepGround never calls this method at all and
   * uses {@code new EffectiveMassDamperResult(damper, Double.NaN)} directly, which is trivially

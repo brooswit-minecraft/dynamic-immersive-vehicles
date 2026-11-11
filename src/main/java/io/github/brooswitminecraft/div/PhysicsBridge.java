@@ -519,12 +519,23 @@ public final class PhysicsBridge {
   * of the shared {@code mass/wheelCount} basis. Pure/testable, no Minecraft types, same pattern
   * as {@link #suspensionDamper} itself.
   *
-  * <p>Guards finite/positive spring, mass, inertia components and point coordinates, and catches
-  * any exception from the solver call itself, falling back to {@code fallbackDamper} (today's
-  * shared value) on any non-finite/non-positive/degenerate result - comment 53219's explicit
-  * "safe baseline fallback" requirement, so a degenerate contact (e.g. a zero/garbage inertia
-  * component, which should never happen but is not re-proven impossible here) can never produce
-  * a NaN/negative damper that would destabilize the suspension.
+  * <p>{@code direction} is the real production call's chassis/suspension-ray direction (the
+  * body's own {@code up}, {@code q.transform(WORLD_UP)}) - NOT a re-derivation of the actual
+  * terrain surface normal at the hit point, which this code never computes (review comment
+  * 53223's correction to this doc's earlier imprecise wording; no geometry change - this was
+  * always what the real call site passed, see {@code Body.stepGround}'s own use of `up` for both
+  * the suspension and friction math it already shared with this candidate).
+  *
+  * <p>Guards finite/positive spring, mass, inertia components and point coordinates, a near-zero
+  * or far-from-unit {@code direction} (comment 53223: explicitly reject rather than silently
+  * normalize or divide-by-near-zero - defensive, since the real call always passes a unit
+  * q-transformed up, not a reason to redesign this method's contract), and a non-finite
+  * {@code inverseOrientation}, and catches any exception from the solver call itself, falling
+  * back to {@code fallbackDamper} (today's shared value) on any non-finite/non-positive/
+  * degenerate result - comment 53219's explicit "safe baseline fallback" requirement, so a
+  * degenerate contact (e.g. a zero/garbage inertia component, which should never happen but is
+  * not re-proven impossible here) can never produce a NaN/negative damper that would destabilize
+  * the suspension.
   *
   * <p>NOT shown to be a net improvement - measured across commits 29d2ed3/98bf372/90ed051/02f90a0:
   * a real driven/recontact scenario improved dramatically at one seed and DT, but that result
@@ -543,7 +554,16 @@ public final class PhysicsBridge {
     || !Double.isFinite(inertiaBody.y) || inertiaBody.y<=0
     || !Double.isFinite(inertiaBody.z) || inertiaBody.z<=0
     || !Double.isFinite(point.x) || !Double.isFinite(point.y) || !Double.isFinite(point.z)
-    || !Double.isFinite(direction.x) || !Double.isFinite(direction.y) || !Double.isFinite(direction.z)) {
+    || !Double.isFinite(direction.x) || !Double.isFinite(direction.y) || !Double.isFinite(direction.z)
+    || !Double.isFinite(inverseOrientation.x) || !Double.isFinite(inverseOrientation.y)
+    || !Double.isFinite(inverseOrientation.z) || !Double.isFinite(inverseOrientation.w)) {
+   return new EffectiveMassDamperResult(fallbackDamper, Double.NaN);
+  }
+  double directionLength=Math.sqrt(direction.x*direction.x+direction.y*direction.y+direction.z*direction.z);
+  if (!Double.isFinite(directionLength) || directionLength<0.9 || directionLength>1.1) {
+   // Comment 53223: reject near-zero/non-unit direction explicitly rather than silently
+   // normalizing (which would mask a caller bug) or dividing by a near-zero length. The real
+   // production call always passes a unit q-transformed up, so this never fires there.
    return new EffectiveMassDamperResult(fallbackDamper, Double.NaN);
   }
   double effectiveMass;
@@ -828,10 +848,13 @@ public final class PhysicsBridge {
     // exactly new EffectiveMassDamperResult(damper, NaN) - damperUsed==damper byte-for-byte,
     // nothing about today's behavior changes. Sourced from this body's own real inertiaBody (its
     // actual box mass/inertia, PhysicsBridge.Body constructor) and this wheel's own real contact
-    // point (terrain hit location, same `point` used for friction below) along the real surface
-    // normal `up` - comment 53219's explicit "actual box mass/inertia and actual contact
-    // direction/arm" requirement. See PhysicsBridge.effectiveMassDamper's own doc for the guard/
-    // fallback behavior and the measured record showing this is NOT a validated fix.
+    // point (terrain hit location, same `point` used for friction below) along `up` - this
+    // body's own chassis/suspension-ray direction, NOT a re-derived actual terrain surface
+    // normal (review comment 53223's correction; no geometry change, this is the same `up`
+    // the existing suspension/friction code already uses at this exact call). Satisfies comment
+    // 53219's "actual box mass/inertia and actual contact direction/arm" requirement using that
+    // direction. See PhysicsBridge.effectiveMassDamper's own doc for the guard/fallback behavior
+    // and the measured record showing this is NOT a validated fix.
     var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
       ? effectiveMassDamper(spring,mass,point,up,inverse,inertiaBody,damper)
       : new EffectiveMassDamperResult(damper, Double.NaN);
