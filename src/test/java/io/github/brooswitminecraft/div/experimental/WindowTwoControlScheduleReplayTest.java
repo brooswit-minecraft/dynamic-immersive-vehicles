@@ -53,15 +53,32 @@ class WindowTwoControlScheduleReplayTest {
   return new WheelState(anchorWorld,up,true,normal,point,forward,right);
  }
 
- private static boolean braking(int t) { return t>=44 && t<=48; }
+ // Exactly comment 53123's "Relative raw control schedule": "brake44-48, throttle49, drive8000
+ // at50-60; brake/drive0 at61-66; drive8000 at67-97; release98-104; drive8000 at105-121" - an
+ // earlier version of this wrongly dropped the 61-66 brake (misreading "brake/drive0" as "both
+ // off" instead of "brake active, drive 0") and started commanded drive at49 instead of50
+ // (throttle engaging at49 is not yet raw drive8000 - comment 53125's correction). Asserted
+ // below against the exact stated boundary ticks so this cannot silently regress again.
+ private static boolean braking(int t) { return (t>=44 && t<=48) || (t>=61 && t<=66); }
  private static double commandedDrive(int t) {
-  if ((t>=49&&t<=60) || (t>=67&&t<=97) || (t>=105&&t<=121)) return MAX_DRIVE;
+  if ((t>=50&&t<=60) || (t>=67&&t<=97) || (t>=105&&t<=121)) return MAX_DRIVE;
   return 0;
+ }
+ @Test void scheduleMatchesTheExactRawControlScheduleFromComment53123() {
+  assertFalse(braking(43)); assertTrue(braking(44)); assertTrue(braking(48)); assertFalse(braking(49));
+  assertFalse(braking(60)); assertTrue(braking(61)); assertTrue(braking(66)); assertFalse(braking(67));
+  assertEquals(0, commandedDrive(49), "throttle engaging at49 is not yet raw drive8000");
+  assertEquals(MAX_DRIVE, commandedDrive(50)); assertEquals(MAX_DRIVE, commandedDrive(60));
+  assertEquals(0, commandedDrive(61)); assertEquals(0, commandedDrive(66));
+  assertEquals(MAX_DRIVE, commandedDrive(67)); assertEquals(MAX_DRIVE, commandedDrive(97));
+  assertEquals(0, commandedDrive(98)); assertEquals(0, commandedDrive(104));
+  assertEquals(MAX_DRIVE, commandedDrive(105)); assertEquals(MAX_DRIVE, commandedDrive(121));
  }
 
  /** @param order maps solver-array position -> actual wheel index, e.g. {0,1,2,3} normal,
   * {3,1,2,0} with the rear pair's array position swapped. */
- private static java.util.List<TickSample> run(int[] order, int ticks) {
+ private static java.util.List<TickSample> run(int[] order, int ticks) { return run(order, ticks, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS); }
+ private static java.util.List<TickSample> run(int[] order, int ticks, int iterations) {
   Vector3d inertiaBody=inertiaBody();
   Vector3d velocity=new Vector3d(0,0,0), angular=new Vector3d(0,0,0);
   Quaterniond orientation=new Quaterniond();
@@ -95,7 +112,7 @@ class WindowTwoControlScheduleReplayTest {
    int activeCount=activeOrder.size();
    double driveForcePerWheel=activeCount==0?0:shapedDrive/4.0; // production divides by ALL wheels (wheels.size()), not just active ones
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,
-     braking,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+     braking,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,DT,iterations);
    velocity.add(new Vector3d(solverVelocity).sub(bf));
    angular.add(new Vector3d(solverAngular).sub(ba));
    double frontNormal=wheels[1].hit()?wheels[1].normal():0;
@@ -110,7 +127,13 @@ class WindowTwoControlScheduleReplayTest {
   return samples;
  }
 
- @Test void realWindowTwoScheduleRollBuildupBeforeSteering() {
+ // Diagnostic only - reports whole-trajectory numbers for comparison against the real capture;
+ // deliberately NOT asserted as a pass/fail physics regression (comment 53125: this harness's
+ // approximations mean a passing assertion here would misrepresent it as a verified behavioral
+ // match rather than exploratory evidence). See WindowTwoSolverConvergenceTest for the properly
+ // isolated (frozen-state, varying-iteration) convergence check this terminal-roll comparison
+ // alone cannot substitute for.
+ @Test void diagnosticWholeTrajectoryRollBuildupBeforeSteering() {
   var normal = run(new int[]{0,1,2,3}, 117);
   var reversed = run(new int[]{3,1,2,0}, 117);
   System.out.println("[WindowTwoControlScheduleReplayTest] normal order roll at t=44/60/97/104/116: "
