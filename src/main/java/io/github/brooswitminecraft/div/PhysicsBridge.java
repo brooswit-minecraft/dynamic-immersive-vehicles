@@ -472,6 +472,36 @@ public final class PhysicsBridge {
   try { parsed = Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return 0; }
   return parsed>0 && parsed<=MAX_EXPERIMENTAL_THROTTLE_RAMP_TICKS ? parsed : 0;
  }
+ /** Documented upper bound for {@code -Ddiv.experimentalFrictionSolverIterations} (ticket
+  * comments 53127/53130). {@code FrictionSolverIterationCostBenchmark} measured cost scaling
+  * roughly linearly with iteration count (~0.64us/iteration/call); 256 leaves headroom above the
+  * 128 actually benchmarked while still refusing an unbounded/mistyped value. */
+ static final int MAX_EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS = 256;
+ /**
+  * Pure parse/validate for {@code -Ddiv.experimentalFrictionSolverIterations} (ticket comments
+  * 53127/53130: "bounded higher-iteration experimental candidate... preserve current production
+  * default 4"). 0, unset, or anything invalid (non-numeric, non-positive, over the documented
+  * bound) means BYPASSED - {@link io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver#FRICTION_SOLVER_ITERATIONS}
+  * (4) is used, exactly as shipped, for every vehicle/session unless explicitly opted in. Same
+  * safe-default-is-off reasoning as {@link #resolveExperimentalThrottleRampTicks} - an
+  * unreviewed experimental accuracy knob should never silently activate itself.
+  */
+ static int resolveExperimentalFrictionSolverIterations(String raw) {
+  if (raw == null) return 0;
+  int parsed;
+  try { parsed = Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return 0; }
+  return parsed>0 && parsed<=MAX_EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS ? parsed : 0;
+ }
+ private static final int EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS_RESOLVED = resolveExperimentalFrictionSolverIterations(System.getProperty("div.experimentalFrictionSolverIterations"));
+ /** The iteration count actually passed to {@code MultiContactFrictionSolver.solveFriction} this
+  * run - the experimental candidate's resolved value if opted in, else the shipped default
+  * ({@code MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS}, 4) unchanged. A plain static
+  * method on the outer class (no Minecraft/SLF4J types) so both {@code Body} and the mod's own
+  * startup marker (which runs before any {@code Body} exists) can call it. */
+ static int effectiveFrictionSolverIterations() {
+  return EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS_RESOLVED>0 ? EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS_RESOLVED
+    : io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS;
+ }
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
@@ -508,6 +538,13 @@ public final class PhysicsBridge {
   private static final int EXPERIMENTAL_THROTTLE_RAMP_TICKS = resolveExperimentalThrottleRampTicks(System.getProperty("div.experimentalThrottleRampTicks"));
   private final io.github.brooswitminecraft.div.experimental.DriveRateLimiter.State throttleRampState =
     EXPERIMENTAL_THROTTLE_RAMP_TICKS>0 ? new io.github.brooswitminecraft.div.experimental.DriveRateLimiter.State() : null;
+  // Opt-in experimental higher-iteration friction-solve candidate (ticket comments 53127/53130) -
+  // an accuracy comparison only, NOT an anti-roll fix or rollover cure. Bypassed
+  // (EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS==0) for every vehicle/session unless explicitly
+  // enabled via -Ddiv.experimentalFrictionSolverIterations, in which case it REPLACES the
+  // iteration count passed to solveFriction below - the shipped default
+  // (MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS, 4) and every other part of the
+  // solver/CG/geometry/support-force model are completely unchanged either way.
   private static final Logger LOGGER = LogUtils.getLogger();
   private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
   /** Full-precision "(x,y,z)" - JOML's own Vector3d.toString() truncates to a handful of
@@ -662,8 +699,11 @@ public final class PhysicsBridge {
    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] entity="+v.uniqueUUID+" side="+(v.world.isClient()?"client":"server")+" tick="+debugTick
      +" mass="+mass+" gravity="+gravity
      // solver/iterations identity (review comment 53052) - so a capture taken against this build
-     // can be proven to have come from this path, not an older single-shot per-wheel one.
-     +" solver=MultiContactFrictionSolver iterations="+io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS
+     // can be proven to have come from this path, not an older single-shot per-wheel one. Logs
+     // the EFFECTIVE iteration count (ticket comments 53127/53130) - equal to
+     // MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS whenever the experimental candidate
+     // is bypassed, so a capture always shows what actually ran, not just what's configured.
+     +" solver=MultiContactFrictionSolver iterations="+effectiveFrictionSolverIterations()
      +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+vfull(pose.position())+" orientation="+qfull(q)
      +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
      +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
@@ -729,7 +769,7 @@ public final class PhysicsBridge {
      h.point(),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,inertiaBody,q,inverse,workingVelocity,workingAngular,
      braking,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,DT,
-     io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+     effectiveFrictionSolverIterations());
    // Phase 3: apply each wheel's final (vertical + solved tire) impulse exactly once, same
    // application/logging shape as before.
    for (int i=0;i<hits.size();i++) {
