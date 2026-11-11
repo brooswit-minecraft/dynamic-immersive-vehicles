@@ -16,10 +16,14 @@ import org.junit.jupiter.api.Test;
  */
 class FrictionSolverIterationCostBenchmark {
  private static final double MASS=350.0, FRICTION=1.0, DT=0.05, BRAKE_FORCE=12000.0;
+ /** SYNTHETIC contacts (ticket comment 53131's correction) - a 4-active-contact braking scenario
+  * using the real ATV's x/z LOCAL_OFFSETS values and MultiStateSolverConvergenceTest's t=46
+  * normal loads, but the y-coordinates here are an arbitrary placeholder, NOT the real COM-
+  * relative anchor (which subtracts CENTER and adds half the suspension travel - see
+  * {@code PhysicsBridge.Body}'s constructor). Good enough for a cost measurement, which only
+  * cares about contact COUNT and iteration count, not exact geometry - NOT a claim that these
+  * are the real contact points. */
  private static MultiContactFrictionSolver.FrictionContact[] representativeContacts() {
-  // A 4-active-contact braking scenario (the heaviest case measured in MultiStateSolverConvergenceTest,
-  // t=46's normal loads) - representative of a typical worst-case per-tick call, not a specific
-  // real capture.
   double[] normals={878.36, 1035.55, 1235.91, 684.68};
   Vector3d[] points={new Vector3d(0.35,-0.15,-0.0625), new Vector3d(-0.375,-0.15,1.25), new Vector3d(0.375,-0.15,1.25), new Vector3d(-0.375,-0.15,-0.0625)};
   var contacts=new MultiContactFrictionSolver.FrictionContact[4];

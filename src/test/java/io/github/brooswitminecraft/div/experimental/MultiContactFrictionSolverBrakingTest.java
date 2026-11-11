@@ -45,7 +45,7 @@ class MultiContactFrictionSolverBrakingTest {
   */
  @Test void lowSpeedBrakingConvergesTowardRestWithATinyExplainableOvershootBothSigns() {
   for (double initialSpeed : new double[]{0.01, -0.01, 0.1, -0.1}) { // genuinely below the 0.142857 self-limiting threshold
-   for (int n : new int[]{1,2,4,8}) {
+   for (int n : new int[]{1,2,4,8,32,64}) { // 32/64 added: ticket comment 53131, candidate-iteration coverage
     double finalSpeed=finalSpeed(initialSpeed, true, 0, n);
     // Bound: the overshoot comes from rolling resistance's contribution to the SAME pass that
     // cancels the bulk of the speed via the brake accumulator - its magnitude is at most on the
@@ -76,7 +76,7 @@ class MultiContactFrictionSolverBrakingTest {
   Vector3d offCenterPoint=new Vector3d(0.35,-0.9,0.625); // representative of the real ATV geometry (ticket chassisReceipt)
   Vector3d inertia=new Vector3d(150,150,45); // representative diagonal solid-box tensor, same order as the real ATV's
   for (double initialSpeed : new double[]{0.01,-0.01,0.1,-0.1}) {
-   for (int n : new int[]{1,2,4,8}) {
+   for (int n : new int[]{1,2,4,8,32,64}) { // 32/64 added: ticket comment 53131, candidate-iteration coverage
     Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
     Vector3d angular=new Vector3d(0,0,0);
     var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(offCenterPoint,FORWARD,RIGHT,NORMAL,1.0)};
@@ -96,7 +96,8 @@ class MultiContactFrictionSolverBrakingTest {
   // pass-to-pass drift from recomputing off a slightly-changing speed swamping the comparison.
   double initialSpeed=10.0;
   double[] finalSpeeds=new double[]{finalSpeed(initialSpeed,true,0,1), finalSpeed(initialSpeed,true,0,2),
-    finalSpeed(initialSpeed,true,0,4), finalSpeed(initialSpeed,true,0,8)};
+    finalSpeed(initialSpeed,true,0,4), finalSpeed(initialSpeed,true,0,8),
+    finalSpeed(initialSpeed,true,0,32), finalSpeed(initialSpeed,true,0,64)}; // 32/64: ticket comment 53131
   double maxSpread=0;
   for (double s : finalSpeeds) maxSpread=Math.max(maxSpread, Math.abs(s-finalSpeeds[0]));
   assertTrue(maxSpread < 0.01,
@@ -115,6 +116,8 @@ class MultiContactFrictionSolverBrakingTest {
   double speed1=finalSpeed(0, false, drivePerWheel, 1);
   double speed4=finalSpeed(0, false, drivePerWheel, 4);
   assertEquals(speed1, speed4, 1e-3, "drive's effect on speed must not meaningfully depend on iteration count - got 1 pass="+speed1+" 4 passes="+speed4);
+  double speed64=finalSpeed(0, false, drivePerWheel, 64); // ticket comment 53131: candidate-iteration coverage
+  assertEquals(speed1, speed64, 1e-3, "drive's effect on speed must not meaningfully depend on iteration count, including the candidate 64 - got 1 pass="+speed1+" 64 passes="+speed64);
  }
 
  @Test void brakingAndLateralDemandShareTheFrictionCircleCorrectly() {
@@ -143,6 +146,14 @@ class MultiContactFrictionSolverBrakingTest {
  }
 
  @Test void multipleContactsWithRotationalCouplingBrakeStablyTogether() {
+  multipleContactsWithRotationalCouplingBrakeStablyTogetherAt(MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+ }
+ /** Ticket comment 53131: re-check this exact multi-tick coupled-braking settling case at the
+  * candidate iteration count too, not only the shipped default. */
+ @Test void multipleContactsWithRotationalCouplingBrakeStablyTogetherAtCandidateIterations() {
+  multipleContactsWithRotationalCouplingBrakeStablyTogetherAt(64);
+ }
+ private static void multipleContactsWithRotationalCouplingBrakeStablyTogetherAt(int iterations) {
   Vector3d p1=new Vector3d(1,0,0), p2=new Vector3d(-1,0,0);
   Vector3d velocity=new Vector3d(FORWARD).mul(2.0);
   Vector3d angular=new Vector3d(0,0,0);
@@ -150,8 +161,8 @@ class MultiContactFrictionSolverBrakingTest {
     new MultiContactFrictionSolver.FrictionContact(p1,FORWARD,RIGHT,NORMAL,1.0),
     new MultiContactFrictionSolver.FrictionContact(p2,FORWARD,RIGHT,NORMAL,1.0)};
   for (int tick=0; tick<30; tick++)
-   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,iterations);
   assertTrue(Double.isFinite(velocity.z) && Math.abs(velocity.z) <= 2.0 && Math.abs(angular.length()) < 1.0,
-    "two coupled contacts braking together for 30 ticks should settle, not diverge - velocity.z="+velocity.z+" |angular|="+angular.length());
+    "two coupled contacts braking together for 30 ticks at "+iterations+" iterations should settle, not diverge - velocity.z="+velocity.z+" |angular|="+angular.length());
  }
 }

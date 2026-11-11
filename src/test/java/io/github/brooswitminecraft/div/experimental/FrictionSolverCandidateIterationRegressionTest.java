@@ -20,6 +20,11 @@ class FrictionSolverCandidateIterationRegressionTest {
  private static final int CANDIDATE_ITERATIONS=64;
  private static final double MASS=350.0, FRICTION=1.0, DT=0.05, BRAKE_FORCE=12000.0;
  private static final Vector3d INERTIA=new Vector3d(350.0/3*(0.4411*0.4411+1.05*1.05), 350.0/3*(0.425*0.425+1.05*1.05), 350.0/3*(0.425*0.425+0.4411*0.4411));
+ /** SYNTHETIC contacts (ticket comment 53131's correction) - x/z match the real ATV's
+  * LOCAL_OFFSETS, but y is an arbitrary placeholder, NOT the real COM-relative anchor (which
+  * subtracts CENTER and adds half the suspension travel). Fine for these invariant checks
+  * (finiteness, friction bounds, accumulation), which don't depend on exact anchor geometry -
+  * NOT a claim that these are the real contact points. */
  private static MultiContactFrictionSolver.FrictionContact[] fourWheelContacts(double normalEach) {
   Vector3d[] points={new Vector3d(0.35,-0.15,-0.0625), new Vector3d(-0.375,-0.15,1.25), new Vector3d(0.375,-0.15,1.25), new Vector3d(-0.375,-0.15,-0.0625)};
   var contacts=new MultiContactFrictionSolver.FrictionContact[4];

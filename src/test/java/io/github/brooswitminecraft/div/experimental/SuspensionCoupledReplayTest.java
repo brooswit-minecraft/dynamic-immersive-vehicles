@@ -80,6 +80,13 @@ class SuspensionCoupledReplayTest {
  private static final int WHEEL_COUNT=4;
 
  private static double maxOmegaOverTicks(boolean useNewSolver, int ticks) {
+  return maxOmegaOverTicks(useNewSolver, ticks, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+ }
+ // Overload taking an explicit iteration count (ticket comment 53131: re-run this exact,
+ // genuinely perturbed/settling replay - not a trivial single zero-in/zero-out solve - at the
+ // candidate higher iteration count, rather than inventing a new test that doesn't actually
+ // exercise suspension coupling or settling).
+ private static double maxOmegaOverTicks(boolean useNewSolver, int ticks, int iterations) {
   Vector3d inertiaBody=inertiaBody();
   Vector3d velocity=new Vector3d(0,0,0);
   Vector3d angular=new Vector3d(0.01,0,0.01);
@@ -129,7 +136,7 @@ class SuspensionCoupledReplayTest {
     var contacts=new MultiContactFrictionSolver.FrictionContact[active.size()];
     for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0); }
     Vector3d beforeFrictionVelocity=new Vector3d(solverVelocity), beforeFrictionAngular=new Vector3d(solverAngular);
-    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,false,0,0,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,false,0,0,FRICTION,DT,iterations);
     // Fold the solved friction impulses' effect into the real (gravity-inclusive) tracked state.
     velocity.add(new Vector3d(solverVelocity).sub(beforeFrictionVelocity));
     angular.add(new Vector3d(solverAngular).sub(beforeFrictionAngular));
@@ -170,6 +177,19 @@ class SuspensionCoupledReplayTest {
   System.out.println("[SuspensionCoupledReplayTest] peak |angularVelocity| over 60 ticks - old="+maxOmegaOld+" rad/s, new="+maxOmegaNew+" rad/s");
   assertTrue(maxOmegaNew < maxOmegaOld * 0.5,
     "with real suspension/load-transfer coupling, the corrected solver should still substantially reduce peak angular velocity versus the pre-fix computation - old="+maxOmegaOld+" new="+maxOmegaNew);
+ }
+
+ /** Ticket comment 53131: re-run this genuine, suspension-coupled, perturbed-initial-angular-
+  * velocity settling replay at the experimental candidate iteration count, instead of a trivial
+  * zero-in/zero-out single solve. Confirms the no-wobble improvement over the pre-fix
+  * computation is preserved (not just "not worse") at 64 iterations, not only at the shipped 4. */
+ @Test void newSolverAtCandidateIterationsStaysMoreBoundedThanOldOverSixtyTicks() {
+  int candidateIterations=64;
+  double maxOmegaOld=maxOmegaOverTicks(false, 60);
+  double maxOmegaNewAtCandidate=maxOmegaOverTicks(true, 60, candidateIterations);
+  System.out.println("[SuspensionCoupledReplayTest] peak |angularVelocity| over 60 ticks at "+candidateIterations+" iterations - old="+maxOmegaOld+" rad/s, new="+maxOmegaNewAtCandidate+" rad/s");
+  assertTrue(maxOmegaNewAtCandidate < maxOmegaOld * 0.5,
+    "the no-wobble improvement must be preserved at "+candidateIterations+" iterations, not just at the shipped default - old="+maxOmegaOld+" new="+maxOmegaNewAtCandidate);
  }
 
  /**
