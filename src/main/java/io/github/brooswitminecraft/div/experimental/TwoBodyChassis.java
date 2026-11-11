@@ -145,23 +145,38 @@ public final class TwoBodyChassis {
  public static Vector3d jointAnchorLocalInLowerBody(double halfHeightB) { return new Vector3d(0, halfHeightB / 2, 0); }
 
  /**
-  * World-frame offset to ADD to a point already expressed relative to G (the original single-
-  * body chassis center - what every wheel anchor/contact point in this ticket's own force code
-  * is computed relative to) to re-express that SAME point relative to the given half's own
-  * center instead (ticket comment 53272's correctness fix: {@code applyImpulseAtPoint} and this
-  * codebase's own hand-rolled impulse-sizing math both need a lever arm relative to the body
-  * actually receiving the impulse, not G). Independent of mass fraction {@code f} - this is pure
-  * geometry (the split plane's position never depends on how mass is divided across it); f only
-  * affects each half's own mass/inertia, not where its own center sits.
+  * World-frame correction to ADD to a lever arm/contact point already expressed relative to G
+  * (the original single-body chassis center - what every wheel anchor/contact point in this
+  * ticket's own force code is computed relative to, as {@code armOld = P - G} for a world
+  * contact {@code P}) to get the SAME point expressed relative to the given half's own center
+  * instead ({@code armNew = P - Cowner}) - what {@code applyImpulseAtPoint} and this codebase's
+  * own hand-rolled impulse-sizing math both actually need (a lever arm relative to the body
+  * receiving the impulse, not G).
+  *
+  * <p>Derivation (review 53277's correction of an earlier, wrong version of this method - see
+  * below): {@code armNew = P - Cowner = (P - G) + (G - Cowner) = armOld + (G - Cowner)}, so the
+  * correction to ADD is {@code (G - Cowner)}, in WORLD frame. From
+  * {@code Cowner = G + orientation.transform(centerOffsetFromG(b))} (the construction formula
+  * {@code TwoBodyLifecycle.create} itself uses), {@code (G - Cowner) =
+  * -orientation.transform(centerOffsetFromG(b)) = orientation.transform(-centerOffsetFromG(b))}.
+  * For the upper half, {@code upperCenterOffsetFromG(b) = (0,+b/2,0)}, so
+  * {@code -upperCenterOffsetFromG(b) = (0,-b/2,0) = jointAnchorLocalInUpperBody(b)} exactly - NO
+  * negation needed once expressed via {@code jointAnchorLocalInUpperBody}/
+  * {@code jointAnchorLocalInLowerBody}, which already encode the needed sign. An EARLIER version
+  * of this method added an extra negation (reasoning, wrongly, from "G + correction = Cowner" -
+  * true, but the wrong invariant: that describes reconstructing a CENTER from G, the opposite
+  * direction from correcting a LEVER ARM measured from G). The actual, correct invariant - what
+  * this method must satisfy, and what its own test checks directly - is
+  * {@code Cowner + (P - G + correction) == P} for an arbitrary contact {@code P}, not
+  * {@code G + correction == Cowner}.
+  *
+  * <p>Independent of mass fraction {@code f} - this is pure geometry (the split plane's position
+  * never depends on how mass is divided across it); f only affects each half's own mass/inertia,
+  * not where its own center sits.
   */
- public static Vector3d worldOffsetFromGToOwnCenter(Quaterniond orientation, double halfHeightB, boolean upperOwned) {
-  // jointAnchorLocalInXBody(b) is G's own local offset FROM that body's own center (i.e.
-  // ownCenter + transform(jointAnchorLocalInXBody) == G), so the offset FROM G TO that body's
-  // own center is the NEGATION of that, transformed into world space - caught by this class's
-  // own discriminating round-trip test (worldOffsetFromGToOwnCenterRoundTripsToTheRealOwnerCenter
-  // UnderRotationAtBothFractions) failing on the very first run with the sign the other way.
-  Vector3d localOffset = upperOwned ? jointAnchorLocalInUpperBody(halfHeightB) : jointAnchorLocalInLowerBody(halfHeightB);
-  return orientation.transform(new Vector3d(localOffset).negate());
+ public static Vector3d worldLeverArmCorrection(Quaterniond orientation, double halfHeightB, boolean upperOwned) {
+  Vector3d localCorrection = upperOwned ? jointAnchorLocalInUpperBody(halfHeightB) : jointAnchorLocalInLowerBody(halfHeightB);
+  return orientation.transform(new Vector3d(localCorrection));
  }
 
  /**

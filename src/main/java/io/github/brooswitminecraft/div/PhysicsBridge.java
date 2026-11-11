@@ -926,6 +926,25 @@ public final class PhysicsBridge {
    // that's the point whose own motion determines the raycast length's rate of change). Those
    // two points differ by roughly radius+compression along `up`; on a rotating chassis, velocity
    // differs between them by angular x that offset (fixed by sampling at `point` - 691f11b).
+   // GroundOwner (review 53272/53277): a body's real mass/inertia/live velocity/angular, plus
+   // the world-frame lever-arm correction needed to re-express a G-relative point/arm relative
+   // to THAT body's own center - see TwoBodyChassis.worldLeverArmCorrection's own doc for the
+   // exact derivation and the invariant it satisfies (Cowner+(armOld+correction)==P for an
+   // arbitrary contact P, NOT "G+correction==Cowner" - an earlier version of this comment/the
+   // function itself got that distinction backwards, caught by review and by that function's own
+   // corrected test). For the single-body path this is exactly today's values (zero correction,
+   // no change) - computed once per candidate here rather than per-wheel, so Phase 1's own
+   // localVelocity/effectiveMassDamper calculations (review 53277's explicit "audit that too" -
+   // an earlier version left those using the full-vehicle mass/inertia/velocity/angular and the
+   // raw G-relative arm/point even when a wheel was two-body-owned) can use the SAME
+   // owner-correct values Phase 2/3 already do, not a second, inconsistent set.
+   record GroundOwner(RigidBodyHandle handle, double ownerMass, Vector3d ownerInertiaBody, Vector3d ownerVelocity, Vector3d ownerAngular, Vector3d leverArmCorrection) {}
+   GroundOwner lowerCandidate=new GroundOwner(handle, twoBodyActive?lowerMassKg:mass, twoBodyActive?lowerInertiaBody:inertiaBody, velocity, angular,
+     twoBodyActive?io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldLeverArmCorrection(q,halfExtents.y,false):new Vector3d());
+   GroundOwner upperCandidate=twoBodyActive
+     ? new GroundOwner(upperHandle,upperMassKg,upperInertiaBody,upperHandle.getLinearVelocity(new Vector3d()),upperHandle.getAngularVelocity(new Vector3d()),
+         io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldLeverArmCorrection(q,halfExtents.y,true))
+     : lowerCandidate; // never actually selected when !twoBodyActive (isUpperHalf is always false then) - just needs to be non-null
    // upperOwned (review 53272): this wheel's actual owner half when twoBodyActive, by
    // TwoBodyChassis.isUpperHalf on its own local anchor Y relative to G - NOT an assumption that
    // every wheel is lower-owned. Always false when !twoBodyActive (meaningless, unused there).
@@ -937,6 +956,7 @@ public final class PhysicsBridge {
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
     boolean upperOwned=twoBodyActive && io.github.brooswitminecraft.div.experimental.TwoBodyChassis.isUpperHalf(anchor.y);
+    GroundOwner wheelOwner=upperOwned?upperCandidate:lowerCandidate;
     Vector3d arm=q.transform(new Vector3d(anchor));
     Vector3d start=new Vector3d(pose.position()).add(arm);
     double length=radius+tuning.suspensionTravel;
@@ -949,22 +969,28 @@ public final class PhysicsBridge {
      continue;
     }
     double compression=length-hit.getLocation().distanceTo(vec(start));
-    Vector3d localVelocity=new Vector3d(angular).cross(arm).add(velocity);
+    // localVelocity samples the suspension anchor's own motion for damping - must use the
+    // OWNING body's real velocity/angular and an owner-relative arm, not the generic
+    // velocity/angular/G-relative arm (review 53277's audit finding).
+    Vector3d ownerArm=new Vector3d(arm).add(wheelOwner.leverArmCorrection());
+    Vector3d localVelocity=new Vector3d(wheelOwner.ownerAngular()).cross(ownerArm).add(wheelOwner.ownerVelocity());
     Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
+    Vector3d ownerPoint=new Vector3d(point).add(wheelOwner.leverArmCorrection());
     // Opt-in experimental effective-mass damping candidate (ticket comments 53214/53219) - OFF
     // (EXPERIMENTAL_EFFECTIVE_MASS_DAMPING false, the shipped default) means damperResult is
     // exactly new EffectiveMassDamperResult(damper, NaN) - damperUsed==damper byte-for-byte,
-    // nothing about today's behavior changes. Sourced from this body's own real inertiaBody (its
-    // actual box mass/inertia, PhysicsBridge.Body constructor) and this wheel's own real contact
-    // point (terrain hit location, same `point` used for friction below) along `up` - this
-    // body's own chassis/suspension-ray direction, NOT a re-derived actual terrain surface
-    // normal (review comment 53223's correction; no geometry change, this is the same `up`
-    // the existing suspension/friction code already uses at this exact call). Satisfies comment
-    // 53219's "actual box mass/inertia and actual contact direction/arm" requirement using that
+    // nothing about today's behavior changes. Sourced from the OWNING body's own real
+    // inertia/mass (full-vehicle values on the single-body path, unchanged) and this wheel's own
+    // owner-relative contact point (review 53277's same audit finding - an earlier version used
+    // the full-vehicle mass/inertiaBody and the raw G-relative point even for an upper-owned
+    // wheel) along `up` - this body's own chassis/suspension-ray direction, NOT a re-derived
+    // actual terrain surface normal (review comment 53223's correction; no geometry change, this
+    // is the same `up` the existing suspension/friction code already uses at this exact call).
+    // Satisfies comment 53219's "actual box mass/inertia and actual contact direction/arm" requirement using that
     // direction. See PhysicsBridge.effectiveMassDamper's own doc for the guard/fallback behavior
     // and the measured record showing this is NOT a validated fix.
     var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
-      ? effectiveMassDamper(spring,mass,point,up,inverse,inertiaBody,damper)
+      ? effectiveMassDamper(spring,wheelOwner.ownerMass(),ownerPoint,up,inverse,wheelOwner.ownerInertiaBody(),damper)
       : new EffectiveMassDamperResult(damper, Double.NaN);
     double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),spring,damperResult.damper()));
     double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
@@ -990,10 +1016,14 @@ public final class PhysicsBridge {
    // every downstream phase (native sync, friction solve, self-right support gating) correctly
    // sees "no wheels" this tick instead of a half-wrong result. Logged once per Body instance,
    // not every tick, so a persistently-mixed vehicle cannot spam the log forever.
-   record GroundOwner(RigidBodyHandle handle, double ownerMass, Vector3d ownerInertiaBody, Vector3d ownerVelocity, Vector3d ownerAngular, Vector3d pointOffsetWorld) {}
+   // Reuses the SAME lowerCandidate/upperCandidate computed before Phase 1 (review 53277's audit
+   // finding - an earlier version recomputed a second, separately-named GroundOwner here from
+   // scratch, which is how Phase 1's own localVelocity/effectiveMassDamper ended up using
+   // un-owner-corrected values while this block had the correct ones) - only the "which ONE half
+   // actually owns every wheel this tick" selection happens here.
    GroundOwner owner;
    if (!twoBodyActive) {
-    owner=new GroundOwner(handle,mass,inertiaBody,velocity,angular,new Vector3d());
+    owner=lowerCandidate; // == the single-body values (see lowerCandidate's own ternary above)
    } else {
     boolean anyUpper=false, anyLower=false;
     for (var h:hits) { if (h.upperOwned()) anyUpper=true; else anyLower=true; }
@@ -1003,15 +1033,13 @@ public final class PhysicsBridge {
       loggedMixedOwnershipWarning=true;
      }
      hits.clear();
-     owner=new GroundOwner(handle,mass,inertiaBody,velocity,angular,new Vector3d()); // unused once hits is empty - Phase2/3 below iterate zero contacts either way
+     owner=lowerCandidate; // unused once hits is empty - Phase2/3 below iterate zero contacts either way
     } else if (anyUpper) {
-     Vector3d offset=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldOffsetFromGToOwnCenter(q,halfExtents.y,true);
-     owner=new GroundOwner(upperHandle,upperMassKg,upperInertiaBody,upperHandle.getLinearVelocity(new Vector3d()),upperHandle.getAngularVelocity(new Vector3d()),offset);
+     owner=upperCandidate;
     } else {
      // anyLower, or hits is empty (no ray hit this tick at all) - lower is the harmless default
      // when there is nothing to own either way.
-     Vector3d offset=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.worldOffsetFromGToOwnCenter(q,halfExtents.y,false);
-     owner=new GroundOwner(handle,lowerMassKg,lowerInertiaBody,velocity,angular,offset);
+     owner=lowerCandidate;
     }
    }
    // Native contact-ownership sync (ticket comment 53182/53182-correction): confirmed by reading
@@ -1126,12 +1154,12 @@ public final class PhysicsBridge {
    for (var h:hits) {
     Vector3d verticalImpulse=new Vector3d(up).mul(h.normal()*DT);
     workingVelocity.add(new Vector3d(verticalImpulse).div(owner.ownerMass()));
-    Vector3d ownerPoint=new Vector3d(h.point()).add(owner.pointOffsetWorld());
+    Vector3d ownerPoint=new Vector3d(h.point()).add(owner.leverArmCorrection());
     Vector3d torqueBody=inverse.transform(new Vector3d(ownerPoint).cross(verticalImpulse));
     workingAngular.add(q.transform(new Vector3d(torqueBody.x/owner.ownerInertiaBody().x,torqueBody.y/owner.ownerInertiaBody().y,torqueBody.z/owner.ownerInertiaBody().z)));
    }
    var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
-     new Vector3d(h.point()).add(owner.pointOffsetWorld()),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
+     new Vector3d(h.point()).add(owner.leverArmCorrection()),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,owner.ownerMass(),owner.ownerInertiaBody(),q,inverse,workingVelocity,workingAngular,
      braking,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,DT,
      effectiveFrictionSolverIterations());
@@ -1139,7 +1167,7 @@ public final class PhysicsBridge {
    // application/logging shape as before.
    for (int i=0;i<hits.size();i++) {
     var h=hits.get(i); var wheel=h.wheel(); var tire=results[i];
-    Vector3d point=new Vector3d(h.point()).add(owner.pointOffsetWorld()), forward=h.forward(), right=h.right();
+    Vector3d point=new Vector3d(h.point()).add(owner.leverArmCorrection()), forward=h.forward(), right=h.right();
     Vector3d contactVelocity=new Vector3d(owner.ownerAngular()).cross(point).add(owner.ownerVelocity());
     double speed=contactVelocity.dot(forward), sideSpeed=contactVelocity.dot(right);
     Vector3d force=new Vector3d(up).mul(h.normal()).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);

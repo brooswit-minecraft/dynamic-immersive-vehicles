@@ -181,20 +181,33 @@ class TwoBodyChassisTest {
  // with a real nonzero rotation, not only the unchanged (f-independent, zero-rotation) off-path
  // behavior every other test in this investigation already covers.
 
- @Test void worldOffsetFromGToOwnCenterRoundTripsToTheRealOwnerCenterUnderRotationAtBothFractions() {
-  Quaterniond q = new Quaterniond().rotateY(Math.toRadians(40)).rotateX(Math.toRadians(15));
+ /** Review 53277's correction: the FIRST version of this test checked "G + correction ==
+  * Cowner" - true, but the WRONG invariant for a lever-arm correction (that describes
+  * reconstructing a center from G, not correcting an arm measured FROM G). The actual invariant
+  * {@code worldLeverArmCorrection} must satisfy, checked directly here for an ARBITRARY contact
+  * point P (not G itself): {@code Cowner + (armOld + correction) == P}, where
+  * {@code armOld = P - G} is exactly what every wheel's {@code point}/{@code arm} in stepGround
+  * already is. Checked for both halves, at IDENTITY orientation AND a real non-axis-aligned
+  * rotation, per review's explicit ask - this is independent of mass fraction (pure geometry, see
+  * the method's own doc), so f is not varied here (already confirmed elsewhere that f doesn't
+  * affect either half's own center position). */
+ @Test void worldLeverArmCorrectionSatisfiesTheActualLeverArmInvariantForAnArbitraryContactPoint() {
   Vector3d knownG = new Vector3d(5000, 80, 5000);
-  for (double f : new double[]{0.5, 0.4}) {
-   var config = new TwoBodyChassis.Config(f);
-   // Independently derive each half's real world center the same way TwoBodyLifecycle.create
-   // does (upper/lowerCenterOffsetFromG, NOT the function under test), then confirm G + the
-   // tested offset lands exactly back on that independently-derived center.
-   Vector3d upperCenter = new Vector3d(q.transform(new Vector3d(TwoBodyChassis.upperCenterOffsetFromG(B)))).add(knownG);
-   Vector3d lowerCenter = new Vector3d(q.transform(new Vector3d(TwoBodyChassis.lowerCenterOffsetFromG(B)))).add(knownG);
-   Vector3d recoveredUpperCenter = new Vector3d(knownG).add(TwoBodyChassis.worldOffsetFromGToOwnCenter(q, B, true));
-   Vector3d recoveredLowerCenter = new Vector3d(knownG).add(TwoBodyChassis.worldOffsetFromGToOwnCenter(q, B, false));
-   assertEquals(upperCenter.x, recoveredUpperCenter.x, 1e-9, "f="+f); assertEquals(upperCenter.y, recoveredUpperCenter.y, 1e-9, "f="+f); assertEquals(upperCenter.z, recoveredUpperCenter.z, 1e-9, "f="+f);
-   assertEquals(lowerCenter.x, recoveredLowerCenter.x, 1e-9, "f="+f); assertEquals(lowerCenter.y, recoveredLowerCenter.y, 1e-9, "f="+f); assertEquals(lowerCenter.z, recoveredLowerCenter.z, 1e-9, "f="+f);
+  // An arbitrary real contact point, well off both G and either half's own center - if the
+  // correction's sign or magnitude were wrong, this would not round-trip back to P.
+  Vector3d contactP = new Vector3d(5000.8, 79.1, 5001.3);
+  for (Quaterniond q : new Quaterniond[]{new Quaterniond(), new Quaterniond().rotateY(Math.toRadians(40)).rotateX(Math.toRadians(15))}) {
+   Vector3d armOld = new Vector3d(contactP).sub(knownG);
+   for (boolean upperOwned : new boolean[]{true, false}) {
+    Vector3d ownCenter = new Vector3d(knownG).add(q.transform(new Vector3d(upperOwned ? TwoBodyChassis.upperCenterOffsetFromG(B) : TwoBodyChassis.lowerCenterOffsetFromG(B))));
+    Vector3d correction = TwoBodyChassis.worldLeverArmCorrection(q, B, upperOwned);
+    Vector3d armNew = new Vector3d(armOld).add(correction);
+    Vector3d reconstructedP = new Vector3d(ownCenter).add(armNew);
+    String label = "upperOwned="+upperOwned+" rotated="+!q.equals(new Quaterniond());
+    assertEquals(contactP.x, reconstructedP.x, 1e-9, label);
+    assertEquals(contactP.y, reconstructedP.y, 1e-9, label);
+    assertEquals(contactP.z, reconstructedP.z, 1e-9, label);
+   }
   }
  }
 
