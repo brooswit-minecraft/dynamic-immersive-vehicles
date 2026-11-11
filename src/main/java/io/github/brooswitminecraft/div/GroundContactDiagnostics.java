@@ -67,9 +67,12 @@ final class GroundContactDiagnostics {
  private GroundContactDiagnostics() {}
  /** Called once from the mod's own startup, independent of any vehicle ever activating - proves
   * logging readiness even when every vehicle falls back before reaching any later diagnostic
-  * call at all. */
- static void logStartupMarker() {
-  if (ENABLED) LOGGER.info("[DIV debugGroundContact] diagnostics ENABLED (-Ddiv.debugGroundContact=true) - mod startup reached");
+  * call at all. {@code debugGroundContactTicks} is the already-resolved (validated/defaulted,
+  * see {@code PhysicsBridge.resolveDebugGroundContactTicks}) window length Body will use this
+  * run - surfaced here so a configured-but-invalid/out-of-range value is visible at startup
+  * rather than only inferable from counting log lines later (ticket comment 53098). */
+ static void logStartupMarker(int debugGroundContactTicks) {
+  if (ENABLED) LOGGER.info("[DIV debugGroundContact] diagnostics ENABLED (-Ddiv.debugGroundContact=true) - mod startup reached, groundContactTicks="+debugGroundContactTicks);
  }
  // Keyed by entity UUID AND side together (a plain string key, "<uuid>:client"/"<uuid>:server"),
  // not UUID alone: in an integrated/singleplayer environment the same entity's client and server

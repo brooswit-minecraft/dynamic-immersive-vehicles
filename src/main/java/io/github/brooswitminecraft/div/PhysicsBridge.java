@@ -427,6 +427,29 @@ public final class PhysicsBridge {
  static double suspensionDamper(double mass, int wheelCount, double spring) {
   return 2*Math.sqrt(spring*mass/wheelCount)*.7;
  }
+ /** Default length, in ticks, of {@code Body}'s bounded ground-contact trace (ticket comment
+  * 53095/53098) when {@code -Ddiv.debugGroundContactTicks} is unset or invalid. */
+ static final int DEFAULT_DEBUG_GROUND_CONTACT_TICKS = 200;
+ /** Documented upper bound on that window: this trace is deliberately bounded instrumentation,
+  * not permanent capture (see {@code Body}'s own class doc) - 12,000 ticks (10 minutes at the
+  * fixed 20tps tick rate) is generous for a single manual test session while still refusing to
+  * let a mistyped huge value turn this into unbounded logging. */
+ static final int MAX_DEBUG_GROUND_CONTACT_TICKS = 12000;
+ /**
+  * Pure parse/validate for {@code -Ddiv.debugGroundContactTicks} (ticket comment 53095: the
+  * previous hardcoded 200-tick window, counted from placement rather than from control input,
+  * missed throttle onset that started later than ~10s after spawn; comment 53098: ship the
+  * configurable duration alone first, skip a control-triggered re-arm for now). Extracted the
+  * same way as {@link #suspensionSpring} so it is unit-testable without any Minecraft/SLF4J
+  * dependency. Never throws - anything not a positive integer within the documented bound
+  * falls back to the default.
+  */
+ static int resolveDebugGroundContactTicks(String raw) {
+  if (raw == null) return DEFAULT_DEBUG_GROUND_CONTACT_TICKS;
+  int parsed;
+  try { parsed = Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return DEFAULT_DEBUG_GROUND_CONTACT_TICKS; }
+  return parsed>0 && parsed<=MAX_DEBUG_GROUND_CONTACT_TICKS ? parsed : DEFAULT_DEBUG_GROUND_CONTACT_TICKS;
+ }
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
@@ -435,13 +458,20 @@ public final class PhysicsBridge {
   // rationale, and why a Minecraft/SLF4J-typed diagnostic is safe to reference from Body but not
   // from the outer PhysicsBridge class or activateOrClassify's generic signature). Logs each
   // wheel's support-ray geometry/result and that tick's suspension/tire inputs for a bounded
-  // number of ticks per activated body (DEBUG_GROUND_CONTACT_TICKS, ~10s at 20tps - long enough
-  // to capture placement settling, short enough that it is not permanent instrumentation or
-  // unbounded spam). Activation/classification/construction-failure visibility now lives on
-  // GroundContactDiagnostics instead, called directly from active() (outer class) - that part
-  // needs to run even for a vehicle that never reaches Body at all.
+  // number of ticks per activated body, counted from ACTIVATION (placement), not from control
+  // input - comment 53095 found the previous hardcoded 200-tick (~10s) default too short to
+  // reach throttle onset in a session that idled after spawning before actually driving.
+  // DEBUG_GROUND_CONTACT_TICKS is now configurable via -Ddiv.debugGroundContactTicks (parsed
+  // once, outside the per-tick path, by PhysicsBridge.resolveDebugGroundContactTicks - see its
+  // doc for the validated bound and fallback behavior) so a longer window can be requested for a
+  // manual test session without a new build. Still bounded, still self-limiting - no
+  // control-triggered re-arm (deliberately deferred, comment 53098: unnecessary complexity for
+  // this first diagnostic-only candidate when duration alone covers the test). Activation/
+  // classification/construction-failure visibility lives on GroundContactDiagnostics instead,
+  // called directly from active() (outer class) - that part needs to run even for a vehicle that
+  // never reaches Body at all.
   private static final boolean DEBUG_GROUND_CONTACT = GroundContactDiagnostics.ENABLED;
-  private static final int DEBUG_GROUND_CONTACT_TICKS = 200;
+  private static final int DEBUG_GROUND_CONTACT_TICKS = resolveDebugGroundContactTicks(System.getProperty("div.debugGroundContactTicks"));
   private static final Logger LOGGER = LogUtils.getLogger();
   private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
   /** Full-precision "(x,y,z)" - JOML's own Vector3d.toString() truncates to a handful of
