@@ -53,6 +53,13 @@ neoForge {
    if (System.getenv('DIV_TWO_BODY_IMPULSE_PROBE') == 'true') {
     jvmArgument('-Ddiv.experimentalTwoBodyImpulseProbe=true')
    }
+   // Opt-in real-vehicle ground-support fixture (review comment 53287) - also turns on the
+   // two-body chassis candidate itself (EXPERIMENTAL_TWO_BODY_CHASSIS), since the whole point of
+   // this fixture is exercising stepGround with it actually enabled, not merely present.
+   if (System.getenv('DIV_GROUND_SUPPORT_FIXTURE') == 'true') {
+    jvmArgument('-Ddiv.experimentalGroundSupportFixture=true')
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=true')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }

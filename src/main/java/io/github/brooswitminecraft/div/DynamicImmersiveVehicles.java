@@ -25,5 +25,12 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.TwoBodyImpulseResponseProbe.maybeRun(overworld);
   });
+  // Opt-in, CI/isolated-host-only real-vehicle ground-support fixture (review comment 53287) -
+  // OFF by default, a strict no-op otherwise. Never touches any real vehicle or world content -
+  // see GroundSupportFixtureProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSupportFixtureProbe.maybeRun(overworld);
+  });
  }
 }
