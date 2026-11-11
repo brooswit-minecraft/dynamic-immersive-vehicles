@@ -48,6 +48,11 @@ neoForge {
    if (System.getenv('DIV_ANCHOR_FRAME_PROBE') == 'true') {
     jvmArgument('-Ddiv.experimentalAnchorFrameProbe=true')
    }
+   // Opt-in two-body impulse-response probe (review comment 53280) - same gating pattern as
+   // the anchor-frame probe above; OFF for every normal `gradle runServer`.
+   if (System.getenv('DIV_TWO_BODY_IMPULSE_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalTwoBodyImpulseProbe=true')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }

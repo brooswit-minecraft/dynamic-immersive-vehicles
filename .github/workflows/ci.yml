@@ -205,3 +205,77 @@ jobs:
           path: |
             server.log
             run/logs/**
+
+  # Bounded, isolated runtime probe (review comment 53280) measuring the real two-half chassis'
+  # ACTUAL constrained response to a known impulse, at both f=0.5 and f=0.4, against the
+  # isolated-owner-half assumption the production friction solver currently makes and the
+  # physically-correct combined-assembly prediction - see TwoBodyImpulseResponseProbe's own doc.
+  # Same disposable-world/hardened pattern as anchor-frame-probe above (short bounded wait, fail
+  # fast on any FAILED marker, non-fatal short-timeout log upload).
+  two-body-impulse-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 8.8
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.8'
+
+      - name: Accept Minecraft EULA for this disposable CI run only
+        run: |
+          mkdir -p run
+          echo "eula=true" > run/eula.txt
+
+      - name: Boot headless dedicated server with the two-body impulse-response probe enabled
+        env:
+          DIV_TWO_BODY_IMPULSE_PROBE: 'true'
+        run: |
+          mkfifo server.stdin
+          exec 3<> server.stdin
+          timeout 660 gradle --no-daemon --stacktrace runServer <&3 > server.log 2>&1 &
+          gradle_pid=$!
+          elapsed=0
+          limit=600
+          status=TIMEOUT
+          while kill -0 "$gradle_pid" 2>/dev/null; do
+            if grep -qE '\[DIV twoBodyImpulseProbe\] COMPLETE' server.log 2>/dev/null; then
+              status=PROBE_COMPLETE; break
+            fi
+            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|\[.*\] \[.*/FATAL\]|twoBodyImpulseProbe\] failed to start|twoBodyImpulseProbe\] FAILED' server.log 2>/dev/null; then
+              status=CRASHED; break
+            fi
+            sleep 3; elapsed=$((elapsed + 3))
+            if [ "$elapsed" -ge "$limit" ]; then status=TIMEOUT; break; fi
+          done
+          printf 'stop\n' >&3
+          exec 3>&-
+          wait "$gradle_pid" 2>/dev/null || true
+          echo "=== two-body impulse probe log lines ==="
+          grep 'DIV twoBodyImpulseProbe' server.log || true
+          echo "=== result: $status ==="
+          if [ "$status" != "PROBE_COMPLETE" ]; then
+            echo "Two-body impulse probe did not complete cleanly (status=$status) - see server.log." >&2
+            exit 1
+          fi
+
+      - name: Upload two-body impulse probe log
+        if: always()
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: two-body-impulse-probe-log-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            server.log
+            run/logs/**

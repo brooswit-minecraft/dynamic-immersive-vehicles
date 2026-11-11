@@ -32,14 +32,19 @@ import org.joml.Vector3d;
  * twist") rather than the world-space/echoed-orientation convention {@code createHitch} itself
  * uses - a separate, already-flagged discrepancy in that existing code, not touched here.
  */
-final class TwoBodyLifecycle {
+public final class TwoBodyLifecycle {
  private TwoBodyLifecycle() {}
 
  /** Both half-bodies plus the joint connecting them - everything {@code Body} would need to
   * hold once this is wired in. {@code upperBox}/{@code lowerBox} and their handles are
   * independent Sable rigid bodies; {@code joint} is the single fixed constraint locking all 6
-  * relative axes between them, with contacts already suppressed between the pair. */
- record Bodies(BoxPhysicsObject upperBox, BoxPhysicsObject lowerBox,
+  * relative axes between them, with contacts already suppressed between the pair.
+  *
+  * <p>Public (same visibility rationale as {@code HitchJoint}): {@code TwoBodyImpulseResponseProbe}
+  * (ticket comment 53280) needs to build the exact same production two-half chassis from the
+  * {@code io.github.brooswitminecraft.div.experimental} package to empirically test the real
+  * joint-coupled response, not a reimplementation of this construction. */
+ public record Bodies(BoxPhysicsObject upperBox, BoxPhysicsObject lowerBox,
      RigidBodyHandle upperHandle, RigidBodyHandle lowerHandle, PhysicsConstraintHandle joint) {}
 
  /**
@@ -55,7 +60,7 @@ final class TwoBodyLifecycle {
   * @param halfExtents the ORIGINAL single-body chassis half-extents (not halved) - each half's
   *  own half-extents are derived from this via {@code TwoBodyChassis.halfExtentsOfEachHalf}.
   */
- static Bodies create(ServerLevel level, Vector3d centerPosition, Quaterniond centerOrientation,
+ public static Bodies create(ServerLevel level, Vector3d centerPosition, Quaterniond centerOrientation,
      Vector3d halfExtents, double totalMassKg, TwoBodyChassis.Config config) {
   double halfHeightB = halfExtents.y;
   Vector3d eachHalfExtents = TwoBodyChassis.halfExtentsOfEachHalf(halfExtents);
@@ -110,7 +115,7 @@ final class TwoBodyLifecycle {
   * once either of its bodies is removed; nothing here has ever called {@code joint.remove()}
   * explicitly, matching how {@code HitchRegistry} tears down a hitch solely by letting the
   * trailer/towing body itself be removed). */
- static void remove(ServerLevel level, Bodies bodies) {
+ public static void remove(ServerLevel level, Bodies bodies) {
   var container = SubLevelContainer.getContainer(level);
   if (container == null) return;
   removeBoth(container.physicsSystem(), bodies.upperBox(), bodies.lowerBox());
