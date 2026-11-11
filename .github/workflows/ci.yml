@@ -333,7 +333,7 @@ jobs:
               && grep -qE '\[DIV groundSupportFixture\] scenario=f=0\.5 COMPLETE' server.log 2>/dev/null; then
               status=PROBE_COMPLETE; break
             fi
-            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|\[.*\] \[.*/FATAL\]|groundSupportFixture\] FAILED' server.log 2>/dev/null; then
+            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|\[.*\] \[.*/FATAL\]|groundSupportFixture\].*FAILED' server.log 2>/dev/null; then
               status=CRASHED; break
             fi
             sleep 3; elapsed=$((elapsed + 3))

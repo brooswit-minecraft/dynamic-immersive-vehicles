@@ -18,7 +18,6 @@ import minecrafttransportsimulator.mcinterface.AWrapperWorld;
 import minecrafttransportsimulator.systems.ConfigSystem;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.levelgen.Heightmap;
 import org.slf4j.Logger;
 import java.util.List;
 import java.util.Set;
@@ -29,7 +28,7 @@ import java.util.Set;
  * TwoBodyChassisTest) would keep passing even if {@code PhysicsBridge.Body.stepGround} still
  * wired the owner-isolated mass/inertia - they are extracted math, not the production code path
  * itself. This probe instead spawns a REAL {@code EntityVehicleF_Physics} with real ground-
- * device wheel parts and a real engine part, over REAL generated terrain, with
+ * device wheel parts and a real engine part, over a real (CI-world, disposable) solid platform, with
  * {@code -Ddiv.experimentalTwoBodyChassis=true} actually enabled, and drives it with direct
  * input-variable writes (no player, no datapack) - so the vehicle's own real {@code moveVehicle}
  * tick genuinely runs through {@code VehicleMovementMixin} -&gt; {@code PhysicsBridge.step} -&gt;
@@ -70,13 +69,36 @@ import java.util.Set;
  *  {@link #TURN_TICKS}, 3 real seconds each) specifically so the vehicle's own real achievable
  *  speed cannot plausibly cross that loaded square within the probe's own bounded window.</li>
  * </ul>
+ *
+ * <p>v3 (this version, per review 53293's independent read of the v2 CI run, 43119570767):
+ * three more concrete fixture-construction defects, none of them a physics change:
+ * <ul>
+ *  <li>f=0.5's spawn column landed on real generated ocean (not solid) and failed outright;
+ *  f=0.4 NPE'd in {@code AEntityD_Definable.updateSubDefinition} ("Cannot invoke
+ *  java.util.List.iterator() because this.definition.definitions is null") - the real stack
+ *  trace showed {@code JSONVehicle.definitions}/{@code JSONPart.definitions} (a
+ *  {@code List<JSONSubDefinition>}) must be populated; passing a sub-definition only to
+ *  {@code ItemVehicle}/{@code ItemPartGroundDevice}/{@code ItemPartEngine}'s own constructor was
+ *  not enough. Fixed: that list is set (with the SAME instance also handed to the item
+ *  constructor) on the vehicle and both part definitions.</li>
+ *  <li>Per review's own suggestion, replaced "search real generated terrain for a solid,
+ *  reasonably flat column" with an explicit carved flat platform ({@link #buildFlatPlatform}) -
+ *  deterministic ground truth regardless of whatever the world generator happens to produce at
+ *  that location (ocean, slope, or otherwise), rather than depending on luck or a search.</li>
+ *  <li>The CI job's own fail-fast regex looked for the literal substring
+ *  {@code "groundSupportFixture] FAILED"}, but this probe's own FAILED lines are
+ *  {@code "groundSupportFixture] scenario=... FAILED"} - never matched, so a fast, clean FAILED
+ *  result from this probe still had to wait out the FULL 600s budget before the job noticed.
+ *  Fixed to match regardless of what sits between.</li>
+ * </ul>
  * Exact joint drift stays a disclosed, deliberate limitation per review's own explicit allowance
  * ("don't let that hold up the useful production-path evidence") - this still does NOT reach
  * into {@code PhysicsBridge.Body}'s private half-body fields; see the rationale below.
  *
- * <p>Method: find real generated terrain (confirmed loaded and solid at some Y via the real
- * heightmap - not a synthetic void scene, unlike the other two probes, since this one
- * specifically needs real wheel-raycast ground contact), seed the two config maps
+ * <p>Method: carve a real, deterministic flat solid platform in this disposable CI world
+ * (confirmed loaded via chunk-grid force-loading, not a synthetic void scene, since this probe
+ * specifically needs real wheel-raycast ground contact - but not dependent on whatever the
+ * world generator happens to produce there either), seed the two config maps
  * {@code AEntityVehicleC_Colliding}'s own constructor requires for an unknown pack ID
  * ({@code ConfigSystem.settings.general.packSpeedFactors}/{@code packVehicleScales}), build a
  * minimal in-Java {@code JSONVehicle} (one collision box sized to match the geometry
@@ -203,14 +225,29 @@ public final class GroundSupportFixtureProbe {
   s.phase = Phase.SPAWNING;
  }
 
+ // Review 53293: real generated terrain is not guaranteed solid or flat at any one chosen
+ // column (confirmed live, CI run 43119570767: the spawn chunk happened to be ocean) - rather
+ // than search generated terrain for a usable spot, carve an explicit flat solid platform in
+ // this disposable CI world instead, so ground truth is deterministic regardless of whatever
+ // the world generator happens to produce there.
+ private static final int PLATFORM_Y = 100;
+ private static final int PLATFORM_RADIUS = 40; // blocks - comfortably covers DRIVE/TURN's real achievable travel at these shortened phase lengths
+
+ private static void buildFlatPlatform(ServerLevel level, int centerX, int centerZ) {
+  var stone = net.minecraft.world.level.block.Blocks.STONE.defaultBlockState();
+  var air = net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+  for (int dx = -PLATFORM_RADIUS; dx <= PLATFORM_RADIUS; dx++) {
+   for (int dz = -PLATFORM_RADIUS; dz <= PLATFORM_RADIUS; dz++) {
+    level.setBlock(new BlockPos(centerX + dx, PLATFORM_Y, centerZ + dz), stone, 3);
+    for (int dy = 1; dy <= 6; dy++) level.setBlock(new BlockPos(centerX + dx, PLATFORM_Y + dy, centerZ + dz), air, 3);
+   }
+  }
+ }
+
  private static void spawn(ServerLevel level, Scenario s) {
   int blockX = s.chunkX * 16 + 8, blockZ = s.chunkZ * 16 + 8;
-  int surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, blockX, blockZ);
-  if (!level.getBlockState(new BlockPos(blockX, surfaceY - 1, blockZ)).isSolid()) {
-   LOGGER.error("[DIV groundSupportFixture] scenario=" + s.label + " FAILED - no solid ground found under (" + blockX + "," + blockZ + ") at surfaceY=" + surfaceY);
-   s.phase = Phase.FAILED;
-   return;
-  }
+  buildFlatPlatform(level, blockX, blockZ);
+  int surfaceY = PLATFORM_Y + 1;
   var packSpeedFactors = ConfigSystem.settings.general.packSpeedFactors.value;
   var packVehicleScales = ConfigSystem.settings.general.packVehicleScales.value;
   packSpeedFactors.putIfAbsent(PACK_ID, 1.0);
@@ -218,7 +255,10 @@ public final class GroundSupportFixtureProbe {
 
   JSONVehicle definition = buildVehicleDefinition(s.systemName);
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
-  var item = new ItemVehicle(definition, firstSubDefinition(definition), PACK_ID);
+  // Reuse the SAME JSONSubDefinition instance already stored in definition.definitions (not a
+  // freshly re-constructed equal-looking one) - keeps the item's own subDefinition and the
+  // definition's own list in agreement by identity, not merely by field value.
+  var item = new ItemVehicle(definition, definition.definitions.get(0), PACK_ID);
   var vehicle = new EntityVehicleF_Physics(world, null, item, null);
   vehicle.position.set(blockX + 0.5, surfaceY + 2.0, blockZ + 0.5); // spawn a little above the real surface so it genuinely falls+settles
   vehicle.orientation.set(new RotationMatrix());
@@ -244,6 +284,12 @@ public final class GroundSupportFixtureProbe {
   v.motorized = new JSONVehicle.VehicleMotorized();
   v.motorized.litVariable = "";
   v.motorized.panel = "";
+  // AEntityD_Definable's own constructor (updateSubDefinition) reads definitions.iterator()
+  // unconditionally - a null list NPEs (confirmed live, CI run 43119570767: "Cannot invoke
+  // java.util.List.iterator() because this.definition.definitions is null"). Passing a
+  // JSONSubDefinition to ItemVehicle's own constructor is not enough on its own; the vehicle's
+  // OWN definition needs this list too, with that exact same instance in it.
+  v.definitions = List.of(firstSubDefinition(v));
 
   var box = new JSONCollisionBox();
   box.pos = new Point3D(0, 0, 0);
@@ -277,8 +323,9 @@ public final class GroundSupportFixtureProbe {
   def.packID = PACK_ID; def.systemName = "wheel";
   def.generic = new JSONPart.JSONPartGeneric();
   def.ground = ground;
+  def.definitions = List.of(firstSubDefinition(def)); // same NPE risk as JSONVehicle.definitions - APart's own constructor chain also reaches AEntityD_Definable
 
-  var item = new ItemPartGroundDevice(def, firstSubDefinition(def), PACK_ID);
+  var item = new ItemPartGroundDevice(def, def.definitions.get(0), PACK_ID);
   APart part = new PartGroundDevice(vehicle, null, slot, item, null);
   vehicle.addPart(part, false);
  }
@@ -303,8 +350,9 @@ public final class GroundSupportFixtureProbe {
   def.packID = PACK_ID; def.systemName = "engine";
   def.generic = new JSONPart.JSONPartGeneric();
   def.engine = engineDef;
+  def.definitions = List.of(firstSubDefinition(def));
 
-  var item = new ItemPartEngine(def, firstSubDefinition(def), PACK_ID);
+  var item = new ItemPartEngine(def, def.definitions.get(0), PACK_ID);
   var engine = new PartEngine(vehicle, null, slot, item, null);
   vehicle.addPart(engine, false);
   forceEngineRunning(engine);
