@@ -11,5 +11,12 @@ public final class DynamicImmersiveVehicles {
   Overrides.load();
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
   NeoForge.EVENT_BUS.addListener((LevelEvent.Unload event) -> PhysicsBridge.unload(event.getLevel()));
+  // Opt-in, CI/isolated-host-only anchor-frame probe (ticket comment 53243/53244) - OFF by
+  // default (Boolean.getBoolean read once inside the probe itself), a strict no-op otherwise.
+  // Never touches any real vehicle or world content - see AnchorFrameProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.AnchorFrameProbe.maybeRun(overworld);
+  });
  }
 }
