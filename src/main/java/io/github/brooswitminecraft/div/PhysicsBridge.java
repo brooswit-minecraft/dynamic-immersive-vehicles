@@ -14,6 +14,7 @@ import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.baseclasses.TowingConnection;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 import minecrafttransportsimulator.entities.instances.PartEngine;
+import minecrafttransportsimulator.entities.instances.PartSeat;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
 import minecrafttransportsimulator.entities.instances.PartPropeller;
 import minecrafttransportsimulator.jsondefs.JSONPart;
@@ -587,8 +588,12 @@ public final class PhysicsBridge {
   // real production angularVelocity data to ~1e-5 rad/s over 30 real ticks across two separate
   // placements (ticket comment 53008). Used by the shared multi-contact friction solve below.
   final Vector3d inertiaBody;
+  // Opt-in self-righting assist (ticket comment 53182/53188) - resolved once at construction
+  // (same lifecycle as tuning itself), not re-resolved every tick.
+  final io.github.brooswitminecraft.div.experimental.SelfRightingAssist.Config selfRight;
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
+   this.selfRight=Overrides.selfRightingConfig(tuning);
    this.flight=Classification.isFlightVehicle(v.definition);
    mass=tuning.massKg != null ? tuning.massKg : Math.max(50,v.getMass());
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
@@ -609,6 +614,13 @@ public final class PhysicsBridge {
    if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] chassisReceipt entity="+v.uniqueUUID+" key="+v.definition.packID+":"+v.definition.systemName
      +" mass="+mass+" center="+vfull(center)+" halfExtents="+vfull(halfExtents)+" hullVolume="+hullVolume
      +" suspensionTravel="+tuning.suspensionTravel+" friction="+tuning.friction+" driveForce="+tuning.driveForce+" brakeForce="+tuning.brakeForce
+     // Provenance (ticket comment 53186/53188: "prove native/metadata values actually reached
+     // runtime rather than merely being parsed") - only the operator-override and documented-
+     // fallback levels are wired to a real source yet (comment 53181/53184), so this is exactly
+     // those two: whether THIS key has an explicit Overrides.get() entry at all, and this
+     // vehicle's own resolved self-right config (OFF unless that entry set all five fields).
+     +" explicitOverrideEntry="+(Overrides.get(v.definition.packID+":"+v.definition.systemName)!=null)
+     +" selfRightConfigured="+(selfRight.strength()>0||selfRight.damping()>0)
      +" nativeInertia=unavailable (Sable 2.0.5's BoxPhysicsObject exposes no native inertia/mass-properties query API - confirmed by its decompiled source; see ticket comment history)");
    box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
    var physics=SubLevelContainer.getContainer(level).physicsSystem();
@@ -816,6 +828,27 @@ public final class PhysicsBridge {
     contact=true;
    }
    if (debugThisTick) debugGroundContactTicksRemaining--;
+   // Opt-in self-righting assist (ticket comment 53182/53188) - OFF (SelfRightingAssist.OFF)
+   // for every vehicle unless its own resolved Overrides metadata sets all five selfRight*
+   // fields; see Overrides.selfRightingConfig. Occupancy: PartSeat extends APart extends
+   // AEntityF_Multipart extends AEntityE_Interactable extends AEntityD_Definable extends
+   // AEntityC_Renderable extends AEntityB_Existing, where the inherited `rider` field
+   // (IWrapperEntity, null when empty) actually lives - a seat part with a non-null rider is
+   // occupied. No vehicle-wide "all riders" collection exists; each seat tracks its own.
+   if (selfRight.strength()>0 || selfRight.damping()>0) {
+    boolean occupied = false;
+    for (var part : v.allParts) if (part instanceof PartSeat seat && seat.rider != null) { occupied = true; break; }
+    Vector3d bodyForward=q.transform(new Vector3d(0,0,1));
+    Vector3d bodyRight=new Vector3d(up).cross(bodyForward);
+    Vector3d selfRightTorque = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.torque(
+      selfRight, bodyForward, up, bodyRight, angular, occupied, contact);
+    if (debugThisTick) LOGGER.info("[DIV debugGroundContact] selfRight occupied="+occupied+" grounded="+contact+" torque="+vfull(selfRightTorque));
+    // World-frame torque*DT, same convention as every other applyTorqueImpulse call in this
+    // class (e.g. stepFlight's control-surface torque just below) - Sable's own handle divides
+    // by the body's inertia tensor internally; this class never does that division itself before
+    // calling applyTorqueImpulse anywhere else, so it must not do so here either.
+    if (selfRightTorque.lengthSquared() > 0) handle.applyTorqueImpulse(new Vector3d(selfRightTorque).mul(DT));
+   }
    double towThrust = applyTowingCompensation(v);
    return contact || drive!=0 || towThrust!=0;
   }

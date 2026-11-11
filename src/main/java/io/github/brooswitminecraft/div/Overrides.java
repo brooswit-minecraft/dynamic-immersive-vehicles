@@ -44,6 +44,17 @@ public final class Overrides {
   public Double hullFillFactor;
   public Double waterDrag;
   public Double propellerForce;
+  // Opt-in self-righting assist (ticket comment 53182/53188) - ALL FIVE must be explicitly set
+  // together for the assist to activate at all (see Overrides.selfRightingConfig); there is no
+  // flat fallback for any of these fields, unlike the physics defaults above - an unconfigured
+  // vehicle gets no assist, full stop. Units/semantics match io.github.brooswitminecraft.div.
+  // experimental.SelfRightingAssist.Config exactly (strength N*m, damping N*m*s/rad, maxTorque
+  // N*m, both fade angles in degrees up to that class's own HARD_SAFETY_CAP_DEGREES).
+  public Double selfRightStrength;
+  public Double selfRightDamping;
+  public Double selfRightMaxTorque;
+  public Double selfRightFadeStartDegrees;
+  public Double selfRightFadeEndDegrees;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -57,6 +68,12 @@ public final class Overrides {
    if (hullFillFactor != null && !(hullFillFactor > 0 && hullFillFactor <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (waterDrag != null && !(waterDrag >= 0 && waterDrag <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (propellerForce != null && !(propellerForce >= 0 && propellerForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (selfRightStrength != null && !(Double.isFinite(selfRightStrength) && selfRightStrength >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (selfRightDamping != null && !(Double.isFinite(selfRightDamping) && selfRightDamping >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (selfRightMaxTorque != null && !(Double.isFinite(selfRightMaxTorque) && selfRightMaxTorque >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   double hardCap = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.HARD_SAFETY_CAP_DEGREES;
+   if (selfRightFadeStartDegrees != null && !(Double.isFinite(selfRightFadeStartDegrees) && selfRightFadeStartDegrees >= 0 && selfRightFadeStartDegrees <= hardCap)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (selfRightFadeEndDegrees != null && !(Double.isFinite(selfRightFadeEndDegrees) && selfRightFadeEndDegrees > (selfRightFadeStartDegrees!=null?selfRightFadeStartDegrees:0) && selfRightFadeEndDegrees <= hardCap)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -76,7 +93,24 @@ public final class Overrides {
   c.enabled=t.enabled; c.massKg=t.massKg; c.suspensionTravel=t.suspensionTravel; c.friction=t.friction;
   c.driveForce=t.driveForce; c.brakeForce=t.brakeForce; c.maxSteerDegrees=t.maxSteerDegrees;
   c.hullFillFactor=t.hullFillFactor; c.waterDrag=t.waterDrag; c.propellerForce=t.propellerForce;
+  c.selfRightStrength=t.selfRightStrength; c.selfRightDamping=t.selfRightDamping; c.selfRightMaxTorque=t.selfRightMaxTorque;
+  c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
   return c;
+ }
+ /** Builds a {@code SelfRightingAssist.Config} from a resolved Tuning (ticket comment 53182/
+  * 53188) - ALL FIVE selfRight* fields must be present together, or this returns {@code
+  * SelfRightingAssist.OFF}. Deliberately all-or-nothing: a partially-configured assist has no
+  * sensible meaning (what damping should apply with a strength but no configured maxTorque?),
+  * so a vehicle must opt in with every field or get no assist at all, never a silent mix with
+  * some other default. */
+ public static io.github.brooswitminecraft.div.experimental.SelfRightingAssist.Config selfRightingConfig(Tuning resolved) {
+  if (resolved.selfRightStrength==null || resolved.selfRightDamping==null || resolved.selfRightMaxTorque==null
+    || resolved.selfRightFadeStartDegrees==null || resolved.selfRightFadeEndDegrees==null) {
+   return io.github.brooswitminecraft.div.experimental.SelfRightingAssist.OFF;
+  }
+  return new io.github.brooswitminecraft.div.experimental.SelfRightingAssist.Config(
+    resolved.selfRightStrength, resolved.selfRightDamping, resolved.selfRightMaxTorque,
+    resolved.selfRightFadeStartDegrees, resolved.selfRightFadeEndDegrees);
  }
  /** Review (comment 53184): the shared {@link #FALLBACK} singleton must never be handed out
   * directly - every field on {@code Tuning} is public and mutable (required for Gson), so any
@@ -129,6 +163,13 @@ public final class Overrides {
   result.hullFillFactor = firstNonNull(override!=null?override.hullFillFactor:null, packMetadata!=null?packMetadata.hullFillFactor:null, ivAdapted!=null?ivAdapted.hullFillFactor:null, physicallyDerived!=null?physicallyDerived.hullFillFactor:null, FALLBACK.hullFillFactor);
   result.waterDrag = firstNonNull(override!=null?override.waterDrag:null, packMetadata!=null?packMetadata.waterDrag:null, ivAdapted!=null?ivAdapted.waterDrag:null, physicallyDerived!=null?physicallyDerived.waterDrag:null, FALLBACK.waterDrag);
   result.propellerForce = firstNonNull(override!=null?override.propellerForce:null, packMetadata!=null?packMetadata.propellerForce:null, ivAdapted!=null?ivAdapted.propellerForce:null, physicallyDerived!=null?physicallyDerived.propellerForce:null, FALLBACK.propellerForce);
+  // Self-righting (comment 53182/53188): no FALLBACK entry - stays null (meaning "assist off",
+  // via selfRightingConfig's all-or-nothing check) unless some level actually sets it.
+  result.selfRightStrength = firstNonNull(override!=null?override.selfRightStrength:null, packMetadata!=null?packMetadata.selfRightStrength:null, ivAdapted!=null?ivAdapted.selfRightStrength:null, physicallyDerived!=null?physicallyDerived.selfRightStrength:null);
+  result.selfRightDamping = firstNonNull(override!=null?override.selfRightDamping:null, packMetadata!=null?packMetadata.selfRightDamping:null, ivAdapted!=null?ivAdapted.selfRightDamping:null, physicallyDerived!=null?physicallyDerived.selfRightDamping:null);
+  result.selfRightMaxTorque = firstNonNull(override!=null?override.selfRightMaxTorque:null, packMetadata!=null?packMetadata.selfRightMaxTorque:null, ivAdapted!=null?ivAdapted.selfRightMaxTorque:null, physicallyDerived!=null?physicallyDerived.selfRightMaxTorque:null);
+  result.selfRightFadeStartDegrees = firstNonNull(override!=null?override.selfRightFadeStartDegrees:null, packMetadata!=null?packMetadata.selfRightFadeStartDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeStartDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeStartDegrees:null);
+  result.selfRightFadeEndDegrees = firstNonNull(override!=null?override.selfRightFadeEndDegrees:null, packMetadata!=null?packMetadata.selfRightFadeEndDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeEndDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeEndDegrees:null);
   return result;
  }
  /** {@link #resolved} with no pack-metadata/IV-adapted/physically-derived source yet available -
@@ -145,7 +186,18 @@ public final class Overrides {
   Gson gson = new GsonBuilder().setPrettyPrinting().create();
   try {
    if (!Files.exists(path)) {
-    Files.writeString(path, gson.toJson(new Config(Map.of("packid:vehicle", new Tuning()))));
+    // mtsofficialpack:quad gets a real, working self-right EXAMPLE on a fresh install (ticket
+    // comment 53182/53188's "explicit quad roll-assist" ask) - commented-out-in-spirit by being
+    // an editable example, not force-applied to every vehicle (selfRightingConfig stays OFF for
+    // every OTHER vehicle with no entry at all). Values are a deliberately gentle "cheat a
+    // little" assist for this specific ~350kg ATV, not a generic default: strength/damping/
+    // maxTorque chosen small relative to this vehicle's own inertiaBody.z (~44 kg*m^2, so even
+    // the 600N*m maxTorque caps angular acceleration well under 15rad/s^2), fadeStart/fadeEnd
+    // (10/50deg) keeps it acting only while basically upright.
+    var quadExample = new Tuning();
+    quadExample.selfRightStrength=200.0; quadExample.selfRightDamping=80.0; quadExample.selfRightMaxTorque=600.0;
+    quadExample.selfRightFadeStartDegrees=10.0; quadExample.selfRightFadeEndDegrees=50.0;
+    Files.writeString(path, gson.toJson(new Config(Map.of("packid:vehicle", new Tuning(), "mtsofficialpack:quad", quadExample))));
    }
    Config config = gson.fromJson(Files.readString(path), Config.class);
    if (config == null || config.vehicles == null) throw new IllegalArgumentException("missing vehicles map");

@@ -143,4 +143,51 @@ class OverridesTest {
    Overrides.setForTest(java.util.Map.of()); // restore isolation for other tests
   }
  }
+
+ // Ticket comment 53182/53188: selfRightingConfig is all-or-nothing - every one of its five
+ // fields must be present together, or the assist stays OFF.
+
+ @Test void selfRightingConfigIsOffWhenNoFieldsAreSet() {
+  var config = Overrides.selfRightingConfig(Overrides.resolved("packid:not_configured"));
+  assertEquals(0, config.strength()); assertEquals(0, config.damping());
+ }
+
+ @Test void selfRightingConfigIsOffWhenOnlySomeFieldsAreSet() {
+  var t = Overrides.resolved("packid:not_configured");
+  t.selfRightStrength = 200.0; t.selfRightDamping = 80.0; // maxTorque/fade fields left unset
+  var config = Overrides.selfRightingConfig(t);
+  assertEquals(0, config.strength(), "a partially-configured assist must stay OFF, not silently activate with some fields missing");
+ }
+
+ @Test void selfRightingConfigActivatesOnlyWhenAllFiveFieldsAreSet() {
+  var t = Overrides.resolved("packid:not_configured");
+  t.selfRightStrength = 200.0; t.selfRightDamping = 80.0; t.selfRightMaxTorque = 600.0;
+  t.selfRightFadeStartDegrees = 10.0; t.selfRightFadeEndDegrees = 50.0;
+  var config = Overrides.selfRightingConfig(t);
+  assertEquals(200.0, config.strength()); assertEquals(80.0, config.damping()); assertEquals(600.0, config.maxTorque());
+  assertEquals(10.0, config.fadeStartDegrees()); assertEquals(50.0, config.fadeEndDegrees());
+ }
+
+ @Test void explicitQuadExampleShapeValidatesAsAWorkingSelfRightConfig() {
+  // Mirrors the real seed Overrides.load() writes on a fresh install for mtsofficialpack:quad
+  // (ticket comment 53182/53188's "explicit quad roll-assist" ask) - not reading the actual
+  // seeded file (that needs live FML config I/O), just confirming this exact shape of entry
+  // produces a working, validating, active config.
+  var quadExample = new Overrides.Tuning();
+  quadExample.selfRightStrength=200.0; quadExample.selfRightDamping=80.0; quadExample.selfRightMaxTorque=600.0;
+  quadExample.selfRightFadeStartDegrees=10.0; quadExample.selfRightFadeEndDegrees=50.0;
+  assertDoesNotThrow(quadExample::validate);
+  var config = Overrides.selfRightingConfig(quadExample);
+  assertTrue(config.strength()>0 && config.damping()>0, "the quad example entry must resolve to an ACTIVE self-right config, not OFF");
+ }
+
+ @Test void selfRightFieldsOutOfRangeFailValidation() {
+  var negativeStrength = new Overrides.Tuning(); negativeStrength.selfRightStrength = -1.0;
+  assertThrows(IllegalArgumentException.class, negativeStrength::validate);
+  var fadeEndBeforeStart = new Overrides.Tuning(); fadeEndBeforeStart.selfRightFadeStartDegrees = 50.0; fadeEndBeforeStart.selfRightFadeEndDegrees = 10.0;
+  assertThrows(IllegalArgumentException.class, fadeEndBeforeStart::validate);
+  var fadeEndBeyondHardCap = new Overrides.Tuning(); fadeEndBeyondHardCap.selfRightFadeStartDegrees = 10.0;
+  fadeEndBeyondHardCap.selfRightFadeEndDegrees = io.github.brooswitminecraft.div.experimental.SelfRightingAssist.HARD_SAFETY_CAP_DEGREES + 1;
+  assertThrows(IllegalArgumentException.class, fadeEndBeyondHardCap::validate);
+ }
 }
