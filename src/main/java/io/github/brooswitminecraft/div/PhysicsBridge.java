@@ -640,6 +640,26 @@ public final class PhysicsBridge {
   private static String qfull(org.joml.Quaterniondc q) { return "("+q.x()+","+q.y()+","+q.z()+","+q.w()+")"; }
   final ServerLevel level;
   final Overrides.Tuning tuning;
+  // Opt-in two-half chassis candidate (ticket comment 53236/53240/53261) - OFF by default for
+  // every vehicle/session (TwoBodyLifecycle is never called unless set) - "keep the candidate
+  // uninstalled until native validation" (comment 53268). When active, `box`/`handle` below are
+  // the LOWER half-body specifically, not a single whole-chassis box - every real wheel on this
+  // ticket's own ATV geometry belongs to the lower half (TwoBodyChassis.isUpperHalf confirmed
+  // false for all four), so every existing wheel-force/torque application site below (which all
+  // already go through `handle`) needs NO changes at all; only the position/orientation SYNC
+  // back to the vehicle (see step(), which must reconstruct G via
+  // TwoBodyChassis.vehicleWorldPositionFromLowerBody rather than reading the lower body's own
+  // center directly) and construction/cleanup are two-body-aware. Uses the body-local/identity
+  // joint convention confirmed against the real native source (comment 53256), not createHitch's
+  // own (separately flagged, un-fixed) world-space/echoed-orientation convention.
+  private static final boolean EXPERIMENTAL_TWO_BODY_CHASSIS = Boolean.getBoolean("div.experimentalTwoBodyChassis");
+  final boolean twoBodyActive;
+  // Non-null only when twoBodyActive - the upper half-body/handle and the fixed joint connecting
+  // it to the lower half (box/handle below). Held only for initial-velocity seeding and cleanup;
+  // no force/torque application site targets these directly (see above).
+  private final BoxPhysicsObject upperBox;
+  private final RigidBodyHandle upperHandle;
+  private final PhysicsConstraintHandle twoBodyJoint;
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
@@ -710,27 +730,59 @@ public final class PhysicsBridge {
      // resolved opt-in state itself, once per Body construction; per-wheel damper/effectiveMass
      // receipt is logged separately below, every debug tick, from the real per-wheel values.
      +" experimentalEffectiveMassDamping="+EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
+     +" experimentalTwoBodyChassis="+EXPERIMENTAL_TWO_BODY_CHASSIS
      +" nativeInertia=unavailable (Sable 2.0.5's BoxPhysicsObject exposes no native inertia/mass-properties query API - confirmed by its decompiled source; see ticket comment history)");
-   box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
-   var physics=SubLevelContainer.getContainer(level).physicsSystem();
-   physics.addObject(box);
-   // From here on, box is a live Sable object; any failure before this constructor returns
-   // must remove it again, since nothing else will ever hold a reference to clean it up.
-   RigidBodyHandle h;
-   try {
-    h=RigidBodyHandle.of(level,box);
-    h.addLinearAndAngularVelocity(new Vector3d(v.motion.x,v.motion.y,v.motion.z).mul(v.speedFactor*20),new Vector3d());
-   } catch (RuntimeException ex) {
-    physics.removeObject(box);
-    throw ex;
+   twoBodyActive=EXPERIMENTAL_TWO_BODY_CHASSIS;
+   Vector3d initialVelocity=new Vector3d(v.motion.x,v.motion.y,v.motion.z).mul(v.speedFactor*20);
+   if (twoBodyActive) {
+    // Uninstalled/unvalidated candidate (comment 53268) - any construction failure (including
+    // Overrides.twoBodyConfig's own validation, e.g. an unsafe upperMassFraction for this
+    // vehicle's real mass) must roll back cleanly and surface as an ordinary construction
+    // failure, exactly like the single-body path below - TwoBodyLifecycle.create already
+    // guarantees no partial state on its own failure, so no extra try/catch is needed here.
+    var config=Overrides.twoBodyConfig(tuning,mass);
+    var bodies=TwoBodyLifecycle.create(level,position,q,half,mass,config);
+    box=bodies.lowerBox(); handle=bodies.lowerHandle();
+    upperBox=bodies.upperBox(); upperHandle=bodies.upperHandle(); twoBodyJoint=bodies.joint();
+    handle.addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+    upperHandle.addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+   } else {
+    upperBox=null; upperHandle=null; twoBodyJoint=null;
+    box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
+    var physics=SubLevelContainer.getContainer(level).physicsSystem();
+    physics.addObject(box);
+    // From here on, box is a live Sable object; any failure before this constructor returns
+    // must remove it again, since nothing else will ever hold a reference to clean it up.
+    RigidBodyHandle h;
+    try {
+     h=RigidBodyHandle.of(level,box);
+     h.addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+    } catch (RuntimeException ex) {
+     physics.removeObject(box);
+     throw ex;
+    }
+    handle=h;
    }
-   handle=h;
   }
   public Object level() { return level; }
-  public void remove() { var c=SubLevelContainer.getContainer(level); if(c!=null)c.physicsSystem().removeObject(box); }
+  public void remove() {
+   var c=SubLevelContainer.getContainer(level);
+   if (c==null) return;
+   if (twoBodyActive) TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
+   else c.physicsSystem().removeObject(box);
+  }
   public void step(EntityVehicleF_Physics v) {
    box.updatePose();
    Pose3d pose=new Pose3d(box.getPose());
+   if (twoBodyActive) {
+    // box/pose here is the LOWER half-body's own pose (its own center), NOT G - every other
+    // part of this class's geometry (center, half, inertiaBody, every wheel anchor) is expressed
+    // relative to G, so the synced vehicle position must be the reconstructed G, not the lower
+    // body's own center. Orientation is used as-is (the lower body's own) - the joint locks all
+    // 6 axes with an identity relative local frame (comment 53256), so reporting either half's
+    // orientation is equivalent while the joint is actually holding.
+    pose.position().set(io.github.brooswitminecraft.div.experimental.TwoBodyChassis.vehicleWorldPositionFromLowerBody(pose.position(), pose.orientation(), halfExtents.y));
+   }
    Quaterniond q=new Quaterniond(pose.orientation()), inverse=new Quaterniond(q).invert();
    Vector3d velocity=handle.getLinearVelocity(new Vector3d()), angular=handle.getAngularVelocity(new Vector3d());
    Vector3d up=q.transform(new Vector3d(0,1,0));
