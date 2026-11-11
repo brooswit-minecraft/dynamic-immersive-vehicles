@@ -765,6 +765,28 @@ public final class PhysicsBridge {
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier));
    }
+   // Native contact-ownership sync (ticket comment 53182/53182-correction): confirmed by reading
+   // the real pinned MTS source (not inferred from naming) that PartEngine.update() - which DOES
+   // survive DIV's getForcesAndMotions cancellation, unlike addToForceOutput (see below) - reads
+   // v.groundDeviceCollective.groundedGroundDevices for its own RPM-feedback loop
+   // (PartEngine.java ~L604-637) AND, when that set shows no driven wheel grounded, forcibly
+   // overwrites wheel.angularVelocity from engine RPM alone (L634) - directly conflicting with
+   // DIV's own Phase3 write of the same field below. DIV never otherwise populates this native
+   // collection (confirmed: DIV cancels performGroundOperations/replaces moveVehicle, which is
+   // what normally calls updateCollisionStatuses to populate it), so for every DIV-controlled
+   // vehicle it was empty/stale, making the native RPM-feedback loop always behave as if no
+   // wheel were ever grounded. Syncing it here to DIV's own real raycast result removes that
+   // staleness at the source, rather than working around its two separate downstream symptoms.
+   // addToForceOutput itself (the wheelForce propulsion formula) is confirmed SEPARATELY
+   // cancelled - it is only ever called from EntityVehicleF_Physics.getForcesAndMotions
+   // (EntityVehicleF_Physics.java L296, inside the exact method VehicleForcesMixin cancels at
+   // its HEAD for an active DIV vehicle) - so it does not run at all, and adapting its formula
+   // would mean replicating the arithmetic DIV-side from the now-correctly-fed-back rpm/
+   // gearRatio/axleRatio/fuelConsumption state, not invoking or re-enabling the native method.
+   // That adaptation itself remains separate, unfinished work - this sync only fixes the
+   // grounded-state staleness those live fields were already depending on.
+   v.groundDeviceCollective.groundedGroundDevices.clear();
+   for (var h : hits) v.groundDeviceCollective.groundedGroundDevices.add(h.wheel());
    // Phase 2: shared multi-contact friction solve (ticket MINECRAFT-503) - stage every wheel's
    // own vertical/suspension impulse into a working velocity/angular estimate first (production
    // reads velocity/angular ONCE per tick - this `velocity`/`angular` snapshot - and every
