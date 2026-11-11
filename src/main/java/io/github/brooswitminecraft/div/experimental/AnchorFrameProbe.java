@@ -87,10 +87,20 @@ public final class AnchorFrameProbe {
  private static final double MASS = 10.0;
  private static final Vector3d HALF_EXTENTS = new Vector3d(0.3, 0.3, 0.3);
  private static final double ANCHOR_OFFSET_MAGNITUDE = 1.0; // each body's own center to the shared anchor point, in that body's own local frame
- private static boolean started = false;
+ private static boolean chunksRequested = false;
+ private static boolean boxesCreated = false;
  private static boolean measuring = false;
+ private static int chunkWaitTicksElapsed = 0;
  private static int activationTicksElapsed = 0;
  private static int ticksRemaining = 0;
+ private static final int MAX_CHUNK_WAIT_TICKS = 200; // 10s - genuine chunk load/generation at a never-visited location
+ // Geometry, computed once in requestChunks() and reused by createBoxes() once chunks are
+ // confirmed actually loaded (review 53259's correction: setChunkForced only SCHEDULES loading,
+ // it does not guarantee the chunk is loaded by the next tick).
+ private static Quaterniond sharedQ, jointLocalFrame;
+ private static Vector3d anchorOffsetInA, anchorOffsetInB;
+ private static Vector3d posA, posB, posA2, posB2;
+ private static int[] chunkCoordsToAwait; // [x1,z1,x2,z2] for the two pairs' locations
  private static Probe worldProbe, localProbe;
  private static final Logger LOGGER = LogUtils.getLogger();
 
@@ -117,21 +127,48 @@ public final class AnchorFrameProbe {
   * opt-in flag is set and the probe hasn't already run to completion this server lifetime. */
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
-  if (!started) {
-   started = true;
+  if (!chunksRequested) {
+   chunksRequested = true;
    try {
-    start(level);
+    requestChunks(level);
    } catch (RuntimeException ex) {
-    LOGGER.error("[DIV anchorFrameProbe] failed to start", ex);
-    measuring = false;
+    LOGGER.error("[DIV anchorFrameProbe] failed to request chunks", ex);
     ticksRemaining = 0;
-    activationTicksElapsed = MAX_ACTIVATION_TICKS + 1; // skip straight to the give-up path below
+    measuring = true;
+   }
+   return;
+  }
+  if (!boxesCreated) {
+   chunkWaitTicksElapsed++;
+   if (!chunksActuallyLoaded(level)) {
+    if (chunkWaitTicksElapsed > MAX_CHUNK_WAIT_TICKS) {
+     LOGGER.error("[DIV anchorFrameProbe] FAILED - chunks never finished loading within " + MAX_CHUNK_WAIT_TICKS + " ticks");
+     ticksRemaining = 0;
+     measuring = true;
+    }
+    return;
+   }
+   try {
+    createBoxes(level);
+    boxesCreated = true;
+   } catch (RuntimeException ex) {
+    LOGGER.error("[DIV anchorFrameProbe] failed to create boxes", ex);
+    ticksRemaining = 0;
+    measuring = true;
    }
    return;
   }
   if (!measuring) {
+   if (nextTickCheckPending) {
+    nextTickCheckPending = false;
+    // Review 53259's explicit before/after ask: this is the FIRST maybeRun call after box
+    // creation - if runtimeId/isActive dropped from their logImmediateState values back to
+    // not-ready here, that proves removal/unloading between ticks, not a failed addBox (which
+    // review also showed cannot happen - RapierBoxHandle.create never returns null).
+    logNextTickState(worldProbe);
+    logNextTickState(localProbe);
+   }
    activationTicksElapsed++;
-   var physics = SubLevelContainer.getContainer(level).physicsSystem();
    boolean worldReady = activate(level, worldProbe);
    boolean localReady = activate(level, localProbe);
    if (worldReady && localReady) {
@@ -181,6 +218,14 @@ public final class AnchorFrameProbe {
   return true;
  }
 
+ /** Review 53259's correction: nothing retries a failed {@code addBox} on its own, so an
+  * explicit remove+re-add is attempted every {@link #RETRY_INTERVAL_TICKS} while not yet ready -
+  * BUT review also found {@code RapierBoxHandle.create} unconditionally returns non-null, which
+  * means a null handle at steady-state more likely indicates the box was ADDED successfully then
+  * REMOVED again (e.g. via {@code BoxPhysicsObject.onUnloaded}) than that {@code addBox} itself
+  * ever failed - this retry remains a reasonable mitigation either way (re-adding after a real
+  * unload is exactly the right recovery), but see {@link #logImmediateAndNextTickState} for the
+  * direct before/after evidence review asked for instead of inferring from steady-state alone. */
  private static void maybeRetryRegistration(ServerLevel level, Probe p, boolean isA) {
   var physics = SubLevelContainer.getContainer(level).physicsSystem();
   BoxPhysicsObject box = isA ? p.boxA : p.boxB;
@@ -192,55 +237,79 @@ public final class AnchorFrameProbe {
   physics.addObject(box);
  }
 
- /** Force-loads (and keeps loaded) the chunks a probe pair's two boxes sit in, so their physics
-  * registration does not depend on this disposable, playerless world happening to have already
-  * loaded/generated terrain at a remote test location. */
- private static void forceLoadChunksNear(ServerLevel level, Vector3d... positions) {
-  for (Vector3d pos : positions) {
-   level.setChunkForced(Math.floorDiv((int) Math.floor(pos.x), 16), Math.floorDiv((int) Math.floor(pos.z), 16), true);
-  }
- }
-
- private static void start(ServerLevel level) {
-  // ONE shared non-axis-aligned orientation for every BODY in both pairs (review 53246's
-  // correction) - both bodies' own world pose, independent of what goes into the constraint
-  // config below.
-  Quaterniond sharedQ = new Quaterniond().rotateY(Math.toRadians(35)).rotateX(Math.toRadians(20));
-  Vector3d anchorOffsetInA = new Vector3d(0, -ANCHOR_OFFSET_MAGNITUDE, 0);
-  Vector3d anchorOffsetInB = new Vector3d(0, ANCHOR_OFFSET_MAGNITUDE, 0);
+ /** Requests (but does not yet wait for) the chunks both pairs' boxes will sit in - review
+  * 53259's correction: {@code setChunkForced} only SCHEDULES loading, it does not guarantee the
+  * chunk is actually loaded by the time this method returns or even by the next tick. Also
+  * computes and stores the shared geometry so {@link #createBoxes} can use it once
+  * {@link #chunksActuallyLoaded} confirms readiness. */
+ private static void requestChunks(ServerLevel level) {
+  sharedQ = new Quaterniond().rotateY(Math.toRadians(35)).rotateX(Math.toRadians(20));
+  anchorOffsetInA = new Vector3d(0, -ANCHOR_OFFSET_MAGNITUDE, 0);
+  anchorOffsetInB = new Vector3d(0, ANCHOR_OFFSET_MAGNITUDE, 0);
   // Review 53256's recovered native Rust source (sable_rapier/joints.rs/boxes.rs, pinned tag
   // 6966d292) confirms local_frame1/local_frame2 reach Rapier as LOCAL joint-frame rotations
-  // relative to each body - NOT an echo of that body's own world orientation, which is what an
-  // earlier version of this probe assumed. IDENTITY is the correct "impose no extra twist" value
-  // under that confirmed convention (both bodies already share one world orientation, so their
-  // local axes already point the same way in world space - identity local frames on both sides
-  // keeps them co-aligned, matching this probe's intended zero-initial-violation setup).
-  Quaterniond jointLocalFrame = new Quaterniond();
+  // relative to each body - NOT an echo of that body's own world orientation. IDENTITY is the
+  // correct "impose no extra twist" value under that confirmed convention.
+  jointLocalFrame = new Quaterniond();
 
-  Vector3d posA = new Vector3d(5000, 80, 5000);
-  forceLoadChunksNear(level, posA, new Vector3d(posA).add(500, 0, 0));
+  posA = new Vector3d(5000, 80, 5000);
+  posA2 = new Vector3d(posA).add(500, 0, 0);
+  int chunkXA = Math.floorDiv((int) Math.floor(posA.x), 16), chunkZA = Math.floorDiv((int) Math.floor(posA.z), 16);
+  int chunkXA2 = Math.floorDiv((int) Math.floor(posA2.x), 16), chunkZA2 = Math.floorDiv((int) Math.floor(posA2.z), 16);
+  chunkCoordsToAwait = new int[]{chunkXA, chunkZA, chunkXA2, chunkZA2};
+  level.setChunkForced(chunkXA, chunkZA, true);
+  level.setChunkForced(chunkXA2, chunkZA2, true);
+  LOGGER.info("[DIV anchorFrameProbe] requested chunks (" + chunkXA + "," + chunkZA + ") and (" + chunkXA2 + "," + chunkZA2 + ")");
+ }
+
+ /** Review 53259's explicit ask: ensure the chunks are genuinely loaded (not merely ticketed)
+  * before creating any box there, via {@code ServerChunkCache.getChunkNow} - a non-null result
+  * confirms the chunk is actually present, not just requested. */
+ private static boolean chunksActuallyLoaded(ServerLevel level) {
+  var chunkSource = level.getChunkSource();
+  return chunkSource.getChunkNow(chunkCoordsToAwait[0], chunkCoordsToAwait[1]) != null
+    && chunkSource.getChunkNow(chunkCoordsToAwait[2], chunkCoordsToAwait[3]) != null;
+ }
+
+ private static void createBoxes(ServerLevel level) {
   Vector3d worldG = new Vector3d(sharedQ.transform(new Vector3d(anchorOffsetInA))).add(posA);
-  Vector3d posB = new Vector3d(worldG).sub(sharedQ.transform(new Vector3d(anchorOffsetInB)));
-  worldProbe = buildPair(level, "world", posA, posB, sharedQ, anchorOffsetInA, anchorOffsetInB,
+  posB = new Vector3d(worldG).sub(sharedQ.transform(new Vector3d(anchorOffsetInB)));
+  worldProbe = buildPair(level, "world", posA, posB,
     new GenericConstraintConfiguration(worldG, worldG, jointLocalFrame, jointLocalFrame, HitchJoint.lockedAxes(true, false)));
 
   // Second pair, offset far away in X so it cannot physically interact with the first, otherwise
   // identical physical configuration but given the BODY-LOCAL hypothesis instead.
-  Vector3d posA2 = new Vector3d(posA).add(500, 0, 0);
   Vector3d worldG2 = new Vector3d(sharedQ.transform(new Vector3d(anchorOffsetInA))).add(posA2);
-  Vector3d posB2 = new Vector3d(worldG2).sub(sharedQ.transform(new Vector3d(anchorOffsetInB)));
-  localProbe = buildPair(level, "local", posA2, posB2, sharedQ, anchorOffsetInA, anchorOffsetInB,
+  posB2 = new Vector3d(worldG2).sub(sharedQ.transform(new Vector3d(anchorOffsetInB)));
+  localProbe = buildPair(level, "local", posA2, posB2,
     new GenericConstraintConfiguration(anchorOffsetInA, anchorOffsetInB, jointLocalFrame, jointLocalFrame, HitchJoint.lockedAxes(true, false)));
 
-  LOGGER.info("[DIV anchorFrameProbe] started - worldG=" + worldG + " worldG2=" + worldG2 + " probeTicks=" + PROBE_TICKS);
+  LOGGER.info("[DIV anchorFrameProbe] boxes created after " + chunkWaitTicksElapsed + " chunk-wait ticks - worldG=" + worldG + " worldG2=" + worldG2 + " probeTicks=" + PROBE_TICKS);
+  // Review 53259's explicit ask: log getRuntimeId/isActive IMMEDIATELY after addObject (inside
+  // buildPair, already returned) - a non-null/-1!=id here, followed by -1 on the VERY NEXT
+  // maybeRun call (logged by logImmediateAndNextTickState below, scheduled via nextTickCheckPending)
+  // would directly prove removal/unloading rather than failed allocation.
+  logImmediateState(worldProbe);
+  logImmediateState(localProbe);
+  nextTickCheckPending = true;
+ }
+ private static boolean nextTickCheckPending = false;
+ private static void logImmediateState(Probe p) {
+  LOGGER.info("[DIV anchorFrameProbe] pair=" + p.label + " IMMEDIATELY after addObject: "
+    + "boxA(runtimeId=" + p.boxA.getRuntimeId() + " isActive=" + p.boxA.isActive() + ") "
+    + "boxB(runtimeId=" + p.boxB.getRuntimeId() + " isActive=" + p.boxB.isActive() + ")");
+ }
+ private static void logNextTickState(Probe p) {
+  LOGGER.info("[DIV anchorFrameProbe] pair=" + p.label + " on the NEXT tick after addObject: "
+    + "boxA(runtimeId=" + p.boxA.getRuntimeId() + " isActive=" + p.boxA.isActive() + ") "
+    + "boxB(runtimeId=" + p.boxB.getRuntimeId() + " isActive=" + p.boxB.isActive() + ")");
  }
 
  /** Constructs the two {@code BoxPhysicsObject}s and registers them (first attempt) - does NOT
   * build the constraint here; that happens only once {@link #activate} confirms both bodies are
   * actually ready (review 53251's correction - the first two versions built the constraint
   * speculatively, before the bodies were confirmed registered). */
- private static Probe buildPair(ServerLevel level, String label, Vector3d posA, Vector3d posB, Quaterniond sharedQ,
-     Vector3d anchorOffsetInA, Vector3d anchorOffsetInB, GenericConstraintConfiguration config) {
+ private static Probe buildPair(ServerLevel level, String label, Vector3d posA, Vector3d posB, GenericConstraintConfiguration config) {
   var physics = SubLevelContainer.getContainer(level).physicsSystem();
   var boxA = new BoxPhysicsObject(new Pose3d(new Vector3d(posA), new Quaterniond(sharedQ), new Vector3d(), new Vector3d(1)), HALF_EXTENTS, MASS);
   var boxB = new BoxPhysicsObject(new Pose3d(new Vector3d(posB), new Quaterniond(sharedQ), new Vector3d(), new Vector3d(1)), HALF_EXTENTS, MASS);
