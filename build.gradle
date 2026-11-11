@@ -55,10 +55,19 @@ neoForge {
    }
    // Opt-in real-vehicle ground-support fixture (review comment 53287) - also turns on the
    // two-body chassis candidate itself (EXPERIMENTAL_TWO_BODY_CHASSIS), since the whole point of
-   // this fixture is exercising stepGround with it actually enabled, not merely present.
+   // this fixture is exercising stepGround with it actually enabled, not merely present. Also
+   // enables the existing GroundContactDiagnostics (-Ddiv.debugGroundContact) and its per-wheel
+   // trace window (-Ddiv.debugGroundContactTicks) for review 53291's "require/record actual
+   // PhysicsBridge activation + twoBodyActive + resolved f/mass" and "positive wheel support" -
+   // both are this project's own pre-existing diagnostics, not new plumbing added for this
+   // fixture; the CI job's own shell script greps their log lines as an activation gate
+   // independent of this probe's own COMPLETE marker, so a native-physics fallback (which could
+   // still move the vehicle somewhat plausibly) cannot be mistaken for DIV actually engaging.
    if (System.getenv('DIV_GROUND_SUPPORT_FIXTURE') == 'true') {
     jvmArgument('-Ddiv.experimentalGroundSupportFixture=true')
     jvmArgument('-Ddiv.experimentalTwoBodyChassis=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=300')
    }
   }
  }

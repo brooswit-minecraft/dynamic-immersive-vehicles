@@ -752,6 +752,11 @@ public final class PhysicsBridge {
    if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] chassisReceipt entity="+v.uniqueUUID+" key="+v.definition.packID+":"+v.definition.systemName
      +" mass="+mass+" center="+vfull(center)+" halfExtents="+vfull(halfExtents)+" hullVolume="+hullVolume
      +" suspensionTravel="+tuning.suspensionTravel+" friction="+tuning.friction+" driveForce="+tuning.driveForce+" brakeForce="+tuning.brakeForce
+     // Review 53291's explicit "record actual... resolved f/mass" - mass is already logged just
+     // above; upperMassFraction (f) was the one two-body-relevant resolved value this line didn't
+     // yet surface, needed to confirm a vehicle actually resolved the fraction its own config
+     // entry requested rather than silently falling back to the 0.5 default.
+     +" upperMassFraction="+tuning.upperMassFraction
      // Provenance (ticket comment 53186/53188: "prove native/metadata values actually reached
      // runtime rather than merely being parsed") - only the operator-override and documented-
      // fallback levels are wired to a real source yet (comment 53181/53184), so this is exactly

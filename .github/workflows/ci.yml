@@ -344,11 +344,55 @@ jobs:
           wait "$gradle_pid" 2>/dev/null || true
           echo "=== ground-support fixture log lines ==="
           grep 'DIV groundSupportFixture' server.log || true
+          echo "=== ground contact diagnostics (activation/classification/construction) ==="
+          grep 'DIV debugGroundContact\] \(classify\|constructed\|chassisReceipt\)' server.log || true
           echo "=== result: $status ==="
           if [ "$status" != "PROBE_COMPLETE" ]; then
             echo "Ground-support fixture did not complete cleanly (status=$status) - see server.log." >&2
             exit 1
           fi
+          # Review 53291: "native fallback must not count as success" - this probe's own
+          # COMPLETE marker only proves the vehicle's externally-observed motion looked right; it
+          # cannot by itself distinguish DIV's real Body actually driving that motion from MTS's
+          # native ground physics coincidentally doing something similar. Independently require,
+          # for EACH scenario's own packID:systemName key, real evidence from the existing
+          # GroundContactDiagnostics that DIV actually classified it as a ground vehicle AND
+          # constructed the real two-body-capable Body class AND resolved the correct
+          # upperMassFraction for that scenario.
+          activation_ok=true
+          for key_frac in "divtest:f0p5:0.5" "divtest:f0p4:0.4"; do
+            key="${key_frac%:*}"; frac="${key_frac##*:}"
+            if ! grep -qE "DIV debugGroundContact\] classify entity=\S+ side=server key=${key} ground=true" server.log; then
+              echo "ACTIVATION_CHECK FAILED: no server-side ground=true classification found for key=${key}" >&2
+              activation_ok=false
+            fi
+            if ! grep -qE "DIV debugGroundContact\] constructed entity=\S+ side=server key=${key} class=Body" server.log; then
+              echo "ACTIVATION_CHECK FAILED: no real Body construction found for key=${key} (native fallback, or construction never succeeded)" >&2
+              activation_ok=false
+            fi
+            # Two independent checks rather than one ordered regex: chassisReceipt logs
+            # upperMassFraction earlier in the line than experimentalTwoBodyChassis, and field
+            # order is an implementation detail neither check should depend on.
+            receipt_line=$(grep -E "DIV debugGroundContact\] chassisReceipt entity=\S+ key=${key} " server.log || true)
+            if [ -z "$receipt_line" ]; then
+              echo "ACTIVATION_CHECK FAILED: no chassisReceipt line found for key=${key}" >&2
+              activation_ok=false
+            else
+              if ! grep -qE "experimentalTwoBodyChassis=true" <<< "$receipt_line"; then
+                echo "ACTIVATION_CHECK FAILED: chassisReceipt for key=${key} does not show experimentalTwoBodyChassis=true" >&2
+                activation_ok=false
+              fi
+              if ! grep -qE "upperMassFraction=${frac}\b" <<< "$receipt_line"; then
+                echo "ACTIVATION_CHECK FAILED: chassisReceipt for key=${key} does not show upperMassFraction=${frac}" >&2
+                activation_ok=false
+              fi
+            fi
+          done
+          if [ "$activation_ok" != "true" ]; then
+            echo "Ground-support fixture's own probe reported COMPLETE, but real DIV/two-body activation evidence is missing or wrong - treating as a failure, not a native-fallback success." >&2
+            exit 1
+          fi
+          echo "=== ACTIVATION_CHECK: real Body/twoBodyActive/resolved-f confirmed for both scenarios ==="
 
       - name: Upload ground-support fixture log
         if: always()
