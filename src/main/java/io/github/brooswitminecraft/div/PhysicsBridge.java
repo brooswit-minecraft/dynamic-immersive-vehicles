@@ -505,6 +505,56 @@ public final class PhysicsBridge {
   return EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS_RESOLVED>0 ? EXPERIMENTAL_FRICTION_SOLVER_ITERATIONS_RESOLVED
     : io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS;
  }
+ /** Result of {@link #effectiveMassDamper}: the damper value actually usable this tick (either
+  * the candidate or the safe fallback) paired with the raw per-contact effective mass that was
+  * attempted, logged separately so a capture can distinguish "candidate bypassed" (NaN) from
+  * "candidate attempted" (a real, possibly-degenerate number) without re-deriving it. */
+ record EffectiveMassDamperResult(double damper, double effectiveMass) {}
+ /**
+  * Opt-in per-contact damping-basis candidate (ticket comments 53214/53219): the same critical-
+  * damping-ratio formula shape {@code suspensionDamper} already uses ({@code 2*sqrt(spring*m)*.7}),
+  * but sourced from the REAL per-contact effective mass along the contact normal
+  * ({@code MultiContactFrictionSolver.contactEffectiveMass}, using this body's own actual box
+  * mass/inertia and the actual contact point/arm - comment 53219's explicit requirement) instead
+  * of the shared {@code mass/wheelCount} basis. Pure/testable, no Minecraft types, same pattern
+  * as {@link #suspensionDamper} itself.
+  *
+  * <p>Guards finite/positive spring, mass, inertia components and point coordinates, and catches
+  * any exception from the solver call itself, falling back to {@code fallbackDamper} (today's
+  * shared value) on any non-finite/non-positive/degenerate result - comment 53219's explicit
+  * "safe baseline fallback" requirement, so a degenerate contact (e.g. a zero/garbage inertia
+  * component, which should never happen but is not re-proven impossible here) can never produce
+  * a NaN/negative damper that would destabilize the suspension.
+  *
+  * <p>NOT shown to be a net improvement - measured across commits 29d2ed3/98bf372/90ed051/02f90a0:
+  * a real driven/recontact scenario improved dramatically at one seed and DT, but that result
+  * reversed direction at a finer timestep and did not hold across a 72-combo seed/heading/
+  * timestep sweep (candidate tipped MORE often than baseline overall). Wired here ONLY as a
+  * bounded, explicitly opt-in (default OFF - {@code -Ddiv.experimentalEffectiveMassDamping} must
+  * be set to enable it) in-game experiment per comment 53219's direct instruction to let the user
+  * play-test it despite that open uncertainty, NOT as a validated fix - see {@code Body}'s own use
+  * site for the exact opt-in flag and this ticket's comment history for the full measurement
+  * record.
+  */
+ static EffectiveMassDamperResult effectiveMassDamper(double spring, double mass, Vector3d point, Vector3d direction,
+     Quaterniond inverseOrientation, Vector3d inertiaBody, double fallbackDamper) {
+  if (!Double.isFinite(spring) || spring<=0 || !Double.isFinite(mass) || mass<=0
+    || !Double.isFinite(inertiaBody.x) || inertiaBody.x<=0
+    || !Double.isFinite(inertiaBody.y) || inertiaBody.y<=0
+    || !Double.isFinite(inertiaBody.z) || inertiaBody.z<=0
+    || !Double.isFinite(point.x) || !Double.isFinite(point.y) || !Double.isFinite(point.z)
+    || !Double.isFinite(direction.x) || !Double.isFinite(direction.y) || !Double.isFinite(direction.z)) {
+   return new EffectiveMassDamperResult(fallbackDamper, Double.NaN);
+  }
+  double effectiveMass;
+  try {
+   effectiveMass = io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.contactEffectiveMass(mass, point, direction, inverseOrientation, inertiaBody);
+  } catch (RuntimeException e) { return new EffectiveMassDamperResult(fallbackDamper, Double.NaN); }
+  if (!Double.isFinite(effectiveMass) || effectiveMass<=0) return new EffectiveMassDamperResult(fallbackDamper, effectiveMass);
+  double damperCandidate = 2*Math.sqrt(spring*effectiveMass)*.7;
+  if (!Double.isFinite(damperCandidate) || damperCandidate<0) return new EffectiveMassDamperResult(fallbackDamper, effectiveMass);
+  return new EffectiveMassDamperResult(damperCandidate, effectiveMass);
+ }
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
@@ -548,6 +598,17 @@ public final class PhysicsBridge {
   // iteration count passed to solveFriction below - the shipped default
   // (MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS, 4) and every other part of the
   // solver/CG/geometry/support-force model are completely unchanged either way.
+  // Opt-in experimental per-contact effective-mass damping candidate (ticket comments 53214/
+  // 53219) - OFF by default for every vehicle/session unless explicitly enabled via
+  // -Ddiv.experimentalEffectiveMassDamping=true. When off, PhysicsBridge.effectiveMassDamper is
+  // never called and the per-wheel damper used below is byte-identical to today's shipped
+  // suspensionDamper(mass,wheels.size(),spring) value - comment 53219's explicit "verify opt-in
+  // off matches baseline" requirement. When on, static spring stiffness/rest-sag and every other
+  // part of the force geometry stay exactly as shipped; only the damper's inertial basis changes,
+  // per-wheel. NOT shown to be a net improvement (see PhysicsBridge.effectiveMassDamper's own doc
+  // for the measured record) - wired here as a bounded, explicitly opt-in in-game experiment at
+  // the user's own direct request (comment 53219: "let me test it"), not as a validated fix.
+  private static final boolean EXPERIMENTAL_EFFECTIVE_MASS_DAMPING = Boolean.getBoolean("div.experimentalEffectiveMassDamping");
   private static final Logger LOGGER = LogUtils.getLogger();
   private int debugGroundContactTicksRemaining = DEBUG_GROUND_CONTACT ? DEBUG_GROUND_CONTACT_TICKS : 0;
   /** Full-precision "(x,y,z)" - JOML's own Vector3d.toString() truncates to a handful of
@@ -625,6 +686,10 @@ public final class PhysicsBridge {
      +" selfRightConfigured="+(selfRight.strength()>0||selfRight.damping()>0)
      +" selfRightStrength="+selfRight.strength()+" selfRightDamping="+selfRight.damping()+" selfRightMaxTorque="+selfRight.maxTorque()
      +" selfRightFadeStartDegrees="+selfRight.fadeStartDegrees()+" selfRightFadeEndDegrees="+selfRight.fadeEndDegrees()
+     // Comment 53219's explicit "log effective option... in existing bounded diagnostics" - the
+     // resolved opt-in state itself, once per Body construction; per-wheel damper/effectiveMass
+     // receipt is logged separately below, every debug tick, from the real per-wheel values.
+     +" experimentalEffectiveMassDamping="+EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
      +" nativeInertia=unavailable (Sable 2.0.5's BoxPhysicsObject exposes no native inertia/mass-properties query API - confirmed by its decompiled source; see ticket comment history)");
    box=new BoxPhysicsObject(new Pose3d(position,q,new Vector3d(),new Vector3d(1)),half,mass);
    var physics=SubLevelContainer.getContainer(level).physicsSystem();
@@ -739,7 +804,7 @@ public final class PhysicsBridge {
    // differs between them by angular x that offset (fixed by sampling at `point` - 691f11b).
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
-     double skidSteerMultiplier) {}
+     double skidSteerMultiplier, double damperUsed, double effectiveMassUsed) {}
    List<WheelHit> hits=new java.util.ArrayList<>();
    for(var wheel:wheels) {
     double radius=wheel.getHeight()/2;
@@ -757,13 +822,26 @@ public final class PhysicsBridge {
     }
     double compression=length-hit.getLocation().distanceTo(vec(start));
     Vector3d localVelocity=new Vector3d(angular).cross(arm).add(velocity);
-    double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),spring,damper));
+    Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
+    // Opt-in experimental effective-mass damping candidate (ticket comments 53214/53219) - OFF
+    // (EXPERIMENTAL_EFFECTIVE_MASS_DAMPING false, the shipped default) means damperResult is
+    // exactly new EffectiveMassDamperResult(damper, NaN) - damperUsed==damper byte-for-byte,
+    // nothing about today's behavior changes. Sourced from this body's own real inertiaBody (its
+    // actual box mass/inertia, PhysicsBridge.Body constructor) and this wheel's own real contact
+    // point (terrain hit location, same `point` used for friction below) along the real surface
+    // normal `up` - comment 53219's explicit "actual box mass/inertia and actual contact
+    // direction/arm" requirement. See PhysicsBridge.effectiveMassDamper's own doc for the guard/
+    // fallback behavior and the measured record showing this is NOT a validated fix.
+    var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
+      ? effectiveMassDamper(spring,mass,point,up,inverse,inertiaBody,damper)
+      : new EffectiveMassDamperResult(damper, Double.NaN);
+    double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),spring,damperResult.damper()));
     double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
-    Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
-    hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier));
+    hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
+      damperResult.damper(),damperResult.effectiveMass()));
    }
    // Phase 2: shared multi-contact friction solve (ticket MINECRAFT-503) - stage every wheel's
    // own vertical/suspension impulse into a working velocity/angular estimate first (production
@@ -820,7 +898,12 @@ public final class PhysicsBridge {
        +" localVelocity(anchor-sampled)="+vfull(h.localVelocity())+" contactVelocity(contact-sampled)="+vfull(contactVelocity)
        +" speed="+speed+" sideSpeed="+sideSpeed+" lateralSlipBudgetTarget="+lateralSlipBudgetTarget
        +" normal="+h.normal()+" tire=Force[longitudinal="+tire.longitudinal()+", lateral="+tire.lateral()+"]"
-       +" requestedImpulseWorld="+requestedImpulseWorld);
+       +" requestedImpulseWorld="+requestedImpulseWorld
+       // Comment 53219's explicit per-wheel damping/effective-mass receipt: damperUsed==the
+       // shared `damper` exactly whenever the candidate is bypassed (effectiveMassUsed logs as
+       // NaN, distinguishing "bypassed" from "attempted but degenerate/fell back" - see
+       // PhysicsBridge.effectiveMassDamper's own doc).
+       +" experimentalEffectiveMassDamping="+EXPERIMENTAL_EFFECTIVE_MASS_DAMPING+" damperUsed="+h.damperUsed()+" effectiveMassUsed="+h.effectiveMassUsed());
     }
     Vector3d appliedPointLocal=inverse.transform(point), appliedImpulseLocal=inverse.transform(force.mul(DT));
     if (debugThisTick) LOGGER.info("[DIV debugGroundContact]  wheel localOffset="+wheel.localOffset
