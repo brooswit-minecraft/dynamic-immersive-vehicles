@@ -126,9 +126,35 @@ public final class GroundSupportFixtureProbe {
  private static final boolean ENABLED = Boolean.getBoolean("div.experimentalGroundSupportFixture");
  private static final String PACK_ID = "divtest";
  private static final int MAX_TERRAIN_WAIT_TICKS = 200; // 10s - real chunk generation at a never-visited location
- private static final int CHUNK_RADIUS = 5; // an 11x11 chunk square (176 blocks/side) around spawn - generous headroom for 3s of real driving
- private static final int SETTLE_TICKS = 60, DRIVE_TICKS = 60, BRAKE_TICKS = 60, TURN_TICKS = 60; // 3s each at 20tps
- private static final double HALF_EXTENT_A = 0.5, HALF_HEIGHT_B = 1.0, HALF_EXTENT_C = 0.5;
+ // Review 53305 + a real local crash (box.handle went null mid-DRIVE - the realistic chassis
+ // accelerates much faster than the old tall-box fixture ever did, and outran the previous
+ // CHUNK_RADIUS=6/PLATFORM_RADIUS=90 bounds by DRIVE tick~120, exiting the force-loaded area):
+ // widened to a safe margin for the realistic vehicle's own real achievable speed across
+ // DRIVE+BRAKE+TURN combined, confirmed against real measured travel (~75 blocks by DRIVE
+ // tick=100) rather than guessed.
+ private static final int CHUNK_RADIUS = 8; // a 17x17 chunk square (272 blocks/side) around spawn
+ private static final int SETTLE_TICKS = 60, DRIVE_TICKS = 100, BRAKE_TICKS = 60, TURN_TICKS = 60; // 20tps
+ // Review 53305: the chassis geometry below must be a representative ATV, not an arbitrary
+ // synthetic box - these are the SAME real chassis half-extents/center/wheel-anchor values this
+ // ticket's own existing tests already established and cite as "real chassisReceipt"
+ // (PhysicsBridgeEffectiveMassDamperTest, TwoBodyChassisTest, WheelieStaticThresholdTest), not a
+ // new guess. Half-extents are (x,y,z) = (0.425, 0.441, 1.05) - LOW and LONG, the opposite
+ // proportions of the earlier v1-v4 fixture's tall 1x2x1m box review correctly flagged as
+ // unrepresentative.
+ private static final double HALF_EXTENT_A = 0.42500001192092896, HALF_HEIGHT_B = 0.4410937510430813, HALF_EXTENT_C = 1.050000011920929;
+ private static final Point3D CHASSIS_CENTER = new Point3D(0, 0.553593748062849, 0.625);
+ // Real wheel anchors (ticket's own established ATV geometry) - front (larger Z) steer, rear do
+ // not, matching the real vehicle's own front-wheel-steering layout.
+ private static final Point3D WHEEL_RL = new Point3D(0.35, 0.125, -0.0625);
+ private static final Point3D WHEEL_FL = new Point3D(-0.375, 0.125, 1.25);
+ private static final Point3D WHEEL_FR = new Point3D(0.375, 0.125, 1.25);
+ private static final Point3D WHEEL_RR = new Point3D(-0.375, 0.125, -0.0625);
+ // Review 53305's "modest throttle ramp and full throttle separately": the first RAMP_TICKS of
+ // DRIVE linearly ramp throttle 0->1 (a realistic, gradual input); the remainder holds at full
+ // throttle - both regimes are visible in the same DRIVE phase's own per-tick log, distinguished
+ // by comparing s.ticksInPhase against this constant, rather than an instantaneous 0->1 step
+ // being the ONLY throttle profile ever tested.
+ private static final int DRIVE_RAMP_TICKS = 40;
  // Explicit, bounded, nonzero thresholds (review 53291's "bounded nonzero thresholds or explicit
  // FAILED result") - deliberately loose (this probe asks "did anything physically sensible
  // happen at all", not "does this match a specific target curve") so it stays robust to tuning
@@ -231,7 +257,7 @@ public final class GroundSupportFixtureProbe {
  // this disposable CI world instead, so ground truth is deterministic regardless of whatever
  // the world generator happens to produce there.
  private static final int PLATFORM_Y = 100;
- private static final int PLATFORM_RADIUS = 40; // blocks - comfortably covers DRIVE/TURN's real achievable travel at these shortened phase lengths
+ private static final int PLATFORM_RADIUS = 120; // blocks - covers real measured DRIVE/BRAKE/TURN travel with margin, within the CHUNK_RADIUS loaded grid
 
  private static void buildFlatPlatform(ServerLevel level, int centerX, int centerZ) {
   var stone = net.minecraft.world.level.block.Blocks.STONE.defaultBlockState();
@@ -258,11 +284,10 @@ public final class GroundSupportFixtureProbe {
   // entityOn.definition.parts is null"). Every slot a part will be attached to must therefore
   // already exist, by the SAME instance, in the vehicle's own definition.parts BEFORE any part
   // is constructed - built upfront here rather than incrementally inside addWheel/addEngine.
-  double wheelY = -(HALF_HEIGHT_B + 0.15); // below the chassis center - lower-owned per TwoBodyChassis.isUpperHalf's own doc
-  var wheelSlotFL = wheelSlot(new Point3D(0.4, wheelY, 0.9), true);
-  var wheelSlotFR = wheelSlot(new Point3D(-0.4, wheelY, 0.9), true);
-  var wheelSlotRL = wheelSlot(new Point3D(0.4, wheelY, -0.9), false);
-  var wheelSlotRR = wheelSlot(new Point3D(-0.4, wheelY, -0.9), false);
+  var wheelSlotFL = wheelSlot(WHEEL_FL, true);
+  var wheelSlotFR = wheelSlot(WHEEL_FR, true);
+  var wheelSlotRL = wheelSlot(WHEEL_RL, false);
+  var wheelSlotRR = wheelSlot(WHEEL_RR, false);
   var engineSlot = engineSlot();
 
   JSONVehicle definition = buildVehicleDefinition(s.systemName);
@@ -273,7 +298,7 @@ public final class GroundSupportFixtureProbe {
   // definition's own list in agreement by identity, not merely by field value.
   var item = new ItemVehicle(definition, definition.definitions.get(0), PACK_ID);
   var vehicle = new EntityVehicleF_Physics(world, null, item, null);
-  vehicle.position.set(blockX + 0.5, surfaceY + 2.0, blockZ + 0.5); // spawn a little above the real surface so it genuinely falls+settles
+  vehicle.position.set(blockX + 0.5, surfaceY + 1.0, blockZ + 0.5); // spawn a little above the real surface so it genuinely falls+settles (lower than the old tall-box fixture - this chassis is much shorter)
   vehicle.orientation.set(new RotationMatrix());
   world.spawnEntity(vehicle);
 
@@ -307,13 +332,28 @@ public final class GroundSupportFixtureProbe {
   v.general = new minecrafttransportsimulator.jsondefs.AJSONItem.General();
   v.general.health = 100; // AEntityE_Interactable reads this.definition.general.health unconditionally (confirmed live: "Cannot read field health because this.definition.general is null")
 
-  var box = new JSONCollisionBox();
-  box.pos = new Point3D(0, 0, 0);
-  box.width = (float) (HALF_EXTENT_A * 2);
-  box.height = (float) (HALF_HEIGHT_B * 2);
+  // PhysicsBridge.Body's own chassis-geometry computation takes the combined min/max across
+  // EVERY collision box in EVERY group, each box independently contributing
+  // (pos +/- width/2) in x/z and (pos +/- height/2) in y - a single box's own width is isotropic
+  // (same half-extent in x and z), but the real ATV chassis is NOT square (half.x=0.425,
+  // half.z=1.05). Reproduced exactly with three boxes: one real-sized box supplying the correct
+  // x/y half-extents (width=0.85, height=0.8821875), plus two zero-size "marker" boxes placed
+  // exactly at the true z=center.z+/-1.05 extremes (x=center.x, y=center.y, so they fall WITHIN
+  // the main box's own x/y range and contribute nothing there) - the combined bounding box's z
+  // half-extent becomes exactly 1.05 while x/y stay exactly what the main box alone gives.
+  var mainBox = new JSONCollisionBox();
+  mainBox.pos = CHASSIS_CENTER.copy();
+  mainBox.width = (float) (HALF_EXTENT_A * 2);
+  mainBox.height = (float) (HALF_HEIGHT_B * 2);
+  var zMarkerFront = new JSONCollisionBox();
+  zMarkerFront.pos = new Point3D(CHASSIS_CENTER.x, CHASSIS_CENTER.y, CHASSIS_CENTER.z + HALF_EXTENT_C);
+  zMarkerFront.width = 0; zMarkerFront.height = 0;
+  var zMarkerRear = new JSONCollisionBox();
+  zMarkerRear.pos = new Point3D(CHASSIS_CENTER.x, CHASSIS_CENTER.y, CHASSIS_CENTER.z - HALF_EXTENT_C);
+  zMarkerRear.width = 0; zMarkerRear.height = 0;
   var group = new JSONCollisionGroup();
   group.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
-  group.collisions = List.of(box);
+  group.collisions = List.of(mainBox, zMarkerFront, zMarkerRear);
   v.collisionGroups = List.of(group);
   return v;
  }
@@ -448,10 +488,9 @@ public final class GroundSupportFixtureProbe {
      + " threshold=" + SETTLE_CHECK_MAX_VERTICAL_SPEED + " result=" + (pass ? "PASS" : "FAIL"));
    if (!pass) { fail(s, "SETTLE_CHECK: still falling (verticalSpeed=" + verticalSpeed + " > " + SETTLE_CHECK_MAX_VERTICAL_SPEED + ") - never came to rest on the ground"); return; }
    s.positionAtDriveStart = s.vehicle.position.copy();
-   s.vehicle.throttleVar.setTo(1.0, false);
    s.phase = Phase.DRIVE;
    s.ticksInPhase = 0;
-   LOGGER.info("[DIV groundSupportFixture] scenario=" + s.label + " beginning DRIVE phase - throttle=1.0");
+   LOGGER.info("[DIV groundSupportFixture] scenario=" + s.label + " beginning DRIVE phase - throttle ramps 0->1 over " + DRIVE_RAMP_TICKS + " ticks, then holds at 1.0");
   }
  }
 
@@ -463,6 +502,12 @@ public final class GroundSupportFixtureProbe {
   s.ticksInPhase++;
   if (!checkFiniteOrFail(s)) return;
   forceEngineRunning(s.engine);
+  // Review 53305's "modest throttle ramp and full throttle separately": linear 0->1 ramp for the
+  // first DRIVE_RAMP_TICKS, then held at full throttle - both regimes exercised in one phase,
+  // distinguishable in the log by s.ticksInPhase against DRIVE_RAMP_TICKS, instead of only ever
+  // testing an instantaneous 0->1 step.
+  double throttle = Math.min(1.0, (double) s.ticksInPhase / DRIVE_RAMP_TICKS);
+  s.vehicle.throttleVar.setTo(throttle, false);
   double speed = forwardSpeed(s);
   s.maxSpeedSeenInDrive = Math.max(s.maxSpeedSeenInDrive, speed);
   if (s.ticksInPhase % 20 == 0 || s.ticksInPhase == DRIVE_TICKS) logState(s, "DRIVE");
