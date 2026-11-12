@@ -82,6 +82,24 @@ neoForge {
     jvmArgument('-Ddiv.debugGroundContact=true')
     jvmArgument('-Ddiv.debugGroundContactTicks=400')
    }
+   // Review 53327's brake-only speed sweep - same two-body/OFF split pattern as the ground-
+   // support fixture above (EXPERIMENTAL_TWO_BODY_CHASSIS is a per-JVM static flag, not
+   // per-vehicle, so OFF/.5/.4 cannot share one server run). debugGroundContactTicks is large
+   // enough to cover every scenario's own SETTLE+ACCELERATE+HOLD+BRAKE window (up to ~460
+   // ticks each) without truncating the per-wheel normal-force/impulse trace this sweep relies
+   // on for load-transfer evidence.
+   if (System.getenv('DIV_BRAKE_SWEEP_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalBrakeSweepProbe=true')
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=500')
+   }
+   if (System.getenv('DIV_BRAKE_SWEEP_PROBE_OFF') == 'true') {
+    jvmArgument('-Ddiv.experimentalBrakeSweepProbe=true')
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=false')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=500')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
