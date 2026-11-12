@@ -310,7 +310,10 @@ public final class TurnComparisonProbe {
   airborneRotation.merc230RawEnvelope = true;
   airborneRotation.incrementalInstall = true;
   airborneRotation.airborneRotationTest = true;
-  scenarios = List.of(airborneRotation);
+  // Review 53390's collisionTypes ENTITY constraint is production code affecting every vehicle
+  // (not just this round's new test) - quadRegression re-confirms the accepted quad's own
+  // fixture (also updated to ENTITY) still produces byte-identical behavior with it active.
+  scenarios = List.of(airborneRotation, quadRegression);
   if (false) scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
     conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels, merc230DriveRaw, merc230DriveFixed, merc230IncrementalInstall,
     quadRegression);
