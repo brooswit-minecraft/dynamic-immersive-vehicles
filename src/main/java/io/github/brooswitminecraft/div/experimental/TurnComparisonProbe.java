@@ -75,8 +75,10 @@ public final class TurnComparisonProbe {
  private static final double PLATFORM_BOUND_HORIZONTAL = PLATFORM_RADIUS - 15;
  private static final double PLATFORM_BOUND_VERTICAL = 10;
  private static final double UPRIGHT_MIN_VERTICALITY = 0.3; // looser than other probes - this one specifically wants to see HOW FAR it rolls before (or whether) self-right recovers it, not stop at the first sign of roll
- private static final double TARGET_SPEED = 5.0; // m/s - a bounded, moderate turning speed
+ private static final double TARGET_SPEED = 5.0; // m/s - a bounded, moderate turning speed for the TURN scenarios
+ private static final double BRAKE_CHECK_TARGET_SPEED = 8.0; // m/s - review 53348's own "around 8 m/s" ask for the straight-braking check
  private static final int SETTLE_TICKS = 60, MAX_ACCEL_TICKS = 160, TURN_TICKS = 200; // TURN sustained for 10s, well beyond a brief turn
+ private static final int HOLD_TICKS = 40, BRAKE_TICKS = 100; // BRAKE-mode scenarios: brief hold at target speed, then a bounded brake-observation window
 
  private static final double HALF_EXTENT_A = 0.42500001192092896, HALF_HEIGHT_B = 0.4410937510430813, HALF_EXTENT_C = 1.050000011920929;
  private static final Point3D CHASSIS_CENTER = new Point3D(0, 0.553593748062849, 0.625);
@@ -89,16 +91,21 @@ public final class TurnComparisonProbe {
  private static final Logger LOGGER = LogUtils.getLogger();
 
  private enum GlobalPhase { WAIT_TERRAIN, BUILD_PLATFORM, RUN_SCENARIOS, ALL_DONE }
- private enum Phase { SPAWNING, SETTLE, ACCELERATE, TURN, DONE, FAILED }
+ private enum Phase { SPAWNING, SETTLE, ACCELERATE, TURN, HOLD, BRAKE, DONE, FAILED }
+ private enum Mode { TURN, BRAKE }
 
  private static final class Scenario {
   final String label, systemName;
+  final Mode mode;
+  final double targetSpeed;
   EntityVehicleF_Physics vehicle;
   PartEngine engine;
   net.minecraft.world.entity.animal.Pig riderEntity;
   Phase phase = Phase.SPAWNING;
   int ticksInPhase = 0;
   double spawnX, spawnZ, spawnSurfaceY;
+  double speedAtBrakeStart;
+  double bankAtOnset; // review 53348's own "report onset attitude/speed" for the BRAKE check
   double minUpY = 1.0; // plain up.y - kept for the bounded-observation-floor check only, NOT the reported roll metric (review 53341: mixes pitch/wheelie with sideways bank)
   // Review 53341: the actual roll-specific metric, matching SelfRightingAssist's own internal
   // math exactly (signed roll about bodyForward alone) - atan2(bodyRight.y, bodyUp.y), NOT
@@ -107,7 +114,9 @@ public final class TurnComparisonProbe {
   double prevBankRadians = Double.NaN;
   double maxAbsBankRateDegreesPerTick = 0;
   double maxAbsLateralSlip = 0; // velocity component along the body-right axis - the real sideways slip a turn induces
-  Scenario(String label, String systemName) { this.label = label; this.systemName = systemName; }
+  Scenario(String label, String systemName, Mode mode, double targetSpeed) {
+   this.label = label; this.systemName = systemName; this.mode = mode; this.targetSpeed = targetSpeed;
+  }
  }
 
  private static GlobalPhase globalPhase = GlobalPhase.WAIT_TERRAIN;
@@ -156,7 +165,18 @@ public final class TurnComparisonProbe {
   var packVehicleScales = ConfigSystem.settings.general.packVehicleScales.value;
   packSpeedFactors.putIfAbsent(PACK_ID, 1.0);
   packVehicleScales.putIfAbsent(PACK_ID, 1.0);
-  scenarios = List.of(new Scenario("baseline", "turncmp-baseline"), new Scenario("tuned", "turncmp-tuned"));
+  // Review 53348: a small, bounded diagnostic follow-up, not a broader sweep - exactly two more
+  // scenarios. "griponly" isolates lateralGripMultiplier alone (baseline's OWN f/self-right,
+  // only grip changed) to separate its real contribution from the bundled candidate's combined
+  // effect (review's own "isolate whether grip reduction alone helps or sacrifices directional
+  // control"). "tunedbrake8" is a straight-line brake check of the FULL bundled tuning at ~8 m/s
+  // (review's own "shared elliptical budget changes combined-force behavior and low-speed suite
+  // alone doesn't cover this speed").
+  scenarios = List.of(
+    new Scenario("baseline", "turncmp-baseline", Mode.TURN, TARGET_SPEED),
+    new Scenario("tuned", "turncmp-tuned", Mode.TURN, TARGET_SPEED),
+    new Scenario("griponly", "turncmp-griponly", Mode.TURN, TARGET_SPEED),
+    new Scenario("tunedbrake8", "turncmp-tunedbrake8", Mode.BRAKE, BRAKE_CHECK_TARGET_SPEED));
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -171,6 +191,8 @@ public final class TurnComparisonProbe {
     case SETTLE -> settle(s);
     case ACCELERATE -> accelerate(s);
     case TURN -> turn(s);
+    case HOLD -> hold(s);
+    case BRAKE -> brake(s);
     case DONE, FAILED -> advanceToNextScenario(s);
    }
   } catch (RuntimeException ex) {
@@ -384,7 +406,7 @@ public final class TurnComparisonProbe {
      + " verticalFromSurface=" + verticalFromSurface + " (bound=" + PLATFORM_BOUND_VERTICAL + ") position=" + v.position);
    return false;
   }
-  if (s.phase == Phase.TURN) {
+  if (s.phase == Phase.TURN || s.phase == Phase.BRAKE) {
    s.minUpY = Math.min(s.minUpY, v.orientation.m11);
    // Review 53341: signed bank = atan2(bodyRight.y, bodyUp.y) about bodyForward alone, the SAME
    // formula SelfRightingAssist itself uses internally (its own class doc's algebraic
@@ -424,7 +446,7 @@ public final class TurnComparisonProbe {
   if (!checkBoundedOrFail(s)) return;
   if (s.ticksInPhase >= SETTLE_TICKS) {
    s.phase = Phase.ACCELERATE; s.ticksInPhase = 0;
-   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning ACCELERATE phase toward targetSpeed=" + TARGET_SPEED + " m/s");
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning ACCELERATE phase toward targetSpeed=" + s.targetSpeed + " m/s (mode=" + s.mode + ")");
   }
  }
 
@@ -433,12 +455,18 @@ public final class TurnComparisonProbe {
   if (!checkBoundedOrFail(s)) return;
   forceEngineRunning(s.engine);
   double speed = forwardSpeed(s);
-  s.vehicle.throttleVar.setTo(speed < TARGET_SPEED ? 1.0 : 0.0, false);
+  s.vehicle.throttleVar.setTo(speed < s.targetSpeed ? 1.0 : 0.0, false);
   if (s.ticksInPhase % 20 == 0) logState(s, "ACCELERATE");
-  if (speed >= TARGET_SPEED * 0.9 || s.ticksInPhase >= MAX_ACCEL_TICKS) {
-   s.phase = Phase.TURN; s.ticksInPhase = 0;
-   s.vehicle.rudderInputVar.setTo(40.0, false); // within MAX_RUDDER_ANGLE=45 - the same real, sustained steering input the bounded brake-sweep/turn work already established as "a clear, deliberate turning signal"
-   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning sustained TURN phase at speed=" + speed + " rudder=40deg");
+  if (speed >= s.targetSpeed * 0.9 || s.ticksInPhase >= MAX_ACCEL_TICKS) {
+   s.ticksInPhase = 0;
+   if (s.mode == Mode.TURN) {
+    s.phase = Phase.TURN;
+    s.vehicle.rudderInputVar.setTo(40.0, false); // within MAX_RUDDER_ANGLE=45 - the same real, sustained steering input the bounded brake-sweep/turn work already established as "a clear, deliberate turning signal"
+    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning sustained TURN phase at speed=" + speed + " rudder=40deg");
+   } else {
+    s.phase = Phase.HOLD;
+    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning HOLD phase at speed=" + speed);
+   }
   }
  }
 
@@ -447,7 +475,7 @@ public final class TurnComparisonProbe {
   if (!checkBoundedOrFail(s)) return;
   forceEngineRunning(s.engine);
   double speed = forwardSpeed(s);
-  s.vehicle.throttleVar.setTo(speed < TARGET_SPEED ? 1.0 : 0.0, false); // keep driving through the turn - a stationary vehicle can't meaningfully flop
+  s.vehicle.throttleVar.setTo(speed < s.targetSpeed ? 1.0 : 0.0, false); // keep driving through the turn - a stationary vehicle can't meaningfully flop
   if (s.ticksInPhase % 10 == 0) logState(s, "TURN");
   if (s.ticksInPhase >= TURN_TICKS) {
    s.phase = Phase.DONE;
@@ -455,6 +483,41 @@ public final class TurnComparisonProbe {
      + " (1.0=never tilted; <" + UPRIGHT_MIN_VERTICALITY + " would have STOPPED as a rollover)"
      + " maxAbsBankDegrees=" + s.maxAbsBankDegrees + " maxAbsBankRateDegPerTick=" + s.maxAbsBankRateDegreesPerTick
      + " maxAbsLateralSlip=" + s.maxAbsLateralSlip + " m/s");
+  }
+ }
+
+ // Review 53348: a bounded STRAIGHT-LINE brake check of the bundled tuning at ~8 m/s, same
+ // matched runtime flags as the TURN scenarios - no rudder input at all, isolating braking's own
+ // combined-force behavior under the new anisotropic friction budget from steering entirely.
+ private static void hold(Scenario s) {
+  s.ticksInPhase++;
+  if (!checkBoundedOrFail(s)) return;
+  forceEngineRunning(s.engine);
+  double speed = forwardSpeed(s);
+  s.vehicle.throttleVar.setTo(speed < s.targetSpeed ? 1.0 : 0.0, false);
+  if (s.ticksInPhase % 10 == 0) logState(s, "HOLD");
+  if (s.ticksInPhase >= HOLD_TICKS) {
+   s.speedAtBrakeStart = speed;
+   s.bankAtOnset = Math.toDegrees(Math.atan2(s.vehicle.orientation.m10, s.vehicle.orientation.m11));
+   s.vehicle.throttleVar.setTo(0.0, false);
+   s.vehicle.brakeVar.setActive(true, false);
+   s.phase = Phase.BRAKE; s.ticksInPhase = 0;
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning BRAKE phase - onset speed=" + s.speedAtBrakeStart + " onset bankDegrees=" + s.bankAtOnset);
+  }
+ }
+
+ private static void brake(Scenario s) {
+  s.ticksInPhase++;
+  if (!checkBoundedOrFail(s)) return;
+  double speed = forwardSpeed(s);
+  if (s.ticksInPhase % 10 == 0) logState(s, "BRAKE");
+  if (s.ticksInPhase >= BRAKE_TICKS) {
+   double fractionalReduction = s.speedAtBrakeStart > 0 ? (s.speedAtBrakeStart - speed) / s.speedAtBrakeStart : 0;
+   s.phase = Phase.DONE;
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " COMPLETE - straight BRAKE check finished, onsetSpeed=" + s.speedAtBrakeStart
+     + " onsetBankDegrees=" + s.bankAtOnset + " finalSpeed=" + speed + " fractionalReduction=" + fractionalReduction
+     + " minUpYSeen=" + s.minUpY + " maxAbsBankDegrees=" + s.maxAbsBankDegrees
+     + " (1.0=never tilted; <" + UPRIGHT_MIN_VERTICALITY + " would have STOPPED as a rollover)");
   }
  }
 }
