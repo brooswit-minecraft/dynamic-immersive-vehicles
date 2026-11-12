@@ -185,10 +185,11 @@ public final class PhysicsBridge {
   // permanently locked in at whatever was active the moment construction first succeeded. Same
   // discard-and-let-the-next-activateOrClassify-call-reconstruct pattern replaceIfCategoryChanged
   // already uses above (continuity comes from the VEHICLE's own position/motion fields, which
-  // step() already writes back every tick regardless of category - a fresh Body's constructor
-  // reads those same fields, so velocity/pose survive a rebuild the same way they already do for
-  // a category change; this is not new risk, it is the already-accepted mechanism applied to a
-  // new trigger condition).
+  // step() already writes back position/linear motion every tick regardless of category, but
+  // review 53385/53388 correctly found that alone is NOT sufficient - angular velocity and each
+  // half's own distinct point velocity need their own explicit, correct capture/transfer below;
+  // treating this as already covered by the existing category-change precedent was itself an
+  // overclaim, now corrected.
   if (registry.get(v) instanceof Body existingBody && existingBody.chassisBoundsChanged(v)) {
    // Review 53385: capture the REAL current rigid-body state before removal - angular velocity
    // and a reference point/linear-velocity pair (the lower half, tightly joint-coupled to the
@@ -197,6 +198,13 @@ public final class PhysicsBridge {
    // modeling) - so the next Body construction for this vehicle can correctly reseed both new
    // halves' velocities via v_new=v_reference+omega x (newPoint-referencePoint), not silently
    // zero the vehicle's own actual rotation.
+   //
+   // Review 53388: box.updatePose() forces the Java-side cached pose to resync from the live
+   // native Rapier state before reading position() - getPose() alone can otherwise return a
+   // value cached from a previous sync point, inconsistent with the velocity read immediately
+   // below from the SAME native body at the current moment; this keeps position and velocity as
+   // one mutually consistent snapshot rather than two different ticks' worth of state.
+   existingBody.box.updatePose();
    pendingInheritedVelocity.put(v, new InheritedRigidBodyVelocity(
      existingBody.handle.getAngularVelocity(new Vector3d()),
      existingBody.handle.getLinearVelocity(new Vector3d()),
@@ -290,6 +298,11 @@ public final class PhysicsBridge {
  private static boolean deactivate(EntityVehicleF_Physics v) {
   VehicleBody old = registry.deactivate(v);
   if (old != null) { hitches.release(v); old.remove(); }
+  // Review 53388: this vehicle may never successfully reconstruct after a staged
+  // chassisBoundsChanged rebuild (e.g. it becomes ineligible, or is simply removed from the
+  // world) - without this, pendingInheritedVelocity would hold a STRONG reference to `v` (an
+  // IdentityHashMap key) forever, leaking the entity itself, not just stale velocity data.
+  pendingInheritedVelocity.remove(v);
   return false;
  }
  enum ActivationDecision { INELIGIBLE, CLIENT_ACTIVE, DEFER_TO_NATIVE, ACTIVATE }
@@ -435,10 +448,12 @@ public final class PhysicsBridge {
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  public static void cleanup() {
-  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); });
+  // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
+  // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
+  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.remove(v); });
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); });
+  registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.remove(v); });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**
@@ -981,7 +996,13 @@ public final class PhysicsBridge {
    // angular velocity and a per-half, lever-arm-correct linear velocity via the standard rigid-
    // body point-velocity formula v_new=v_reference+omega x (newPoint-referencePoint) - not a
    // single shared velocity that silently drops rotation and ignores each half's own new offset.
-   var inherited = pendingInheritedVelocity.remove(v);
+   // Review 53388's concrete correction: NOT removed here - a construction failure (either
+   // branch's own catch below) must leave this entry intact so a RETRY can still consume it;
+   // removing it unconditionally up front silently lost the inherited angular state on any
+   // retry after a transient failure (e.g. Overrides.twoBodyConfig validation, or any other
+   // exception on the path to a successful addLinearAndAngularVelocity call). Only removed
+   // explicitly below, once, on confirmed success in BOTH branches.
+   var inherited = pendingInheritedVelocity.get(v);
    if (twoBodyActive) {
     // Uninstalled/unvalidated candidate (comment 53268) - any construction failure (including
     // Overrides.twoBodyConfig's own validation, e.g. an unsafe upperMassFraction for this
@@ -1009,6 +1030,7 @@ public final class PhysicsBridge {
      TwoBodyLifecycle.remove(level,bodies);
      throw ex;
     }
+    if (inherited != null) pendingInheritedVelocity.remove(v); // success-only consume (review 53388)
     box=bodies.lowerBox(); handle=bodies.lowerHandle();
     upperBox=bodies.upperBox(); upperHandle=bodies.upperHandle(); twoBodyJoint=bodies.joint();
     lowerMassKg=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.lowerMassKg(mass,config);
@@ -1040,6 +1062,7 @@ public final class PhysicsBridge {
      physics.removeObject(box);
      throw ex;
     }
+    if (inherited != null) pendingInheritedVelocity.remove(v); // success-only consume (review 53388)
     handle=h;
    }
   }
