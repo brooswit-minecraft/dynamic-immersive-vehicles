@@ -74,6 +74,18 @@ public final class PhysicsBridge {
   void stage(K key, V value) { pending.put(key, value); }
   void consumeOnSuccess(K key) { pending.remove(key); }
   void cleanup(K key) { pending.remove(key); }
+  /**
+   * Review 53399: a key can be staged, then abandoned, WITHOUT ever appearing in - or while
+   * already absent from - any other registry a caller's own bulk-removal loop iterates. The
+   * concrete case: PhysicsBridge.active()'s chassisBoundsChanged rebuild calls
+   * registry.deactivate(v) (removing v from BodyRegistry) BEFORE attempting reconstruction; if
+   * that reconstruction then fails, v is already gone from BodyRegistry but still staged here.
+   * cleanup()/unload()'s own registry.removeIf(...) callback never runs for v in that case, so
+   * their own pendingInheritedVelocity.cleanup(v) call inside it never fires either - this sweep
+   * is independent of BodyRegistry entirely, keyed only by this store's own staged keys, so it
+   * still finds and removes v.
+   */
+  void removeIf(java.util.function.Predicate<K> predicate) { pending.keySet().removeIf(predicate); }
  }
  private static final PendingReplacementState<EntityVehicleF_Physics, InheritedRigidBodyVelocity> pendingInheritedVelocity = new PendingReplacementState<>();
  // Vehicle definitions whose chassis geometry failed to build a Sable body once already;
@@ -495,9 +507,21 @@ public final class PhysicsBridge {
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
   registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
+  // Review 53399: the registry.removeIf above only cleans pendingInheritedVelocity for a vehicle
+  // STILL present in BodyRegistry - a vehicle already deactivated (e.g. a failed
+  // chassisBoundsChanged reconstruction, which deactivates BEFORE attempting to rebuild) is
+  // absent from BodyRegistry by the time cleanup() runs, so that callback never fires for it.
+  // This sweep is independent of BodyRegistry, keyed only by pendingInheritedVelocity's own
+  // staged entries, so it still finds and removes that exact orphan case.
+  pendingInheritedVelocity.removeIf(v -> !v.isValid);
  }
  public static void unload(Object level) {
   registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
+  // Review 53399: same independent sweep as cleanup() above, matched on the unloading level
+  // instead of validity - a vehicle's own level comes directly from v (the same accessor
+  // active()'s own lifecycle-refresh path already uses), not from any Body, so this needs no
+  // BodyRegistry lookup at all.
+  pendingInheritedVelocity.removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**

@@ -73,4 +73,32 @@ class PendingReplacementStateTest {
   assertNull(store.get("car1"));
   assertEquals(2, store.get("car2"), "consuming one vehicle's entry must not disturb another's");
  }
+
+ // Review 53399: removeIf's own exact reason for existing - a key can be staged, then
+ // abandoned, while ALREADY ABSENT from (or never having appeared in) whatever other registry a
+ // caller's own bulk-removal loop iterates (PhysicsBridge.cleanup()/unload() previously relied
+ // solely on BodyRegistry.removeIf's own callback to call cleanup(v), which never fires for a key
+ // BodyRegistry no longer has). removeIf must find and remove such an orphaned key purely from
+ // its own predicate over ITS OWN staged keys, with no registry involved at all.
+ @Test void removeIfRemovesAnOrphanedKeyNoOtherRegistryEverSaw() {
+  var store = new PhysicsBridge.PendingReplacementState<String, Integer>();
+  store.stage("orphan", 42); // simulates: deactivated from BodyRegistry already, reconstruction then failed
+  store.removeIf(key -> key.equals("orphan"));
+  assertNull(store.get("orphan"), "removeIf must remove a key with no corresponding registry entry at all");
+ }
+
+ @Test void removeIfLeavesNonMatchingKeysAlone() {
+  var store = new PhysicsBridge.PendingReplacementState<String, Integer>();
+  store.stage("invalid", 1);
+  store.stage("stillValid", 2);
+  store.removeIf(key -> key.equals("invalid"));
+  assertNull(store.get("invalid"));
+  assertEquals(2, store.get("stillValid"), "a key the predicate doesn't match must survive the sweep");
+ }
+
+ @Test void removeIfOnAnEmptyStoreIsANoOp() {
+  var store = new PhysicsBridge.PendingReplacementState<String, Integer>();
+  store.removeIf(key -> true);
+  assertNull(store.get("anything"));
+ }
 }
