@@ -703,6 +703,15 @@ public final class PhysicsBridge {
   private boolean loggedMixedOwnershipWarning = false;
   private boolean loggedNonGroundTwoBodyWarning = false;
   private boolean loggedTwoBodyTowingWarning = false;
+  // Diagnostic-only (ticket comment 53365: "zero drive ambiguous" - the existing debugGroundContact
+  // line above logs throttle/drive/brakeActive but never engine presence/running/gear/fuel, so a
+  // vehicle with four wheels and a seat that simply never started its engine looks identical in the
+  // log to one failing to drive for some other reason). Read-only - never alters force/control or
+  // auto-starts anything. Edge-triggered (logs again whenever the built line actually changes) PLUS
+  // a bounded periodic resample, not unconditional per-tick spam.
+  private String lastEngineFuelElectricalReceiptLine = null;
+  private int ticksSinceLastEngineFuelElectricalReceipt = ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS;
+  private static final int ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS = 100;
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
@@ -947,6 +956,7 @@ public final class PhysicsBridge {
      // throttleRampTicks=0 together prove the experimental candidate is bypassed on this build/
      // session; otherwise shows exactly which configured tick count shaped this tick's drive.
      +" driveRaw="+rawDrive+" throttleRampTicks="+EXPERIMENTAL_THROTTLE_RAMP_TICKS);
+   if (debugThisTick) logEngineFuelElectricalReceiptIfDue(v, debugTick);
    // Phase 1: raycast every wheel and compute its vertical/suspension force exactly as before -
    // suspension is per-wheel and unaffected by this change. Friction/slip is sampled at the
    // point the tire impulse is actually applied (the terrain hit, `point` below), not the
@@ -1315,6 +1325,61 @@ public final class PhysicsBridge {
    }
    double towThrust = applyTowingCompensation(v);
    return contact || drive!=0 || towThrust!=0;
+  }
+  /**
+   * Ticket comment 53365: John's quad accepted and installed, but his car (four tires + seat)
+   * does not drive, and the existing debugGroundContact line (throttle/driveRaw/drive/
+   * brakeActive/parkingBrakeActive) cannot distinguish "engine never started" from any other
+   * cause of zero drive - it never surfaces engine presence/running/gear/fuel/electrical state
+   * at all. Read-only: every field read here (PartEngine.running/rpm/currentGearVar/magnetoVar/
+   * electricStarterVar/handStarterVar, AEntityVehicleE_Powered.fuelTank/electricPower) is IV's
+   * own public state, never written to - this never alters force/control and never auto-starts
+   * anything. Logs "unavailable" rather than guessing wherever a value cannot actually be read
+   * (currently only the defensive fuelTank==null case - every other field checked against the
+   * decompiled source is a plain, always-present public field/ComputedVariable, not something
+   * that can itself throw or be absent).
+   *
+   * <p>Edge-triggered, not unconditional: builds the full receipt line every debug tick (cheap -
+   * one pass over this vehicle's own parts) but only actually logs it when the line changed
+   * since the last one logged (an engine started/stopped, a gear changed, fuel/electric moved)
+   * OR {@link #ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS} ticks have passed since the last log
+   * - bounded, modest periodic sampling rather than unbounded per-engine-per-tick spam, per
+   * John's explicit ask.
+   */
+  private void logEngineFuelElectricalReceiptIfDue(EntityVehicleF_Physics v, int debugTick) {
+   StringBuilder engines = new StringBuilder("[");
+   int engineCount = 0;
+   for (var part : v.allParts) {
+    if (!(part instanceof PartEngine engine)) continue;
+    if (engineCount > 0) engines.append("; ");
+    engines.append("idx=").append(engineCount)
+      .append(" running=").append(engine.running)
+      .append(" gear=").append(engine.currentGearVar.currentValue)
+      .append(" rpm=").append(engine.rpm)
+      .append(" ignitionOn=").append(engine.magnetoVar.isActive)
+      .append(" electricStarterEngaged=").append(engine.electricStarterVar.isActive)
+      .append(" handStarterEngaged=").append(engine.handStarterVar.isActive);
+    engineCount++;
+   }
+   engines.append("]");
+   String fuelState;
+   if (v.fuelTank == null) {
+    fuelState = "fuelLevel=unavailable fuelMax=unavailable fuelType=unavailable (no fuelTank on this vehicle)";
+   } else {
+    fuelState = "fuelLevel="+v.fuelTank.getFluidLevel()+" fuelMax="+v.fuelTank.getMaxLevel()+" fuelType="+v.fuelTank.getFluid();
+   }
+   // Compared WITHOUT the tick number below - tick changes every call, so including it in the
+   // change-detection comparison would make "changed since last logged" trivially true every
+   // single debug tick, defeating the whole point of edge-triggering.
+   String stateOnly = "entity="+v.uniqueUUID+" engineCount="+engineCount+" engines="+engines+" "+fuelState+" electricPower="+v.electricPower;
+   boolean due = lastEngineFuelElectricalReceiptLine==null || !lastEngineFuelElectricalReceiptLine.equals(stateOnly)
+     || ticksSinceLastEngineFuelElectricalReceipt >= ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS;
+   ticksSinceLastEngineFuelElectricalReceipt++;
+   if (due) {
+    LOGGER.info("[DIV debugGroundContact] engineFuelElectricalReceipt tick="+debugTick+" "+stateOnly);
+    lastEngineFuelElectricalReceiptLine = stateOnly;
+    ticksSinceLastEngineFuelElectricalReceipt = 0;
+   }
   }
   /**
    * IV would normally add getRecursiveTowingThrust() - the engine thrust of everything this

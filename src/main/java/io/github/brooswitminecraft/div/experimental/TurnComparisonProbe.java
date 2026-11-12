@@ -97,7 +97,12 @@ public final class TurnComparisonProbe {
 
  private enum GlobalPhase { WAIT_TERRAIN, BUILD_PLATFORM, RUN_SCENARIOS, ALL_DONE }
  private enum Phase { SPAWNING, SETTLE, ACCELERATE, TURN, HOLD, BRAKE, BRAKE_DURING_TURN, STRAIGHT_SETTLE, RECOVER, DONE, FAILED }
- private enum Mode { TURN, BRAKE, TURN_THEN_BRAKE, STRAIGHT_SETTLE, TURN_THEN_RECOVER }
+ // ENGINE_STATE_CHECK (ticket 53365): never drives - exercises PhysicsBridge.Body's new
+ // engineFuelElectricalReceipt diagnostic across the 4 states John asked to be tested (no
+ // engine installed, engine installed but not running, running in neutral, running in gear),
+ // confirmed purely by reading this scenario's own spawned engine/fuel/electrical fields back -
+ // never alters force/control itself, same as the production diagnostic it is exercising.
+ private enum Mode { TURN, BRAKE, TURN_THEN_BRAKE, STRAIGHT_SETTLE, TURN_THEN_RECOVER, ENGINE_STATE_CHECK }
 
  private static final class Scenario {
   final String label, systemName;
@@ -132,6 +137,12 @@ public final class TurnComparisonProbe {
   double maxAbsLateralSlip = 0; // velocity component along the body-right axis - the real sideways slip a turn induces
   double steadyStateSignedBankDegrees = Double.NaN; // set at scenario end - average signed bank over the final STEADY_STATE_WINDOW_TICKS
   double bankAtRudderRelease; // review 53357's post-turn recovery - signed bank the instant rudder returns to 0
+  // ENGINE_STATE_CHECK only (ticket 53365) - defaults preserve every existing scenario/mode's
+  // behavior unchanged (hasEngine=true, forceEngineRunning still overrides running/gear in
+  // accelerate() for every driving mode exactly as before).
+  boolean hasEngine = true;
+  boolean engineRunningDesired = false;
+  double gearDesired = 0.0;
   Scenario(String label, String systemName, Mode mode, double targetSpeed, boolean symmetricGeometry, double rudderDegrees) {
    this.label = label; this.systemName = systemName; this.mode = mode; this.targetSpeed = targetSpeed; this.symmetricGeometry = symmetricGeometry; this.rudderDegrees = rudderDegrees;
   }
@@ -201,9 +212,17 @@ public final class TurnComparisonProbe {
   // the matching grip=.5 pair (reusing the existing divtest:turncmp-tuned config - same
   // f=.1/400/160/1000/10-50, lateralGripMultiplier=0.5 - not a new config entry) for a direct,
   // bounded comparison. Not re-running the already-reported .7 pair or expanding scope further.
-  scenarios = List.of(
-    new Scenario("recoverLeft-grip5", "turncmp-tuned", Mode.TURN_THEN_RECOVER, TARGET_SPEED, false, 40.0),
-    new Scenario("recoverRight-grip5", "turncmp-tuned", Mode.TURN_THEN_RECOVER, TARGET_SPEED, false, -40.0));
+  // Ticket 53365: lightweight diagnostic-only check of the new engineFuelElectricalReceipt log
+  // line across the 4 states John asked to be tested - never drives, no turn/brake/recovery.
+  Scenario engineCheckNoEngine = new Scenario("engineCheck-noEngine", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  engineCheckNoEngine.hasEngine = false;
+  Scenario engineCheckStopped = new Scenario("engineCheck-stopped", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  engineCheckStopped.engineRunningDesired = false; engineCheckStopped.gearDesired = 0.0;
+  Scenario engineCheckRunningNeutral = new Scenario("engineCheck-runningNeutral", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  engineCheckRunningNeutral.engineRunningDesired = true; engineCheckRunningNeutral.gearDesired = 0.0;
+  Scenario engineCheckRunningInGear = new Scenario("engineCheck-runningInGear", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  engineCheckRunningInGear.engineRunningDesired = true; engineCheckRunningInGear.gearDesired = 1.0;
+  scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear);
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -264,7 +283,16 @@ public final class TurnComparisonProbe {
   addWheel(vehicle, wheelSlotFR);
   addWheel(vehicle, wheelSlotRL);
   addWheel(vehicle, wheelSlotRR);
-  s.engine = addEngine(vehicle, engineSlot);
+  // Ticket 53365's "no engine installed" ENGINE_STATE_CHECK scenario: the slot stays declared
+  // (realistic "engine bay present, nothing installed in it"), but no PartEngine is actually
+  // added - v.allParts then genuinely contains zero PartEngine instances.
+  if (s.hasEngine) {
+   s.engine = addEngine(vehicle, engineSlot);
+   s.engine.running = s.engineRunningDesired;
+   s.engine.currentGearVar.setTo(s.gearDesired, false);
+  } else {
+   s.engine = null;
+  }
   PartSeat seat = addSeat(vehicle, seatSlot);
 
   // Review 53332's own explicit gate: self-right's `occupied` check (PhysicsBridge.java) looks
@@ -490,6 +518,19 @@ public final class TurnComparisonProbe {
   s.ticksInPhase++;
   if (!checkBoundedOrFail(s)) return;
   if (s.ticksInPhase >= SETTLE_TICKS) {
+   // ENGINE_STATE_CHECK (ticket 53365): never drives - just lets PhysicsBridge.Body tick long
+   // enough for its new engineFuelElectricalReceipt diagnostic to fire (gated the same way as
+   // every other debugGroundContact line - DEBUG_GROUND_CONTACT_TICKS is per-Body, fresh at this
+   // scenario's own spawn, so SETTLE_TICKS is already well within its window), then reports what
+   // THIS scenario actually configured so the real log line (named engineFuelElectricalReceipt,
+   // visible separately in the server log) can be checked against it.
+   if (s.mode == Mode.ENGINE_STATE_CHECK) {
+    s.phase = Phase.DONE;
+    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " COMPLETE - ENGINE_STATE_CHECK configured hasEngine=" + s.hasEngine
+      + (s.engine != null ? " engineRunning=" + s.engine.running + " gear=" + s.engine.currentGearVar.currentValue : " (no engine part installed)")
+      + " fuelTankPresent=" + (s.vehicle.fuelTank != null) + " electricPower=" + s.vehicle.electricPower);
+    return;
+   }
    s.phase = Phase.ACCELERATE; s.ticksInPhase = 0;
    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning ACCELERATE phase toward targetSpeed=" + s.targetSpeed + " m/s (mode=" + s.mode + ")");
   }
