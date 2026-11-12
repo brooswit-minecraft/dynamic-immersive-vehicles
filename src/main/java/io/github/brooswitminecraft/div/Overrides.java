@@ -63,6 +63,16 @@ public final class Overrides {
   // real total mass (not just f in isolation - see TwoBodyChassis.Config.validateAgainstTotalMass's
   // own doc for why that distinction matters).
   public Double upperMassFraction;
+  // Ticket 53331/53332: John's hands-on feedback ("flops over to the side when I turn...also
+  // maybe less grip or side force from the tires so the thing slides, rather than violently
+  // flipping") - a narrow, additive knob scaling ONLY the lateral slip-canceling target inside
+  // MultiContactFrictionSolver.solveFriction, left of the existing shared friction-circle clamp.
+  // Deliberately separate from `friction` (which still governs the combined circle, including
+  // drive/brake grip) per John's own explicit caution against "blindly reducing shared friction
+  // if that also destroys drive/brake grip". 1.0 (FALLBACK) is a byte-identical no-op; values
+  // below 1.0 let the tire slide sideways more readily before the circle clamp would otherwise
+  // allow, without touching longitudinal authority at all.
+  public Double lateralGripMultiplier;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -86,6 +96,11 @@ public final class Overrides {
    // constructor validation exactly, checked again here so a malformed config entry fails loudly
    // at load time rather than only when a vehicle actually tries to resolve a two-body config.
    if (upperMassFraction != null && !(Double.isFinite(upperMassFraction) && upperMassFraction > 0 && upperMassFraction < 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Strictly between 0 (exclusive, never a true zero-lateral-grip vehicle - that would be a
+   // physically nonsensical ice-skate tire) and 1 (inclusive - the no-op/unconfigured value).
+   // Never above 1: this knob is explicitly for REDUCING lateral grip (John's own "less grip...
+   // so it slides"), not for granting more lateral authority than the real friction circle.
+   if (lateralGripMultiplier != null && !(Double.isFinite(lateralGripMultiplier) && lateralGripMultiplier > 0 && lateralGripMultiplier <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -100,6 +115,7 @@ public final class Overrides {
   FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
   FALLBACK.maxSteerDegrees=30.0; FALLBACK.hullFillFactor=0.5; FALLBACK.waterDrag=400.0; FALLBACK.propellerForce=6000.0;
   FALLBACK.upperMassFraction=0.5;
+  FALLBACK.lateralGripMultiplier=1.0;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -108,7 +124,7 @@ public final class Overrides {
   c.hullFillFactor=t.hullFillFactor; c.waterDrag=t.waterDrag; c.propellerForce=t.propellerForce;
   c.selfRightStrength=t.selfRightStrength; c.selfRightDamping=t.selfRightDamping; c.selfRightMaxTorque=t.selfRightMaxTorque;
   c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
-  c.upperMassFraction=t.upperMassFraction;
+  c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   return c;
  }
  /** Builds a {@code SelfRightingAssist.Config} from a resolved Tuning (ticket comment 53182/
@@ -185,6 +201,7 @@ public final class Overrides {
   result.selfRightFadeStartDegrees = firstNonNull(override!=null?override.selfRightFadeStartDegrees:null, packMetadata!=null?packMetadata.selfRightFadeStartDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeStartDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeStartDegrees:null);
   result.selfRightFadeEndDegrees = firstNonNull(override!=null?override.selfRightFadeEndDegrees:null, packMetadata!=null?packMetadata.selfRightFadeEndDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeEndDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeEndDegrees:null);
   result.upperMassFraction = firstNonNull(override!=null?override.upperMassFraction:null, packMetadata!=null?packMetadata.upperMassFraction:null, ivAdapted!=null?ivAdapted.upperMassFraction:null, physicallyDerived!=null?physicallyDerived.upperMassFraction:null, FALLBACK.upperMassFraction);
+  result.lateralGripMultiplier = firstNonNull(override!=null?override.lateralGripMultiplier:null, packMetadata!=null?packMetadata.lateralGripMultiplier:null, ivAdapted!=null?ivAdapted.lateralGripMultiplier:null, physicallyDerived!=null?physicallyDerived.lateralGripMultiplier:null, FALLBACK.lateralGripMultiplier);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

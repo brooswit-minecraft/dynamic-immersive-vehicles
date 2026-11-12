@@ -96,7 +96,7 @@ public final class MultiContactFrictionSolver {
  public static FrictionResult[] solveFriction(FrictionContact[] contacts, double mass, Vector3dc inertiaBody,
      Quaterniondc orientation, Quaterniondc inverseOrientation,
      Vector3d workingVelocity, Vector3d workingAngular,
-     boolean braking, double brakeForcePerWheel, double driveForcePerWheel, double friction, double dt, int iterations) {
+     boolean braking, double brakeForcePerWheel, double driveForcePerWheel, double friction, double lateralGripMultiplier, double dt, int iterations) {
   int n=contacts.length;
   // accLong/accLat track the TOTAL applied-so-far longitudinal/lateral force (post friction-
   // circle clamp) purely so each pass's impulse delta is correct - same role for both.
@@ -147,7 +147,15 @@ public final class MultiContactFrictionSolver {
     double effectiveMass=contactLateralEffectiveMass(mass,c.point(),c.right(),inverseOrientation,inertiaBody);
     double lateralIncrement=-sideSpeed*effectiveMass/dt;
     double candidateLateral=accLat[i]+lateralIncrement;
-    var tire=TireForces.friction(longitudinalTarget,candidateLateral,c.normal(),friction);
+    // Ticket 53331/53332/53335: review correctly rejected scaling the per-pass increment (or
+    // the accumulator) as unsound - either merely damps PGS convergence RATE, so a high
+    // iteration count (the real installed baseline's own 64, confirmed via 53333) restores
+    // nearly full grip regardless, and scaling the accumulator additionally compounds
+    // geometrically across passes. Using the ANISOTROPIC clamp instead (TireForces.
+    // frictionAnisotropic) bounds the CONVERGED STEADY STATE itself via a smaller lateral
+    // semi-axis, independent of iteration count - lateralGripMultiplier=1.0 is algebraically
+    // byte-identical to the original circular TireForces.friction (see that method's own doc).
+    var tire=TireForces.frictionAnisotropic(longitudinalTarget,candidateLateral,c.normal(),friction,lateralGripMultiplier);
     double deltaLong=tire.longitudinal()-accLong[i], deltaLat=tire.lateral()-accLat[i];
     accLong[i]=tire.longitudinal(); accLat[i]=tire.lateral();
     Vector3d impulse=new Vector3d(c.forward()).mul(deltaLong*dt).fma(deltaLat*dt,c.right());

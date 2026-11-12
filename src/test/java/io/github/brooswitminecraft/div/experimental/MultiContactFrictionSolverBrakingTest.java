@@ -25,7 +25,7 @@ class MultiContactFrictionSolverBrakingTest {
   Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
   Vector3d angular=new Vector3d(0,0,0);
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,braking,BRAKE_FORCE,driveForcePerWheel,FRICTION,DT,iterations);
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,braking,BRAKE_FORCE,driveForcePerWheel,FRICTION,1.0,DT,iterations);
   return velocity.dot(FORWARD);
  }
 
@@ -80,7 +80,7 @@ class MultiContactFrictionSolverBrakingTest {
     Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
     Vector3d angular=new Vector3d(0,0,0);
     var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(offCenterPoint,FORWARD,RIGHT,NORMAL,1.0)};
-    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,n);
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,1.0,DT,n);
     assertTrue(Double.isFinite(angular.length()), "off-center braking must not produce a non-finite induced angular velocity");
     double contactSlip=new Vector3d(angular).cross(offCenterPoint).add(velocity).dot(FORWARD);
     assertTrue(Math.abs(contactSlip) < Math.abs(initialSpeed)*0.05,
@@ -128,7 +128,7 @@ class MultiContactFrictionSolverBrakingTest {
   Vector3d velocity=new Vector3d(FORWARD).mul(50).add(new Vector3d(RIGHT).mul(50)); // large demand, well over budget
   Vector3d angular=new Vector3d(0,0,0);
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   double magnitude=Math.hypot(results[0].longitudinal(),results[0].lateral());
   double budget=NORMAL*FRICTION;
   assertTrue(magnitude <= budget+1e-6,
@@ -140,7 +140,7 @@ class MultiContactFrictionSolverBrakingTest {
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,0.0,1.0)};
   Vector3d velocity=new Vector3d(FORWARD).mul(5.0);
   Vector3d angular=new Vector3d(0,0,0);
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   assertEquals(5.0, velocity.z, 1e-9, "zero normal load means zero friction budget - an airborne/unloaded wheel must not brake or steer at all");
   assertTrue(Double.isFinite(velocity.x) && Double.isFinite(velocity.y) && Double.isFinite(velocity.z));
  }
@@ -161,7 +161,7 @@ class MultiContactFrictionSolverBrakingTest {
     new MultiContactFrictionSolver.FrictionContact(p1,FORWARD,RIGHT,NORMAL,1.0),
     new MultiContactFrictionSolver.FrictionContact(p2,FORWARD,RIGHT,NORMAL,1.0)};
   for (int tick=0; tick<30; tick++)
-   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,DT,iterations);
+   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,1.0,DT,iterations);
   assertTrue(Double.isFinite(velocity.z) && Math.abs(velocity.z) <= 2.0 && Math.abs(angular.length()) < 1.0,
     "two coupled contacts braking together for 30 ticks at "+iterations+" iterations should settle, not diverge - velocity.z="+velocity.z+" |angular|="+angular.length());
  }
