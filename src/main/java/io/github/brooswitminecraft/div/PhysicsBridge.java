@@ -160,6 +160,19 @@ public final class PhysicsBridge {
   if (brokenDefinitions.contains(definition)) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "brokenDefinition:"+key); return deactivate(v); }
   if (!ground && !floating) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "ineligible:"+key); return deactivate(v); }
   replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, old -> { hitches.release(v); old.remove(); });
+  // Ticket 53379/53383's explicit priority: a vehicle whose parts are installed/removed AFTER
+  // this Body already successfully constructed must have its chassis envelope refreshed - not
+  // permanently locked in at whatever was active the moment construction first succeeded. Same
+  // discard-and-let-the-next-activateOrClassify-call-reconstruct pattern replaceIfCategoryChanged
+  // already uses above (continuity comes from the VEHICLE's own position/motion fields, which
+  // step() already writes back every tick regardless of category - a fresh Body's constructor
+  // reads those same fields, so velocity/pose survive a rebuild the same way they already do for
+  // a category change; this is not new risk, it is the already-accepted mechanism applied to a
+  // new trigger condition).
+  if (registry.get(v) instanceof Body existingBody && existingBody.chassisBoundsChanged(v)) {
+   var old = registry.deactivate(v);
+   if (old != null) { hitches.release(v); old.remove(); }
+  }
   boolean alreadyActive = registry.isActive(v);
   boolean towingVehicleActive = ground && towed && isHitchableBody(towedByConnection.towingVehicle);
   var decision = ground
@@ -757,6 +770,88 @@ public final class PhysicsBridge {
   // Opt-in self-righting assist (ticket comment 53182/53188) - resolved once at construction
   // (same lifecycle as tuning itself), not re-resolved every tick.
   final io.github.brooswitminecraft.div.experimental.SelfRightingAssist.Config selfRight;
+  /**
+   * Ticket 53373/53379/53381/53383: the real, current chassis-collision-volume union, computed
+   * fresh from {@code v.definition.collisionGroups} every time this is called (construction, and
+   * every tick thereafter for {@link #chassisBoundsChanged} to detect a real part install/remove)
+   * - NEVER cached across calls itself, so it always reflects this exact moment's active groups.
+   *
+   * <p>Evaluates each group's own visibility condition by constructing and running a FRESH
+   * {@link minecrafttransportsimulator.baseclasses.AnimationSwitchbox} (both public) rather than
+   * reading IV's own lazily-populated {@code v.collisionBoxes} cache - sidesteps that cache's
+   * lazy-population timing entirely (the root cause of three regressions in an earlier, reverted
+   * attempt - see git history on this method's own prior line range). A group with no animations
+   * has no switchbox in IV's own map either and is therefore unconditionally active, mirroring
+   * {@code AEntityE_Interactable.updateCollisionBoxes}'s own decompiled null-switchbox branch
+   * exactly; a visible group's boxes are transformed by the switchbox's own {@code netMatrix}
+   * before being unioned, mirroring that same method's {@code globalCenter.transform(netMatrix)}
+   * step - so an animated (moving), not just shown/hidden, group now unions its LIVE position.
+   *
+   * <p>Deliberately, explicitly NOT supported (narrower than full parity with IV's own general
+   * animation system - review 53379/53383's own "constrain rather than claim exact parity"):
+   * <ul>
+   *  <li>{@code JSONCollisionGroup.health}-based damage exclusion - a separate, rarer "has this
+   *  group been shot off" mechanic, unrelated to any part-presence visibility condition.</li>
+   *  <li>A group with {@code applyAfter} set but NO animations of its own - treated as
+   *  unconditionally active (same as a group with no animations at all) rather than resolving
+   *  the chain this would need into IV's own {@code entity.animatedObjectSwitchboxes} map (a
+   *  different, non-collision-specific map this class has no reason to otherwise touch). If a
+   *  real pack ever uses this exact shape for a collision group, this would wrongly include it
+   *  unconditionally - not yet seen in practice, flagged rather than guessed at.</li>
+   *  <li>{@code JSONCollisionGroup.collisionTypes} is not filtered - confirmed from IV's own
+   *  decompiled {@code updateCollisionBoxes} that it doesn't filter by type either before adding
+   *  a group's boxes to {@code collisionBoxes}, so this matches IV's own actual behavior, not an
+   *  oversight.</li>
+   * </ul>
+   */
+  private static Vector3d[] computeChassisBounds(EntityVehicleF_Physics v) {
+   Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
+   for (var group : v.definition.collisionGroups) {
+    minecrafttransportsimulator.baseclasses.TransformationMatrix netMatrix = null;
+    if (group.animations != null && !group.animations.isEmpty()) {
+     var switchbox = new minecrafttransportsimulator.baseclasses.AnimationSwitchbox(v, group.animations, group.applyAfter);
+     if (!switchbox.runSwitchbox(0f, false)) continue;
+     netMatrix = switchbox.netMatrix;
+    }
+    for (var c : group.collisions) {
+     if (netMatrix != null) {
+      // Mirrors AEntityE_Interactable.updateCollisionBoxes' own
+      // globalCenter.set(localCenter); globalCenter.transform(netMatrix) exactly - an animated
+      // group's boxes union at their LIVE transformed center, not their static JSON position.
+      var transformedCenter = c.pos.copy().transform(netMatrix);
+      min.min(new Vector3d(transformedCenter.x-c.width/2,transformedCenter.y-c.height/2,transformedCenter.z-c.width/2));
+      max.max(new Vector3d(transformedCenter.x+c.width/2,transformedCenter.y+c.height/2,transformedCenter.z+c.width/2));
+     } else {
+      min.min(new Vector3d(c.pos.x-c.width/2,c.pos.y-c.height/2,c.pos.z-c.width/2));
+      max.max(new Vector3d(c.pos.x+c.width/2,c.pos.y+c.height/2,c.pos.z+c.width/2));
+     }
+    }
+   }
+   return new Vector3d[]{min, max};
+  }
+  /**
+   * Ticket 53383's explicit priority: a vehicle whose parts are installed/removed AFTER this
+   * Body already successfully constructed must have its chassis envelope refreshed, not
+   * permanently locked in at whatever was active the moment construction first succeeded (the
+   * confirmed-real lifecycle gap from review 53379). Compares a freshly recomputed
+   * {@link #computeChassisBounds} against this Body's own already-committed {@link #center}/
+   * {@link #halfExtents} with a real tolerance (1mm) - never a bare {@code ==}/exact-equality
+   * comparison, so ordinary floating-point jitter between ticks (suspension settling, native
+   * physics noise) can never itself trigger a rebuild, per 53381's own explicit caution. Returns
+   * false (never triggers) if the fresh computation would itself be invalid (no groups/all
+   * hidden) - an already-active vehicle transiently losing every active group mid-tick should
+   * keep its last-known-good envelope rather than force a doomed rebuild attempt.
+   */
+  boolean chassisBoundsChanged(EntityVehicleF_Physics v) {
+   Vector3d[] bounds;
+   try { bounds = computeChassisBounds(v); } catch (RuntimeException ignored) { return false; }
+   Vector3d min=bounds[0], max=bounds[1];
+   if (!Double.isFinite(min.x) || max.x<=min.x || max.y<=min.y || max.z<=min.z) return false;
+   Vector3d freshCenter=new Vector3d(min).add(max).mul(.5);
+   Vector3d freshHalf=new Vector3d(max).sub(min).mul(.5);
+   double tolerance = 0.001;
+   return center.distance(freshCenter) > tolerance || halfExtents.distance(freshHalf) > tolerance;
+  }
   Body(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning) {
    this.level=level; this.tuning=tuning;
    this.selfRight=Overrides.selfRightingConfig(tuning);
@@ -788,19 +883,18 @@ public final class PhysicsBridge {
    // rarer per-group "has this collision group been shot off" mechanic, unrelated to merc230's
    // part-presence visibility condition) - out of scope for this fix, not a hand-rolled
    // workaround for it either way since it was never attempted.
-   Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
-   for (var group : v.definition.collisionGroups) {
-    if (group.animations != null && !group.animations.isEmpty()) {
-     var switchbox = new minecrafttransportsimulator.baseclasses.AnimationSwitchbox(v, group.animations, group.applyAfter);
-     if (!switchbox.runSwitchbox(0f, false)) continue;
-    }
-    for (var c : group.collisions) {
-     min.min(new Vector3d(c.pos.x-c.width/2,c.pos.y-c.height/2,c.pos.z-c.width/2));
-     max.max(new Vector3d(c.pos.x+c.width/2,c.pos.y+c.height/2,c.pos.z+c.width/2));
-    }
+   var bounds = computeChassisBounds(v);
+   Vector3d min=bounds[0], max=bounds[1];
+   if (!Double.isFinite(min.x) || max.x<=min.x || max.y<=min.y || max.z<=min.z) {
+    // Review 53379/53383: all-groups-hidden must NOT permanently poison this vehicle's shared
+    // pack definition (InvalidChassisGeometry's own documented contract in activateOrClassify) -
+    // that is correct ONLY for a genuine, deterministic pack-authoring defect (collisionGroups
+    // itself empty/null); every group existing but all currently hidden (e.g. mid-assembly,
+    // before any wheel is installed) is a real, transient, retryable state.
+    if (v.definition.collisionGroups == null || v.definition.collisionGroups.isEmpty())
+     throw new InvalidChassisGeometry("Vehicle has no finite chassis collision volume");
+    throw new IllegalStateException("every collisionGroup is currently hidden for entity="+v.uniqueUUID+" (e.g. no wheel installed yet) - safe to retry next tick");
    }
-   if (!Double.isFinite(min.x) || max.x<=min.x || max.y<=min.y || max.z<=min.z)
-    throw new InvalidChassisGeometry("Vehicle has no finite chassis collision volume");
    center=new Vector3d(min).add(max).mul(.5);
    Vector3d half=new Vector3d(max).sub(min).mul(.5);
    halfExtents=new Vector3d(half);

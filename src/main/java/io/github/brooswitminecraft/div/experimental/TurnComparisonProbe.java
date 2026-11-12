@@ -81,6 +81,9 @@ public final class TurnComparisonProbe {
  // Review 53367: must exceed PhysicsBridge's ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS (100) so
  // the churn scenario actually exercises the periodic resample, not just the initial log line.
  private static final int ENGINE_STATE_CHECK_CHURN_TICKS = 150;
+ // Ticket 53383: long enough either side of the flip for the vehicle to genuinely settle (not
+ // mid-fall) before AND after chassisBoundsChanged's rebuild, so the comparison is meaningful.
+ private static final int INCREMENTAL_INSTALL_TICKS = 120;
  private static final int HOLD_TICKS = 40, BRAKE_TICKS = 100; // BRAKE-mode scenarios: brief hold at target speed, then a bounded brake-observation window
  private static final int STABILIZE_TURN_TICKS = 60; // 3s - review 53352's own "reach stable ~5m/s sustained 40deg turn" before braking mid-turn
  private static final int BRAKE_DURING_TURN_TICKS = 100; // up to 5s, review's own explicit bound, rudder/steering retained throughout
@@ -105,7 +108,13 @@ public final class TurnComparisonProbe {
  // engine installed, engine installed but not running, running in neutral, running in gear),
  // confirmed purely by reading this scenario's own spawned engine/fuel/electrical fields back -
  // never alters force/control itself, same as the production diagnostic it is exercising.
- private enum Mode { TURN, BRAKE, TURN_THEN_BRAKE, STRAIGHT_SETTLE, TURN_THEN_RECOVER, ENGINE_STATE_CHECK }
+ // INCREMENTAL_INSTALL (ticket 53383): never drives - spawns with the fallback collision group
+ // VISIBLE (wide/buggy envelope, simulating "wheel not installed yet"), settles, then flips a
+ // REAL (non-constant) ComputedVariable mid-run to simulate the wheel actually being installed,
+ // directly proving PhysicsBridge.Body's new chassisBoundsChanged lifecycle refresh triggers a
+ // rebuild and narrows the envelope, rather than permanently locking in whatever was active the
+ // moment Body first successfully constructed.
+ private enum Mode { TURN, BRAKE, TURN_THEN_BRAKE, STRAIGHT_SETTLE, TURN_THEN_RECOVER, ENGINE_STATE_CHECK, INCREMENTAL_INSTALL }
 
  private static final class Scenario {
   final String label, systemName;
@@ -158,6 +167,11 @@ public final class TurnComparisonProbe {
   // real mass/suspensionTravel/wheel radius/anchors under actual throttle, comparing the raw
   // (buggy, wide) envelope against the fixed (narrow, fallback-hidden) one. null = not this test.
   Boolean merc230RawEnvelope = null;
+  // Ticket 53383: when true, the merc230 fallback group's visibility variable is a REAL,
+  // mutable ComputedVariable ("wheelInstalledVar") instead of a "#"-constant, so this scenario
+  // can flip it mid-run to simulate an actual incremental part install.
+  boolean incrementalInstall = false;
+  Point3D incrementalInstallFlipPosition;
   // Review 53367: demonstrates the edge-trigger fix itself - running/gear stay fixed for the
   // whole window while rpm (a continuous value, deliberately excluded from the discrete
   // comparison) is mutated every single tick, confirming it does NOT cause continuous emission.
@@ -274,8 +288,13 @@ public final class TurnComparisonProbe {
   merc230DriveRaw.merc230RawEnvelope = true;
   Scenario merc230DriveFixed = new Scenario("merc230Drive-fixed", "merc230drive", Mode.STRAIGHT_SETTLE, TARGET_SPEED, false);
   merc230DriveFixed.merc230RawEnvelope = false;
+  // Ticket 53383's explicit priority test: real incremental wheel-install refresh, with
+  // pose/velocity continuity checked across the rebuild (not just that it doesn't crash).
+  Scenario merc230IncrementalInstall = new Scenario("merc230-incrementalInstall", "merc230drive", Mode.INCREMENTAL_INSTALL, 0, false);
+  merc230IncrementalInstall.merc230RawEnvelope = true; // starts wide - settle()'s own mid-run flip corrects it
+  merc230IncrementalInstall.incrementalInstall = true;
   scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
-    conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels, merc230DriveRaw, merc230DriveFixed);
+    conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels, merc230DriveRaw, merc230DriveFixed, merc230IncrementalInstall);
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -408,8 +427,15 @@ public final class TurnComparisonProbe {
    var fallbackY = new JSONCollisionBox(); fallbackY.pos = new Point3D(0, 0.42125, 1.40625); fallbackY.width = 1f; fallbackY.height = (float)(0.89125*2);
    var fallbackVisibilityAnim = new minecrafttransportsimulator.jsondefs.JSONAnimationDefinition();
    fallbackVisibilityAnim.animationType = minecrafttransportsimulator.jsondefs.JSONAnimationDefinition.AnimationComponentType.VISIBILITY;
-   fallbackVisibilityAnim.variable = "#" + (s.merc230RawEnvelope ? "1.0" : "0.0");
-   fallbackVisibilityAnim.clampMin = 1; fallbackVisibilityAnim.clampMax = 1;
+   if (s.incrementalInstall) {
+    // Real, mutable variable (not a "#"-constant) - visible (wide/buggy) while value==0 ("wheel
+    // not installed yet"), hidden (narrow/fixed) once flipped to 1 mid-run by settle().
+    fallbackVisibilityAnim.variable = "wheelInstalledVar";
+    fallbackVisibilityAnim.clampMin = 0; fallbackVisibilityAnim.clampMax = 0;
+   } else {
+    fallbackVisibilityAnim.variable = "#" + (s.merc230RawEnvelope ? "1.0" : "0.0");
+    fallbackVisibilityAnim.clampMin = 1; fallbackVisibilityAnim.clampMax = 1;
+   }
    var fallbackGroup = new JSONCollisionGroup();
    fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
    fallbackGroup.collisions = new java.util.ArrayList<>(twoSquareBoxesAtY.apply(0.42125));
@@ -452,6 +478,8 @@ public final class TurnComparisonProbe {
   var riderWrapper = mcinterface1211.WrapperEntity.getWrapperFor(rider);
   seat.setRider(riderWrapper, true);
   s.riderEntity = rider;
+
+  if (s.incrementalInstall) vehicle.getOrCreateVariable("wheelInstalledVar").currentValue = 0.0;
 
   s.vehicle = vehicle;
   s.spawnX = blockX + 0.5; s.spawnZ = blockZ + 0.5; s.spawnSurfaceY = surfaceY;
@@ -663,10 +691,26 @@ public final class TurnComparisonProbe {
  private static void settle(Scenario s) {
   s.ticksInPhase++;
   if (!checkBoundedOrFail(s)) return;
+  // Ticket 53383: flip the real wheelInstalledVar mid-run (at the halfway point of this mode's
+  // own window) to simulate a wheel actually being installed after Body already activated once
+  // with the wide/buggy envelope - directly exercising chassisBoundsChanged's rebuild trigger.
+  if (s.mode == Mode.INCREMENTAL_INSTALL && s.ticksInPhase == INCREMENTAL_INSTALL_TICKS/2) {
+   s.vehicle.getOrCreateVariable("wheelInstalledVar").currentValue = 1.0;
+   s.incrementalInstallFlipPosition = new Point3D(s.vehicle.position.x, s.vehicle.position.y, s.vehicle.position.z);
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " flipped wheelInstalledVar to 1.0 at tick=" + s.ticksInPhase
+     + " position=" + s.vehicle.position + " motion=" + s.vehicle.motion);
+  }
   // Review 53367's churn scenario needs to run PAST ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS
   // (100) to actually exercise the periodic resample, well beyond ordinary SETTLE_TICKS (60).
   if (s.mode == Mode.ENGINE_STATE_CHECK && s.churnRpmEachTick && s.engine != null) s.engine.rpm = 800 + s.ticksInPhase;
-  int settleTicksForThisScenario = (s.mode == Mode.ENGINE_STATE_CHECK && s.churnRpmEachTick) ? ENGINE_STATE_CHECK_CHURN_TICKS : SETTLE_TICKS;
+  int settleTicksForThisScenario = (s.mode == Mode.ENGINE_STATE_CHECK && s.churnRpmEachTick) ? ENGINE_STATE_CHECK_CHURN_TICKS
+    : s.mode == Mode.INCREMENTAL_INSTALL ? INCREMENTAL_INSTALL_TICKS : SETTLE_TICKS;
+  if (s.mode == Mode.INCREMENTAL_INSTALL && s.ticksInPhase >= settleTicksForThisScenario) {
+   s.phase = Phase.DONE;
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " COMPLETE - INCREMENTAL_INSTALL finished, flipPosition=" + s.incrementalInstallFlipPosition
+     + " finalPosition=" + s.vehicle.position + " finalMotion=" + s.vehicle.motion + " minUpYSeen=" + s.minUpY + " ticksRun=" + s.ticksInPhase);
+   return;
+  }
   if (s.ticksInPhase >= settleTicksForThisScenario) {
    // ENGINE_STATE_CHECK (ticket 53365): never drives - just lets PhysicsBridge.Body tick long
    // enough for its new engineFuelElectricalReceipt diagnostic to fire (gated the same way as
