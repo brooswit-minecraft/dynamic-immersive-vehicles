@@ -49,15 +49,19 @@ class LateralGripMultiplierTest {
   return velocity.dot(FORWARD);
  }
 
- /** Default (1.0) must be algebraically byte-identical to the original circular model - direct
-  * proof at the TireForces level, independent of the solver's own iteration loop. */
+ /** Default (1.0) must be TRUE byte-identical to the original circular model - not merely
+  * algebraically close. Review (53337) correctly caught that the ellipse's own
+  * division-then-hypot evaluation is a genuinely different floating-point computation than
+  * {@code friction}'s direct {@code hypot(longitudinal,lateral)/budget} - fixed by delegating
+  * directly to {@code friction} at exactly 1.0, checked here with a ZERO delta (exact equality),
+  * not a tolerance. */
  @Test void defaultMultiplierIsByteIdenticalToCircularFriction() {
   double[][] cases = {{500, 300}, {-200, 900}, {1800, 1800}, {0, 0}, {2500, -400}};
   for (double[] c : cases) {
    var circular = io.github.brooswitminecraft.div.TireForces.friction(c[0], c[1], NORMAL, FRICTION);
    var anisotropic = io.github.brooswitminecraft.div.TireForces.frictionAnisotropic(c[0], c[1], NORMAL, FRICTION, 1.0);
-   assertEquals(circular.longitudinal(), anisotropic.longitudinal(), 1e-12, "longitudinal differs for " + java.util.Arrays.toString(c));
-   assertEquals(circular.lateral(), anisotropic.lateral(), 1e-12, "lateral differs for " + java.util.Arrays.toString(c));
+   assertEquals(circular.longitudinal(), anisotropic.longitudinal(), 0.0, "longitudinal differs for " + java.util.Arrays.toString(c));
+   assertEquals(circular.lateral(), anisotropic.lateral(), 0.0, "lateral differs for " + java.util.Arrays.toString(c));
   }
  }
 
@@ -127,5 +131,53 @@ class LateralGripMultiplierTest {
    assertTrue(Double.isFinite(residual), "non-finite at lateralGripMultiplier=0, iterations=" + iterations);
    assertEquals(3.0, residual, 1e-9, "zero lateral grip should leave lateral velocity completely uncorrected, iterations=" + iterations);
   }
+ }
+
+ /** Review 53337's own caught bug: the FIRST version of frictionAnisotropic returned (0,0)
+  * whenever budgetLat<=0, incorrectly zeroing LONGITUDINAL force too even with zero lateral
+  * demand requested. A vehicle configured with zero lateral grip must still have full drive
+  * authority - checked directly at the TireForces level (no lateral demand at all, so the old
+  * buggy and the fixed behavior would otherwise be indistinguishable through the solver alone). */
+ @Test void zeroLateralGripBudgetPreservesNonzeroLongitudinalDrive() {
+  var result = io.github.brooswitminecraft.div.TireForces.frictionAnisotropic(1500.0, 0.0, NORMAL, FRICTION, 0.0);
+  assertTrue(Double.isFinite(result.longitudinal()), "non-finite longitudinal at zero lateral grip budget");
+  assertEquals(1500.0, result.longitudinal(), 1e-9, "zero lateral grip budget should not zero a well-under-budget longitudinal (drive) demand");
+  assertEquals(0.0, result.lateral(), 0.0, "zero lateral grip budget must still report exactly zero lateral force");
+ }
+
+ /** Same bug, braking regime (a negative/opposing longitudinal demand, not drive) - review
+  * explicitly asked for "nonzero drive AND brake at zero lateral grip". */
+ @Test void zeroLateralGripBudgetPreservesNonzeroLongitudinalBrake() {
+  var result = io.github.brooswitminecraft.div.TireForces.frictionAnisotropic(-1500.0, 0.0, NORMAL, FRICTION, 0.0);
+  assertTrue(Double.isFinite(result.longitudinal()), "non-finite longitudinal (brake) at zero lateral grip budget");
+  assertEquals(-1500.0, result.longitudinal(), 1e-9, "zero lateral grip budget should not zero a well-under-budget braking demand");
+  assertEquals(0.0, result.lateral(), 0.0, "zero lateral grip budget must still report exactly zero lateral force");
+  // Also confirm the 1D clamp itself still bounds an OVER-budget braking demand to +-budgetLong,
+  // rather than passing it through unclamped now that the lateral branch is special-cased.
+  var clamped = io.github.brooswitminecraft.div.TireForces.frictionAnisotropic(-5000.0, 0.0, NORMAL, FRICTION, 0.0);
+  assertEquals(-NORMAL * FRICTION, clamped.longitudinal(), 1e-9, "over-budget braking demand should still clamp to -budgetLong at zero lateral grip");
+ }
+
+ /** Review 53337: "add combined BRAKE+turn coverage, not only DRIVE+turn; radial ellipse
+  * projection can reduce longitudinal output in combined-demand regimes, so describe tradeoff
+  * honestly rather than universally unchanged braking." This test documents that tradeoff
+  * directly: a genuinely combined high-demand (hard braking AND a hard turn, both near their
+  * own semi-axis) CAN show a measurable longitudinal difference between full and reduced
+  * lateral grip - unlike the modest combinedDriveAndTurnPreservesLongitudinalAuthority case
+  * above, which deliberately stayed well under budget on both axes. */
+ @Test void combinedHighDemandBrakeAndTurnCanReduceLongitudinal() {
+  // Both components individually close to the NORMAL*FRICTION=2000N circular budget, so the
+  // COMBINED circular point is already well outside budget at full grip - the regime review
+  // asked to characterize honestly, not merely assert is unaffected.
+  var fullGrip = io.github.brooswitminecraft.div.TireForces.frictionAnisotropic(-1800.0, 1800.0, NORMAL, FRICTION, 1.0);
+  var reducedGrip = io.github.brooswitminecraft.div.TireForces.frictionAnisotropic(-1800.0, 1800.0, NORMAL, FRICTION, 0.2);
+  assertTrue(Double.isFinite(fullGrip.longitudinal()) && Double.isFinite(reducedGrip.longitudinal()),
+    "non-finite longitudinal in combined high-demand regime");
+  // The honest tradeoff: shrinking the lateral semi-axis here measurably CHANGES the achieved
+  // longitudinal (braking) force too, because the shared radial projection's direction itself
+  // shifts with the ellipse's shape when both demands are near their own limits - this is
+  // EXPECTED and documented, not a bug to "fix" toward equality.
+  assertNotEquals(fullGrip.longitudinal(), reducedGrip.longitudinal(), 1.0,
+    "expected a real, measurable longitudinal difference in this genuinely combined high-demand regime (documenting the honest tradeoff, not asserting false universal neutrality)");
  }
 }

@@ -63,15 +63,23 @@ public final class Overrides {
   // real total mass (not just f in isolation - see TwoBodyChassis.Config.validateAgainstTotalMass's
   // own doc for why that distinction matters).
   public Double upperMassFraction;
-  // Ticket 53331/53332: John's hands-on feedback ("flops over to the side when I turn...also
-  // maybe less grip or side force from the tires so the thing slides, rather than violently
-  // flipping") - a narrow, additive knob scaling ONLY the lateral slip-canceling target inside
-  // MultiContactFrictionSolver.solveFriction, left of the existing shared friction-circle clamp.
-  // Deliberately separate from `friction` (which still governs the combined circle, including
-  // drive/brake grip) per John's own explicit caution against "blindly reducing shared friction
-  // if that also destroys drive/brake grip". 1.0 (FALLBACK) is a byte-identical no-op; values
-  // below 1.0 let the tire slide sideways more readily before the circle clamp would otherwise
-  // allow, without touching longitudinal authority at all.
+  // Ticket 53331/53332/53335/53337: John's hands-on feedback ("flops over to the side when I
+  // turn...also maybe less grip or side force from the tires so the thing slides, rather than
+  // violently flipping") - the lateral semi-axis of an ANISOTROPIC (elliptical) friction budget
+  // in TireForces.frictionAnisotropic/MultiContactFrictionSolver, shrinking ONLY lateral tire
+  // authority (normal*friction*lateralGripMultiplier) while the longitudinal semi-axis
+  // (normal*friction, drive/brake) stays exactly what the existing shared `friction` field
+  // already gives - per John's own explicit caution against "blindly reducing shared friction
+  // if that also destroys drive/brake grip". An earlier design scaling the lateral correction
+  // INSIDE the solver's own per-pass PGS loop was reviewed and rejected (53335) as unsound: it
+  // only damps convergence RATE, so a high iteration count (the real installed baseline's own
+  // 64, confirmed via 53333) would restore nearly full grip regardless of the configured value.
+  // 1.0 (FALLBACK) delegates directly to the original circular model (TRUE byte-identical, not
+  // merely algebraically close - see frictionAnisotropic's own doc for why that distinction
+  // matters); values below 1.0 shrink the ellipse's lateral extent, letting the tire slide
+  // sideways sooner. NOT universally longitudinal-neutral in every regime (frictionAnisotropic's
+  // own doc): a genuinely combined high-demand tick (e.g. hard braking mid-turn) can still see
+  // the shared radial projection reduce achieved longitudinal force somewhat.
   public Double lateralGripMultiplier;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
