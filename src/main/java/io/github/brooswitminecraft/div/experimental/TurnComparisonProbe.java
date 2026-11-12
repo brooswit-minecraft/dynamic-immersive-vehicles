@@ -196,11 +196,14 @@ public final class TurnComparisonProbe {
   // (both turn directions) post-turn neutral-steer recovery at .7, under actual turn dynamics
   // (not the synthetic straight-line disturbance test) - checking residual/settling bank once
   // rudder returns to 0.
+  // Review 53361: "SAME mirrored recoveries at .7 plus .5 comparison" - grip=.7's recovery pair
+  // (recoverLeft-grip7/recoverRight-grip7) is already captured/reported; this round adds ONLY
+  // the matching grip=.5 pair (reusing the existing divtest:turncmp-tuned config - same
+  // f=.1/400/160/1000/10-50, lateralGripMultiplier=0.5 - not a new config entry) for a direct,
+  // bounded comparison. Not re-running the already-reported .7 pair or expanding scope further.
   scenarios = List.of(
-    new Scenario("turn-grip7", "turncmp-grip7", Mode.TURN, TARGET_SPEED, false),
-    new Scenario("turnbrake-grip7", "turncmp-grip7", Mode.TURN_THEN_BRAKE, TARGET_SPEED, false),
-    new Scenario("recoverLeft-grip7", "turncmp-grip7", Mode.TURN_THEN_RECOVER, TARGET_SPEED, false, 40.0),
-    new Scenario("recoverRight-grip7", "turncmp-grip7", Mode.TURN_THEN_RECOVER, TARGET_SPEED, false, -40.0));
+    new Scenario("recoverLeft-grip5", "turncmp-tuned", Mode.TURN_THEN_RECOVER, TARGET_SPEED, false, 40.0),
+    new Scenario("recoverRight-grip5", "turncmp-tuned", Mode.TURN_THEN_RECOVER, TARGET_SPEED, false, -40.0));
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
