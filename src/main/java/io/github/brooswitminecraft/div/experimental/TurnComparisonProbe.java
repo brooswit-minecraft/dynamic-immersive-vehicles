@@ -293,8 +293,16 @@ public final class TurnComparisonProbe {
   Scenario merc230IncrementalInstall = new Scenario("merc230-incrementalInstall", "merc230drive", Mode.INCREMENTAL_INSTALL, 0, false);
   merc230IncrementalInstall.merc230RawEnvelope = true; // starts wide - settle()'s own mid-run flip corrects it
   merc230IncrementalInstall.incrementalInstall = true;
+  // Ticket 53383's explicit sequencing: accepted quad start/turn/brake must also be reconfirmed
+  // under this round's lifecycle-refresh/netMatrix/all-hidden changes before any packaging -
+  // reuses the EXACT same real ATV geometry (symmetricGeometry=false, WHEEL_* constants) and
+  // grip=.7 config already accepted and installed, same TURN_THEN_BRAKE combined check this
+  // ticket has used throughout (53342/53357/etc.) - a true behavioral regression, not just a
+  // static chassisReceipt comparison.
+  Scenario quadRegression = new Scenario("quadRegression-turnbrake", "turncmp-grip7", Mode.TURN_THEN_BRAKE, TARGET_SPEED, false);
   scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
-    conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels, merc230DriveRaw, merc230DriveFixed, merc230IncrementalInstall);
+    conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels, merc230DriveRaw, merc230DriveFixed, merc230IncrementalInstall,
+    quadRegression);
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
