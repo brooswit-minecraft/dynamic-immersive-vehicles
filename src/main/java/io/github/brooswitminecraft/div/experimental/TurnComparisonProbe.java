@@ -149,6 +149,11 @@ public final class TurnComparisonProbe {
   // Ticket 53373's conditional-collision-group proof (null = no second group, matching every
   // existing scenario's behavior unchanged).
   Boolean conditionalGroupVisible = null;
+  // Ticket 53372/53373: merc230's own REAL geometry reproduction - when set (non-null), spawn()
+  // replaces the plain single-group definition with a two-group one matching merc230's actual
+  // reported numbers (interior floor group, always active; missing-wheel fallback group,
+  // visibility-gated) instead of adding a synthetic deep marker box.
+  Boolean merc230WheelsPresent = null;
   // Review 53367: demonstrates the edge-trigger fix itself - running/gear stay fixed for the
   // whole window while rpm (a continuous value, deliberately excluded from the discrete
   // comparison) is mutated every single tick, confirming it does NOT cause continuous emission.
@@ -246,8 +251,17 @@ public final class TurnComparisonProbe {
   conditionalHidden.conditionalGroupVisible = false;
   Scenario conditionalVisible = new Scenario("conditionalGroup-visible", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
   conditionalVisible.conditionalGroupVisible = true;
+  // Ticket 53372's real merc230 numbers - end-to-end reproduction. wheelsPresent should now
+  // correctly narrow to the interior-floor-only bounds (center.y=.5625 half.y=.75), while
+  // noWheels should reproduce the ORIGINAL buggy wide bounds EXACTLY (center.y=.42125
+  // half.y=.89125, matching comment 53372's own reported numbers) - confirming this fixture
+  // accurately models the real reported bug in the state the fix does NOT need to narrow.
+  Scenario merc230WheelsPresent = new Scenario("merc230-wheelsPresent", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  merc230WheelsPresent.merc230WheelsPresent = true;
+  Scenario merc230NoWheels = new Scenario("merc230-noWheels", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  merc230NoWheels.merc230WheelsPresent = false;
   scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
-    conditionalHidden, conditionalVisible);
+    conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels);
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -316,6 +330,36 @@ public final class TurnComparisonProbe {
    conditionalGroup.collisions = List.of(deepBox);
    conditionalGroup.animations = List.of(visibilityAnim);
    definition.collisionGroups = List.of(definition.collisionGroups.get(0), conditionalGroup);
+  }
+  // Ticket 53372's real merc230 numbers: unfiltered union center=(0,.42125,1.40625)
+  // halfExtents=(1.1875,.89125,2.8125) -> bottom=.42125-.89125=-.47 (the missing-wheel fallback
+  // group's own bottom, confirmed exactly), top=.42125+.89125=1.3125. Interior floor bottom=
+  // -.1875 (given) - top assumed the SAME 1.3125 (the fallback box only extends the bottom
+  // deeper, per 53372's own description; not independently confirmed from the supplied receipt,
+  // since only the fallback's own bottom and the floor's own bottom were given, not two
+  // independent full boxes - the X/Z footprint is assumed shared between both groups too, for
+  // the same reason). mtsofficialpack:merc230-shaped X/Z halfExtents (1.1875,2.8125) reused as
+  // given, center.z=1.40625 as given.
+  if (s.merc230WheelsPresent != null) {
+   var floorBox = new JSONCollisionBox();
+   floorBox.pos = new Point3D(0, 0.5625, 1.40625); // bottom=-.1875, top=1.3125 (assumed)
+   floorBox.width = (float)(1.1875*2); floorBox.height = (float)(0.75*2);
+   var floorGroup = new JSONCollisionGroup();
+   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   floorGroup.collisions = List.of(floorBox);
+   var fallbackBox = new JSONCollisionBox();
+   fallbackBox.pos = new Point3D(0, 0.42125, 1.40625); // exactly the real unfiltered numbers
+   fallbackBox.width = (float)(1.1875*2); fallbackBox.height = (float)(0.89125*2);
+   var fallbackVisibilityAnim = new minecrafttransportsimulator.jsondefs.JSONAnimationDefinition();
+   fallbackVisibilityAnim.animationType = minecrafttransportsimulator.jsondefs.JSONAnimationDefinition.AnimationComponentType.VISIBILITY;
+   // visible (included) exactly when a wheel is ABSENT - fallbackVisible = !wheelsPresent.
+   fallbackVisibilityAnim.variable = "#" + (s.merc230WheelsPresent ? "0.0" : "1.0");
+   fallbackVisibilityAnim.clampMin = 1; fallbackVisibilityAnim.clampMax = 1;
+   var fallbackGroup = new JSONCollisionGroup();
+   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   fallbackGroup.collisions = List.of(fallbackBox);
+   fallbackGroup.animations = List.of(fallbackVisibilityAnim);
+   definition.collisionGroups = List.of(floorGroup, fallbackGroup);
   }
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
   var item = new ItemVehicle(definition, definition.definitions.get(0), PACK_ID);
