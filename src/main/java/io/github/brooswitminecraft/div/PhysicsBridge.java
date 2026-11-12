@@ -669,7 +669,13 @@ public final class PhysicsBridge {
   // flagged, un-fixed) world-space/echoed-orientation convention. Non-ground stepper modes
   // (flight/rotor) and towing are explicitly unsupported for a two-body vehicle for now (review's
   // "preserve non-ground modes and towing boundaries") - see step()'s own guard.
-  private static final boolean EXPERIMENTAL_TWO_BODY_CHASSIS = Boolean.getBoolean("div.experimentalTwoBodyChassis");
+  // Ticket 53310/53312: this test-build candidate (branch minecraft-503/shared-ground-support,
+  // not main) ships with the two-body chassis ON by default - the real, configurable
+  // upperMassFraction (f) resolution below is unaffected (Overrides' own FALLBACK.
+  // upperMassFraction=0.5; a pack/override can still set a different f). The system property is
+  // kept as an explicit kill-switch (-Ddiv.experimentalTwoBodyChassis=false) rather than removed,
+  // so this stays a one-line, easily revertible default flip rather than deleting the gate.
+  private static final boolean EXPERIMENTAL_TWO_BODY_CHASSIS = !"false".equalsIgnoreCase(System.getProperty("div.experimentalTwoBodyChassis", "true"));
   final boolean twoBodyActive;
   // Non-null only when twoBodyActive - the upper half-body/handle and the fixed joint connecting
   // it to the lower half (box/handle below). Construction/cleanup hold these; stepGround's own

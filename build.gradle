@@ -75,6 +75,10 @@ neoForge {
    // phase instability (or its absence) be checked against the shipped default path on demand.
    if (System.getenv('DIV_GROUND_SUPPORT_FIXTURE_OFF') == 'true') {
     jvmArgument('-Ddiv.experimentalGroundSupportFixture=true')
+    // Ticket 53310/53312: PhysicsBridge.EXPERIMENTAL_TWO_BODY_CHASSIS now defaults to true on
+    // this branch - this OFF baseline must keep explicitly disabling it (previously relied on
+    // the old default-false), or it would silently stop being a real single-body comparison.
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=false')
     jvmArgument('-Ddiv.debugGroundContact=true')
     jvmArgument('-Ddiv.debugGroundContactTicks=400')
    }
