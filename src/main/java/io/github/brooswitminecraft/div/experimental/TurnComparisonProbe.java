@@ -172,6 +172,9 @@ public final class TurnComparisonProbe {
   // can flip it mid-run to simulate an actual incremental part install.
   boolean incrementalInstall = false;
   Point3D incrementalInstallFlipPosition;
+  // Review 53390: airborne/rotating native-angular-velocity-receipt test (see spawn()'s own Y
+  // override above) - a focused, minimal, grip-confound-free check, not a full suite rerun.
+  boolean airborneRotationTest = false;
   // Review 53367: demonstrates the edge-trigger fix itself - running/gear stay fixed for the
   // whole window while rpm (a continuous value, deliberately excluded from the discrete
   // comparison) is mutated every single tick, confirming it does NOT cause continuous emission.
@@ -300,7 +303,15 @@ public final class TurnComparisonProbe {
   // ticket has used throughout (53342/53357/etc.) - a true behavioral regression, not just a
   // static chassisReceipt comparison.
   Scenario quadRegression = new Scenario("quadRegression-turnbrake", "turncmp-grip7", Mode.TURN_THEN_BRAKE, TARGET_SPEED, false);
-  scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
+  // Review 53390: "necessary and cheap compared with rerunning 13 unrelated stationary checks" -
+  // run ONLY this new, focused, grip-confound-free airborne/rotating test below, not the whole
+  // bundle again this round.
+  Scenario airborneRotation = new Scenario("merc230-airborneRotation", "merc230drive", Mode.INCREMENTAL_INSTALL, 0, false);
+  airborneRotation.merc230RawEnvelope = true;
+  airborneRotation.incrementalInstall = true;
+  airborneRotation.airborneRotationTest = true;
+  scenarios = List.of(airborneRotation);
+  if (false) scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
     conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels, merc230DriveRaw, merc230DriveFixed, merc230IncrementalInstall,
     quadRegression);
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
@@ -374,7 +385,7 @@ public final class TurnComparisonProbe {
    visibilityAnim.variable = "#" + (s.conditionalGroupVisible ? "1.0" : "0.0");
    visibilityAnim.clampMin = 1; visibilityAnim.clampMax = 1;
    var conditionalGroup = new JSONCollisionGroup();
-   conditionalGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   conditionalGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
    conditionalGroup.collisions = List.of(deepBox);
    conditionalGroup.animations = List.of(visibilityAnim);
    definition.collisionGroups = List.of(definition.collisionGroups.get(0), conditionalGroup);
@@ -393,7 +404,7 @@ public final class TurnComparisonProbe {
    floorBox.pos = new Point3D(0, 0.5625, 1.40625); // bottom=-.1875, top=1.3125 (assumed)
    floorBox.width = (float)(1.1875*2); floorBox.height = (float)(0.75*2);
    var floorGroup = new JSONCollisionGroup();
-   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
    floorGroup.collisions = List.of(floorBox);
    var fallbackBox = new JSONCollisionBox();
    fallbackBox.pos = new Point3D(0, 0.42125, 1.40625); // exactly the real unfiltered numbers
@@ -404,7 +415,7 @@ public final class TurnComparisonProbe {
    fallbackVisibilityAnim.variable = "#" + (s.merc230WheelsPresent ? "0.0" : "1.0");
    fallbackVisibilityAnim.clampMin = 1; fallbackVisibilityAnim.clampMax = 1;
    var fallbackGroup = new JSONCollisionGroup();
-   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
    fallbackGroup.collisions = List.of(fallbackBox);
    fallbackGroup.animations = List.of(fallbackVisibilityAnim);
    definition.collisionGroups = List.of(floorGroup, fallbackGroup);
@@ -429,7 +440,7 @@ public final class TurnComparisonProbe {
    // which box carries which axis's extent.
    var floorY = new JSONCollisionBox(); floorY.pos = new Point3D(0, 0.5625, 1.40625); floorY.width = 1f; floorY.height = (float)(0.75*2);
    var floorGroup = new JSONCollisionGroup();
-   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
    floorGroup.collisions = new java.util.ArrayList<>(twoSquareBoxesAtY.apply(0.5625));
    floorGroup.collisions.add(floorY);
    var fallbackY = new JSONCollisionBox(); fallbackY.pos = new Point3D(0, 0.42125, 1.40625); fallbackY.width = 1f; fallbackY.height = (float)(0.89125*2);
@@ -445,7 +456,7 @@ public final class TurnComparisonProbe {
     fallbackVisibilityAnim.clampMin = 1; fallbackVisibilityAnim.clampMax = 1;
    }
    var fallbackGroup = new JSONCollisionGroup();
-   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
    fallbackGroup.collisions = new java.util.ArrayList<>(twoSquareBoxesAtY.apply(0.42125));
    fallbackGroup.collisions.add(fallbackY);
    fallbackGroup.animations = List.of(fallbackVisibilityAnim);
@@ -454,7 +465,11 @@ public final class TurnComparisonProbe {
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
   var item = new ItemVehicle(definition, definition.definitions.get(0), PACK_ID);
   var vehicle = new EntityVehicleF_Physics(world, null, item, null);
-  vehicle.position.set(blockX + 0.5, surfaceY + 1.0, blockZ + 0.5);
+  // Review 53390: airborne (far above the platform, free-falling throughout this scenario's own
+  // short window) eliminates the grip confound entirely - no wheel/ground contact means no
+  // grip-restoring effect from the chassisBoundsChanged rebuild to muddy a direct native angular
+  // velocity before/after comparison.
+  vehicle.position.set(blockX + 0.5, s.airborneRotationTest ? surfaceY + 8.0 : surfaceY + 1.0, blockZ + 0.5);
   vehicle.orientation.set(new RotationMatrix());
   world.spawnEntity(vehicle);
 
@@ -490,7 +505,7 @@ public final class TurnComparisonProbe {
   if (s.incrementalInstall) vehicle.getOrCreateVariable("wheelInstalledVar").currentValue = 0.0;
 
   s.vehicle = vehicle;
-  s.spawnX = blockX + 0.5; s.spawnZ = blockZ + 0.5; s.spawnSurfaceY = surfaceY;
+  s.spawnX = blockX + 0.5; s.spawnZ = blockZ + 0.5; s.spawnSurfaceY = s.airborneRotationTest ? surfaceY + 8.0 : surfaceY;
   s.phase = Phase.SETTLE;
   s.ticksInPhase = 0;
   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " spawned at " + vehicle.position + " rider=" + rider + " key=" + PACK_ID + ":" + s.systemName + " - beginning SETTLE phase");
@@ -517,7 +532,7 @@ public final class TurnComparisonProbe {
   zMarkerRear.pos = new Point3D(CHASSIS_CENTER.x, CHASSIS_CENTER.y, CHASSIS_CENTER.z - HALF_EXTENT_C);
   zMarkerRear.width = 0; zMarkerRear.height = 0;
   var group = new JSONCollisionGroup();
-  group.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+  group.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
   group.collisions = List.of(mainBox, zMarkerFront, zMarkerRear);
   v.collisionGroups = List.of(group);
   return v;
@@ -706,21 +721,41 @@ public final class TurnComparisonProbe {
   // zeroed angular velocity would show up as a visible, measurable yaw-rate discontinuity right
   // at the flip tick - logged explicitly every tick through a window around it to make any such
   // snap directly checkable, not just asserted.
-  if (s.mode == Mode.INCREMENTAL_INSTALL) {
+  if (s.mode == Mode.INCREMENTAL_INSTALL && !s.airborneRotationTest) {
    if (s.engine != null && !s.engine.running) forceEngineRunning(s.engine);
    s.vehicle.throttleVar.setTo(1.0, false);
    s.vehicle.rudderInputVar.setTo(40.0, false);
   }
-  // Ticket 53383: flip the real wheelInstalledVar mid-run (at the halfway point of this mode's
-  // own window) to simulate a wheel actually being installed after Body already activated once
-  // with the wide/buggy envelope - directly exercising chassisBoundsChanged's rebuild trigger.
-  if (s.mode == Mode.INCREMENTAL_INSTALL && s.ticksInPhase == INCREMENTAL_INSTALL_TICKS/2) {
+  // Review 53390: inject a real, precisely-known angular velocity directly (airborne - no
+  // wheel/ground forces needed or available to produce one) well before the flip, so there is
+  // genuine, substantial, nonzero native rotation already established by the time the rebuild
+  // happens - the EXACT thing the driving-on-ground version of this test couldn't cleanly show.
+  if (s.mode == Mode.INCREMENTAL_INSTALL && s.airborneRotationTest && s.ticksInPhase == 5) {
+   io.github.brooswitminecraft.div.PhysicsBridge.debugInjectAngularVelocity(s.vehicle, new org.joml.Vector3d(0, 1.5, 0));
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " injected angularVelocity=(0,1.5,0) at tick=5, readback=" + io.github.brooswitminecraft.div.PhysicsBridge.debugReadAngularVelocity(s.vehicle));
+  }
+  // Ticket 53383: flip the real wheelInstalledVar mid-run to simulate a wheel actually being
+  // installed after Body already activated once with the wide/buggy envelope - directly
+  // exercising chassisBoundsChanged's rebuild trigger. Review 53390's airborne variant flips
+  // MUCH sooner after injection (tick=15, not the normal half-window point) - a first attempt at
+  // tick=60 found the injected 1.5 rad/s had ALREADY decayed to near-zero on its own by then (an
+  // unrelated, real angular-damping behavior of a freely-tumbling box, discovered by this very
+  // test), making that comparison meaningless before it ever reached the rebuild. A short gap
+  // keeps real, substantial, still-measurable rotation present at the moment of rebuild.
+  int flipTick = s.airborneRotationTest ? 15 : INCREMENTAL_INSTALL_TICKS/2;
+  if (s.mode == Mode.INCREMENTAL_INSTALL && s.ticksInPhase == flipTick) {
+   if (s.airborneRotationTest) LOGGER.info("[DIV turnComparison] scenario=" + s.label + " angularVelocity BEFORE flip, tick=" + s.ticksInPhase
+     + " = " + io.github.brooswitminecraft.div.PhysicsBridge.debugReadAngularVelocity(s.vehicle));
    s.vehicle.getOrCreateVariable("wheelInstalledVar").currentValue = 1.0;
    s.incrementalInstallFlipPosition = new Point3D(s.vehicle.position.x, s.vehicle.position.y, s.vehicle.position.z);
    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " flipped wheelInstalledVar to 1.0 at tick=" + s.ticksInPhase
      + " position=" + s.vehicle.position + " motion=" + s.vehicle.motion + " yawDegrees=" + Math.toDegrees(Math.atan2(s.vehicle.orientation.m02, s.vehicle.orientation.m22)));
   }
-  if (s.mode == Mode.INCREMENTAL_INSTALL && Math.abs(s.ticksInPhase - INCREMENTAL_INSTALL_TICKS/2) <= 10) {
+  if (s.mode == Mode.INCREMENTAL_INSTALL && s.airborneRotationTest && s.ticksInPhase == flipTick + 1) {
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " angularVelocity AFTER flip (1 tick later), tick=" + s.ticksInPhase
+     + " = " + io.github.brooswitminecraft.div.PhysicsBridge.debugReadAngularVelocity(s.vehicle));
+  }
+  if (s.mode == Mode.INCREMENTAL_INSTALL && !s.airborneRotationTest && Math.abs(s.ticksInPhase - INCREMENTAL_INSTALL_TICKS/2) <= 10) {
    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " tick=" + s.ticksInPhase
      + " yawDegrees=" + Math.toDegrees(Math.atan2(s.vehicle.orientation.m02, s.vehicle.orientation.m22))
      + " position=" + s.vehicle.position);

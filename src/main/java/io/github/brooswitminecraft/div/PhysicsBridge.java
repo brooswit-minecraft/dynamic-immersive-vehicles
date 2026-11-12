@@ -18,6 +18,7 @@ import minecrafttransportsimulator.entities.instances.PartSeat;
 import minecrafttransportsimulator.entities.instances.PartGroundDevice;
 import minecrafttransportsimulator.entities.instances.PartPropeller;
 import minecrafttransportsimulator.jsondefs.JSONPart;
+import minecrafttransportsimulator.jsondefs.JSONCollisionGroup;
 import minecrafttransportsimulator.jsondefs.JSONVehicle;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ClipContext;
@@ -447,6 +448,31 @@ public final class PhysicsBridge {
   }
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
+ /**
+  * Diagnostic/test-only (ticket 53390's explicit "native angular before/after receipt on
+  * rotating airborne rebuild remains necessary and cheap"): directly injects a KNOWN angular
+  * velocity into this vehicle's currently-active Body, so a test can establish a real, nonzero,
+  * precisely-known rotation rate WITHOUT needing wheel/ground forces to produce one (airborne -
+  * no grip, no confound with the chassisBoundsChanged rebuild's own grip-restoring effect, the
+  * real limitation review 53385/53386 already found in the stationary-then-driving test). A
+  * no-op if this vehicle has no active two-body Body right now. Never called from any production
+  * code path - only from this experimental test probe.
+  */
+ public static void debugInjectAngularVelocity(EntityVehicleF_Physics v, Vector3d angularVelocity) {
+  if (registry.get(v) instanceof Body body) {
+   body.handle.addLinearAndAngularVelocity(new Vector3d(), angularVelocity);
+   if (body.twoBodyActive) body.upperHandle.addLinearAndAngularVelocity(new Vector3d(), angularVelocity);
+  }
+ }
+ /**
+  * Diagnostic/test-only companion to {@link #debugInjectAngularVelocity} - reads back this
+  * vehicle's CURRENT actual native angular velocity directly from its live Sable handle, so a
+  * test can log the real before/after values across a chassisBoundsChanged rebuild instead of
+  * inferring preservation from a yaw-rate proxy. Returns null if there is no active Body.
+  */
+ public static Vector3d debugReadAngularVelocity(EntityVehicleF_Physics v) {
+  return registry.get(v) instanceof Body body ? body.handle.getAngularVelocity(new Vector3d()) : null;
+ }
  public static void cleanup() {
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
@@ -844,23 +870,29 @@ public final class PhysicsBridge {
    *  different, non-collision-specific map this class has no reason to otherwise touch). If a
    *  real pack ever uses this exact shape for a collision group, this would wrongly include it
    *  unconditionally - not yet seen in practice, flagged rather than guessed at.</li>
-   *  <li>{@code JSONCollisionGroup.collisionTypes} is NOT filtered here, and review 53385
-   *  correctly caught that this is a genuinely open question, not a settled non-issue:
-   *  {@code updateCollisionBoxes} not filtering by type before populating {@code collisionBoxes}
-   *  does not by itself establish that EVERY type belongs in a PHYSICAL chassis volume - that
-   *  set is already known (the earlier, reverted attempt) to include non-physical/interaction-
-   *  only content too. {@code CollisionType} has BLOCK/ENTITY/VEHICLE/ATTACK/BULLET/CLICK/
-   *  EFFECTOR values; which of these (if any) actually marks "this box represents physical hull
-   *  volume" in real packs has not been established from any authoritative IV source (only
-   *  guessed at by this ticket's own synthetic test fixtures, which arbitrarily chose VEHICLE
-   *  for their own boxes) - left unfiltered rather than guessing a possibly-wrong constraint with
-   *  real consequences for an unverified real pack. Flagged as a genuinely open follow-up, not
-   *  claimed resolved.</li>
+   *  <li>{@code JSONCollisionGroup.collisionTypes} IS now constrained - review 53390's explicit
+   *  "read collisionTypes consumers" found the real answer: {@code mcinterface1211.
+   *  WrapperAABBCollective}'s own decompiled {@code getBoxes} lambda is IV's native-Minecraft-
+   *  entity-collision path (the vanilla AABB system other entities push against), and it
+   *  specifically checks {@code collisionTypes.contains(ENTITY)} for its own "collision" (as
+   *  opposed to attack/click-interaction) mode - ENTITY is the type IV itself treats as "this box
+   *  is the vehicle's real physical shape for things to collide with," distinct from ATTACK/CLICK
+   *  (interaction-only) and from VEHICLE (this ticket's own synthetic fixtures had arbitrarily
+   *  guessed VEHICLE before this was checked - now corrected to ENTITY throughout, including the
+   *  test fixtures). This governs Minecraft's OWN native entity-collision path, not Sable's
+   *  chassis shape directly - there is no code connecting the two - but it is real, confirmed
+   *  evidence (not a guess) for which type a pack author means by "this group is the vehicle's
+   *  outer physical hull," which is exactly the question this method needs answered.</li>
    * </ul>
    */
   private static Vector3d[] computeChassisBounds(EntityVehicleF_Physics v) {
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
    for (var group : v.definition.collisionGroups) {
+    // Review 53390: constrained to ENTITY per WrapperAABBCollective's own confirmed usage (see
+    // this method's class doc) - a group not meant as part of the vehicle's physical hull (pure
+    // ATTACK/CLICK/BULLET/EFFECTOR interaction boxes, or BLOCK-only) no longer corrupts the
+    // chassis union just by existing in definition.collisionGroups.
+    if (group.collisionTypes == null || !group.collisionTypes.contains(JSONCollisionGroup.CollisionType.ENTITY)) continue;
     minecrafttransportsimulator.baseclasses.TransformationMatrix netMatrix = null;
     if (group.animations != null && !group.animations.isEmpty()) {
      var switchbox = new minecrafttransportsimulator.baseclasses.AnimationSwitchbox(v, group.animations, group.applyAfter);
