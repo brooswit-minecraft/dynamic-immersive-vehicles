@@ -253,7 +253,20 @@ public final class GroundSupportFixtureProbe {
   packSpeedFactors.putIfAbsent(PACK_ID, 1.0);
   packVehicleScales.putIfAbsent(PACK_ID, 1.0);
 
+  // APart's own constructor does entityOn.definition.parts.indexOf(placementDefinition) to find
+  // each slot's index - confirmed live ("Cannot invoke java.util.List.indexOf(Object) because
+  // entityOn.definition.parts is null"). Every slot a part will be attached to must therefore
+  // already exist, by the SAME instance, in the vehicle's own definition.parts BEFORE any part
+  // is constructed - built upfront here rather than incrementally inside addWheel/addEngine.
+  double wheelY = -(HALF_HEIGHT_B + 0.15); // below the chassis center - lower-owned per TwoBodyChassis.isUpperHalf's own doc
+  var wheelSlotFL = wheelSlot(new Point3D(0.4, wheelY, 0.9), true);
+  var wheelSlotFR = wheelSlot(new Point3D(-0.4, wheelY, 0.9), true);
+  var wheelSlotRL = wheelSlot(new Point3D(0.4, wheelY, -0.9), false);
+  var wheelSlotRR = wheelSlot(new Point3D(-0.4, wheelY, -0.9), false);
+  var engineSlot = engineSlot();
+
   JSONVehicle definition = buildVehicleDefinition(s.systemName);
+  definition.parts = List.of(wheelSlotFL, wheelSlotFR, wheelSlotRL, wheelSlotRR, engineSlot);
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
   // Reuse the SAME JSONSubDefinition instance already stored in definition.definitions (not a
   // freshly re-constructed equal-looking one) - keeps the item's own subDefinition and the
@@ -264,12 +277,11 @@ public final class GroundSupportFixtureProbe {
   vehicle.orientation.set(new RotationMatrix());
   world.spawnEntity(vehicle);
 
-  double wheelY = -(HALF_HEIGHT_B + 0.15); // below the chassis center - lower-owned per TwoBodyChassis.isUpperHalf's own doc
-  addWheel(vehicle, new Point3D(0.4, wheelY, 0.9), true);
-  addWheel(vehicle, new Point3D(-0.4, wheelY, 0.9), true);
-  addWheel(vehicle, new Point3D(0.4, wheelY, -0.9), false);
-  addWheel(vehicle, new Point3D(-0.4, wheelY, -0.9), false);
-  s.engine = addEngine(vehicle);
+  addWheel(vehicle, wheelSlotFL);
+  addWheel(vehicle, wheelSlotFR);
+  addWheel(vehicle, wheelSlotRL);
+  addWheel(vehicle, wheelSlotRR);
+  s.engine = addEngine(vehicle, engineSlot);
 
   s.vehicle = vehicle;
   s.phase = Phase.SETTLE;
@@ -290,6 +302,10 @@ public final class GroundSupportFixtureProbe {
   // JSONSubDefinition to ItemVehicle's own constructor is not enough on its own; the vehicle's
   // OWN definition needs this list too, with that exact same instance in it.
   v.definitions = List.of(firstSubDefinition(v));
+  v.rendering = new minecrafttransportsimulator.jsondefs.JSONRendering();
+  v.rendering.modelType = minecrafttransportsimulator.jsondefs.JSONRendering.ModelType.NONE; // no model needed for this probe - short-circuits resetModelsAndAnimations cleanly (confirmed live, CI/local run: "Cannot read field modelType because this.definition.rendering is null")
+  v.general = new minecrafttransportsimulator.jsondefs.AJSONItem.General();
+  v.general.health = 100; // AEntityE_Interactable reads this.definition.general.health unconditionally (confirmed live: "Cannot read field health because this.definition.general is null")
 
   var box = new JSONCollisionBox();
   box.pos = new Point3D(0, 0, 0);
@@ -309,22 +325,36 @@ public final class GroundSupportFixtureProbe {
   return sub;
  }
 
- private static void addWheel(EntityVehicleF_Physics vehicle, Point3D localPos, boolean steers) {
+ private static JSONPartDefinition wheelSlot(Point3D localPos, boolean steers) {
   var slot = new JSONPartDefinition();
   slot.pos = localPos;
   slot.turnsWithSteer = steers;
   slot.types = List.of("ground_wheel");
+  return slot;
+ }
 
+ private static void addWheel(EntityVehicleF_Physics vehicle, JSONPartDefinition slot) {
   var ground = new JSONPart.JSONPartGroundDevice();
   ground.isWheel = true;
   ground.width = 0.4f;
   ground.height = 0.4f;
+  // PartGroundDevice.getFrictionLoss/setVariableDefaults reads this map unconditionally - a
+  // null map NPEs on first tick (confirmed live, local run: crashed the WHOLE dedicated server,
+  // not caught by this probe's own try/catch, since the throw happens inside MTS's own
+  // EntityManager.tickAll, outside this probe's call stack entirely). Empty is a valid "no
+  // material-specific friction modifier" default - getFrictionLoss's own null-key lookup on an
+  // empty map returns null gracefully, same as a real pack's own unconfigured map would.
+  ground.frictionModifiers = new java.util.LinkedHashMap<>();
   var def = new JSONPart();
   def.packID = PACK_ID; def.systemName = "wheel";
   def.generic = new JSONPart.JSONPartGeneric();
   def.ground = ground;
   def.definitions = List.of(firstSubDefinition(def)); // same NPE risk as JSONVehicle.definitions - APart's own constructor chain also reaches AEntityD_Definable
 
+  def.rendering = new minecrafttransportsimulator.jsondefs.JSONRendering();
+  def.rendering.modelType = minecrafttransportsimulator.jsondefs.JSONRendering.ModelType.NONE;
+  def.general = new minecrafttransportsimulator.jsondefs.AJSONItem.General();
+  def.general.health = 100;
   var item = new ItemPartGroundDevice(def, def.definitions.get(0), PACK_ID);
   APart part = new PartGroundDevice(vehicle, null, slot, item, null);
   vehicle.addPart(part, false);
@@ -337,11 +367,14 @@ public final class GroundSupportFixtureProbe {
   return sub;
  }
 
- private static PartEngine addEngine(EntityVehicleF_Physics vehicle) {
+ private static JSONPartDefinition engineSlot() {
   var slot = new JSONPartDefinition();
   slot.pos = new Point3D(0, 0, 0);
   slot.types = List.of("engine");
+  return slot;
+ }
 
+ private static PartEngine addEngine(EntityVehicleF_Physics vehicle, JSONPartDefinition slot) {
   var engineDef = new JSONPart.JSONPartEngine();
   engineDef.type = JSONPart.EngineType.NORMAL;
   engineDef.gearRatios = List.of(-2.0f, 0.0f, 2.0f); // [reverse, neutral, 1st] - PartEngine indexes this by currentGearVar+reverseGears
@@ -352,6 +385,10 @@ public final class GroundSupportFixtureProbe {
   def.engine = engineDef;
   def.definitions = List.of(firstSubDefinition(def));
 
+  def.rendering = new minecrafttransportsimulator.jsondefs.JSONRendering();
+  def.rendering.modelType = minecrafttransportsimulator.jsondefs.JSONRendering.ModelType.NONE;
+  def.general = new minecrafttransportsimulator.jsondefs.AJSONItem.General();
+  def.general.health = 100;
   var item = new ItemPartEngine(def, def.definitions.get(0), PACK_ID);
   var engine = new PartEngine(vehicle, null, slot, item, null);
   vehicle.addPart(engine, false);
