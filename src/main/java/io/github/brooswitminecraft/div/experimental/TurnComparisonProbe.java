@@ -388,7 +388,7 @@ public final class TurnComparisonProbe {
    visibilityAnim.variable = "#" + (s.conditionalGroupVisible ? "1.0" : "0.0");
    visibilityAnim.clampMin = 1; visibilityAnim.clampMax = 1;
    var conditionalGroup = new JSONCollisionGroup();
-   conditionalGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
+   conditionalGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.BLOCK);
    conditionalGroup.collisions = List.of(deepBox);
    conditionalGroup.animations = List.of(visibilityAnim);
    definition.collisionGroups = List.of(definition.collisionGroups.get(0), conditionalGroup);
@@ -407,7 +407,7 @@ public final class TurnComparisonProbe {
    floorBox.pos = new Point3D(0, 0.5625, 1.40625); // bottom=-.1875, top=1.3125 (assumed)
    floorBox.width = (float)(1.1875*2); floorBox.height = (float)(0.75*2);
    var floorGroup = new JSONCollisionGroup();
-   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
+   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.BLOCK);
    floorGroup.collisions = List.of(floorBox);
    var fallbackBox = new JSONCollisionBox();
    fallbackBox.pos = new Point3D(0, 0.42125, 1.40625); // exactly the real unfiltered numbers
@@ -418,7 +418,7 @@ public final class TurnComparisonProbe {
    fallbackVisibilityAnim.variable = "#" + (s.merc230WheelsPresent ? "0.0" : "1.0");
    fallbackVisibilityAnim.clampMin = 1; fallbackVisibilityAnim.clampMax = 1;
    var fallbackGroup = new JSONCollisionGroup();
-   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
+   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.BLOCK);
    fallbackGroup.collisions = List.of(fallbackBox);
    fallbackGroup.animations = List.of(fallbackVisibilityAnim);
    definition.collisionGroups = List.of(floorGroup, fallbackGroup);
@@ -443,7 +443,7 @@ public final class TurnComparisonProbe {
    // which box carries which axis's extent.
    var floorY = new JSONCollisionBox(); floorY.pos = new Point3D(0, 0.5625, 1.40625); floorY.width = 1f; floorY.height = (float)(0.75*2);
    var floorGroup = new JSONCollisionGroup();
-   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
+   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.BLOCK);
    floorGroup.collisions = new java.util.ArrayList<>(twoSquareBoxesAtY.apply(0.5625));
    floorGroup.collisions.add(floorY);
    var fallbackY = new JSONCollisionBox(); fallbackY.pos = new Point3D(0, 0.42125, 1.40625); fallbackY.width = 1f; fallbackY.height = (float)(0.89125*2);
@@ -459,7 +459,7 @@ public final class TurnComparisonProbe {
     fallbackVisibilityAnim.clampMin = 1; fallbackVisibilityAnim.clampMax = 1;
    }
    var fallbackGroup = new JSONCollisionGroup();
-   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
+   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.BLOCK);
    fallbackGroup.collisions = new java.util.ArrayList<>(twoSquareBoxesAtY.apply(0.42125));
    fallbackGroup.collisions.add(fallbackY);
    fallbackGroup.animations = List.of(fallbackVisibilityAnim);
@@ -535,7 +535,7 @@ public final class TurnComparisonProbe {
   zMarkerRear.pos = new Point3D(CHASSIS_CENTER.x, CHASSIS_CENTER.y, CHASSIS_CENTER.z - HALF_EXTENT_C);
   zMarkerRear.width = 0; zMarkerRear.height = 0;
   var group = new JSONCollisionGroup();
-  group.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.ENTITY);
+  group.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.BLOCK);
   group.collisions = List.of(mainBox, zMarkerFront, zMarkerRear);
   v.collisionGroups = List.of(group);
   return v;

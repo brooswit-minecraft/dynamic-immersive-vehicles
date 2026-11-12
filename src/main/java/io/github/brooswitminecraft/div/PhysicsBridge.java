@@ -870,29 +870,40 @@ public final class PhysicsBridge {
    *  different, non-collision-specific map this class has no reason to otherwise touch). If a
    *  real pack ever uses this exact shape for a collision group, this would wrongly include it
    *  unconditionally - not yet seen in practice, flagged rather than guessed at.</li>
-   *  <li>{@code JSONCollisionGroup.collisionTypes} IS now constrained - review 53390's explicit
-   *  "read collisionTypes consumers" found the real answer: {@code mcinterface1211.
-   *  WrapperAABBCollective}'s own decompiled {@code getBoxes} lambda is IV's native-Minecraft-
-   *  entity-collision path (the vanilla AABB system other entities push against), and it
-   *  specifically checks {@code collisionTypes.contains(ENTITY)} for its own "collision" (as
-   *  opposed to attack/click-interaction) mode - ENTITY is the type IV itself treats as "this box
-   *  is the vehicle's real physical shape for things to collide with," distinct from ATTACK/CLICK
-   *  (interaction-only) and from VEHICLE (this ticket's own synthetic fixtures had arbitrarily
-   *  guessed VEHICLE before this was checked - now corrected to ENTITY throughout, including the
-   *  test fixtures). This governs Minecraft's OWN native entity-collision path, not Sable's
-   *  chassis shape directly - there is no code connecting the two - but it is real, confirmed
-   *  evidence (not a guess) for which type a pack author means by "this group is the vehicle's
-   *  outer physical hull," which is exactly the question this method needs answered.</li>
+   *  <li>{@code JSONCollisionGroup.collisionTypes} IS constrained - to BLOCK, corrected from an
+   *  earlier, WRONG conclusion (review 53392's own correction) that ENTITY was the right type.
+   *  ENTITY is {@code mcinterface1211.WrapperAABBCollective}'s own check, but that governs
+   *  Minecraft's native ENTITY-vs-entity collision (other mobs/players pushing against this
+   *  vehicle) - a different question from "does this group represent the vehicle's own TERRAIN/
+   *  BLOCK collision hull," which is what this method (and the actual merc230 bug - a chassis
+   *  resting on TERRAIN) needs. {@code AEntityVehicleD_Moving.update()} is the real, confirmed
+   *  consumer for that question: it rebuilds its own {@code allBlockCollisionBoxes} field every
+   *  tick by filtering {@code allCollisionBoxes} for {@code collisionTypes.contains(BLOCK)} -
+   *  this is IV's own vehicle-movement/terrain-collision path, not an interaction/rendering
+   *  concern, and {@code VehicleGroundDeviceBox}'s own static default collisionTypes set is ALSO
+   *  BLOCK-only, further corroborating it as the standard "collides with terrain" type.
+   *  <p>Still NOT fully settled: this corrects the WRONG consumer, but review 53392 also
+   *  correctly caught that updating this ticket's own synthetic test fixtures to any type (first
+   *  ENTITY, now BLOCK) and finding they still pass only proves internal self-consistency with a
+   *  self-chosen filter - it does NOT prove the REAL merc230/quad packs' own JSON actually uses
+   *  BLOCK on their real physical-hull groups. Neither pack's real JSON is available to read
+   *  directly from this environment (only generic parts/items/decors ship in the base IV jar
+   *  cached locally - the actual vehicle content pack is a separate, uninstalled addon) - the
+   *  real group types for merc230/quad need to come from the Zippy helper's own read-only
+   *  inspection, not assumed from decompiled IV consumer code alone.</li>
    * </ul>
    */
   private static Vector3d[] computeChassisBounds(EntityVehicleF_Physics v) {
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
    for (var group : v.definition.collisionGroups) {
-    // Review 53390: constrained to ENTITY per WrapperAABBCollective's own confirmed usage (see
-    // this method's class doc) - a group not meant as part of the vehicle's physical hull (pure
-    // ATTACK/CLICK/BULLET/EFFECTOR interaction boxes, or BLOCK-only) no longer corrupts the
-    // chassis union just by existing in definition.collisionGroups.
-    if (group.collisionTypes == null || !group.collisionTypes.contains(JSONCollisionGroup.CollisionType.ENTITY)) continue;
+    // Review 53393: REVERTED the BLOCK filter immediately on real data - Zippy's own read-only
+    // pack receipt shows NEITHER the quad NOR merc230 has a single group with BLOCK (or ENTITY)
+    // explicitly set; both packs' real physical-hull groups simply OMIT collisionTypes entirely.
+    // A raw-JSON-presence filter on either type would return an EMPTY union for BOTH real
+    // vehicles - permanently starving the ALREADY-ACCEPTED, installed quad, not just failing to
+    // fix merc230. Not filtering by collisionTypes at all until IV's own loader/legacy-compat
+    // resolved-runtime value (not raw JSON presence) is actually understood - see this method's
+    // class doc.
     minecrafttransportsimulator.baseclasses.TransformationMatrix netMatrix = null;
     if (group.animations != null && !group.animations.isEmpty()) {
      var switchbox = new minecrafttransportsimulator.baseclasses.AnimationSwitchbox(v, group.animations, group.applyAfter);
