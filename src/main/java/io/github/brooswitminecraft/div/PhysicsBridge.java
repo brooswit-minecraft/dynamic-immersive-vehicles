@@ -57,7 +57,25 @@ public final class PhysicsBridge {
   * by a stale leftover entry.
   */
  private record InheritedRigidBodyVelocity(Vector3d angularVelocity, Vector3d referenceLinearVelocity, Vector3d referencePosition) {}
- private static final java.util.Map<EntityVehicleF_Physics, InheritedRigidBodyVelocity> pendingInheritedVelocity = new IdentityHashMap<>();
+ /**
+  * Ticket 53390's explicit "extract small replacement-state lifecycle seam and unit-test
+  * get/retain-on-failure/consume-on-success/cleanup" - generic over {@code K}/{@code V} (same
+  * reasoning as {@link #replaceIfCategoryChanged}/{@link BodyRegistry}: directly testable with
+  * plain keys and fake values, no live entity/Sable runtime needed) rather than a bare
+  * {@code Map} field with the three call sites' own discipline as the only thing enforcing
+  * correct get/retain/consume/cleanup semantics. {@link #get} never removes (so a failed
+  * construction's own retry still finds the entry); {@link #consumeOnSuccess} and
+  * {@link #cleanup} both remove, but mean different things at the call site (success vs.
+  * abandonment) even though the implementation happens to be identical right now.
+  */
+ static final class PendingReplacementState<K, V> {
+  private final java.util.Map<K, V> pending = new IdentityHashMap<>();
+  V get(K key) { return pending.get(key); }
+  void stage(K key, V value) { pending.put(key, value); }
+  void consumeOnSuccess(K key) { pending.remove(key); }
+  void cleanup(K key) { pending.remove(key); }
+ }
+ private static final PendingReplacementState<EntityVehicleF_Physics, InheritedRigidBodyVelocity> pendingInheritedVelocity = new PendingReplacementState<>();
  // Vehicle definitions whose chassis geometry failed to build a Sable body once already;
  // keyed by the shared JSON definition object (one per packID:systemName, not per entity), so a
  // bad content-pack definition is retried, and logged, once rather than every tick for every
@@ -206,7 +224,7 @@ public final class PhysicsBridge {
    // below from the SAME native body at the current moment; this keeps position and velocity as
    // one mutually consistent snapshot rather than two different ticks' worth of state.
    existingBody.box.updatePose();
-   pendingInheritedVelocity.put(v, new InheritedRigidBodyVelocity(
+   pendingInheritedVelocity.stage(v, new InheritedRigidBodyVelocity(
      existingBody.handle.getAngularVelocity(new Vector3d()),
      existingBody.handle.getLinearVelocity(new Vector3d()),
      new Vector3d(existingBody.box.getPose().position())));
@@ -303,7 +321,7 @@ public final class PhysicsBridge {
   // chassisBoundsChanged rebuild (e.g. it becomes ineligible, or is simply removed from the
   // world) - without this, pendingInheritedVelocity would hold a STRONG reference to `v` (an
   // IdentityHashMap key) forever, leaking the entity itself, not just stale velocity data.
-  pendingInheritedVelocity.remove(v);
+  pendingInheritedVelocity.cleanup(v);
   return false;
  }
  enum ActivationDecision { INELIGIBLE, CLIENT_ACTIVE, DEFER_TO_NATIVE, ACTIVATE }
@@ -476,10 +494,10 @@ public final class PhysicsBridge {
  public static void cleanup() {
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
-  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.remove(v); });
+  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.remove(v); });
+  registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**
@@ -1073,7 +1091,7 @@ public final class PhysicsBridge {
      TwoBodyLifecycle.remove(level,bodies);
      throw ex;
     }
-    if (inherited != null) pendingInheritedVelocity.remove(v); // success-only consume (review 53388)
+    if (inherited != null) pendingInheritedVelocity.consumeOnSuccess(v); // success-only consume (review 53388)
     box=bodies.lowerBox(); handle=bodies.lowerHandle();
     upperBox=bodies.upperBox(); upperHandle=bodies.upperHandle(); twoBodyJoint=bodies.joint();
     lowerMassKg=io.github.brooswitminecraft.div.experimental.TwoBodyChassis.lowerMassKg(mass,config);
@@ -1105,7 +1123,7 @@ public final class PhysicsBridge {
      physics.removeObject(box);
      throw ex;
     }
-    if (inherited != null) pendingInheritedVelocity.remove(v); // success-only consume (review 53388)
+    if (inherited != null) pendingInheritedVelocity.consumeOnSuccess(v); // success-only consume (review 53388)
     handle=h;
    }
   }
