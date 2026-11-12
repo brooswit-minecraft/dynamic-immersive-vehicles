@@ -709,7 +709,7 @@ public final class PhysicsBridge {
   // log to one failing to drive for some other reason). Read-only - never alters force/control or
   // auto-starts anything. Edge-triggered (logs again whenever the built line actually changes) PLUS
   // a bounded periodic resample, not unconditional per-tick spam.
-  private String lastEngineFuelElectricalReceiptLine = null;
+  private String lastEngineFuelElectricalReceiptDiscreteState = null;
   private int ticksSinceLastEngineFuelElectricalReceipt = ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS;
   private static final int ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS = 100;
   final BoxPhysicsObject box;
@@ -1339,45 +1339,66 @@ public final class PhysicsBridge {
    * decompiled source is a plain, always-present public field/ComputedVariable, not something
    * that can itself throw or be absent).
    *
-   * <p>Edge-triggered, not unconditional: builds the full receipt line every debug tick (cheap -
-   * one pass over this vehicle's own parts) but only actually logs it when the line changed
-   * since the last one logged (an engine started/stopped, a gear changed, fuel/electric moved)
-   * OR {@link #ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS} ticks have passed since the last log
-   * - bounded, modest periodic sampling rather than unbounded per-engine-per-tick spam, per
-   * John's explicit ask.
+   * <p>Edge-triggered on DISCRETE state only (review 53367's correction to this method's first
+   * version): a running engine's rpm/fuel level/electricPower change almost every tick on their
+   * own, so comparing the FULL line (continuous values included) made "changed since last
+   * logged" trivially true on nearly every debug tick while an engine runs - defeating the
+   * claimed modest/edge-triggered sampling entirely. The comparison below uses only identity/
+   * count/running/gear/ignition/starter plus a derived fuel-empty/nonempty boolean (not the raw
+   * continuous fuel level); the EMITTED line still always carries the exact continuous rpm/fuel
+   * level/electricPower values, just sampled periodically ({@link
+   * #ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS} ticks) rather than on every tiny fluctuation.
+   * A discrete transition (engine started/stopped, gear changed, ignition/starter toggled, fuel
+   * crossing empty/nonempty) still logs immediately regardless of that period.
+   *
+   * <p>Per-engine identity uses {@code engine.definition.packID+":"+engine.definition.systemName}
+   * (the same convention {@code chassisReceipt} already uses for the vehicle itself) rather than
+   * bare iteration index, which can shift if parts are added/removed/reordered between ticks.
    */
   private void logEngineFuelElectricalReceiptIfDue(EntityVehicleF_Physics v, int debugTick) {
-   StringBuilder engines = new StringBuilder("[");
+   StringBuilder engines = new StringBuilder("["), discreteEngines = new StringBuilder("[");
    int engineCount = 0;
    for (var part : v.allParts) {
     if (!(part instanceof PartEngine engine)) continue;
-    if (engineCount > 0) engines.append("; ");
-    engines.append("idx=").append(engineCount)
+    if (engineCount > 0) { engines.append("; "); discreteEngines.append("; "); }
+    String identity = engine.definition.packID+":"+engine.definition.systemName;
+    engines.append("id=").append(identity)
       .append(" running=").append(engine.running)
       .append(" gear=").append(engine.currentGearVar.currentValue)
       .append(" rpm=").append(engine.rpm)
       .append(" ignitionOn=").append(engine.magnetoVar.isActive)
       .append(" electricStarterEngaged=").append(engine.electricStarterVar.isActive)
       .append(" handStarterEngaged=").append(engine.handStarterVar.isActive);
+    // Discrete-only subset used for the edge-trigger comparison - deliberately omits rpm.
+    discreteEngines.append("id=").append(identity)
+      .append(" running=").append(engine.running)
+      .append(" gear=").append(engine.currentGearVar.currentValue)
+      .append(" ignitionOn=").append(engine.magnetoVar.isActive)
+      .append(" electricStarterEngaged=").append(engine.electricStarterVar.isActive)
+      .append(" handStarterEngaged=").append(engine.handStarterVar.isActive);
     engineCount++;
    }
-   engines.append("]");
-   String fuelState;
+   engines.append("]"); discreteEngines.append("]");
+   String fuelState, discreteFuelState;
    if (v.fuelTank == null) {
     fuelState = "fuelLevel=unavailable fuelMax=unavailable fuelType=unavailable (no fuelTank on this vehicle)";
+    discreteFuelState = "fuelPresent=false";
    } else {
     fuelState = "fuelLevel="+v.fuelTank.getFluidLevel()+" fuelMax="+v.fuelTank.getMaxLevel()+" fuelType="+v.fuelTank.getFluid();
+    discreteFuelState = "fuelPresent=true fuelNonEmpty="+(v.fuelTank.getFluidLevel()>0);
    }
-   // Compared WITHOUT the tick number below - tick changes every call, so including it in the
-   // change-detection comparison would make "changed since last logged" trivially true every
-   // single debug tick, defeating the whole point of edge-triggering.
+   // Full line (continuous values included) - ALWAYS what actually gets logged; never part of
+   // the change-detection comparison itself (see discreteState below).
    String stateOnly = "entity="+v.uniqueUUID+" engineCount="+engineCount+" engines="+engines+" "+fuelState+" electricPower="+v.electricPower;
-   boolean due = lastEngineFuelElectricalReceiptLine==null || !lastEngineFuelElectricalReceiptLine.equals(stateOnly)
+   // Discrete-only (identity/count/running/gear/ignition/starter/fuel-empty-vs-nonempty) - what
+   // change-detection actually compares against, so continuous drift alone never counts as "due".
+   String discreteState = "entity="+v.uniqueUUID+" engineCount="+engineCount+" engines="+discreteEngines+" "+discreteFuelState;
+   boolean due = lastEngineFuelElectricalReceiptDiscreteState==null || !lastEngineFuelElectricalReceiptDiscreteState.equals(discreteState)
      || ticksSinceLastEngineFuelElectricalReceipt >= ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS;
    ticksSinceLastEngineFuelElectricalReceipt++;
    if (due) {
     LOGGER.info("[DIV debugGroundContact] engineFuelElectricalReceipt tick="+debugTick+" "+stateOnly);
-    lastEngineFuelElectricalReceiptLine = stateOnly;
+    lastEngineFuelElectricalReceiptDiscreteState = discreteState;
     ticksSinceLastEngineFuelElectricalReceipt = 0;
    }
   }

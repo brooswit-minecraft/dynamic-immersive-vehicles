@@ -78,6 +78,9 @@ public final class TurnComparisonProbe {
  private static final double TARGET_SPEED = 5.0; // m/s - a bounded, moderate turning speed for the TURN scenarios
  private static final double BRAKE_CHECK_TARGET_SPEED = 8.0; // m/s - review 53348's own "around 8 m/s" ask for the straight-braking check
  private static final int SETTLE_TICKS = 60, MAX_ACCEL_TICKS = 160, TURN_TICKS = 200; // TURN sustained for 10s, well beyond a brief turn
+ // Review 53367: must exceed PhysicsBridge's ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS (100) so
+ // the churn scenario actually exercises the periodic resample, not just the initial log line.
+ private static final int ENGINE_STATE_CHECK_CHURN_TICKS = 150;
  private static final int HOLD_TICKS = 40, BRAKE_TICKS = 100; // BRAKE-mode scenarios: brief hold at target speed, then a bounded brake-observation window
  private static final int STABILIZE_TURN_TICKS = 60; // 3s - review 53352's own "reach stable ~5m/s sustained 40deg turn" before braking mid-turn
  private static final int BRAKE_DURING_TURN_TICKS = 100; // up to 5s, review's own explicit bound, rudder/steering retained throughout
@@ -143,6 +146,10 @@ public final class TurnComparisonProbe {
   boolean hasEngine = true;
   boolean engineRunningDesired = false;
   double gearDesired = 0.0;
+  // Review 53367: demonstrates the edge-trigger fix itself - running/gear stay fixed for the
+  // whole window while rpm (a continuous value, deliberately excluded from the discrete
+  // comparison) is mutated every single tick, confirming it does NOT cause continuous emission.
+  boolean churnRpmEachTick = false;
   Scenario(String label, String systemName, Mode mode, double targetSpeed, boolean symmetricGeometry, double rudderDegrees) {
    this.label = label; this.systemName = systemName; this.mode = mode; this.targetSpeed = targetSpeed; this.symmetricGeometry = symmetricGeometry; this.rudderDegrees = rudderDegrees;
   }
@@ -222,7 +229,12 @@ public final class TurnComparisonProbe {
   engineCheckRunningNeutral.engineRunningDesired = true; engineCheckRunningNeutral.gearDesired = 0.0;
   Scenario engineCheckRunningInGear = new Scenario("engineCheck-runningInGear", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
   engineCheckRunningInGear.engineRunningDesired = true; engineCheckRunningInGear.gearDesired = 1.0;
-  scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear);
+  // Review 53367: proves the edge-trigger fix - running/gear held fixed for 150 ticks while rpm
+  // churns every tick should produce exactly 2 engineFuelElectricalReceipt lines (the initial
+  // tick=0 state, then one periodic resample at tick=100), not 150.
+  Scenario engineCheckRpmChurn = new Scenario("engineCheck-rpmChurn", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  engineCheckRpmChurn.engineRunningDesired = true; engineCheckRpmChurn.gearDesired = 1.0; engineCheckRpmChurn.churnRpmEachTick = true;
+  scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn);
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -517,18 +529,23 @@ public final class TurnComparisonProbe {
  private static void settle(Scenario s) {
   s.ticksInPhase++;
   if (!checkBoundedOrFail(s)) return;
-  if (s.ticksInPhase >= SETTLE_TICKS) {
+  // Review 53367's churn scenario needs to run PAST ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS
+  // (100) to actually exercise the periodic resample, well beyond ordinary SETTLE_TICKS (60).
+  if (s.mode == Mode.ENGINE_STATE_CHECK && s.churnRpmEachTick && s.engine != null) s.engine.rpm = 800 + s.ticksInPhase;
+  int settleTicksForThisScenario = (s.mode == Mode.ENGINE_STATE_CHECK && s.churnRpmEachTick) ? ENGINE_STATE_CHECK_CHURN_TICKS : SETTLE_TICKS;
+  if (s.ticksInPhase >= settleTicksForThisScenario) {
    // ENGINE_STATE_CHECK (ticket 53365): never drives - just lets PhysicsBridge.Body tick long
    // enough for its new engineFuelElectricalReceipt diagnostic to fire (gated the same way as
    // every other debugGroundContact line - DEBUG_GROUND_CONTACT_TICKS is per-Body, fresh at this
-   // scenario's own spawn, so SETTLE_TICKS is already well within its window), then reports what
-   // THIS scenario actually configured so the real log line (named engineFuelElectricalReceipt,
-   // visible separately in the server log) can be checked against it.
+   // scenario's own spawn, so this window is already well within its 600-tick budget), then
+   // reports what THIS scenario actually configured so the real log line (named
+   // engineFuelElectricalReceipt, visible separately in the server log) can be checked against it.
    if (s.mode == Mode.ENGINE_STATE_CHECK) {
     s.phase = Phase.DONE;
     LOGGER.info("[DIV turnComparison] scenario=" + s.label + " COMPLETE - ENGINE_STATE_CHECK configured hasEngine=" + s.hasEngine
       + (s.engine != null ? " engineRunning=" + s.engine.running + " gear=" + s.engine.currentGearVar.currentValue : " (no engine part installed)")
-      + " fuelTankPresent=" + (s.vehicle.fuelTank != null) + " electricPower=" + s.vehicle.electricPower);
+      + " fuelTankPresent=" + (s.vehicle.fuelTank != null) + " electricPower=" + s.vehicle.electricPower
+      + " churnRpmEachTick=" + s.churnRpmEachTick + " ticksRun=" + s.ticksInPhase);
     return;
    }
    s.phase = Phase.ACCELERATE; s.ticksInPhase = 0;
