@@ -81,6 +81,8 @@ public final class TurnComparisonProbe {
  private static final int HOLD_TICKS = 40, BRAKE_TICKS = 100; // BRAKE-mode scenarios: brief hold at target speed, then a bounded brake-observation window
  private static final int STABILIZE_TURN_TICKS = 60; // 3s - review 53352's own "reach stable ~5m/s sustained 40deg turn" before braking mid-turn
  private static final int BRAKE_DURING_TURN_TICKS = 100; // up to 5s, review's own explicit bound, rudder/steering retained throughout
+ private static final int STRAIGHT_SETTLE_TICKS = 300; // 15s straight driving, zero rudder - long enough to distinguish a persistent steady-state lean from initial settling transients
+ private static final int STEADY_STATE_WINDOW_TICKS = 60; // last 3s averaged for the reported steady-state signed bank
 
  private static final double HALF_EXTENT_A = 0.42500001192092896, HALF_HEIGHT_B = 0.4410937510430813, HALF_EXTENT_C = 1.050000011920929;
  private static final Point3D CHASSIS_CENTER = new Point3D(0, 0.553593748062849, 0.625);
@@ -93,13 +95,14 @@ public final class TurnComparisonProbe {
  private static final Logger LOGGER = LogUtils.getLogger();
 
  private enum GlobalPhase { WAIT_TERRAIN, BUILD_PLATFORM, RUN_SCENARIOS, ALL_DONE }
- private enum Phase { SPAWNING, SETTLE, ACCELERATE, TURN, HOLD, BRAKE, BRAKE_DURING_TURN, DONE, FAILED }
- private enum Mode { TURN, BRAKE, TURN_THEN_BRAKE }
+ private enum Phase { SPAWNING, SETTLE, ACCELERATE, TURN, HOLD, BRAKE, BRAKE_DURING_TURN, STRAIGHT_SETTLE, DONE, FAILED }
+ private enum Mode { TURN, BRAKE, TURN_THEN_BRAKE, STRAIGHT_SETTLE }
 
  private static final class Scenario {
   final String label, systemName;
   final Mode mode;
   final double targetSpeed;
+  final boolean symmetricGeometry; // review 53354: isolates whether the real ATV's own established-but-asymmetric rear wheel track (RL.x=0.35 vs RR.x=-0.375, front stays symmetric) alone produces a persistent steady-state bank with zero rudder input
   EntityVehicleF_Physics vehicle;
   PartEngine engine;
   net.minecraft.world.entity.animal.Pig riderEntity;
@@ -107,6 +110,10 @@ public final class TurnComparisonProbe {
   int ticksInPhase = 0;
   double spawnX, spawnZ, spawnSurfaceY;
   double speedAtBrakeStart;
+  // Review 53354: STEADY-STATE signed bank (NOT abs, NOT max) - the last STEADY_STATE_WINDOW_TICKS
+  // ticks' own bank values, averaged, to characterize a persistent lean/bias distinct from
+  // transient settling oscillation or deliberate turn bank.
+  final java.util.ArrayDeque<Double> recentSignedBankDegrees = new java.util.ArrayDeque<>();
   double bankAtOnset; // review 53348's own "report onset attitude/speed" for the BRAKE check
   // Review 53352's own combined turn+brake check - onset snapshot taken the instant the brake
   // engages mid-turn, plus the horizontal-speed/pitch extrema tracked through that window.
@@ -121,8 +128,9 @@ public final class TurnComparisonProbe {
   double prevBankRadians = Double.NaN;
   double maxAbsBankRateDegreesPerTick = 0;
   double maxAbsLateralSlip = 0; // velocity component along the body-right axis - the real sideways slip a turn induces
-  Scenario(String label, String systemName, Mode mode, double targetSpeed) {
-   this.label = label; this.systemName = systemName; this.mode = mode; this.targetSpeed = targetSpeed;
+  double steadyStateSignedBankDegrees = Double.NaN; // set at scenario end - average signed bank over the final STEADY_STATE_WINDOW_TICKS
+  Scenario(String label, String systemName, Mode mode, double targetSpeed, boolean symmetricGeometry) {
+   this.label = label; this.systemName = systemName; this.mode = mode; this.targetSpeed = targetSpeed; this.symmetricGeometry = symmetricGeometry;
   }
  }
 
@@ -172,18 +180,23 @@ public final class TurnComparisonProbe {
   var packVehicleScales = ConfigSystem.settings.general.packVehicleScales.value;
   packSpeedFactors.putIfAbsent(PACK_ID, 1.0);
   packVehicleScales.putIfAbsent(PACK_ID, 1.0);
-  // Review 53348: a small, bounded diagnostic follow-up, not a broader sweep - exactly two more
-  // scenarios. "griponly" isolates lateralGripMultiplier alone (baseline's OWN f/self-right,
-  // only grip changed) to separate its real contribution from the bundled candidate's combined
-  // effect (review's own "isolate whether grip reduction alone helps or sacrifices directional
-  // control"). "tunedbrake8" is a straight-line brake check of the FULL bundled tuning at ~8 m/s
-  // (review's own "shared elliptical budget changes combined-force behavior and low-speed suite
-  // alone doesn't cover this speed").
+  // Review 53354/53355: real Zippy gameplay data confirms self-right genuinely active (1160/1200
+  // occupied ticks) yet a persistent, non-oscillating total tilt remains (median 9.16deg, p95
+  // 18.18deg) alongside substantial sideways wheel slip (p95 8.58, peak 15 m/s) - "leans to one
+  // side... all the time". SelfRightingAssist's own torque formula is strength*sin(bank)+
+  // damping*rollRate - a pure PD controller with NO integral term, which NEVER fully cancels a
+  // CONSTANT disturbance torque; it settles at whatever nonzero bank makes the restoring term
+  // balance the disturbance. The real ATV's own established (not guessed - cited across multiple
+  // pre-existing tests, e.g. TwoBodyChassisTest) wheel geometry has a genuine rear-track
+  // asymmetry (WHEEL_RL.x=0.35 vs WHEEL_RR.x=-0.375; front stays symmetric at +-0.375) that is
+  // exactly this kind of constant disturbance candidate. This run isolates it directly: same
+  // tuning (f=.1/grip=.5/assist400-160-1000) and same self-right, straight driving with ZERO
+  // rudder, comparing the REAL (asymmetric) geometry against a geometry-CORRECTED (symmetric)
+  // variant - a steady-state signed bank in the asymmetric case that disappears/shrinks in the
+  // symmetric case would confirm this specific disturbance source.
   scenarios = List.of(
-    // Review 53352: one final bounded diagnostic (bundled tuning ONLY) - not a re-run of the
-    // prior baseline/tuned/griponly/tunedbrake8 scenarios, which already reported their own
-    // results. Deliberately the single new scenario this run exists for.
-    new Scenario("tunedturnbrake", "turncmp-tuned", Mode.TURN_THEN_BRAKE, TARGET_SPEED));
+    new Scenario("straightsettle-asym", "turncmp-tuned", Mode.STRAIGHT_SETTLE, 3.0, false),
+    new Scenario("straightsettle-sym", "turncmp-tuned", Mode.STRAIGHT_SETTLE, 3.0, true));
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -201,6 +214,7 @@ public final class TurnComparisonProbe {
     case HOLD -> hold(s);
     case BRAKE -> brake(s);
     case BRAKE_DURING_TURN -> brakeDuringTurn(s);
+    case STRAIGHT_SETTLE -> straightSettle(s);
     case DONE, FAILED -> advanceToNextScenario(s);
    }
   } catch (RuntimeException ex) {
@@ -218,9 +232,13 @@ public final class TurnComparisonProbe {
  private static void spawn(ServerLevel level, Scenario s) {
   int blockX = CHUNK_X * 16 + 8, blockZ = CHUNK_Z * 16 + 8;
   int surfaceY = PLATFORM_Y + 1;
+  // Review 53354: symmetricGeometry replaces ONLY the rear-left anchor's x with 0.375 (mirroring
+  // WHEEL_RR exactly) - the real/established asymmetric value (0.35) is otherwise used
+  // everywhere else in this file and its sibling probes, unchanged.
+  Point3D wheelRL = s.symmetricGeometry ? new Point3D(0.375, WHEEL_RL.y, WHEEL_RL.z) : WHEEL_RL;
   var wheelSlotFL = wheelSlot(WHEEL_FL, true);
   var wheelSlotFR = wheelSlot(WHEEL_FR, true);
-  var wheelSlotRL = wheelSlot(WHEEL_RL, false);
+  var wheelSlotRL = wheelSlot(wheelRL, false);
   var wheelSlotRR = wheelSlot(WHEEL_RR, false);
   var engineSlot = engineSlot();
   var seatSlot = seatSlot();
@@ -414,7 +432,7 @@ public final class TurnComparisonProbe {
      + " verticalFromSurface=" + verticalFromSurface + " (bound=" + PLATFORM_BOUND_VERTICAL + ") position=" + v.position);
    return false;
   }
-  if (s.phase == Phase.TURN || s.phase == Phase.BRAKE || s.phase == Phase.BRAKE_DURING_TURN) {
+  if (s.phase == Phase.TURN || s.phase == Phase.BRAKE || s.phase == Phase.BRAKE_DURING_TURN || s.phase == Phase.STRAIGHT_SETTLE) {
    s.minUpY = Math.min(s.minUpY, v.orientation.m11);
    // Review 53352's own "bank/pitch extrema" - pitch (wheelie/nose-down) about the body-right
    // axis, using the forward vector's own world-Y component (bodyForward is column 2:
@@ -432,6 +450,8 @@ public final class TurnComparisonProbe {
    double bankRadians = Math.atan2(v.orientation.m10, v.orientation.m11);
    double bankDegrees = Math.toDegrees(bankRadians);
    s.maxAbsBankDegrees = Math.max(s.maxAbsBankDegrees, Math.abs(bankDegrees));
+   s.recentSignedBankDegrees.addLast(bankDegrees);
+   while (s.recentSignedBankDegrees.size() > STEADY_STATE_WINDOW_TICKS) s.recentSignedBankDegrees.removeFirst();
    if (!Double.isNaN(s.prevBankRadians)) {
     double rateRadians = Math.atan2(Math.sin(bankRadians - s.prevBankRadians), Math.cos(bankRadians - s.prevBankRadians));
     s.maxAbsBankRateDegreesPerTick = Math.max(s.maxAbsBankRateDegreesPerTick, Math.abs(Math.toDegrees(rateRadians)));
@@ -480,10 +500,35 @@ public final class TurnComparisonProbe {
     s.phase = Phase.TURN;
     s.vehicle.rudderInputVar.setTo(40.0, false); // within MAX_RUDDER_ANGLE=45 - the same real, sustained steering input the bounded brake-sweep/turn work already established as "a clear, deliberate turning signal"
     LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning sustained TURN phase at speed=" + speed + " rudder=40deg");
+   } else if (s.mode == Mode.STRAIGHT_SETTLE) {
+    s.phase = Phase.STRAIGHT_SETTLE;
+    s.vehicle.rudderInputVar.setTo(0.0, false); // deliberately ZERO - isolating persistent lean from deliberate turn bank
+    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning STRAIGHT_SETTLE phase at speed=" + speed + " rudder=0deg (symmetricGeometry=" + s.symmetricGeometry + ")");
    } else {
     s.phase = Phase.HOLD;
     LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning HOLD phase at speed=" + speed);
    }
+  }
+ }
+
+ // Review 53354: zero rudder, maintain a small bounded speed, for long enough to separate a
+ // genuine persistent steady-state lean from initial settling transients or deliberate turn
+ // bank - the SAME signed-bank computation checkBoundedOrFail already does, just held for a
+ // much longer straight-line window and averaged over its final STEADY_STATE_WINDOW_TICKS.
+ private static void straightSettle(Scenario s) {
+  s.ticksInPhase++;
+  if (!checkBoundedOrFail(s)) return;
+  forceEngineRunning(s.engine);
+  double speed = forwardSpeed(s);
+  s.vehicle.throttleVar.setTo(speed < s.targetSpeed ? 1.0 : 0.0, false);
+  if (s.ticksInPhase % 20 == 0) logState(s, "STRAIGHT_SETTLE");
+  if (s.ticksInPhase >= STRAIGHT_SETTLE_TICKS) {
+   s.steadyStateSignedBankDegrees = s.recentSignedBankDegrees.stream().mapToDouble(Double::doubleValue).average().orElse(Double.NaN);
+   s.phase = Phase.DONE;
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " COMPLETE - STRAIGHT_SETTLE finished (symmetricGeometry=" + s.symmetricGeometry + "),"
+     + " steadyStateSignedBankDegrees=" + s.steadyStateSignedBankDegrees + " (avg of last " + s.recentSignedBankDegrees.size() + " ticks)"
+     + " maxAbsBankDegrees=" + s.maxAbsBankDegrees + " maxAbsPitchDegrees=" + s.maxAbsPitchDegrees
+     + " maxAbsLateralSlip=" + s.maxAbsLateralSlip + " finalSpeed=" + speed + " minUpYSeen=" + s.minUpY);
   }
  }
 
