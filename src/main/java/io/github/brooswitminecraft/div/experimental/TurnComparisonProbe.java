@@ -79,6 +79,8 @@ public final class TurnComparisonProbe {
  private static final double BRAKE_CHECK_TARGET_SPEED = 8.0; // m/s - review 53348's own "around 8 m/s" ask for the straight-braking check
  private static final int SETTLE_TICKS = 60, MAX_ACCEL_TICKS = 160, TURN_TICKS = 200; // TURN sustained for 10s, well beyond a brief turn
  private static final int HOLD_TICKS = 40, BRAKE_TICKS = 100; // BRAKE-mode scenarios: brief hold at target speed, then a bounded brake-observation window
+ private static final int STABILIZE_TURN_TICKS = 60; // 3s - review 53352's own "reach stable ~5m/s sustained 40deg turn" before braking mid-turn
+ private static final int BRAKE_DURING_TURN_TICKS = 100; // up to 5s, review's own explicit bound, rudder/steering retained throughout
 
  private static final double HALF_EXTENT_A = 0.42500001192092896, HALF_HEIGHT_B = 0.4410937510430813, HALF_EXTENT_C = 1.050000011920929;
  private static final Point3D CHASSIS_CENTER = new Point3D(0, 0.553593748062849, 0.625);
@@ -91,8 +93,8 @@ public final class TurnComparisonProbe {
  private static final Logger LOGGER = LogUtils.getLogger();
 
  private enum GlobalPhase { WAIT_TERRAIN, BUILD_PLATFORM, RUN_SCENARIOS, ALL_DONE }
- private enum Phase { SPAWNING, SETTLE, ACCELERATE, TURN, HOLD, BRAKE, DONE, FAILED }
- private enum Mode { TURN, BRAKE }
+ private enum Phase { SPAWNING, SETTLE, ACCELERATE, TURN, HOLD, BRAKE, BRAKE_DURING_TURN, DONE, FAILED }
+ private enum Mode { TURN, BRAKE, TURN_THEN_BRAKE }
 
  private static final class Scenario {
   final String label, systemName;
@@ -106,6 +108,11 @@ public final class TurnComparisonProbe {
   double spawnX, spawnZ, spawnSurfaceY;
   double speedAtBrakeStart;
   double bankAtOnset; // review 53348's own "report onset attitude/speed" for the BRAKE check
+  // Review 53352's own combined turn+brake check - onset snapshot taken the instant the brake
+  // engages mid-turn, plus the horizontal-speed/pitch extrema tracked through that window.
+  double onsetSpeedDuringTurnBrake, onsetPitchDegreesDuringTurnBrake, onsetYawDegreesDuringTurnBrake, onsetVerticalFromSurfaceDuringTurnBrake;
+  double maxAbsPitchDegrees = 0;
+  double finalHorizontalSpeed = Double.NaN; // sqrt(forward^2+lateral^2) at the end of the BRAKE_DURING_TURN window - review's own "not solely body-forward component, to avoid mistaking sideways slide for stopping"
   double minUpY = 1.0; // plain up.y - kept for the bounded-observation-floor check only, NOT the reported roll metric (review 53341: mixes pitch/wheelie with sideways bank)
   // Review 53341: the actual roll-specific metric, matching SelfRightingAssist's own internal
   // math exactly (signed roll about bodyForward alone) - atan2(bodyRight.y, bodyUp.y), NOT
@@ -173,10 +180,10 @@ public final class TurnComparisonProbe {
   // (review's own "shared elliptical budget changes combined-force behavior and low-speed suite
   // alone doesn't cover this speed").
   scenarios = List.of(
-    new Scenario("baseline", "turncmp-baseline", Mode.TURN, TARGET_SPEED),
-    new Scenario("tuned", "turncmp-tuned", Mode.TURN, TARGET_SPEED),
-    new Scenario("griponly", "turncmp-griponly", Mode.TURN, TARGET_SPEED),
-    new Scenario("tunedbrake8", "turncmp-tunedbrake8", Mode.BRAKE, BRAKE_CHECK_TARGET_SPEED));
+    // Review 53352: one final bounded diagnostic (bundled tuning ONLY) - not a re-run of the
+    // prior baseline/tuned/griponly/tunedbrake8 scenarios, which already reported their own
+    // results. Deliberately the single new scenario this run exists for.
+    new Scenario("tunedturnbrake", "turncmp-tuned", Mode.TURN_THEN_BRAKE, TARGET_SPEED));
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -193,6 +200,7 @@ public final class TurnComparisonProbe {
     case TURN -> turn(s);
     case HOLD -> hold(s);
     case BRAKE -> brake(s);
+    case BRAKE_DURING_TURN -> brakeDuringTurn(s);
     case DONE, FAILED -> advanceToNextScenario(s);
    }
   } catch (RuntimeException ex) {
@@ -406,8 +414,16 @@ public final class TurnComparisonProbe {
      + " verticalFromSurface=" + verticalFromSurface + " (bound=" + PLATFORM_BOUND_VERTICAL + ") position=" + v.position);
    return false;
   }
-  if (s.phase == Phase.TURN || s.phase == Phase.BRAKE) {
+  if (s.phase == Phase.TURN || s.phase == Phase.BRAKE || s.phase == Phase.BRAKE_DURING_TURN) {
    s.minUpY = Math.min(s.minUpY, v.orientation.m11);
+   // Review 53352's own "bank/pitch extrema" - pitch (wheelie/nose-down) about the body-right
+   // axis, using the forward vector's own world-Y component (bodyForward is column 2:
+   // m02/m12/m22, so forward.y = m12) - a simple, standard measure, in the same spirit as bank's
+   // own use of the right vector's vertical component just below, not claimed to be the same
+   // gimbal-free rigor SelfRightingAssist's own bank formula has (pitch was not that class's own
+   // documented concern).
+   double pitchDegrees = Math.toDegrees(Math.asin(Math.max(-1, Math.min(1, -v.orientation.m12))));
+   s.maxAbsPitchDegrees = Math.max(s.maxAbsPitchDegrees, Math.abs(pitchDegrees));
    // Review 53341: signed bank = atan2(bodyRight.y, bodyUp.y) about bodyForward alone, the SAME
    // formula SelfRightingAssist itself uses internally (its own class doc's algebraic
    // justification) - NOT plain up.y, which conflates pitch/wheelie with sideways bank. bodyUp is
@@ -436,7 +452,8 @@ public final class TurnComparisonProbe {
 
  private static void fail(Scenario s, String reason) {
   LOGGER.error("[DIV turnComparison] scenario=" + s.label + " STOPPED (preserved as evidence) - minUpYSeen=" + s.minUpY
-    + " maxAbsBankDegrees=" + s.maxAbsBankDegrees + " maxAbsBankRateDegPerTick=" + s.maxAbsBankRateDegreesPerTick
+    + " maxAbsBankDegrees=" + s.maxAbsBankDegrees + " maxAbsPitchDegrees=" + s.maxAbsPitchDegrees
+    + " maxAbsBankRateDegPerTick=" + s.maxAbsBankRateDegreesPerTick
     + " maxAbsLateralSlip=" + s.maxAbsLateralSlip + " - " + reason);
   s.phase = Phase.FAILED;
  }
@@ -459,7 +476,7 @@ public final class TurnComparisonProbe {
   if (s.ticksInPhase % 20 == 0) logState(s, "ACCELERATE");
   if (speed >= s.targetSpeed * 0.9 || s.ticksInPhase >= MAX_ACCEL_TICKS) {
    s.ticksInPhase = 0;
-   if (s.mode == Mode.TURN) {
+   if (s.mode == Mode.TURN || s.mode == Mode.TURN_THEN_BRAKE) {
     s.phase = Phase.TURN;
     s.vehicle.rudderInputVar.setTo(40.0, false); // within MAX_RUDDER_ANGLE=45 - the same real, sustained steering input the bounded brake-sweep/turn work already established as "a clear, deliberate turning signal"
     LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning sustained TURN phase at speed=" + speed + " rudder=40deg");
@@ -477,12 +494,66 @@ public final class TurnComparisonProbe {
   double speed = forwardSpeed(s);
   s.vehicle.throttleVar.setTo(speed < s.targetSpeed ? 1.0 : 0.0, false); // keep driving through the turn - a stationary vehicle can't meaningfully flop
   if (s.ticksInPhase % 10 == 0) logState(s, "TURN");
+  if (s.mode == Mode.TURN_THEN_BRAKE) {
+   // Review 53352: "reach stable ~5m/s sustained 40deg turn, then apply full brake with
+   // throttle 0 while retaining steering" - a shorter stabilization window than the full
+   // TURN_TICKS, then transition straight into BRAKE_DURING_TURN rather than DONE.
+   if (s.ticksInPhase >= STABILIZE_TURN_TICKS) {
+    var v = s.vehicle;
+    s.onsetSpeedDuringTurnBrake = speed;
+    s.onsetPitchDegreesDuringTurnBrake = s.maxAbsPitchDegrees; // last-known pitch is this tick's own value (already updated by checkBoundedOrFail above)
+    s.onsetYawDegreesDuringTurnBrake = Math.toDegrees(Math.atan2(v.orientation.m02, v.orientation.m22));
+    s.onsetVerticalFromSurfaceDuringTurnBrake = Math.abs(v.position.y - s.spawnSurfaceY);
+    s.vehicle.throttleVar.setTo(0.0, false);
+    s.vehicle.brakeVar.setActive(true, false);
+    // Rudder is deliberately LEFT at 40deg (review's own "retaining steering") - not reset.
+    s.phase = Phase.BRAKE_DURING_TURN; s.ticksInPhase = 0;
+    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " beginning BRAKE_DURING_TURN - onset speed=" + s.onsetSpeedDuringTurnBrake
+      + " onset bankDegrees=" + s.maxAbsBankDegrees + " onset pitchDegreesSoFar=" + s.onsetPitchDegreesDuringTurnBrake
+      + " onset yawDegrees=" + s.onsetYawDegreesDuringTurnBrake + " onset verticalFromSurface=" + s.onsetVerticalFromSurfaceDuringTurnBrake
+      + " (rudder retained at 40deg, throttle=0, brake=active)");
+   }
+   return;
+  }
   if (s.ticksInPhase >= TURN_TICKS) {
    s.phase = Phase.DONE;
    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " COMPLETE - sustained TURN finished, minUpYSeen=" + s.minUpY
      + " (1.0=never tilted; <" + UPRIGHT_MIN_VERTICALITY + " would have STOPPED as a rollover)"
      + " maxAbsBankDegrees=" + s.maxAbsBankDegrees + " maxAbsBankRateDegPerTick=" + s.maxAbsBankRateDegreesPerTick
      + " maxAbsLateralSlip=" + s.maxAbsLateralSlip + " m/s");
+  }
+ }
+
+ // Review 53352: the combined turn+brake check itself - rudder/steering retained (set once at
+ // the BRAKE_DURING_TURN transition above, never reset here), throttle=0, brake=active, for up
+ // to BRAKE_DURING_TURN_TICKS (5s). Records horizontal speed magnitude (forward AND lateral
+ // components combined) at the end, per review's own explicit "not solely body-forward
+ // component, to avoid mistaking sideways slide for stopping".
+ private static void brakeDuringTurn(Scenario s) {
+  s.ticksInPhase++;
+  if (!checkBoundedOrFail(s)) return;
+  var v = s.vehicle;
+  double forward = forwardSpeed(s);
+  double lateral = (v.motion.x * v.orientation.m00 + v.motion.y * v.orientation.m10 + v.motion.z * v.orientation.m20) * v.speedFactor * 20;
+  double horizontalSpeed = Math.hypot(forward, lateral);
+  if (s.ticksInPhase % 10 == 0) {
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " BRAKE_DURING_TURN tick=" + s.ticksInPhase
+     + " forwardSpeed=" + forward + " lateralSpeed=" + lateral + " horizontalSpeed=" + horizontalSpeed
+     + " position=" + v.position + " up(m01,m11,m21)=(" + v.orientation.m01 + "," + v.orientation.m11 + "," + v.orientation.m21 + ")"
+     + " rudder=" + v.rudderInputVar.currentValue + " brakeActive=" + v.brakeVar.isActive);
+  }
+  if (s.ticksInPhase >= BRAKE_DURING_TURN_TICKS) {
+   s.finalHorizontalSpeed = horizontalSpeed;
+   s.phase = Phase.DONE;
+   double onsetToFinalFractionalReduction = s.onsetSpeedDuringTurnBrake > 0 ? (s.onsetSpeedDuringTurnBrake - horizontalSpeed) / s.onsetSpeedDuringTurnBrake : 0;
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " COMPLETE - combined TURN+BRAKE check finished,"
+     + " onsetSpeed=" + s.onsetSpeedDuringTurnBrake + " onsetPitchDegreesSoFar=" + s.onsetPitchDegreesDuringTurnBrake
+     + " onsetYawDegrees=" + s.onsetYawDegreesDuringTurnBrake + " onsetVerticalFromSurface=" + s.onsetVerticalFromSurfaceDuringTurnBrake
+     + " finalForwardSpeed=" + forward + " finalLateralSpeed=" + lateral + " finalHorizontalSpeed=" + horizontalSpeed
+     + " onsetToFinalHorizontalFractionalReduction=" + onsetToFinalFractionalReduction
+     + " minUpYSeen=" + s.minUpY + " maxAbsBankDegrees=" + s.maxAbsBankDegrees + " maxAbsPitchDegrees=" + s.maxAbsPitchDegrees
+     + " maxAbsLateralSlip=" + s.maxAbsLateralSlip
+     + " (1.0=never tilted; <" + UPRIGHT_MIN_VERTICALITY + " would have STOPPED as a rollover)");
   }
  }
 
