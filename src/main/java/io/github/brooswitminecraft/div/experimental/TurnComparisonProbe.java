@@ -175,6 +175,18 @@ public final class TurnComparisonProbe {
   // Review 53390: airborne/rotating native-angular-velocity-receipt test (see spawn()'s own Y
   // override above) - a focused, minimal, grip-confound-free check, not a full suite rerun.
   boolean airborneRotationTest = false;
+  // Review 53390's second assigned item: REAL wheel add/remove via the actual IV
+  // AEntityF_Multipart.addPart/removePart lifecycle and the REAL "part_present_1" numbered
+  // variable (confirmed from Zippy's own real pack JSON receipt, comment 53393) - not the
+  // synthetic "wheelInstalledVar" proxy incrementalInstall uses above. When true, spawn() leaves
+  // wheelSlotFL genuinely EMPTY (no addWheel call for it) and gates the fallback group's
+  // visibility on "part_present_1" (clampMin=clampMax=0, i.e. visible while that slot's real
+  // part_present resolves to 0/false) instead of any synthetic variable; settle() then physically
+  // calls addPart/removePart on a real PartGroundDevice to drive the transition.
+  boolean realPartLifecycle = false;
+  APart realLifecyclePart;
+  JSONPartDefinition realLifecycleWheelSlot;
+  double realLifecycleWheelRadius;
   // Review 53367: demonstrates the edge-trigger fix itself - running/gear stay fixed for the
   // whole window while rpm (a continuous value, deliberately excluded from the discrete
   // comparison) is mutated every single tick, confirming it does NOT cause continuous emission.
@@ -310,10 +322,18 @@ public final class TurnComparisonProbe {
   airborneRotation.merc230RawEnvelope = true;
   airborneRotation.incrementalInstall = true;
   airborneRotation.airborneRotationTest = true;
+  // Review 53390's second assigned item: REAL wheel add/remove via the actual addPart/removePart
+  // lifecycle and the real part_present_1 variable, on the ground (not airborne) so the drive
+  // phase afterward actually exercises grip, confirming the chassisBoundsChanged rebuild it
+  // triggers restores real driving the same way the already-confirmed merc230Drive-fixed case
+  // does, not just a static envelope narrowing.
+  Scenario realPartLifecycle = new Scenario("merc230-realPartLifecycle", "merc230drive", Mode.INCREMENTAL_INSTALL, 0, false);
+  realPartLifecycle.merc230RawEnvelope = true; // starts wide - the real missing wheel is the fallback trigger
+  realPartLifecycle.realPartLifecycle = true;
   // Review 53390's collisionTypes ENTITY constraint is production code affecting every vehicle
   // (not just this round's new test) - quadRegression re-confirms the accepted quad's own
   // fixture (also updated to ENTITY) still produces byte-identical behavior with it active.
-  scenarios = List.of(airborneRotation, quadRegression);
+  scenarios = List.of(airborneRotation, realPartLifecycle, quadRegression);
   if (false) scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
     conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels, merc230DriveRaw, merc230DriveFixed, merc230IncrementalInstall,
     quadRegression);
@@ -449,7 +469,15 @@ public final class TurnComparisonProbe {
    var fallbackY = new JSONCollisionBox(); fallbackY.pos = new Point3D(0, 0.42125, 1.40625); fallbackY.width = 1f; fallbackY.height = (float)(0.89125*2);
    var fallbackVisibilityAnim = new minecrafttransportsimulator.jsondefs.JSONAnimationDefinition();
    fallbackVisibilityAnim.animationType = minecrafttransportsimulator.jsondefs.JSONAnimationDefinition.AnimationComponentType.VISIBILITY;
-   if (s.incrementalInstall) {
+   if (s.realPartLifecycle) {
+    // Review 53390: the REAL IV numbered variable, resolved by AEntityF_Multipart's own
+    // createComputedVariable("part_present_1",...) against partsInSlots[0] (wheelSlotFL, the
+    // first entry in definition.parts below) - not a synthetic proxy. Visible (wide/buggy) while
+    // that slot is genuinely empty (part_present_1 resolves to 0/false), hidden (narrow/fixed)
+    // once settle() physically adds a real PartGroundDevice there.
+    fallbackVisibilityAnim.variable = "part_present_1";
+    fallbackVisibilityAnim.clampMin = 0; fallbackVisibilityAnim.clampMax = 0;
+   } else if (s.incrementalInstall) {
     // Real, mutable variable (not a "#"-constant) - visible (wide/buggy) while value==0 ("wheel
     // not installed yet"), hidden (narrow/fixed) once flipped to 1 mid-run by settle().
     fallbackVisibilityAnim.variable = "wheelInstalledVar";
@@ -476,7 +504,12 @@ public final class TurnComparisonProbe {
   vehicle.orientation.set(new RotationMatrix());
   world.spawnEntity(vehicle);
 
-  addWheel(vehicle, wheelSlotFL, wheelRadius);
+  // Review 53390: realPartLifecycle leaves wheelSlotFL genuinely EMPTY at spawn (no part added),
+  // so the real part_present_1 variable (bound to partsInSlots[0], matching definition.parts'
+  // own declared order FL,FR,RL,RR,engine,seat) resolves to 0/false until settle() physically
+  // installs it mid-run.
+  if (s.realPartLifecycle) { s.realLifecycleWheelSlot = wheelSlotFL; s.realLifecycleWheelRadius = wheelRadius; }
+  else addWheel(vehicle, wheelSlotFL, wheelRadius);
   addWheel(vehicle, wheelSlotFR, wheelRadius);
   addWheel(vehicle, wheelSlotRL, wheelRadius);
   addWheel(vehicle, wheelSlotRR, wheelRadius);
@@ -554,7 +587,7 @@ public final class TurnComparisonProbe {
  }
 
  private static void addWheel(EntityVehicleF_Physics vehicle, JSONPartDefinition slot) { addWheel(vehicle, slot, 0.2); }
- private static void addWheel(EntityVehicleF_Physics vehicle, JSONPartDefinition slot, double radius) {
+ private static APart addWheel(EntityVehicleF_Physics vehicle, JSONPartDefinition slot, double radius) {
   var ground = new JSONPart.JSONPartGroundDevice();
   ground.isWheel = true; ground.width = (float)(radius*2); ground.height = (float)(radius*2);
   ground.frictionModifiers = new java.util.LinkedHashMap<>();
@@ -570,6 +603,7 @@ public final class TurnComparisonProbe {
   var item = new ItemPartGroundDevice(def, def.definitions.get(0), PACK_ID);
   APart part = new PartGroundDevice(vehicle, null, slot, item, null);
   vehicle.addPart(part, false);
+  return part;
  }
 
  private static minecrafttransportsimulator.jsondefs.JSONSubDefinition firstSubDefinition(JSONPart p) {
@@ -749,10 +783,33 @@ public final class TurnComparisonProbe {
   if (s.mode == Mode.INCREMENTAL_INSTALL && s.ticksInPhase == flipTick) {
    if (s.airborneRotationTest) LOGGER.info("[DIV turnComparison] scenario=" + s.label + " angularVelocity BEFORE flip, tick=" + s.ticksInPhase
      + " = " + io.github.brooswitminecraft.div.PhysicsBridge.debugReadAngularVelocity(s.vehicle));
-   s.vehicle.getOrCreateVariable("wheelInstalledVar").currentValue = 1.0;
+   if (s.realPartLifecycle) {
+    // Review 53390's second assigned item: physically add a REAL PartGroundDevice to the
+    // previously-empty wheelSlotFL slot (not a synthetic variable flip) - part_present_1 must
+    // resolve to true the instant AEntityF_Multipart.addPart runs, hiding the fallback group and
+    // triggering chassisBoundsChanged's own rebuild on the very next PhysicsBridge.active() tick.
+    s.realLifecyclePart = addWheel(s.vehicle, s.realLifecycleWheelSlot, s.realLifecycleWheelRadius);
+    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " physically added real wheel part via addPart at tick=" + s.ticksInPhase
+      + " position=" + s.vehicle.position + " motion=" + s.vehicle.motion
+      + " part_present_1=" + s.vehicle.getOrCreateVariable("part_present_1").currentValue);
+   } else {
+    s.vehicle.getOrCreateVariable("wheelInstalledVar").currentValue = 1.0;
+   }
    s.incrementalInstallFlipPosition = new Point3D(s.vehicle.position.x, s.vehicle.position.y, s.vehicle.position.z);
    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " flipped wheelInstalledVar to 1.0 at tick=" + s.ticksInPhase
      + " position=" + s.vehicle.position + " motion=" + s.vehicle.motion + " yawDegrees=" + Math.toDegrees(Math.atan2(s.vehicle.orientation.m02, s.vehicle.orientation.m22)));
+  }
+  // Review 53390: the remove() half of the same assigned lifecycle - physically uninstall the
+  // same real part again (simulating an uninstall/"reload" with the wheel taken back out) and
+  // confirm the fallback envelope widens back via chassisBoundsChanged a SECOND time, in the
+  // opposite direction, not just narrow-once.
+  int removeTick = flipTick + 20;
+  if (s.mode == Mode.INCREMENTAL_INSTALL && s.realPartLifecycle && s.ticksInPhase == removeTick) {
+   s.vehicle.removePart(s.realLifecyclePart, false, false);
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " physically removed real wheel part via removePart at tick=" + s.ticksInPhase
+     + " position=" + s.vehicle.position + " motion=" + s.vehicle.motion
+     + " part_present_1=" + s.vehicle.getOrCreateVariable("part_present_1").currentValue);
+   s.realLifecyclePart = null;
   }
   if (s.mode == Mode.INCREMENTAL_INSTALL && s.airborneRotationTest && s.ticksInPhase == flipTick + 1) {
    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " angularVelocity AFTER flip (1 tick later), tick=" + s.ticksInPhase
