@@ -712,6 +712,19 @@ public final class PhysicsBridge {
   private String lastEngineFuelElectricalReceiptDiscreteState = null;
   private int ticksSinceLastEngineFuelElectricalReceipt = ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS;
   private static final int ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS = 100;
+  // Diagnostic-only (ticket comment 53369: "investigate whether the enclosing two-body chassis
+  // hits terrain and bears most weight, starving tire normal/grip" - and 53371's explicit
+  // correction: "don't assume whole box bottom scalar if tilted; transform actual corners by
+  // native orientation and compare terrain at contact footprint"). Read-only - queries terrain
+  // via the same level.clip(...) raycast already used for wheel ground detection; never applies
+  // any force or alters the chassis box itself. Same discrete-edge-trigger-plus-periodic pattern
+  // as the engine receipt above, now applied consistently: the per-corner CONTINUOUS clearance
+  // values always appear in the emitted line, but the trigger itself is the DISCRETE touching/
+  // clear boolean per corner, not the raw clearance number (which, like suspension compression,
+  // fluctuates almost every tick even when nothing meaningfully changed).
+  private String lastChassisClearanceDiscreteState = null;
+  private int ticksSinceLastChassisClearanceReceipt = CHASSIS_CLEARANCE_RECEIPT_PERIOD_TICKS;
+  private static final int CHASSIS_CLEARANCE_RECEIPT_PERIOD_TICKS = 100;
   final BoxPhysicsObject box;
   final RigidBodyHandle handle;
   final Vector3d center;
@@ -749,6 +762,27 @@ public final class PhysicsBridge {
    this.selfRight=Overrides.selfRightingConfig(tuning);
    this.flight=Classification.isFlightVehicle(v.definition);
    mass=tuning.massKg != null ? tuning.massKg : Math.max(50,v.getMass());
+   // Ticket 53373: independent source review found this exact unconditional union is why
+   // merc230's own chassis bound came out far too large/low - its pack authors a deep
+   // "missing-wheel fallback" collision group (bottom -.47) only meant to be active when a wheel
+   // part is NOT installed, plus a shallower authored interior-floor group (bottom -.1875) for
+   // the normal (wheel-installed) case; this unconditionally includes BOTH regardless of which is
+   // actually active right now. REVERTED (not yet fixed) after three rounds of live verification
+   // each surfaced a new regression attempting to fix it via v.collisionBoxes (IV's own live,
+   // already-visibility-filtered set): (1) it aggregates every attached PART's own collision
+   // boxes too (wheels/seats/engines), not just the vehicle's own body groups, requiring a
+   // groupDef-identity filter; (2) some entries have a null groupDef, and the immutable
+   // List.of(...) this ticket's own test fixture uses throws NullPointerException from
+   // contains(null) rather than returning false; (3) most seriously, v.collisionBoxes is
+   // populated lazily by IV and is reliably EMPTY (after filtering) for the first several ticks
+   // after every vehicle spawns - even after routing that through a retryable exception instead
+   // of the permanently-pack-poisoning InvalidChassisGeometry, every single vehicle still went
+   // non-finite during its own first few ticks of free-fall before Body could successfully
+   // activate, a real regression this revert removes. The correct fix needs to evaluate each
+   // JSONCollisionGroup's own AnimationSwitchbox directly (IV's general visibility mechanism)
+   // rather than depending on v.collisionBoxes' own lazy population timing - not yet implemented;
+   // left as the raw unconditional union (today's existing, imperfect-but-stable behavior) until
+   // that is done properly and re-verified live.
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
    for (var group : v.definition.collisionGroups) for (var c : group.collisions) {
     min.min(new Vector3d(c.pos.x-c.width/2,c.pos.y-c.height/2,c.pos.z-c.width/2));
@@ -957,6 +991,7 @@ public final class PhysicsBridge {
      // session; otherwise shows exactly which configured tick count shaped this tick's drive.
      +" driveRaw="+rawDrive+" throttleRampTicks="+EXPERIMENTAL_THROTTLE_RAMP_TICKS);
    if (debugThisTick) logEngineFuelElectricalReceiptIfDue(v, debugTick);
+   if (debugThisTick) logChassisCornerGroundClearanceIfDue(v, up, debugTick);
    // Phase 1: raycast every wheel and compute its vertical/suspension force exactly as before -
    // suspension is per-wheel and unaffected by this change. Friction/slip is sampled at the
    // point the tire impulse is actually applied (the terrain hit, `point` below), not the
@@ -1400,6 +1435,70 @@ public final class PhysicsBridge {
     LOGGER.info("[DIV debugGroundContact] engineFuelElectricalReceipt tick="+debugTick+" "+stateOnly);
     lastEngineFuelElectricalReceiptDiscreteState = discreteState;
     ticksSinceLastEngineFuelElectricalReceipt = 0;
+   }
+  }
+  /**
+   * Ticket comment 53369: "investigate whether the enclosing two-body chassis hits terrain and
+   * bears most weight, starving tire normal/grip, or actual impulse/contact cancellation" - and
+   * 53371's explicit correction: a single body-center bottom-Y scalar is wrong once the vehicle
+   * is tilted (bank/pitch); must transform the box's ACTUAL corners by its own live orientation
+   * and compare terrain height at each corner's own world footprint, not one vertical line
+   * through the center. Read-only: {@code level.clip(...)} is the exact same query already used
+   * for wheel ground detection (never a mutation), and this never applies any force or alters
+   * either chassis box - purely observational. Checks BOTH boxes when {@link #twoBodyActive}
+   * (either half could independently touch terrain), using each box's own LIVE Sable pose/half-
+   * extents (not this tick's stepGround-local {@code pose}/{@code q} snapshot), so this reflects
+   * the real physics body exactly as Sable itself currently has it.
+   */
+  private void logChassisCornerGroundClearanceIfDue(EntityVehicleF_Physics v, Vector3d up, int debugTick) {
+   record BoxEntry(String label, BoxPhysicsObject box) {}
+   StringBuilder boxesFull = new StringBuilder("["), boxesDiscrete = new StringBuilder("[");
+   boolean first = true;
+   for (var entry : twoBodyActive
+       ? List.of(new BoxEntry("lower", box), new BoxEntry("upper", upperBox))
+       : List.of(new BoxEntry("single", box))) {
+    String label = entry.label();
+    BoxPhysicsObject thisBox = entry.box();
+    var pose = thisBox.getPose();
+    Vector3d half = new Vector3d(thisBox.getHalfExtents());
+    StringBuilder cornersFull = new StringBuilder("["), cornersDiscrete = new StringBuilder("[");
+    for (int i = 0; i < 4; i++) {
+     double sx = (i&1)==0 ? -1 : 1, sz = (i&2)==0 ? -1 : 1;
+     Vector3d localCorner = new Vector3d(sx*half.x, -half.y, sz*half.z);
+     Vector3d worldCorner = pose.transformPosition(localCorner, new Vector3d());
+     // Short raycast through the corner itself (lifted slightly above it, cast slightly below
+     // it) - same ClipContext.Block.COLLIDER query the wheel suspension already uses, just
+     // centered on this corner instead of a wheel anchor.
+     Vector3d rayStart = new Vector3d(worldCorner).fma(0.1, up);
+     Vector3d rayEnd = new Vector3d(worldCorner).fma(-0.4, up);
+     var hit = level.clip(new ClipContext(vec(rayStart), vec(rayEnd), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, (net.minecraft.world.entity.Entity) null));
+     if (i > 0) { cornersFull.append("; "); cornersDiscrete.append("; "); }
+     if (hit.getType() == HitResult.Type.MISS) {
+      cornersFull.append("corner").append(i).append("=clear(noHitWithin0.5)");
+      cornersDiscrete.append("corner").append(i).append("=clear");
+     } else {
+      double hitY = hit.getLocation().y;
+      double clearance = worldCorner.y - hitY;
+      cornersFull.append("corner").append(i).append("=").append(clearance);
+      cornersDiscrete.append("corner").append(i).append("=").append(clearance <= 0 ? "touching" : "clear");
+     }
+    }
+    cornersFull.append("]"); cornersDiscrete.append("]");
+    if (!first) { boxesFull.append("; "); boxesDiscrete.append("; "); }
+    boxesFull.append(label).append("=").append(cornersFull);
+    boxesDiscrete.append(label).append("=").append(cornersDiscrete);
+    first = false;
+   }
+   boxesFull.append("]"); boxesDiscrete.append("]");
+   String stateOnly = "entity="+v.uniqueUUID+" twoBodyActive="+twoBodyActive+" boxes="+boxesFull;
+   String discreteState = "entity="+v.uniqueUUID+" twoBodyActive="+twoBodyActive+" boxes="+boxesDiscrete;
+   boolean due = lastChassisClearanceDiscreteState==null || !lastChassisClearanceDiscreteState.equals(discreteState)
+     || ticksSinceLastChassisClearanceReceipt >= CHASSIS_CLEARANCE_RECEIPT_PERIOD_TICKS;
+   ticksSinceLastChassisClearanceReceipt++;
+   if (due) {
+    LOGGER.info("[DIV debugGroundContact] chassisCornerGroundClearanceReceipt tick="+debugTick+" "+stateOnly);
+    lastChassisClearanceDiscreteState = discreteState;
+    ticksSinceLastChassisClearanceReceipt = 0;
    }
   }
   /**
