@@ -154,6 +154,10 @@ public final class TurnComparisonProbe {
   // reported numbers (interior floor group, always active; missing-wheel fallback group,
   // visibility-gated) instead of adding a synthetic deep marker box.
   Boolean merc230WheelsPresent = null;
+  // Ticket 53381: full DRIVING causal reproduction, not just a static chassisReceipt snapshot -
+  // real mass/suspensionTravel/wheel radius/anchors under actual throttle, comparing the raw
+  // (buggy, wide) envelope against the fixed (narrow, fallback-hidden) one. null = not this test.
+  Boolean merc230RawEnvelope = null;
   // Review 53367: demonstrates the edge-trigger fix itself - running/gear stay fixed for the
   // whole window while rpm (a continuous value, deliberately excluded from the discrete
   // comparison) is mutated every single tick, confirming it does NOT cause continuous emission.
@@ -260,8 +264,18 @@ public final class TurnComparisonProbe {
   merc230WheelsPresent.merc230WheelsPresent = true;
   Scenario merc230NoWheels = new Scenario("merc230-noWheels", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
   merc230NoWheels.merc230WheelsPresent = false;
+  // Ticket 53381's own top-priority ask: full DRIVING causal reproduction, not just a static
+  // chassisReceipt snapshot - real mass=1647/suspensionTravel=.3/wheel radius=.33/real anchors
+  // under actual throttle, straight line (rudder=0, Mode.STRAIGHT_SETTLE), comparing the raw
+  // (buggy, wide - fallback visible) envelope against the fixed (narrow - fallback hidden) one.
+  // Per-wheel normal load and chassis-corner clearance are both already captured by the
+  // existing debugGroundContact/chassisCornerGroundClearanceReceipt diagnostics for free.
+  Scenario merc230DriveRaw = new Scenario("merc230Drive-raw", "merc230drive", Mode.STRAIGHT_SETTLE, TARGET_SPEED, false);
+  merc230DriveRaw.merc230RawEnvelope = true;
+  Scenario merc230DriveFixed = new Scenario("merc230Drive-fixed", "merc230drive", Mode.STRAIGHT_SETTLE, TARGET_SPEED, false);
+  merc230DriveFixed.merc230RawEnvelope = false;
   scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
-    conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels);
+    conditionalHidden, conditionalVisible, merc230WheelsPresent, merc230NoWheels, merc230DriveRaw, merc230DriveFixed);
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -301,11 +315,18 @@ public final class TurnComparisonProbe {
   // Review 53354: symmetricGeometry replaces ONLY the rear-left anchor's x with 0.375 (mirroring
   // WHEEL_RR exactly) - the real/established asymmetric value (0.35) is otherwise used
   // everywhere else in this file and its sibling probes, unchanged.
-  Point3D wheelRL = s.symmetricGeometry ? new Point3D(0.375, WHEEL_RL.y, WHEEL_RL.z) : WHEEL_RL;
-  var wheelSlotFL = wheelSlot(WHEEL_FL, true);
-  var wheelSlotFR = wheelSlot(WHEEL_FR, true);
+  // Ticket 53381: merc230's real wheel anchors/radius (x=+-.90625, y=0, z=-.03125 front/3.1875
+  // rear, radius=.33) instead of the synthetic ATV's WHEEL_* constants/default .2 radius.
+  Point3D wheelFL = s.merc230RawEnvelope != null ? new Point3D(-0.90625, 0, -0.03125) : WHEEL_FL;
+  Point3D wheelFR = s.merc230RawEnvelope != null ? new Point3D(0.90625, 0, -0.03125) : WHEEL_FR;
+  Point3D wheelRR = s.merc230RawEnvelope != null ? new Point3D(0.90625, 0, 3.1875) : WHEEL_RR;
+  Point3D wheelRL = s.merc230RawEnvelope != null ? new Point3D(-0.90625, 0, 3.1875)
+    : (s.symmetricGeometry ? new Point3D(0.375, WHEEL_RL.y, WHEEL_RL.z) : WHEEL_RL); // review 53354's symmetricGeometry fixup, unused for merc230
+  double wheelRadius = s.merc230RawEnvelope != null ? 0.33 : 0.2;
+  var wheelSlotFL = wheelSlot(wheelFL, true);
+  var wheelSlotFR = wheelSlot(wheelFR, true);
   var wheelSlotRL = wheelSlot(wheelRL, false);
-  var wheelSlotRR = wheelSlot(WHEEL_RR, false);
+  var wheelSlotRR = wheelSlot(wheelRR, false);
   var engineSlot = engineSlot();
   var seatSlot = seatSlot();
 
@@ -361,6 +382,41 @@ public final class TurnComparisonProbe {
    fallbackGroup.animations = List.of(fallbackVisibilityAnim);
    definition.collisionGroups = List.of(floorGroup, fallbackGroup);
   }
+  // Ticket 53381's correction: width-shared X/Z is no real blocker - two SQUARE boxes (width
+  // matching the real X half-extent*2=2.375) positioned at the Z extremes correctly reproduce
+  // the EXACT overall Z bounding envelope (centerZ=1.40625, halfZ=2.8125) via min/max alone, even
+  // though the pair leaves a real gap between them - this code only ever computes an AABB union,
+  // never an actual collision volume, so the gap is immaterial to the result. z=-.21875 and
+  // z=3.03125 span exactly [-1.40625,4.21875] = center 1.40625 +-2.8125, matching John's own
+  // worked numbers exactly. Applied to BOTH merc230 groups so each independently produces the
+  // real footprint, not just a narrow single-box one.
+  if (s.merc230RawEnvelope != null) {
+   java.util.function.Function<Double, List<JSONCollisionBox>> twoSquareBoxesAtY = centerY -> {
+    var b1 = new JSONCollisionBox(); b1.pos = new Point3D(0, centerY, -0.21875); b1.width = 2.375f; b1.height = 0f;
+    var b2 = new JSONCollisionBox(); b2.pos = new Point3D(0, centerY, 3.03125); b2.width = 2.375f; b2.height = 0f;
+    return List.of(b1, b2);
+   };
+   // height=0 above (Z-span only, via width) - the REAL Y extent comes from a THIRD box at the
+   // group's own centerY with the real height, reusing the SAME two-Z-extreme positions is
+   // unnecessary for Y since min/max unions freely across all boxes in the group regardless of
+   // which box carries which axis's extent.
+   var floorY = new JSONCollisionBox(); floorY.pos = new Point3D(0, 0.5625, 1.40625); floorY.width = 1f; floorY.height = (float)(0.75*2);
+   var floorGroup = new JSONCollisionGroup();
+   floorGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   floorGroup.collisions = new java.util.ArrayList<>(twoSquareBoxesAtY.apply(0.5625));
+   floorGroup.collisions.add(floorY);
+   var fallbackY = new JSONCollisionBox(); fallbackY.pos = new Point3D(0, 0.42125, 1.40625); fallbackY.width = 1f; fallbackY.height = (float)(0.89125*2);
+   var fallbackVisibilityAnim = new minecrafttransportsimulator.jsondefs.JSONAnimationDefinition();
+   fallbackVisibilityAnim.animationType = minecrafttransportsimulator.jsondefs.JSONAnimationDefinition.AnimationComponentType.VISIBILITY;
+   fallbackVisibilityAnim.variable = "#" + (s.merc230RawEnvelope ? "1.0" : "0.0");
+   fallbackVisibilityAnim.clampMin = 1; fallbackVisibilityAnim.clampMax = 1;
+   var fallbackGroup = new JSONCollisionGroup();
+   fallbackGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   fallbackGroup.collisions = new java.util.ArrayList<>(twoSquareBoxesAtY.apply(0.42125));
+   fallbackGroup.collisions.add(fallbackY);
+   fallbackGroup.animations = List.of(fallbackVisibilityAnim);
+   definition.collisionGroups = List.of(floorGroup, fallbackGroup);
+  }
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
   var item = new ItemVehicle(definition, definition.definitions.get(0), PACK_ID);
   var vehicle = new EntityVehicleF_Physics(world, null, item, null);
@@ -368,10 +424,10 @@ public final class TurnComparisonProbe {
   vehicle.orientation.set(new RotationMatrix());
   world.spawnEntity(vehicle);
 
-  addWheel(vehicle, wheelSlotFL);
-  addWheel(vehicle, wheelSlotFR);
-  addWheel(vehicle, wheelSlotRL);
-  addWheel(vehicle, wheelSlotRR);
+  addWheel(vehicle, wheelSlotFL, wheelRadius);
+  addWheel(vehicle, wheelSlotFR, wheelRadius);
+  addWheel(vehicle, wheelSlotRL, wheelRadius);
+  addWheel(vehicle, wheelSlotRR, wheelRadius);
   // Ticket 53365's "no engine installed" ENGINE_STATE_CHECK scenario: the slot stays declared
   // (realistic "engine bay present, nothing installed in it"), but no PartEngine is actually
   // added - v.allParts then genuinely contains zero PartEngine instances.
@@ -443,9 +499,10 @@ public final class TurnComparisonProbe {
   return slot;
  }
 
- private static void addWheel(EntityVehicleF_Physics vehicle, JSONPartDefinition slot) {
+ private static void addWheel(EntityVehicleF_Physics vehicle, JSONPartDefinition slot) { addWheel(vehicle, slot, 0.2); }
+ private static void addWheel(EntityVehicleF_Physics vehicle, JSONPartDefinition slot, double radius) {
   var ground = new JSONPart.JSONPartGroundDevice();
-  ground.isWheel = true; ground.width = 0.4f; ground.height = 0.4f;
+  ground.isWheel = true; ground.width = (float)(radius*2); ground.height = (float)(radius*2);
   ground.frictionModifiers = new java.util.LinkedHashMap<>();
   var def = new JSONPart();
   def.packID = PACK_ID; def.systemName = "wheel";
