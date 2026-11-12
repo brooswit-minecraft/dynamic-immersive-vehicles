@@ -100,6 +100,21 @@ neoForge {
     jvmArgument('-Ddiv.debugGroundContact=true')
     jvmArgument('-Ddiv.debugGroundContactTicks=500')
    }
+   // Review 53331/53332/53339/53340's occupied baseline-vs-tuned turn comparison - both
+   // scenarios use the two-body chassis (baseline f=.5, tuned f=.1), so a single gate (no
+   // OFF variant needed, unlike the ground-support/brake-sweep probes above).
+   if (System.getenv('DIV_TURN_COMPARISON_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalTurnComparisonProbe=true')
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=600')
+    // Review 53341: match the REAL verified installed baseline's own runtime flags (53333 -
+    // "Effective-mass damping=true, friction solver64 iterations, ramp20"), not this probe's
+    // own local defaults, so the comparison is apples-to-apples with what's actually installed.
+    jvmArgument('-Ddiv.experimentalEffectiveMassDamping=true')
+    jvmArgument('-Ddiv.experimentalFrictionSolverIterations=64')
+    jvmArgument('-Ddiv.experimentalThrottleRampTicks=20')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }

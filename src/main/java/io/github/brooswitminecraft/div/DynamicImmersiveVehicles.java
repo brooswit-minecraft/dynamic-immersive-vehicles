@@ -39,5 +39,12 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.BrakeSweepProbe.maybeRun(overworld);
   });
+  // Opt-in, CI/isolated-host-only occupied baseline-vs-tuned turn comparison (review comment
+  // 53331/53332/53339/53340) - OFF by default, a strict no-op otherwise. Never touches any
+  // real vehicle, Zippy, or world content - see TurnComparisonProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.TurnComparisonProbe.maybeRun(overworld);
+  });
  }
 }
