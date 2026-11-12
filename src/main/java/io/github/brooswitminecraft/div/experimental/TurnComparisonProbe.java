@@ -699,6 +699,18 @@ public final class TurnComparisonProbe {
  private static void settle(Scenario s) {
   s.ticksInPhase++;
   if (!checkBoundedOrFail(s)) return;
+  // Review 53385: "your stationary custom-variable flip cannot prove this" - a vehicle at rest
+  // has zero angular velocity either way, so a rebuild silently zeroing it is invisible. This
+  // scenario now actively DRIVES AND TURNS (sustained throttle+rudder, real nonzero yaw rate)
+  // through the ENTIRE window, including the exact tick the flip/rebuild happens, so a silently
+  // zeroed angular velocity would show up as a visible, measurable yaw-rate discontinuity right
+  // at the flip tick - logged explicitly every tick through a window around it to make any such
+  // snap directly checkable, not just asserted.
+  if (s.mode == Mode.INCREMENTAL_INSTALL) {
+   if (s.engine != null && !s.engine.running) forceEngineRunning(s.engine);
+   s.vehicle.throttleVar.setTo(1.0, false);
+   s.vehicle.rudderInputVar.setTo(40.0, false);
+  }
   // Ticket 53383: flip the real wheelInstalledVar mid-run (at the halfway point of this mode's
   // own window) to simulate a wheel actually being installed after Body already activated once
   // with the wide/buggy envelope - directly exercising chassisBoundsChanged's rebuild trigger.
@@ -706,7 +718,12 @@ public final class TurnComparisonProbe {
    s.vehicle.getOrCreateVariable("wheelInstalledVar").currentValue = 1.0;
    s.incrementalInstallFlipPosition = new Point3D(s.vehicle.position.x, s.vehicle.position.y, s.vehicle.position.z);
    LOGGER.info("[DIV turnComparison] scenario=" + s.label + " flipped wheelInstalledVar to 1.0 at tick=" + s.ticksInPhase
-     + " position=" + s.vehicle.position + " motion=" + s.vehicle.motion);
+     + " position=" + s.vehicle.position + " motion=" + s.vehicle.motion + " yawDegrees=" + Math.toDegrees(Math.atan2(s.vehicle.orientation.m02, s.vehicle.orientation.m22)));
+  }
+  if (s.mode == Mode.INCREMENTAL_INSTALL && Math.abs(s.ticksInPhase - INCREMENTAL_INSTALL_TICKS/2) <= 10) {
+   LOGGER.info("[DIV turnComparison] scenario=" + s.label + " tick=" + s.ticksInPhase
+     + " yawDegrees=" + Math.toDegrees(Math.atan2(s.vehicle.orientation.m02, s.vehicle.orientation.m22))
+     + " position=" + s.vehicle.position);
   }
   // Review 53367's churn scenario needs to run PAST ENGINE_FUEL_ELECTRICAL_RECEIPT_PERIOD_TICKS
   // (100) to actually exercise the periodic resample, well beyond ordinary SETTLE_TICKS (60).

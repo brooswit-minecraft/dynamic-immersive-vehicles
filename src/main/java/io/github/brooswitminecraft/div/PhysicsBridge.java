@@ -37,6 +37,26 @@ import java.util.function.Supplier;
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
 public final class PhysicsBridge {
  private static final BodyRegistry<EntityVehicleF_Physics, VehicleBody> registry = new BodyRegistry<>();
+ /**
+  * Ticket 53385's concrete, confirmed defect: Body's own constructor always seeds BOTH halves'
+  * angular velocity to exactly zero ({@code addLinearAndAngularVelocity(initialVelocity, new
+  * Vector3d())}) and derives only ONE shared linear velocity from {@code v.motion} - correct for
+  * a genuinely fresh vehicle spawn (at rest or moving in a straight line with no spin), but wrong
+  * for {@link Body#chassisBoundsChanged}'s own mid-life rebuild: a vehicle actually rotating the
+  * instant its envelope changes would have that rotation silently zeroed, and - review's own
+  * correction - {@code v.motion} alone cannot reconstruct each half's own distinct point velocity
+  * once the chassis center (and so each half's own lever arm) shifts.
+  *
+  * <p>Populated by {@link #active} immediately before deactivating a Body for a confirmed
+  * {@code chassisBoundsChanged} rebuild (never for an ordinary fresh spawn, and never for a
+  * category change via {@link #replaceIfCategoryChanged} - that path has this SAME pre-existing
+  * limitation, flagged, not fixed here, since it is a separate, pre-existing issue this ticket
+  * did not introduce and was not asked to fix). Consumed (removed) exactly once by the next
+  * {@code Body} constructor for this same vehicle, so a normal subsequent spawn is never affected
+  * by a stale leftover entry.
+  */
+ private record InheritedRigidBodyVelocity(Vector3d angularVelocity, Vector3d referenceLinearVelocity, Vector3d referencePosition) {}
+ private static final java.util.Map<EntityVehicleF_Physics, InheritedRigidBodyVelocity> pendingInheritedVelocity = new IdentityHashMap<>();
  // Vehicle definitions whose chassis geometry failed to build a Sable body once already;
  // keyed by the shared JSON definition object (one per packID:systemName, not per entity), so a
  // bad content-pack definition is retried, and logged, once rather than every tick for every
@@ -170,6 +190,17 @@ public final class PhysicsBridge {
   // a category change; this is not new risk, it is the already-accepted mechanism applied to a
   // new trigger condition).
   if (registry.get(v) instanceof Body existingBody && existingBody.chassisBoundsChanged(v)) {
+   // Review 53385: capture the REAL current rigid-body state before removal - angular velocity
+   // and a reference point/linear-velocity pair (the lower half, tightly joint-coupled to the
+   // upper half so its own velocity is a reasonable single reference for the whole assembly,
+   // not an independent per-half capture - documented simplification, not full joint-compliance
+   // modeling) - so the next Body construction for this vehicle can correctly reseed both new
+   // halves' velocities via v_new=v_reference+omega x (newPoint-referencePoint), not silently
+   // zero the vehicle's own actual rotation.
+   pendingInheritedVelocity.put(v, new InheritedRigidBodyVelocity(
+     existingBody.handle.getAngularVelocity(new Vector3d()),
+     existingBody.handle.getLinearVelocity(new Vector3d()),
+     new Vector3d(existingBody.box.getPose().position())));
    var old = registry.deactivate(v);
    if (old != null) { hitches.release(v); old.remove(); }
   }
@@ -798,10 +829,18 @@ public final class PhysicsBridge {
    *  different, non-collision-specific map this class has no reason to otherwise touch). If a
    *  real pack ever uses this exact shape for a collision group, this would wrongly include it
    *  unconditionally - not yet seen in practice, flagged rather than guessed at.</li>
-   *  <li>{@code JSONCollisionGroup.collisionTypes} is not filtered - confirmed from IV's own
-   *  decompiled {@code updateCollisionBoxes} that it doesn't filter by type either before adding
-   *  a group's boxes to {@code collisionBoxes}, so this matches IV's own actual behavior, not an
-   *  oversight.</li>
+   *  <li>{@code JSONCollisionGroup.collisionTypes} is NOT filtered here, and review 53385
+   *  correctly caught that this is a genuinely open question, not a settled non-issue:
+   *  {@code updateCollisionBoxes} not filtering by type before populating {@code collisionBoxes}
+   *  does not by itself establish that EVERY type belongs in a PHYSICAL chassis volume - that
+   *  set is already known (the earlier, reverted attempt) to include non-physical/interaction-
+   *  only content too. {@code CollisionType} has BLOCK/ENTITY/VEHICLE/ATTACK/BULLET/CLICK/
+   *  EFFECTOR values; which of these (if any) actually marks "this box represents physical hull
+   *  volume" in real packs has not been established from any authoritative IV source (only
+   *  guessed at by this ticket's own synthetic test fixtures, which arbitrarily chose VEHICLE
+   *  for their own boxes) - left unfiltered rather than guessing a possibly-wrong constraint with
+   *  real consequences for an unverified real pack. Flagged as a genuinely open follow-up, not
+   *  claimed resolved.</li>
    * </ul>
    */
   private static Vector3d[] computeChassisBounds(EntityVehicleF_Physics v) {
@@ -935,6 +974,14 @@ public final class PhysicsBridge {
      +" nativeInertia=unavailable (Sable 2.0.5's BoxPhysicsObject exposes no native inertia/mass-properties query API - confirmed by its decompiled source; see ticket comment history)");
    twoBodyActive=EXPERIMENTAL_TWO_BODY_CHASSIS;
    Vector3d initialVelocity=new Vector3d(v.motion.x,v.motion.y,v.motion.z).mul(v.speedFactor*20);
+   // Review 53385: consumed (removed) at most once per construction - a genuinely fresh spawn
+   // (no entry) keeps today's exact prior behavior (initialVelocity from v.motion, zero angular)
+   // unchanged; a chassisBoundsChanged-triggered rebuild (an entry was staged in `active()`
+   // immediately before this vehicle's old Body was removed) instead reseeds BOTH halves' actual
+   // angular velocity and a per-half, lever-arm-correct linear velocity via the standard rigid-
+   // body point-velocity formula v_new=v_reference+omega x (newPoint-referencePoint) - not a
+   // single shared velocity that silently drops rotation and ignores each half's own new offset.
+   var inherited = pendingInheritedVelocity.remove(v);
    if (twoBodyActive) {
     // Uninstalled/unvalidated candidate (comment 53268) - any construction failure (including
     // Overrides.twoBodyConfig's own validation, e.g. an unsafe upperMassFraction for this
@@ -947,8 +994,17 @@ public final class PhysicsBridge {
     var config=Overrides.twoBodyConfig(tuning,mass);
     var bodies=TwoBodyLifecycle.create(level,position,q,half,mass,config);
     try {
-     bodies.lowerHandle().addLinearAndAngularVelocity(initialVelocity,new Vector3d());
-     bodies.upperHandle().addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+     if (inherited != null) {
+      Vector3d lowerVel=new Vector3d(inherited.referenceLinearVelocity()).add(new Vector3d(inherited.angularVelocity())
+        .cross(new Vector3d(bodies.lowerBox().getPose().position()).sub(inherited.referencePosition())));
+      Vector3d upperVel=new Vector3d(inherited.referenceLinearVelocity()).add(new Vector3d(inherited.angularVelocity())
+        .cross(new Vector3d(bodies.upperBox().getPose().position()).sub(inherited.referencePosition())));
+      bodies.lowerHandle().addLinearAndAngularVelocity(lowerVel,new Vector3d(inherited.angularVelocity()));
+      bodies.upperHandle().addLinearAndAngularVelocity(upperVel,new Vector3d(inherited.angularVelocity()));
+     } else {
+      bodies.lowerHandle().addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+      bodies.upperHandle().addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+     }
     } catch (RuntimeException ex) {
      TwoBodyLifecycle.remove(level,bodies);
      throw ex;
@@ -973,7 +1029,13 @@ public final class PhysicsBridge {
     RigidBodyHandle h;
     try {
      h=RigidBodyHandle.of(level,box);
-     h.addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+     if (inherited != null) {
+      Vector3d seededVel=new Vector3d(inherited.referenceLinearVelocity()).add(new Vector3d(inherited.angularVelocity())
+        .cross(new Vector3d(box.getPose().position()).sub(inherited.referencePosition())));
+      h.addLinearAndAngularVelocity(seededVel,new Vector3d(inherited.angularVelocity()));
+     } else {
+      h.addLinearAndAngularVelocity(initialVelocity,new Vector3d());
+     }
     } catch (RuntimeException ex) {
      physics.removeObject(box);
      throw ex;
