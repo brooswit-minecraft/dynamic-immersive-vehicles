@@ -763,6 +763,11 @@ public final class PhysicsBridge {
      // yet surface, needed to confirm a vehicle actually resolved the fraction its own config
      // entry requested rather than silently falling back to the 0.5 default.
      +" upperMassFraction="+tuning.upperMassFraction
+     // Ticket 53343: "add lateralGripMultiplier to the runtime receipt so installer can verify
+     // it actually resolved" - same reasoning as upperMassFraction just above, now that
+     // lateralGripMultiplier (53331/53332/53335/53337) is itself a resolved-per-vehicle value a
+     // config patch can set.
+     +" lateralGripMultiplier="+tuning.lateralGripMultiplier
      // Provenance (ticket comment 53186/53188: "prove native/metadata values actually reached
      // runtime rather than merely being parsed") - only the operator-override and documented-
      // fallback levels are wired to a real source yet (comment 53181/53184), so this is exactly
