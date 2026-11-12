@@ -146,6 +146,9 @@ public final class TurnComparisonProbe {
   boolean hasEngine = true;
   boolean engineRunningDesired = false;
   double gearDesired = 0.0;
+  // Ticket 53373's conditional-collision-group proof (null = no second group, matching every
+  // existing scenario's behavior unchanged).
+  Boolean conditionalGroupVisible = null;
   // Review 53367: demonstrates the edge-trigger fix itself - running/gear stay fixed for the
   // whole window while rpm (a continuous value, deliberately excluded from the discrete
   // comparison) is mutated every single tick, confirming it does NOT cause continuous emission.
@@ -234,7 +237,17 @@ public final class TurnComparisonProbe {
   // tick=0 state, then one periodic resample at tick=100), not 150.
   Scenario engineCheckRpmChurn = new Scenario("engineCheck-rpmChurn", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
   engineCheckRpmChurn.engineRunningDesired = true; engineCheckRpmChurn.gearDesired = 1.0; engineCheckRpmChurn.churnRpmEachTick = true;
-  scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn);
+  // Ticket 53373: direct proof the AnimationSwitchbox-based fix correctly excludes a hidden
+  // conditional group's boxes and includes a visible one's - chassisReceipt's own logged
+  // halfExtents.y will differ by 10 blocks between these two if the fix is working (the deep box
+  // sits 10 blocks below CHASSIS_CENTER), and match the plain fixture's halfExtents.y (0.441) if
+  // excluded correctly when hidden.
+  Scenario conditionalHidden = new Scenario("conditionalGroup-hidden", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  conditionalHidden.conditionalGroupVisible = false;
+  Scenario conditionalVisible = new Scenario("conditionalGroup-visible", "turncmp-tuned", Mode.ENGINE_STATE_CHECK, 0, false);
+  conditionalVisible.conditionalGroupVisible = true;
+  scenarios = List.of(engineCheckNoEngine, engineCheckStopped, engineCheckRunningNeutral, engineCheckRunningInGear, engineCheckRpmChurn,
+    conditionalHidden, conditionalVisible);
   LOGGER.info("[DIV turnComparison] platform built at blockX=" + blockX + " blockZ=" + blockZ + " - running " + scenarios.size()
     + " scenarios sequentially: " + scenarios.stream().map(s -> s.label).reduce("", (a, b) -> a + " " + b));
   globalPhase = GlobalPhase.RUN_SCENARIOS;
@@ -284,6 +297,26 @@ public final class TurnComparisonProbe {
 
   JSONVehicle definition = buildVehicleDefinition(s.systemName);
   definition.parts = List.of(wheelSlotFL, wheelSlotFR, wheelSlotRL, wheelSlotRR, engineSlot, seatSlot);
+  // Ticket 53373's own real-world shape: merc230's pack has a SECOND collision group gated by a
+  // visibility condition (only active when a wheel is absent), which the fix must correctly
+  // exclude/include. Reproduced here deterministically using IV's own ComputedVariable
+  // CONSTANT_PREFIX ("#") convention - a constant-valued variable needs no real part-presence
+  // plumbing to control, directly proving the AnimationSwitchbox evaluation itself works in BOTH
+  // directions rather than merely happening to pass on the existing always-active fixture.
+  if (s.conditionalGroupVisible != null) {
+   var deepBox = new JSONCollisionBox();
+   deepBox.pos = new Point3D(CHASSIS_CENTER.x, CHASSIS_CENTER.y - 10.0, CHASSIS_CENTER.z);
+   deepBox.width = 0.1f; deepBox.height = 0.1f;
+   var visibilityAnim = new minecrafttransportsimulator.jsondefs.JSONAnimationDefinition();
+   visibilityAnim.animationType = minecrafttransportsimulator.jsondefs.JSONAnimationDefinition.AnimationComponentType.VISIBILITY;
+   visibilityAnim.variable = "#" + (s.conditionalGroupVisible ? "1.0" : "0.0");
+   visibilityAnim.clampMin = 1; visibilityAnim.clampMax = 1;
+   var conditionalGroup = new JSONCollisionGroup();
+   conditionalGroup.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
+   conditionalGroup.collisions = List.of(deepBox);
+   conditionalGroup.animations = List.of(visibilityAnim);
+   definition.collisionGroups = List.of(definition.collisionGroups.get(0), conditionalGroup);
+  }
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
   var item = new ItemVehicle(definition, definition.definitions.get(0), PACK_ID);
   var vehicle = new EntityVehicleF_Physics(world, null, item, null);

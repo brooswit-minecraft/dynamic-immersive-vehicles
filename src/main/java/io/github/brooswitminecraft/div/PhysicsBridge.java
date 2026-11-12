@@ -766,27 +766,38 @@ public final class PhysicsBridge {
    // merc230's own chassis bound came out far too large/low - its pack authors a deep
    // "missing-wheel fallback" collision group (bottom -.47) only meant to be active when a wheel
    // part is NOT installed, plus a shallower authored interior-floor group (bottom -.1875) for
-   // the normal (wheel-installed) case; this unconditionally includes BOTH regardless of which is
-   // actually active right now. REVERTED (not yet fixed) after three rounds of live verification
-   // each surfaced a new regression attempting to fix it via v.collisionBoxes (IV's own live,
-   // already-visibility-filtered set): (1) it aggregates every attached PART's own collision
-   // boxes too (wheels/seats/engines), not just the vehicle's own body groups, requiring a
-   // groupDef-identity filter; (2) some entries have a null groupDef, and the immutable
-   // List.of(...) this ticket's own test fixture uses throws NullPointerException from
-   // contains(null) rather than returning false; (3) most seriously, v.collisionBoxes is
-   // populated lazily by IV and is reliably EMPTY (after filtering) for the first several ticks
-   // after every vehicle spawns - even after routing that through a retryable exception instead
-   // of the permanently-pack-poisoning InvalidChassisGeometry, every single vehicle still went
-   // non-finite during its own first few ticks of free-fall before Body could successfully
-   // activate, a real regression this revert removes. The correct fix needs to evaluate each
-   // JSONCollisionGroup's own AnimationSwitchbox directly (IV's general visibility mechanism)
-   // rather than depending on v.collisionBoxes' own lazy population timing - not yet implemented;
-   // left as the raw unconditional union (today's existing, imperfect-but-stable behavior) until
-   // that is done properly and re-verified live.
+   // the normal (wheel-installed) case; the unconditional union included BOTH regardless of
+   // which is actually active right now. A first attempt using v.collisionBoxes (IV's own live,
+   // lazily-populated active set) was reverted after three live-verified regressions (see git
+   // history on this exact line range) - most seriously, that set is reliably EMPTY for the
+   // first several ticks after every vehicle spawns, which made every vehicle go non-finite
+   // before Body could activate even once the pack-poisoning risk was fixed.
+   //
+   // This version sidesteps that lazy-population timing entirely: it constructs and evaluates
+   // its OWN fresh AnimationSwitchbox per group (AnimationSwitchbox's own constructor and
+   // runSwitchbox(float,boolean) are both public) instead of reading IV's cached
+   // collisionSwitchboxes map, exactly mirroring AEntityE_Interactable.updateCollisionBoxes' own
+   // decompiled logic: a group with no animations (null/empty) has no switchbox in IV's own map
+   // either and is unconditionally active; otherwise the SAME visibility condition IV's own
+   // native collision/interaction code evaluates decides whether this group's boxes count here.
+   // A brand-new instance has no state shared with IV's own cached one, so this never interferes
+   // with native rendering/visibility clocks - the only cost is a small amount of duplicate
+   // computation, once per vehicle activation, not per tick.
+   //
+   // Deliberately NOT replicated: JSONCollisionGroup.health-based damage exclusion (a separate,
+   // rarer per-group "has this collision group been shot off" mechanic, unrelated to merc230's
+   // part-presence visibility condition) - out of scope for this fix, not a hand-rolled
+   // workaround for it either way since it was never attempted.
    Vector3d min=new Vector3d(Double.POSITIVE_INFINITY), max=new Vector3d(Double.NEGATIVE_INFINITY);
-   for (var group : v.definition.collisionGroups) for (var c : group.collisions) {
-    min.min(new Vector3d(c.pos.x-c.width/2,c.pos.y-c.height/2,c.pos.z-c.width/2));
-    max.max(new Vector3d(c.pos.x+c.width/2,c.pos.y+c.height/2,c.pos.z+c.width/2));
+   for (var group : v.definition.collisionGroups) {
+    if (group.animations != null && !group.animations.isEmpty()) {
+     var switchbox = new minecrafttransportsimulator.baseclasses.AnimationSwitchbox(v, group.animations, group.applyAfter);
+     if (!switchbox.runSwitchbox(0f, false)) continue;
+    }
+    for (var c : group.collisions) {
+     min.min(new Vector3d(c.pos.x-c.width/2,c.pos.y-c.height/2,c.pos.z-c.width/2));
+     max.max(new Vector3d(c.pos.x+c.width/2,c.pos.y+c.height/2,c.pos.z+c.width/2));
+    }
    }
    if (!Double.isFinite(min.x) || max.x<=min.x || max.y<=min.y || max.z<=min.z)
     throw new InvalidChassisGeometry("Vehicle has no finite chassis collision volume");
