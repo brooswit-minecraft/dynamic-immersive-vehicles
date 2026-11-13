@@ -79,7 +79,20 @@ public final class GroundSurfaces {
     }
 
     public static GroundSurface at(LevelReader level, BlockPos pos) {
-        BlockState state = level.getBlockState(pos);
+        return atState(level, pos, level.getBlockState(pos));
+    }
+
+    /**
+     * Same resolution as {@link #at}, but for a caller-supplied {@code state} rather than
+     * whatever block actually occupies {@code pos} - {@code pos}/{@code level} are still needed
+     * for {@code SoundType}'s level-sensitive overload, but the BLOCK under test need not
+     * actually be placed there. Extracted (MINECRAFT-508 review, John: an actual mod-load/tag-
+     * resolution smoke test, not just unit tests against hand-fed booleans) so
+     * {@code GroundSurfaceTagProbe} can exercise this exact production path against arbitrary
+     * real block IDs - including ones not present anywhere in the smoke-test world - at a live,
+     * fully-loaded server.
+     */
+    public static GroundSurface atState(LevelReader level, BlockPos pos, BlockState state) {
         if (state.isAir()) {
             return GroundSurfaceOverrides.effective("pavement", GroundSurface.PAVEMENT);
         }

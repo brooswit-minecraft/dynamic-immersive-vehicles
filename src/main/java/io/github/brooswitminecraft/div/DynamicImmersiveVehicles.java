@@ -52,5 +52,12 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.TurnComparisonProbe.maybeRun(overworld);
   });
+  // Opt-in, CI/isolated-host-only mod-load/tag-resolution smoke test (MINECRAFT-508 review,
+  // John) - OFF by default, a strict no-op otherwise. Never touches any real vehicle or world
+  // content - see GroundSurfaceTagProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSurfaceTagProbe.maybeRun(overworld);
+  });
  }
 }

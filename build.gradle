@@ -115,6 +115,11 @@ neoForge {
     jvmArgument('-Ddiv.experimentalFrictionSolverIterations=64')
     jvmArgument('-Ddiv.experimentalThrottleRampTicks=20')
    }
+   // MINECRAFT-508 review (John): opt-in mod-load/tag-resolution smoke test - same gating
+   // pattern as every other probe above; OFF for every normal `gradle runServer`.
+   if (System.getenv('DIV_GROUND_SURFACE_TAG_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalGroundSurfaceTagProbe=true')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
