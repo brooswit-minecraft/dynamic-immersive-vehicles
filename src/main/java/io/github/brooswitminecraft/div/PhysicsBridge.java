@@ -297,7 +297,8 @@ public final class PhysicsBridge {
   * suspensionTravel/friction/driveForce/brakeForce/maxSteerDegrees/lateralGripMultiplier/
   * waterDrag/propellerForce/angularWaterDrag/antiRollStiffness (MINECRAFT-519 - stepGround reads
   * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
-  * brakeBiasFront (MINECRAFT-520, same reasoning). Mutating
+  * brakeBiasFront (MINECRAFT-520, same reasoning)/cyclicLimitDegrees/cyclicAuthorityScale/
+  * yawAuthorityScale (MINECRAFT-522, same reasoning). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -324,6 +325,9 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.propellerForce, fresh.propellerForce)) { target.propellerForce = fresh.propellerForce; appliedOut.add("propellerForce"); }
   if (!java.util.Objects.equals(target.angularWaterDrag, fresh.angularWaterDrag)) { target.angularWaterDrag = fresh.angularWaterDrag; appliedOut.add("angularWaterDrag"); }
   if (!java.util.Objects.equals(target.antiRollStiffness, fresh.antiRollStiffness)) { target.antiRollStiffness = fresh.antiRollStiffness; appliedOut.add("antiRollStiffness"); }
+  if (!java.util.Objects.equals(target.cyclicLimitDegrees, fresh.cyclicLimitDegrees)) { target.cyclicLimitDegrees = fresh.cyclicLimitDegrees; appliedOut.add("cyclicLimitDegrees"); }
+  if (!java.util.Objects.equals(target.cyclicAuthorityScale, fresh.cyclicAuthorityScale)) { target.cyclicAuthorityScale = fresh.cyclicAuthorityScale; appliedOut.add("cyclicAuthorityScale"); }
+  if (!java.util.Objects.equals(target.yawAuthorityScale, fresh.yawAuthorityScale)) { target.yawAuthorityScale = fresh.yawAuthorityScale; appliedOut.add("yawAuthorityScale"); }
   if (!java.util.Objects.equals(target.brakeBiasFront, fresh.brakeBiasFront)) { target.brakeBiasFront = fresh.brakeBiasFront; appliedOut.add("brakeBiasFront"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
@@ -2383,6 +2387,16 @@ public final class PhysicsBridge {
    * applied by the caller when landed/floating on water - this method supplies only the rotor's
    * own thrust/attitude, which stays correct either way since a rotor sitting above a floating
    * hull is never itself submerged.
+   *
+   * <p>MINECRAFT-522: {@code tuning.cyclicLimitDegrees} bounds the PER-AXIS cyclic tilt clamp
+   * (pitch and roll independently - same as this method already did with the fixed 20-degree
+   * constant; NOT a combined/total-disk-angle bound, so the combined tilt can still exceed this
+   * number when both axes are near their limit at once), and {@code
+   * tuning.cyclicAuthorityScale}/{@code tuning.yawAuthorityScale} multiply the already
+   * thrust-gated cyclic/yaw torque ({@link RotorForces#cyclicTorque(double,double,double,double)}/
+   * {@link RotorForces#yawTorque(double,double,double,double)}). All three default to the exact
+   * prior behavior (20deg/1.0/1.0) via {@link Overrides#resolved} when unconfigured, and are
+   * read live off this tick's {@code tuning} the same way {@code driveForce} already is.
    */
   private boolean stepRotor(EntityVehicleF_Physics v, Quaterniond q, Vector3d up, List<JSONPart.JSONPartPropeller> installedPropellers) {
    var motorized = v.definition.motorized;
@@ -2392,8 +2406,13 @@ public final class PhysicsBridge {
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running) throttle=v.throttleVar.currentValue;
    double collective=RotorForces.collective(throttle);
    double thrust=RotorForces.lift(collective,tuning.driveForce);
-   double tiltPitch=RotorForces.cyclicTilt(Math.toRadians(v.elevatorInputVar.currentValue));
-   double tiltRoll=RotorForces.cyclicTilt(Math.toRadians(v.aileronInputVar.currentValue));
+   // MINECRAFT-522: tuning.cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale are read
+   // live off this tick's tuning object (same as driveForce above), not cached at construction -
+   // see applyLiveSafeFields. Overrides.resolved always fills these from FALLBACK (20deg/1.0/1.0)
+   // when unconfigured, so an unconfigured rotorcraft gets byte-identical behavior to before.
+   double maxCyclicTilt=Math.toRadians(tuning.cyclicLimitDegrees);
+   double tiltPitch=RotorForces.cyclicTilt(Math.toRadians(v.elevatorInputVar.currentValue),maxCyclicTilt);
+   double tiltRoll=RotorForces.cyclicTilt(Math.toRadians(v.aileronInputVar.currentValue),maxCyclicTilt);
    double tiltMagnitude=Math.hypot(tiltPitch,tiltRoll);
    double vertical=RotorForces.verticalComponent(thrust,tiltMagnitude);
    double forwardComp=RotorForces.horizontalComponent(thrust,tiltPitch);
@@ -2403,10 +2422,10 @@ public final class PhysicsBridge {
    double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
    double rotorRadiusMeters=RotorForces.rotorRadiusMeters(installedPropellers.stream()
      .filter(Classification::isRotor).mapToDouble(p -> p.diameter).max().orElse(0));
-   double rollTorque=RotorForces.cyclicTorque(tiltRoll,thrust,rotorRadiusMeters);
-   double pitchTorque=RotorForces.cyclicTorque(tiltPitch,thrust,rotorRadiusMeters);
+   double rollTorque=RotorForces.cyclicTorque(tiltRoll,thrust,rotorRadiusMeters,tuning.cyclicAuthorityScale);
+   double pitchTorque=RotorForces.cyclicTorque(tiltPitch,thrust,rotorRadiusMeters,tuning.cyclicAuthorityScale);
    double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
-   double yawTorque=RotorForces.yawTorque(rudderDeflection,thrust,tailArm);
+   double yawTorque=RotorForces.yawTorque(rudderDeflection,thrust,tailArm,tuning.yawAuthorityScale);
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
    applyTowingCompensation(v);

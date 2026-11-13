@@ -55,7 +55,11 @@ each vehicle from IV's own definition at the moment it is needed:
   rudder-driven yaw/anti-torque authority. Unlike a fixed-wing control
   surface, this attitude and yaw authority scales with available thrust, not
   airspeed, so a helicopter keeps full control hovering at zero airspeed.
-  See
+  The cyclic tilt clamp and cyclic/yaw torque authority are optionally
+  configurable per vehicle (`cyclicLimitDegrees`, `cyclicAuthorityScale`,
+  `yawAuthorityScale` - MINECRAFT-522); unconfigured, they default to the
+  model's original 20-degree clamp and 1.0 (unit) scaling - see
+  [Configuration](#configuration) below. See
   [`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
   for the exact model and its stated simplifications (no translational-lift
   efficiency gain in forward flight, no retreating-blade stall, no
@@ -506,6 +510,11 @@ after changes.
     "examplepack:known_bad_car": {
       "enabled": false
     },
+    "examplepack:helicopter": {
+      "cyclicLimitDegrees": 15.0,
+      "cyclicAuthorityScale": 1.3,
+      "yawAuthorityScale": 0.8
+    },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
       "hullFillFactor": 0.5,
@@ -543,7 +552,28 @@ not every installed propeller), and `angularWaterDrag` (an optional
 roll/pitch/yaw damping strength, 0 by default - no change from
 prior behavior unless configured) - are ignored by a ground/flight vehicle
 with no float device, and `suspensionTravel`/`friction`/`driveForce`/
-`brakeForce` are ignored by a float-only hull. A copyable example is also
+`brakeForce` are ignored by a float-only hull. `cyclicLimitDegrees` (strictly
+positive, capped at 45, default 20), `cyclicAuthorityScale`, and
+`yawAuthorityScale` (both strictly positive, capped at 5, default 1.0) only
+apply to a rotorcraft
+([`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)):
+`cyclicLimitDegrees` is a PER-AXIS clamp (pitch and roll independently, exactly
+matching the model's own prior fixed 20-degree clamp - John's review,
+comment 53751): it bounds how far EACH axis of cyclic input can tilt the
+rotor disk (replacing that 20-degree constant when set), never past 45 on
+either axis - a disk cannot be tilted onto its edge - and never zero: a
+rotor with zero cyclic authority is not a configuration this ticket
+supports; disable the rotorcraft category itself via `enabled: false` if
+that's the intent. Because pitch and roll are clamped independently, the
+COMBINED disk tilt with both axes at their limit can exceed the configured
+number (`hypot(limit, limit)`, e.g. ~63.6deg at the 45deg cap) - this is
+unchanged from the model's original behavior (unconfigured, the combined
+tilt already reaches `hypot(20,20)` &asymp; 28.3deg) and is not itself a
+total-disk-angle bound, and
+`cyclicAuthorityScale`/`yawAuthorityScale` multiply the already thrust-gated
+cyclic attitude torque and yaw/anti-torque authority respectively - 1.0 is a
+no-op, and a zero-thrust rotor still produces zero torque regardless of
+scale (no unpowered free torque). A copyable example is also
 available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
 
@@ -597,7 +627,8 @@ break anything already running.
 A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
-`propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `brakeBiasFront`. Fields baked in at vehicle construction - `massKg`,
+`propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `cyclicLimitDegrees`,
+`cyclicAuthorityScale`, `yawAuthorityScale`, `brakeBiasFront`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
