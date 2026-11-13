@@ -1,0 +1,12 @@
+{
+  "values": [
+    "#c:stones",
+    "#c:concretes",
+    "#c:cobblestones",
+    "#minecraft:stone_bricks",
+    "minecraft:smooth_stone",
+    "minecraft:terracotta",
+    "minecraft:deepslate_bricks",
+    "minecraft:deepslate_tiles"
+  ]
+}

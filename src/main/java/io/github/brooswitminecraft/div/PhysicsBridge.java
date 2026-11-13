@@ -1440,7 +1440,7 @@ public final class PhysicsBridge {
    // every wheel is lower-owned. Always false when !twoBodyActive (meaningless, unused there).
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
-     double skidSteerMultiplier, double damperUsed, double effectiveMassUsed, boolean upperOwned) {}
+     double skidSteerMultiplier, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface) {}
    List<WheelHit> hits=new java.util.ArrayList<>();
    for(var wheel:wheels) {
     double radius=wheel.getHeight()/2;
@@ -1487,8 +1487,12 @@ public final class PhysicsBridge {
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
+    // MINECRAFT-508: baseline ground-surface response (tag-driven pavement/dirt/grass/gravel/
+    // ice; directional per-pixel/16x16-face response is a deferred later sprint, not this
+    // lookup) - resolved from the actual terrain hit block, not the suspension anchor.
+    GroundSurface surface=GroundSurfaces.at(level,((net.minecraft.world.phys.BlockHitResult)hit).getBlockPos());
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      damperResult.damper(),damperResult.effectiveMass(),upperOwned));
+      damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface));
    }
    // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
    // class-level correction for the full defect this closes). For the single-body path this is
@@ -1652,7 +1656,8 @@ public final class PhysicsBridge {
     workingAngular.add(q.transform(new Vector3d(torqueBody.x/aggregateInertiaBody.x,torqueBody.y/aggregateInertiaBody.y,torqueBody.z/aggregateInertiaBody.z)));
    }
    var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
-     new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
+     new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
+     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      brakeMagnitude,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
      effectiveFrictionSolverIterations());

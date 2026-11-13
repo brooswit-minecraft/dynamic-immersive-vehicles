@@ -9,6 +9,7 @@ public final class DynamicImmersiveVehicles {
   GroundContactDiagnostics.logStartupMarker(PhysicsBridge.resolveDebugGroundContactTicks(System.getProperty("div.debugGroundContactTicks")),
     PhysicsBridge.effectiveFrictionSolverIterations());
   Overrides.load();
+  GroundSurfaceOverrides.load();
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
   // Ticket 53518 (MINECRAFT-505): bounded, periodic operator-config hot reload - see
   // OverridesHotReload's own doc for why mtime-polling, and PhysicsBridge.reloadOverrides for
@@ -50,6 +51,13 @@ public final class DynamicImmersiveVehicles {
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.TurnComparisonProbe.maybeRun(overworld);
+  });
+  // Opt-in, CI/isolated-host-only mod-load/tag-resolution smoke test (MINECRAFT-508 review,
+  // John) - OFF by default, a strict no-op otherwise. Never touches any real vehicle or world
+  // content - see GroundSurfaceTagProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSurfaceTagProbe.maybeRun(overworld);
   });
  }
 }
