@@ -573,4 +573,54 @@ class OverridesTest {
  // doc) - reload()'s actual per-field validation/extends-chain/last-known-good logic is already
  // exercised indirectly above via the extends/cycle/precedence tests against readAndValidate's
  // shared helper, minus only the file-I/O wrapper itself.
+
+ // MINECRAFT-521 self-review: the ticket explicitly requires "invalid reload retaining last-good
+ // values" as a regression, not merely Tuning.validate() throwing in isolation. Overrides.apply(
+ // Supplier<Config>) (package-private test seam reload() itself now delegates through - see its
+ // own doc) runs the real validate-then-swap-or-reject logic with no file I/O/Gson needed, the
+ // same substitution GroundSurfaceOverridesTest already uses for its own loader's equivalent gap.
+
+ @Test void invalidReloadRetainsThePriorGoodStallAngleLiftSlopeAndControlSurfaceSlope() {
+  try {
+   var good = new Overrides.Tuning();
+   good.stallAngleDegrees = 20.0; good.liftSlope = 5.0; good.controlSurfaceSlope = 4.0;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(20.0, Overrides.resolved("packid:glider").stallAngleDegrees);
+   assertEquals(5.0, Overrides.resolved("packid:glider").liftSlope, 1e-9);
+   assertEquals(4.0, Overrides.resolved("packid:glider").controlSurfaceSlope, 1e-9);
+
+   var invalid = new Overrides.Tuning();
+   invalid.stallAngleDegrees = 90.0; invalid.liftSlope = -1.0; invalid.controlSurfaceSlope = 999.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload for these fields must be rejected, not silently applied");
+
+   assertEquals(20.0, Overrides.resolved("packid:glider").stallAngleDegrees,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(5.0, Overrides.resolved("packid:glider").liftSlope, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(4.0, Overrides.resolved("packid:glider").controlSurfaceSlope, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void invalidReloadViaAThrowingParseAlsoRetainsThePriorGoodValues() {
+  // The other half of the substitution GroundSurfaceOverridesTest already established: a
+  // configSupplier that throws (standing in for a real malformed-JSON parse failure) must be
+  // rejected exactly like a validation failure, never treated differently.
+  try {
+   var good = new Overrides.Tuning(); good.stallAngleDegrees = 12.0;
+   Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider2", good), java.util.Map.of()));
+   assertEquals(12.0, Overrides.resolved("packid:glider2").stallAngleDegrees);
+
+   var badResult = Overrides.apply(() -> { throw new RuntimeException("malformed json"); });
+   assertFalse(badResult.success());
+   assertEquals(12.0, Overrides.resolved("packid:glider2").stallAngleDegrees,
+     "a throwing parse must retain the prior good state, same as a validation failure does");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
 }

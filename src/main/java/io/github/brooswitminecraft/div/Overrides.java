@@ -309,7 +309,11 @@ public final class Overrides {
   * extends} may reference (see {@link #effective}); {@code vehicles} is unchanged from before
   * this ticket; {@code parts} is new, keyed identically to {@code vehicles} but for a PART's own
   * identity (see {@link #resolvedPart}'s doc for the exact key shape) rather than a vehicle's. */
- private record Config(Map<String,Tuning> templates, Map<String,Tuning> vehicles, Map<String,Tuning> parts) {}
+ // Package-private, not private (MINECRAFT-521 self-review) - lets OverridesTest construct a
+ // Config directly for Overrides.apply(Supplier<Config>)'s own test seam (see its doc), without
+ // needing Gson or a live FML config file to drive an invalid-reload-retains-last-known-good
+ // regression through.
+ record Config(Map<String,Tuning> templates, Map<String,Tuning> vehicles, Map<String,Tuning> parts) {}
  private static Map<String,Tuning> templates = Map.of();
  private static Map<String,Tuning> vehicles = Map.of();
  private static Map<String,Tuning> parts = Map.of();
@@ -463,17 +467,19 @@ public final class Overrides {
  private static Gson gson() { return new GsonBuilder().setPrettyPrinting().create(); }
  private static Path configPath() { return FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json"); }
  /**
-  * Parses and fully validates {@code path} into a {@link Config} - every entry in {@code
-  * templates}/{@code vehicles}/{@code parts} (field-range validation via {@link Tuning#validate})
-  * AND every entry's own {@code extends} chain (unknown target / cycle, via {@link #effective},
-  * eagerly resolved once per entry here so a bad chain fails at load/reload time, not on some
-  * later vehicle's first tick - ticket 53518's "invalid/unknown values" requirement). Never
-  * mutates {@link #templates}/{@link #vehicles}/{@link #parts} itself - {@link #load} and
-  * {@link #reload} each decide separately what to do with a successful parse, and specifically
-  * how to react to a failure (throw vs. keep the last-known-good maps and report it).
+  * Fully validates an already-parsed {@link Config} - every entry in {@code templates}/{@code
+  * vehicles}/{@code parts} (field-range validation via {@link Tuning#validate}) AND every entry's
+  * own {@code extends} chain (unknown target / cycle, via {@link #effective}, eagerly resolved
+  * once per entry here so a bad chain fails at load/reload time, not on some later vehicle's
+  * first tick - ticket 53518's "invalid/unknown values" requirement). Never mutates {@link
+  * #templates}/{@link #vehicles}/{@link #parts} itself - {@link #load} and {@link #apply} each
+  * decide separately what to do with a successful validation, and specifically how to react to a
+  * failure (throw vs. keep the last-known-good maps and report it). The parse-independent half of
+  * the original combined method (MINECRAFT-521 self-review) - factored out so {@link #apply} can
+  * run this exact same validation against a test-supplied {@link Config} with no file I/O/Gson
+  * involved at all; see {@link #readAndValidate} for what still wraps this with the actual parse.
   */
- private static Config readAndValidate(Path path) throws IOException {
-  Config config = gson().fromJson(Files.readString(path), Config.class);
+ private static Config validateConfig(Config config) {
   if (config == null || config.vehicles() == null) throw new IllegalArgumentException("missing vehicles map");
   Map<String,Tuning> templatesRead = config.templates() != null ? config.templates() : Map.of();
   Map<String,Tuning> vehiclesRead = config.vehicles();
@@ -503,6 +509,40 @@ public final class Overrides {
    merged.validateSupportedForPart(); // review 53556: reject an inert (unsupported) part field loudly
   }
   return new Config(templatesRead, vehiclesRead, partsRead);
+ }
+ /** Parses {@code path} then runs it through {@link #validateConfig} - the checked-exception path
+  * {@link #load} uses directly (a broken fresh-install file must fail loudly at startup). */
+ private static Config readAndValidate(Path path) throws IOException {
+  Config config = gson().fromJson(Files.readString(path), Config.class);
+  return validateConfig(config);
+ }
+ /**
+  * Test-only seam (MINECRAFT-521 self-review: the ticket requires an actual invalid-reload-
+  * retains-last-known-good regression, not only {@code Tuning.validate()} throwing in isolation) -
+  * the exact same validate-then-swap-or-reject logic {@link #reload} uses, against a caller-
+  * supplied {@link Config} instead of one parsed from {@link #configPath}'s file, so a plain unit
+  * test can install a known-good state, "reload" an invalid one, and assert the known-good state
+  * was retained - with no live FML config directory or Gson needed at all. {@code configSupplier}
+  * throwing (standing in for a real parse failure, the same substitution
+  * {@code GroundSurfaceOverridesTest} already uses for its own loader) is treated exactly like a
+  * validation failure: last-known-good, never a partial/garbage apply.
+  */
+ static ReloadResult apply(java.util.function.Supplier<Config> configSupplier) {
+  try {
+   Config config = validateConfig(configSupplier.get());
+   templates = Map.copyOf(config.templates());
+   vehicles = Map.copyOf(config.vehicles());
+   parts = Map.copyOf(config.parts());
+   return ReloadResult.ok(vehicles.size(), parts.size());
+  } catch (RuntimeException ex) {
+   // No configPath() call here (self-review fix): apply() is also the test seam, called directly
+   // against a caller-supplied Config/Supplier with no live FML config directory at all -
+   // configPath() itself throws (FMLPaths.CONFIGDIR.get() is null outside a real FML runtime) if
+   // referenced from this generic message, masking the real validation failure with an unrelated
+   // NPE. ex's own message already names what actually went wrong; reload()'s caller only ever
+   // needs that, not a restated path it already knows (it's the one who called reload()).
+   return ReloadResult.failed("Cannot reload: " + ex.getMessage());
+  }
  }
  static void load() {
   Path path = configPath();
@@ -536,8 +576,8 @@ public final class Overrides {
  }
  /**
   * Non-throwing hot-reload (ticket 53518/MINECRAFT-505's core ask) - re-reads and fully
-  * validates {@link #configPath}'s current contents via the SAME {@link #readAndValidate} path
-  * {@link #load} uses, but on ANY failure (missing/malformed JSON, an out-of-range field, an
+  * validates {@link #configPath}'s current contents via {@link #apply}, the same validation
+  * {@link #load}'s own {@link #readAndValidate} runs, but on ANY failure (missing/malformed JSON, an out-of-range field, an
   * unknown {@code extends} target, a cycle) leaves {@link #templates}/{@link #vehicles}/
   * {@link #parts} completely untouched - last-known-good, per the ticket's explicit "retain
   * last-known-good on errors" requirement - and returns a {@link ReloadResult} describing the
@@ -550,16 +590,20 @@ public final class Overrides {
   * method only ever changes what a FUTURE {@link #resolved}/{@link #resolvedPart} call sees.
   */
  public static ReloadResult reload() {
-  Path path = configPath();
-  try {
-   Config config = readAndValidate(path);
-   templates = Map.copyOf(config.templates());
-   vehicles = Map.copyOf(config.vehicles());
-   parts = Map.copyOf(config.parts());
-   return ReloadResult.ok(vehicles.size(), parts.size());
-  } catch (IOException | RuntimeException ex) {
-   return ReloadResult.failed("Cannot reload " + path + ": " + ex.getMessage());
-  }
+  // Delegates to the test-seam apply() above (MINECRAFT-521 self-review) - identical
+  // validate-then-swap-or-reject behavior, just reached through the real file instead of a
+  // caller-supplied Config. A checked IOException from the parse itself (e.g. the file was
+  // deleted between calls) must still produce the same last-known-good failure apply() already
+  // gives a RuntimeException - apply()'s Supplier<Config> contract has no checked-exception
+  // channel, so it is converted to UncheckedIOException here and unwrapped into apply()'s normal
+  // RuntimeException catch, not raised past this method.
+  return apply(() -> {
+   try {
+    return gson().fromJson(Files.readString(configPath()), Config.class);
+   } catch (IOException ex) {
+    throw new java.io.UncheckedIOException(ex);
+   }
+  });
  }
  /** Outcome of a {@link #reload} call - {@code success} false means the previous
   * templates/vehicles/parts maps are UNCHANGED (last-known-good), never partially applied. */

@@ -1393,6 +1393,33 @@ wiring level, never by a live runtime tick; this is the same disclosed limit
 every prior flight/rotor ticket here has stood on, not a new gap introduced
 by this one.
 
+**Self-review finding (own re-review, PR #19 head `0a05015`): invalid-reload-
+retains-last-known-good was undertested.** The first revision's tests
+covered range validation, defaults, precedence, pure-force behavior, and
+live in-place application for `stallAngleDegrees`/`liftSlope`/
+`controlSurfaceSlope`, but not the ticket's own explicit "invalid reload
+retaining last-good values" requirement as an actual reload-path regression
+(only `Tuning.validate()` throwing in isolation, which the ticket text does
+not consider sufficient on its own). `Overrides.readAndValidate`'s
+validation logic (field-range checks, `extends`-chain resolution, the
+merged-result coupled check) was factored into a new parse-independent
+`validateConfig(Config)`, and a new package-private test seam,
+`Overrides.apply(Supplier<Config>)`, runs that exact same validation against
+a caller-supplied `Config` - no live FML config directory or Gson needed at
+all, the identical substitution `GroundSurfaceOverridesTest` already uses
+for its own loader's equivalent gap. `Overrides.reload()` itself now
+delegates to `apply()` (reached through the real file instead of a test
+`Supplier`) rather than duplicating the validate-then-swap-or-reject logic a
+second time. Two new `OverridesTest` cases install a known-good
+`stallAngleDegrees`/`liftSlope`/`controlSurfaceSlope`, then "reload" an
+out-of-range `Config` (one case) or a throwing parse (the other, standing in
+for a malformed-JSON failure), and assert `Overrides.resolved` still returns
+the PRIOR GOOD values, not the invalid ones or the flat fallback - the exact
+regression this ticket's own acceptance criteria name. `Overrides.Config`
+was widened from `private` to package-private solely so `OverridesTest` can
+construct one directly for this seam; nothing about its own external
+contract (`load()`/`reload()`'s public behavior) changed.
+
 Local check: `javac --release 21 -proc:none` against the real `mts.jar`,
 Sable NeoForge 2.0.5, Sable Companion 1.6.0, joml 1.10.5, and this repo's
 exact pinned NeoForge 21.1.265 (`neoforge-21.1.265-merged.jar`, reused from
@@ -1401,9 +1428,10 @@ version, plus the separate FancyModLoader/bus/netty/mojang-logging/
 mixin/jetbrains-annotations/datafixerupper jars NeoForge's own source
 references but that merged artifact does not bundle) confirms every changed
 file (`FlightForces.java`, `Overrides.java`, `PhysicsBridge.java`, and the
-three updated test files) compiles cleanly with zero errors against IV's
-real `JSONVehicle.motorized`/control-input-var fields. All 540 tests in the
-repository pass under a manually assembled JUnit Platform launcher (JUnit
-5.11.4/platform 1.11.4) - the same full suite as every prior local check
-here, not merely the new/changed tests - confirming this change introduces
-no regression anywhere else in the suite.
+four updated/added test files) compiles cleanly with zero errors against
+IV's real `JSONVehicle.motorized`/control-input-var fields. All 542 tests in
+the repository (540 plus the two new invalid-reload regressions above) pass
+under a manually assembled JUnit Platform launcher (JUnit 5.11.4/platform
+1.11.4) - the same full suite as every prior local check here, not merely
+the new/changed tests - confirming this change introduces no regression
+anywhere else in the suite.
