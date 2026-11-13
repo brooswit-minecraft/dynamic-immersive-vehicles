@@ -10,6 +10,11 @@ public final class DynamicImmersiveVehicles {
     PhysicsBridge.effectiveFrictionSolverIterations());
   Overrides.load();
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
+  // Ticket 53518 (MINECRAFT-505): bounded, periodic operator-config hot reload - see
+  // OverridesHotReload's own doc for why mtime-polling, and PhysicsBridge.reloadOverrides for
+  // what actually gets propagated into already-active vehicles vs. reported as needing respawn.
+  var overridesHotReload = new OverridesHotReload();
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> overridesHotReload.maybeReload());
   NeoForge.EVENT_BUS.addListener((LevelEvent.Unload event) -> PhysicsBridge.unload(event.getLevel()));
   // Opt-in, CI/isolated-host-only anchor-frame probe (ticket comment 53243/53244) - OFF by
   // default (Boolean.getBoolean read once inside the probe itself), a strict no-op otherwise.

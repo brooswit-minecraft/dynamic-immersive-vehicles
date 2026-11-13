@@ -240,4 +240,236 @@ class OverridesTest {
    Overrides.setForTest(java.util.Map.of());
   }
  }
+
+ // Ticket 53518 (MINECRAFT-505): layered JSON vehicle/part overrides - `parts`/`templates`
+ // namespaces, `extends` inheritance, and non-throwing reload() with last-known-good semantics.
+ // These all go through the package-private three-namespace setForTest seam so they run as a
+ // plain unit test, the same reasoning OverridesTest's class doc already gives for `load()`.
+
+ @Test void partOverrideResolvesIndependentlyOfAnyVehicleOverride() {
+  try {
+   var part = new Overrides.Tuning(); part.friction = 0.42;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("packid:engine_part", part));
+   assertEquals(0.42, Overrides.resolvedPart("packid:engine_part").friction);
+   assertEquals(1.0, Overrides.resolved("packid:engine_part").friction,
+     "a part override must never leak into vehicle-key resolution for the same string, and vice versa - separate namespaces");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void partOverrideFallsBackToTheSameDocumentedFallbackAsVehiclesWhenUnconfigured() {
+  assertEquals(0.3, Overrides.resolvedPart("packid:not_configured_part").suspensionTravel);
+  assertEquals(8000.0, Overrides.resolvedPart("packid:not_configured_part").driveForce);
+ }
+
+ @Test void extendsInheritsEveryUnsetFieldFromItsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.driveForce = 5000.0; template.friction = 0.8;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "base"; child.friction = 0.95; // overrides the template's own friction
+   Overrides.setForTest(java.util.Map.of("base", template), java.util.Map.of("packid:child_vehicle", child), java.util.Map.of());
+   var r = Overrides.resolved("packid:child_vehicle");
+   assertEquals(5000.0, r.driveForce, "a field the child never set must inherit the template's value");
+   assertEquals(0.95, r.friction, "a field the child DID set must win over the template's own value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void extendsChainsThroughMultipleTemplates() {
+  try {
+   var grandparent = new Overrides.Tuning(); grandparent.brakeForce = 9000.0;
+   var parent = new Overrides.Tuning(); parent.extendsTemplate = "grandparent"; parent.driveForce = 4000.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "parent";
+   Overrides.setForTest(java.util.Map.of("grandparent", grandparent, "parent", parent),
+     java.util.Map.of("packid:chained_vehicle", child), java.util.Map.of());
+   var r = Overrides.resolved("packid:chained_vehicle");
+   assertEquals(9000.0, r.brakeForce, "a field set only on the grandparent template must still reach the child");
+   assertEquals(4000.0, r.driveForce);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void extendsUnknownTemplateFailsLoudlyInsteadOfSilentlyIgnoringIt() {
+  try {
+   var child = new Overrides.Tuning(); child.extendsTemplate = "does_not_exist";
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of("packid:broken_vehicle", child), java.util.Map.of());
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:broken_vehicle"));
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void extendsCycleFailsLoudlyInsteadOfInfiniteLooping() {
+  try {
+   var a = new Overrides.Tuning(); a.extendsTemplate = "b";
+   var b = new Overrides.Tuning(); b.extendsTemplate = "a";
+   Overrides.setForTest(java.util.Map.of("a", a, "b", b), java.util.Map.of("packid:cyclic_vehicle", a), java.util.Map.of());
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:cyclic_vehicle"));
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void extendsResolvesAgainstTemplatesNamespaceOnlyNotVehiclesOrParts() {
+  // A template name happening to collide with an unrelated vehicle's own key must not make that
+  // vehicle entry a valid (and confusing) extension target - templates are their own namespace.
+  try {
+   var unrelatedVehicle = new Overrides.Tuning(); unrelatedVehicle.driveForce = 1.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "packid:unrelated_vehicle";
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of("packid:unrelated_vehicle", unrelatedVehicle, "packid:child", child), java.util.Map.of());
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:child"),
+     "a vehicle key is not a valid extends target even though a template with that exact name does not exist");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void resolvingTwoDifferentKeysProducesIndependentMutableTuningInstances() {
+  // "Multi-instance isolation" (ticket 53518): two different vehicle instances of two different
+  // (or even the same) definition must never share one mutable Tuning object - each resolved()
+  // call is its own fresh snapshot.
+  var first = Overrides.resolved("packid:not_configured");
+  var second = Overrides.resolved("packid:not_configured");
+  assertNotSame(first, second);
+  first.driveForce = 1.0;
+  assertEquals(8000.0, second.driveForce, "mutating one resolved() instance's own copy must never affect a separately resolved instance for the same key");
+ }
+
+ // Review findings (John's comment 53539): isOptedOut must honor an `enabled:false` inherited
+ // through `extends`, and a merged (effective) Tuning - not just each raw entry - must itself be
+ // validated so a coupled check spanning a child/template boundary cannot slip through.
+
+ @Test void isOptedOutHonorsEnabledInheritedThroughExtends() {
+  try {
+   var disabledTemplate = new Overrides.Tuning(); disabledTemplate.enabled = false;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "disabled-template"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("disabled-template", disabledTemplate), java.util.Map.of("packid:inherited_opt_out", child), java.util.Map.of());
+   assertTrue(Overrides.isOptedOut("packid:inherited_opt_out"),
+     "enabled:false inherited from a template must opt this vehicle out, the same as resolved() already reports it");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void isOptedOutStillWorksForADirectEntryWithNoExtends() {
+  try {
+   var direct = new Overrides.Tuning(); direct.enabled = false;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of("packid:directly_opted_out", direct), java.util.Map.of());
+   assertTrue(Overrides.isOptedOut("packid:directly_opted_out"));
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void mergedEffectiveTuningCanBeInvalidEvenWhenEveryRawEntryValidatesOnItsOwn() {
+  // The exact gap readAndValidate's post-merge validate() (not just each raw entry's own
+  // validate()) now closes: a template sets ONLY fadeStartDegrees=40 (valid alone - fadeEndDegrees
+  // null means the coupled check's own null-guard passes trivially), a child extending it sets
+  // ONLY fadeEndDegrees=10 (also valid alone, compared against the raw child's own null
+  // fadeStartDegrees as "> 0"). Neither raw entry, validated alone, ever sees both fields
+  // together - but the MERGED result (fadeStartDegrees=40, fadeEndDegrees=10) violates
+  // "fadeEnd > fadeStart" and must fail once actually merged and validated.
+  try {
+   var template = new Overrides.Tuning(); template.selfRightFadeStartDegrees = 40.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "base"; child.selfRightFadeEndDegrees = 10.0;
+   Overrides.setForTest(java.util.Map.of("base", template), java.util.Map.of(), java.util.Map.of());
+   assertDoesNotThrow(template::validate, "the raw template alone is valid");
+   assertDoesNotThrow(child::validate, "the raw child alone is valid (its own fadeStartDegrees is null)");
+   assertThrows(IllegalArgumentException.class, () -> Overrides.effective(child).validate(),
+     "the MERGED combination is invalid and must be caught once both fields are actually together");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // Ticket 53518 self-review / John's comment 53539: a part override must actually reach a real
+ // physics consumer, not just resolve to a value nothing reads. PhysicsBridge.enginePartDriveForce
+ // is the literal decision stepGround's drive-force computation now uses.
+
+ @Test void effectivePartOverrideIsNullForAnUnconfiguredPartUnlikeResolvedPartsFallbackFilledValue() {
+  assertNull(Overrides.effectivePartOverride("packid:not_configured_part"),
+    "effectivePartOverride must distinguish \"no override\" from resolvedPart's own flat fallback");
+  assertEquals(8000.0, Overrides.resolvedPart("packid:not_configured_part").driveForce,
+    "resolvedPart itself is unaffected - still falls through to the same flat FALLBACK as a vehicle");
+ }
+
+ @Test void effectivePartOverrideAppliesExtendsTheSameWayVehicleResolutionDoes() {
+  try {
+   var template = new Overrides.Tuning(); template.driveForce = 7000.0;
+   var part = new Overrides.Tuning(); part.extendsTemplate = "engine-base";
+   Overrides.setForTest(java.util.Map.of("engine-base", template), java.util.Map.of(), java.util.Map.of("packid:inherited_engine", part));
+   assertEquals(7000.0, Overrides.effectivePartOverride("packid:inherited_engine").driveForce);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void enginePartDriveForceOverrideWinsOverTheVehicleResolvedValue() {
+  try {
+   var part = new Overrides.Tuning(); part.driveForce = 9500.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:high_output_engine", part));
+   assertEquals(9500.0, PhysicsBridge.enginePartDriveForce("examplepack:high_output_engine", 8000.0),
+     "an explicit part-level driveForce override must win outright over the vehicle's own resolved value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void enginePartDriveForceFallsThroughToTheVehicleResolvedValueWhenNoPartOverrideExists() {
+  assertEquals(8000.0, PhysicsBridge.enginePartDriveForce("packid:ordinary_engine_with_no_override", 8000.0));
+ }
+
+ // Review finding (self-review 53556/PR comment 6854012663): "narrow the accepted part schema"
+ // - a parts entry may only set driveForce today; every other field is rejected at load/reload,
+ // including one reached only through extends, not silently accepted-but-ignored.
+
+ @Test void partEntrySettingOnlyDriveForcePassesTheSupportedFieldsCheck() {
+  var part = new Overrides.Tuning(); part.driveForce = 9500.0;
+  assertDoesNotThrow(part::validateSupportedForPart);
+ }
+
+ @Test void partEntrySettingAnUnsupportedFieldFailsTheSupportedFieldsCheck() {
+  var frictionOverride = new Overrides.Tuning(); frictionOverride.friction = 0.9;
+  assertThrows(IllegalArgumentException.class, frictionOverride::validateSupportedForPart);
+  var brakeOverride = new Overrides.Tuning(); brakeOverride.brakeForce = 1000.0;
+  assertThrows(IllegalArgumentException.class, brakeOverride::validateSupportedForPart);
+  var selfRightOverride = new Overrides.Tuning(); selfRightOverride.selfRightStrength = 1.0;
+  assertThrows(IllegalArgumentException.class, selfRightOverride::validateSupportedForPart);
+ }
+
+ @Test void partEntryInheritingAnUnsupportedFieldThroughExtendsStillFailsTheSupportedFieldsCheck() {
+  try {
+   var template = new Overrides.Tuning(); template.friction = 0.9; // not supported for a part
+   var part = new Overrides.Tuning(); part.extendsTemplate = "base"; part.driveForce = 9500.0;
+   Overrides.setForTest(java.util.Map.of("base", template), java.util.Map.of(), java.util.Map.of());
+   var merged = Overrides.effective(part);
+   assertThrows(IllegalArgumentException.class, merged::validateSupportedForPart,
+     "a part must not be able to smuggle an unsupported field in through extends");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void enginePartDriveForceFallsThroughWhenThePartEntryExistsButDoesNotSetDriveForce() {
+  try {
+   var part = new Overrides.Tuning(); part.friction = 0.9; // sets a different field, not driveForce
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("packid:partially_configured_engine", part));
+   assertEquals(8000.0, PhysicsBridge.enginePartDriveForce("packid:partially_configured_engine", 8000.0),
+     "a part entry that never sets driveForce must not be mistaken for a zero/fallback override");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // Overrides.reload(), like load(), needs a live FML config directory (and, for this ticket, a
+ // full Gson on the runtime classpath, which a plain unit test's trimmed classpath does not
+ // have either - confirmed directly: calling it here throws NoClassDefFoundError, an Error, not
+ // one of the RuntimeException/IOException reload() catches, since production never needs to
+ // catch a classpath problem that cannot occur on the real moddev/NeoForge runtime). Covered only
+ // by the runtime-smoke/acceptance path, same as load() always has been (see this class's own
+ // doc) - reload()'s actual per-field validation/extends-chain/last-known-good logic is already
+ // exercised indirectly above via the extends/cycle/precedence tests against readAndValidate's
+ // shared helper, minus only the file-I/O wrapper itself.
 }

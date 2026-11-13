@@ -1,4 +1,12 @@
 {
+  "templates": {
+    "sporty-base": {
+      "friction": 1.2,
+      "driveForce": 10000.0,
+      "brakeForce": 13000.0,
+      "maxSteerDegrees": 32.0
+    }
+  },
   "vehicles": {
     "examplepack:ordinary_car": {
       "massKg": 1450.0,
@@ -17,6 +25,16 @@
     },
     "examplepack:known_bad_car": {
       "enabled": false
+    },
+    "examplepack:sporty_car": {
+      "extends": "sporty-base",
+      "massKg": 1250.0,
+      "driveForce": 11000.0
+    }
+  },
+  "parts": {
+    "examplepack:high_output_engine": {
+      "driveForce": 9500.0
     }
   }
 }

@@ -106,6 +106,112 @@ public final class PhysicsBridge {
   // partial override), so callers must never read it directly.
   return Overrides.resolved(definition.packID + ":" + definition.systemName);
  }
+ /**
+  * Review finding (ticket 53518/MINECRAFT-505, self-review 53542 and John's comment 53539):
+  * {@code Overrides.resolvedPart} existed with no actual production consumer, so a configured
+  * {@code parts} entry never affected real physics. This wires exactly one documented, concrete
+  * field - an engine part's own drive force - into {@code stepGround}'s existing drive-force
+  * computation, as the deliberate vehicle/part precedence: an explicit part-level {@code
+  * driveForce} override, if this specific engine part has one, wins outright over the vehicle's
+  * own resolved {@code driveForce} (not stacked/multiplied with it - a part saying "my own drive
+  * force is X" is a complete replacement, not a modifier); otherwise the vehicle's already-
+  * resolved value is used completely unchanged, so an installation with no part overrides at all
+  * behaves byte-identically to before this ticket. {@code Overrides.effectivePartOverride}
+  * (unlike {@code resolvedPart}) returns {@code null} - never the flat fallback - for a field the
+  * part says nothing about, which is exactly the signal needed to tell "no override" apart from
+  * "override explicitly set it".
+  */
+ static double enginePartDriveForce(String partKey, double vehicleDriveForce) {
+  var partOverride = Overrides.effectivePartOverride(partKey);
+  return (partOverride != null && partOverride.driveForce != null) ? partOverride.driveForce : vehicleDriveForce;
+ }
+ /**
+  * Which {@code Overrides.Tuning} fields a currently-active {@code Body}/{@code BuoyantBody}
+  * already re-reads fresh from its own live {@code tuning} object every tick/call, rather than
+  * caching into a separate field at construction time (ticket 53518/MINECRAFT-505) - confirmed
+  * by direct inspection of every {@code tuning.X} read site in this file (stepGround/stepFlight/
+  * stepRotor) and in BuoyantForces.apply (waterDrag/propellerForce): suspensionTravel/friction/
+  * driveForce/brakeForce/maxSteerDegrees/lateralGripMultiplier/waterDrag/propellerForce. Mutating
+  * the SAME live Tuning object's one of these fields in place therefore takes effect on that
+  * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
+  * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
+  * {@code selfRight*}, {@code enabled}) is read exactly ONCE, at {@code Body}/{@code
+  * BuoyantBody}'s own constructor, and baked into a separate cached field ({@code mass},
+  * {@code inertiaBody}, {@code hullVolume}, {@code selfRight}, {@code twoBodyConfig}, this
+  * vehicle's category eligibility) - changing one of THOSE in the live config file cannot take
+  * effect on an already-active body at all; {@link #reloadOverrides} reports those by name
+  * instead of silently pretending they applied. Re-spawning the vehicle (or any other event that
+  * triggers a fresh {@code Body}/{@code BuoyantBody} construction, e.g. {@code
+  * active()}'s existing category-change/chassisBoundsChanged replacement paths) is what actually
+  * picks up a new value for one of these - this ticket does not add a new mechanism for that,
+  * it only documents the existing one as the correct answer for "how do I make THIS field change
+  * live" instead of a caller silently assuming reload alone always finishes the job.
+  */
+ static void applyLiveSafeFields(Overrides.Tuning target, Overrides.Tuning fresh, java.util.List<String> appliedOut) {
+  if (!java.util.Objects.equals(target.suspensionTravel, fresh.suspensionTravel)) { target.suspensionTravel = fresh.suspensionTravel; appliedOut.add("suspensionTravel"); }
+  if (!java.util.Objects.equals(target.friction, fresh.friction)) { target.friction = fresh.friction; appliedOut.add("friction"); }
+  if (!java.util.Objects.equals(target.driveForce, fresh.driveForce)) { target.driveForce = fresh.driveForce; appliedOut.add("driveForce"); }
+  if (!java.util.Objects.equals(target.brakeForce, fresh.brakeForce)) { target.brakeForce = fresh.brakeForce; appliedOut.add("brakeForce"); }
+  if (!java.util.Objects.equals(target.maxSteerDegrees, fresh.maxSteerDegrees)) { target.maxSteerDegrees = fresh.maxSteerDegrees; appliedOut.add("maxSteerDegrees"); }
+  if (!java.util.Objects.equals(target.lateralGripMultiplier, fresh.lateralGripMultiplier)) { target.lateralGripMultiplier = fresh.lateralGripMultiplier; appliedOut.add("lateralGripMultiplier"); }
+  if (!java.util.Objects.equals(target.waterDrag, fresh.waterDrag)) { target.waterDrag = fresh.waterDrag; appliedOut.add("waterDrag"); }
+  if (!java.util.Objects.equals(target.propellerForce, fresh.propellerForce)) { target.propellerForce = fresh.propellerForce; appliedOut.add("propellerForce"); }
+ }
+ /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
+  * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
+  * {@link #reloadOverrides}'s caller can tell the operator "X needs a respawn" instead of either
+  * silently doing nothing or wrongly claiming everything applied. */
+ static void reportFieldsNeedingRespawn(Overrides.Tuning target, Overrides.Tuning fresh, java.util.Set<String> pendingOut) {
+  if (!java.util.Objects.equals(target.massKg, fresh.massKg)) pendingOut.add("massKg");
+  if (!java.util.Objects.equals(target.hullFillFactor, fresh.hullFillFactor)) pendingOut.add("hullFillFactor");
+  if (!java.util.Objects.equals(target.upperMassFraction, fresh.upperMassFraction)) pendingOut.add("upperMassFraction");
+  if (!java.util.Objects.equals(target.enabled, fresh.enabled)) pendingOut.add("enabled");
+  boolean selfRightChanged = !java.util.Objects.equals(target.selfRightStrength, fresh.selfRightStrength)
+    || !java.util.Objects.equals(target.selfRightDamping, fresh.selfRightDamping)
+    || !java.util.Objects.equals(target.selfRightMaxTorque, fresh.selfRightMaxTorque)
+    || !java.util.Objects.equals(target.selfRightFadeStartDegrees, fresh.selfRightFadeStartDegrees)
+    || !java.util.Objects.equals(target.selfRightFadeEndDegrees, fresh.selfRightFadeEndDegrees);
+  if (selfRightChanged) pendingOut.add("selfRight*");
+ }
+ /**
+  * Outcome of {@link #reloadOverrides} - {@code configResult} is {@code Overrides.reload()}'s
+  * own success/failure/last-known-good report; {@code vehiclesUpdatedLive} counts how many
+  * currently-active vehicle bodies actually had at least one field change live; {@code
+  * fieldsNeedingRespawn} names every field (deduplicated, across every active vehicle) that
+  * changed in the new config but could NOT be applied without reconstructing that vehicle's
+  * body - the ticket's explicit "document any properties needing respawn" requirement. Empty
+  * when {@code configResult.success()} is false (nothing was touched at all).
+  */
+ public record ReloadReport(Overrides.ReloadResult configResult, int vehiclesUpdatedLive, java.util.Set<String> fieldsNeedingRespawn) {}
+ /**
+  * The actual hot-reload entry point (ticket 53518/MINECRAFT-505) - re-reads/validates the
+  * operator config via {@link Overrides#reload}, and on success, propagates it into every
+  * currently-active {@code Body}/{@code BuoyantBody} (both implement {@code VehicleBody}, so
+  * this needs no per-domain special-casing) by re-resolving that vehicle's own tuning and
+  * live-mutating the fields {@link #applyLiveSafeFields} says are safe - never touching pose,
+  * velocity, hitches, or any other part of a vehicle's live physics state, exactly the "preserve
+  * pose/velocity/topology" requirement, since nothing about construction/replacement runs here
+  * at all. On a failed {@code Overrides.reload()} (bad JSON, out-of-range field, bad {@code
+  * extends}), this makes NO changes to any active body either - last-known-good propagates all
+  * the way through, not just at the config layer.
+  */
+ public static ReloadReport reloadOverrides() {
+  var configResult = Overrides.reload();
+  if (!configResult.success()) return new ReloadReport(configResult, 0, java.util.Set.of());
+  int[] updatedCount = {0};
+  var pendingFields = new java.util.TreeSet<String>();
+  registry.forEachActive((v, body) -> {
+   JSONVehicle definition = v.definition;
+   if (definition == null) return;
+   Overrides.Tuning fresh = tuning(definition);
+   Overrides.Tuning live = body.tuning();
+   var applied = new java.util.ArrayList<String>();
+   applyLiveSafeFields(live, fresh, applied);
+   reportFieldsNeedingRespawn(live, fresh, pendingFields);
+   if (!applied.isEmpty()) updatedCount[0]++;
+  });
+  return new ReloadReport(configResult, updatedCount[0], pendingFields);
+ }
  /** Any ground-contact device (wheel or track) the generalized suspension/friction solver can drive. */
  private static List<PartGroundDevice> groundContacts(EntityVehicleF_Physics v) {
   return v.allParts.stream().filter(p -> p instanceof PartGroundDevice g && g.definition != null
@@ -1152,6 +1258,7 @@ public final class PhysicsBridge {
    }
   }
   public Object level() { return level; }
+  public Overrides.Tuning tuning() { return tuning; }
   public void remove() {
    var c=SubLevelContainer.getContainer(level);
    if (c==null) return;
@@ -1214,7 +1321,8 @@ public final class PhysicsBridge {
   private boolean stepGround(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d angular, Vector3d velocity, Vector3d up) {
    double rawDrive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
-    rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
+    rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue
+      *enginePartDriveForce(engine.definition.packID+":"+engine.definition.systemName, tuning.driveForce);
    // G29/wheel analog brake pedal strength (ticket MINECRAFT-504, comment 52840/53522) - IV's own
    // brakeVar.currentValue (ComputedVariable) already carries the real 0-1 pedal magnitude from
    // its ControlsJoystick.CAR_BRAKE axis (isActive is merely currentValue>0 - see that class's own
