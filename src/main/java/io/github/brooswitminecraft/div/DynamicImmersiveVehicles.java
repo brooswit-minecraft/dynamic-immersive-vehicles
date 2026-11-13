@@ -1,15 +1,29 @@
 package io.github.brooswitminecraft.div;
+import io.github.brooswitminecraft.div.client.DivClientConfig;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.config.ModConfig;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 @Mod("dynamicimmersivevehicles")
 public final class DynamicImmersiveVehicles {
- public DynamicImmersiveVehicles() {
+ public DynamicImmersiveVehicles(IEventBus modEventBus, ModContainer modContainer) {
   GroundContactDiagnostics.logStartupMarker(PhysicsBridge.resolveDebugGroundContactTicks(System.getProperty("div.debugGroundContactTicks")),
     PhysicsBridge.effectiveFrictionSolverIterations());
   Overrides.load();
   GroundSurfaceOverrides.load();
+  // Ticket MINECRAFT-504: client-only wheel-aux config (hybrid H-pattern/paddle shift toggle,
+  // analog handbrake calibration) - safe to register unconditionally on both sides, same as
+  // every other NeoForge mod's CLIENT config (FML simply never loads/uses it on a dedicated
+  // server).
+  modContainer.registerConfig(ModConfig.Type.CLIENT, DivClientConfig.SPEC);
+  modEventBus.addListener((RegisterPayloadHandlersEvent event) -> {
+   var registrar = event.registrar("1");
+   registrar.playToServer(WheelAuxPayload.TYPE, WheelAuxPayload.STREAM_CODEC, WheelAuxPayload::handle);
+  });
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
   // Ticket 53518 (MINECRAFT-505): bounded, periodic operator-config hot reload - see
   // OverridesHotReload's own doc for why mtime-polling, and PhysicsBridge.reloadOverrides for

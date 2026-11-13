@@ -275,34 +275,58 @@ Deliberately **not** mapped: `CAR_GUN_FIRE`/`CAR_GUN_SWITCH` (weapon controls -
 has no sensible weapon-trigger affordance and nothing in this ticket's scope
 calls for one).
 
-**Two native constraints, not DIV bugs, worth stating plainly rather than
-glossing over:**
+### Hybrid H-pattern + paddle shifting, and an analog handbrake (DIV additions)
 
-- **`useShifter` is a single exclusive toggle, not independent per-control.**
-  Reading IV's own `ControlSystem.controlGroundVehicle` directly: when
-  `useShifter=true`, only the H-pattern `CAR_SHIFT_1`-`R` branch runs and the
-  paddle/sequential `CAR_SHIFT_U`/`CAR_SHIFT_D` branch is skipped entirely
-  (and vice versa) - IV does not support H-pattern direct-select and
-  paddle sequential-shift being simultaneously active. Since paddles shifting
-  gears is the explicit firm requirement (ticket comment 53524), the setting
-  that satisfies it is **`useShifter=false`** - the physical H-pattern
-  shifter's gear positions will not directly select a gear in that mode (its
-  shift-up/shift-down micro-switches, if it has them, could still be bound to
-  `CAR_SHIFT_U`/`CAR_SHIFT_D` alongside the paddles, but its H-pattern gate
-  itself would do nothing). If H-pattern direct-select is wanted instead,
-  `useShifter=true` is required and the paddles go inert - this is a real
-  either/or in the installed mod, not a configuration bug to fix.
-- **IV has no analog handbrake control at all** - `CAR_PARK` is the only
-  parking/handbrake-adjacent control and it is a plain digital toggle (see
-  the enum's own `isMomentary=true`/boolean definition), not an axis. There
-  is no separate "handbrake" input distinct from the existing parking brake
-  to bind a future handbrake device to, and this project is not adding one -
-  that would be new DIV code building a parallel input stack, which is out
-  of this ticket's scope. When the handbrake hardware arrives, the practical
-  option is binding it to the existing `CAR_PARK` toggle (full-stop,
-  digital), explicitly documented here as the supported semantic rather than
-  silently treated as either a full service brake or assumed to already
-  support analog pull strength.
+Two things native IV genuinely cannot do on its own (ticket comments
+53572/53573 - "they should work together", not merely pick one mode):
+
+- **H-pattern direct-select and paddle sequential-shift simultaneously.**
+  IV's own `useShifter` setting is a single exclusive toggle (reading
+  `ControlSystem.controlGroundVehicle` directly: `useShifter=true` runs only
+  the H-pattern `CAR_SHIFT_1`-`R` branch, `useShifter=false` runs only the
+  paddle/sequential `CAR_SHIFT_U`/`CAR_SHIFT_D` branch - never both). Fixed
+  with `useShifter=false` (so native's own paddle handling keeps working,
+  completely unmodified) plus a small DIV addition (`HPatternShifter`,
+  `WheelAuxInput`): this project reads the H-pattern's own `CAR_SHIFT_1`-`R`
+  bindings *directly*, independent of `useShifter`, and drives
+  `PartEngine`'s public `shiftUp()`/`shiftDown()`/`shiftNeutral()` itself.
+  Native's own `shiftSelectionVar` (which only `useShifter=true` touches) is
+  never written to, so there is nothing left to fight over. The one
+  deliberately-preserved native limitation: a direct-select request only
+  ever climbs *up* toward a higher-numbered gear, never down to a lower one
+  (confirmed in IV's own `shiftSelectionVar` branch) - this project matches
+  that exactly rather than "fixing" behavior outside its scope. The one
+  behavior this project does NOT inherit from native: a held H-pattern
+  slot never re-asserts itself once reached, so an independent paddle
+  downshift below that held slot is never silently reverted back up
+  (`HPatternShifter.Tracker` latches "already reached" per target value,
+  only resuming a climb when the shifter moves to a genuinely different
+  slot) - see `HPatternShifterTest` for the exact scenario.
+- **An analog handbrake.** IV has no analog handbrake control at all -
+  `CAR_PARK` is the only parking/handbrake-adjacent control, and it is a
+  plain digital toggle. This project adds one: configure
+  `wheel.handbrakeAxis` (client config) to a joystick axis on the SAME
+  device already configured for `CAR_TURN` in IV's controls GUI, with its
+  own `handbrakeAxisMin`/`Max`/`Invert`/`Deadzone` - genuinely independent
+  calibration from the service brake pedal and from `CAR_PARK`. Server-side,
+  its 0-1 magnitude is combined with the service-brake magnitude as
+  `max(serviceBrake, handbrake)` (`WheelAxisCalibration`,
+  `PhysicsBridge.setHandbrakeMagnitude`) - both ultimately ask the same
+  wheels to stop harder, so whichever is asking for more wins that tick,
+  with no double-counting past the existing brake-force cap. Missing/
+  disabled/disconnected always resolves to exactly 0.0, never a stale value.
+
+Both are small, targeted additions (two new small files plus the client
+input reader - not a parallel full control stack), configured via a new
+`wheel` section in this mod's own CLIENT config (`hybridShiftEnabled`,
+defaulting on; `handbrakeAxis`, defaulting to `-1`/disabled since no
+handbrake hardware is connected yet per Zippy's own device inventory -
+ticket comment 53557). `HPatternShifterTest`/`WheelAxisCalibrationTest`
+cover the pure logic directly; the actual client-side joystick reading and
+networking are not unit-testable without a live Minecraft/NeoForge runtime
+(same pre-existing boundary VERIFICATION.md already documents elsewhere in
+this project) and remain John's own device-level verification once the
+wheel/shifter/handbrake hardware is connected.
 
 ## Configuration
 

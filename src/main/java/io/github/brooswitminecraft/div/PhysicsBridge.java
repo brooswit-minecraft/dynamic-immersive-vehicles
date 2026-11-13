@@ -38,6 +38,45 @@ import java.util.function.Supplier;
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
 public final class PhysicsBridge {
  private static final BodyRegistry<EntityVehicleF_Physics, VehicleBody> registry = new BodyRegistry<>();
+ // G29/wheel hybrid H-pattern + paddle shifting and analog handbrake (ticket MINECRAFT-504,
+ // comments 53557/53572/53573). Keyed by entity identity (IdentityHashMap), matching this
+ // class's existing per-vehicle-state pattern (brokenDefinitions/pendingInheritedVelocity
+ // above) - cleaned up from the SAME cleanup()/unload() sweeps those use, so a vehicle that
+ // despawns or whose level unloads can never leak an entry here either.
+ private static final java.util.Map<EntityVehicleF_Physics, Double> handbrakeMagnitude = new IdentityHashMap<>();
+ private static final java.util.Map<PartEngine, HPatternShifter.Tracker> hPatternTrackers = new IdentityHashMap<>();
+ /**
+  * Client → server: the live analog handbrake pedal/lever magnitude (0-1), read and calibrated
+  * entirely client-side (own axis, own deadzone, own inversion - never the service-brake axis
+  * or the native digital parking-brake toggle). Safe to call every tick; a missing/disabled
+  * channel is simply 0.0 from the caller's own {@code WheelAxisCalibration}, never stale.
+  */
+ public static void setHandbrakeMagnitude(EntityVehicleF_Physics v, double magnitude) {
+  handbrakeMagnitude.put(v, Math.max(0.0, Math.min(1.0, magnitude)));
+ }
+ /**
+  * Client → server: the physical H-pattern shifter's currently-read slot (see {@link
+  * HPatternShifter} for the sentinel values), applied directly via {@code PartEngine}'s public
+  * {@code shiftUp()}/{@code shiftDown()}/{@code shiftNeutral()} - entirely independent of IV's
+  * own {@code useShifter} setting and its {@code shiftSelectionVar}, so native's own
+  * {@code useShifter=false} paddle handling (already shipped, unmodified) keeps working
+  * alongside this untouched. One {@link HPatternShifter.Tracker} per engine part (a vehicle
+  * with multiple engines gets independent climb state for each, matching how IV already lets
+  * multi-engine vehicles shift independently) - looked up by the engine's own identity, not the
+  * vehicle's, so adding/removing engine parts never confuses one engine's climb state for
+  * another's.
+  */
+ public static void applyHPatternTarget(EntityVehicleF_Physics v, int target) {
+  for (var part : v.allParts) if (part instanceof PartEngine engine) {
+   var tracker = hPatternTrackers.computeIfAbsent(engine, ignored -> new HPatternShifter.Tracker());
+   switch (tracker.nextAction((int)engine.currentGearVar.currentValue, target)) {
+    case SHIFT_UP -> engine.shiftUp();
+    case SHIFT_DOWN -> engine.shiftDown();
+    case NEUTRAL -> engine.shiftNeutral();
+    case NONE -> {}
+   }
+  }
+ }
  /**
   * Ticket 53385's concrete, confirmed defect: Body's own constructor always seeds BOTH halves'
   * angular velocity to exactly zero ({@code addLinearAndAngularVelocity(initialVelocity, new
@@ -620,6 +659,10 @@ public final class PhysicsBridge {
   // This sweep is independent of BodyRegistry, keyed only by pendingInheritedVelocity's own
   // staged entries, so it still finds and removes that exact orphan case.
   pendingInheritedVelocity.removeIf(v -> !v.isValid);
+  // Ticket MINECRAFT-504: same leak shape as pendingInheritedVelocity above, for the wheel
+  // handbrake/H-pattern state - independent of BodyRegistry, swept directly against validity.
+  handbrakeMagnitude.keySet().removeIf(v -> !v.isValid);
+  hPatternTrackers.keySet().removeIf(engine -> !engine.isValid);
  }
  public static void unload(Object level) {
   registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
@@ -628,6 +671,8 @@ public final class PhysicsBridge {
   // active()'s own lifecycle-refresh path already uses), not from any Body, so this needs no
   // BodyRegistry lookup at all.
   pendingInheritedVelocity.removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  handbrakeMagnitude.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  hPatternTrackers.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**
@@ -1331,6 +1376,16 @@ public final class PhysicsBridge {
    // than contributing a magnitude. Clamped defensively since nothing upstream guarantees the
    // ComputedVariable stays within 0-1 (e.g. a modpack-side script writing it directly).
    double brakeMagnitude=v.parkingBrakeVar.isActive?1.0:Math.max(0.0,Math.min(1.0,v.brakeVar.currentValue));
+   // Analog handbrake (ticket MINECRAFT-504, comment 53572) - a genuinely separate, independently
+   // calibrated input (own axis/deadzone/inversion, read and set via setHandbrakeMagnitude), not
+   // conflated with the service brake pedal above or the native digital parking-brake toggle.
+   // Composed as the larger of the two magnitudes rather than summed/clamped-separately: a real
+   // handbrake and a real brake pedal both ultimately ask the same wheels to stop harder, so
+   // whichever input is asking for more braking this tick wins, with no double-counting past
+   // tuning.brakeForce's own single cap. Defaults to 0.0 (no effect) for any vehicle never sent a
+   // handbrake magnitude at all - a missing channel is never treated as "fully applied".
+   double handbrakeMagnitudeThisTick=handbrakeMagnitude.getOrDefault(v,0.0);
+   brakeMagnitude=Math.max(brakeMagnitude,handbrakeMagnitudeThisTick);
    boolean braking=brakeMagnitude>0.0;
    // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - bypassed
    // (drive==rawDrive) unless EXPERIMENTAL_THROTTLE_RAMP_TICKS>0. The rate is THIS vehicle's own
