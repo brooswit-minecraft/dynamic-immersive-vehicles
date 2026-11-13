@@ -615,13 +615,17 @@ direction a stiffer real anti-roll bar does), it does not equalize their
 raw loads. It runs after each wheel's own independently-computed suspension
 load (static load share, spring, damper, compression, the existing
 per-wheel ground solve - see [`WheelLoadDistribution`](src/main/java/io/github/brooswitminecraft/div/WheelLoadDistribution.java)),
-and compares each side's load against ITS OWN static-equilibrium baseline
-(`mass*gravity*loadShare`) rather than against the pair's raw average - an
-asymmetric axle (COM off-center between the pair) legitimately carries
-unequal static loads with zero actual roll, and comparing against the raw
-average would manufacture a roll torque that was never really there. The
-rest of the solve (friction budget, drive/brake, native sync) then sees
-that already-redistributed load like any other.
+and derives the coupling from each side's DIFFERENTIAL TRAVEL (raw
+suspension compression), not its load - every wheel's calibrated rest
+compression is the same regardless of its own static share, so a true
+common-mode heave/bounce (both sides moving the same real distance) or a
+common sink velocity produces zero transfer, even though an asymmetric
+axle's (COM off-center between the pair) two wheels legitimately run
+different spring rates and therefore different loads for that same shared
+compression. The travel difference is converted to a force via the pair's
+own average calibrated spring rate before being applied. The rest of the
+solve (friction budget, drive/brake, native sync) then sees that
+already-redistributed load like any other.
 
 Axle/side pairing is purely geometric - two wheels pair iff they share the
 same longitudinal anchor and sit on strictly opposite sides of the chassis

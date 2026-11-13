@@ -1863,16 +1863,20 @@ public final class PhysicsBridge {
    // pair where BOTH sides currently have a real hit is ever coupled (hitIndexForWheel[...]<0 for
    // an airborne/missing/unsupported-layout partner skips that wheel entirely - see class doc's
    // "left completely untouched" and the ticket's own "airborne/contact transitions" case).
-   // Review correction (comments 53750/53752): AntiRoll.transfer couples each side's DEVIATION
-   // from its OWN static-equilibrium baseline (mass*gravity*loadShares[wi] - the exact load
-   // suspensionSpringForShare already calibrates this wheel's spring to support at rest), not
-   // the raw normal - an asymmetric axle (unequal loadShares, e.g. COM off-center between the
-   // pair) sitting exactly at its own correct static split gets ZERO transfer regardless of how
-   // different those two baselines are from each other, and an actual roll disturbance gets a
-   // LARGER restoring differential than the uncoupled pair would have, never a smaller one.
-   // Bypassed entirely (zero allocation, zero behavior change) when stiffness is exactly the
-   // documented 0 FALLBACK - the ticket's explicit "default zero/off preserving accepted
-   // handling" and zero/default-equivalence expectation.
+   // Review correction #2 (comment 53770 - over the first correction, comments 53750/53752):
+   // AntiRoll.transfer now couples DIFFERENTIAL TRAVEL (each side's own raw WheelHit.compression(),
+   // common-heave/common-velocity-neutral by construction since every wheel's calibrated rest
+   // compression is the SAME tuning.suspensionTravel*.5 regardless of its own loadShare/rate -
+   // see AntiRoll's own class doc), converted to a force via the pair's own average calibrated
+   // spring rate (suspensionSpringForShare(mass,loadShares[...],...), the SAME per-wheel rate
+   // already used above to build wheelSpring - not the earlier (and still wrong whenever the
+   // pair's rates differ) force-baseline-deviation attempt. An asymmetric axle (unequal
+   // loadShares) sitting at a genuinely common compression (no actual roll) gets ZERO transfer
+   // regardless of how different the pair's own rates are; an actual roll disturbance (a real
+   // compression difference) gets a LARGER restoring differential than the uncoupled pair would
+   // have, never a smaller one. Bypassed entirely (zero allocation, zero behavior change) when
+   // stiffness is exactly the documented 0 FALLBACK - the ticket's explicit "default zero/off
+   // preserving accepted handling" and zero/default-equivalence expectation.
    if (!hits.isEmpty() && tuning.antiRollStiffness != null && tuning.antiRollStiffness > 0) {
     int[] pairPartner=AntiRoll.pairPartners(loadShareX,loadShareZ);
     int[] hitIndexForWheel=new int[wheels.size()];
@@ -1886,8 +1890,9 @@ public final class PhysicsBridge {
      int hi=hitIndexForWheel[wi], hj=hitIndexForWheel[partnerWi];
      if (hi<0 || hj<0) continue; // one or both sides not actually grounded this tick - leave both alone
      double normalA=hits.get(hi).normal(), normalB=hits.get(hj).normal();
-     double baselineA=mass*gravity*loadShares[wi], baselineB=mass*gravity*loadShares[partnerWi];
-     double t=AntiRoll.transfer(normalA,baselineA,normalB,baselineB,tuning.antiRollStiffness);
+     double rateA=suspensionSpringForShare(mass,loadShares[wi],tuning.suspensionTravel,gravity);
+     double rateB=suspensionSpringForShare(mass,loadShares[partnerWi],tuning.suspensionTravel,gravity);
+     double t=AntiRoll.transfer(hits.get(hi).compression(),hits.get(hj).compression(),rateA,rateB,normalA,normalB,tuning.antiRollStiffness);
      newNormal[hi]=normalA+t;
      newNormal[hj]=normalB-t;
     }
