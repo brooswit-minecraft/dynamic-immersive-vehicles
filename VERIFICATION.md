@@ -1470,3 +1470,41 @@ peers (MINECRAFT-519 et al.) used, not merely the manual javac/JUnit
 substitute above - that manual run remains useful as the faster, narrower
 confirmation during iteration, but this Gradle run is the evidence John's
 comment asked for.**
+
+**Merged-head Gradle build/test (John's comment 53762: "obtain merged-head
+Gradle evidence through the shared Servy slot" after integrating
+MINECRAFT-520's already-merged brake-bias work, PR #18/53d666d, into this
+branch).** `git merge origin/main` brought in `Overrides.Tuning#
+brakeBiasFront`/`BrakeBiasDistribution`/`BrakeBiasDistributionTest`/
+`ServiceBrakeBiasTest` (MINECRAFT-520), conflicting with this ticket's own
+changes to the exact same `Overrides.java`/`PhysicsBridge.java` regions
+(`validate()`, `validateSupportedForPart()`, `copy()`, `mergeOntoParent()`,
+`resolveFields()`, `applyLiveSafeFields()`, plus the matching doc-comment
+sentences, `README.md`, and the copyable example JSON) - every conflict was
+resolved by hand, keeping BOTH sides' fields side by side rather than
+dropping either (the brief's own "resolve conflicts without dropping either
+side" requirement). New head: `b6a8eb67334c13867f16b04bdb5594f35b739e3d`, a
+real merge commit, not a mechanical no-conflict fast-forward - this
+invalidated the prior GitHub approval at `0635c648` (re-requested review at
+this head per this repo's own changed-head-requires-re-review rule).
+
+Same local slot-lock coordination with MINECRAFT-519 as the prior run (held
+for this run's duration, released immediately after; confirmed no other
+gradle/java build process of mine was active before starting - a second,
+unrelated `gradle test --offline` process against a DIFFERENT checkout path
+(`~/code/brooswit-minecraft/dynamic-immersive-vehicles`, not any task
+workspace) was observed running concurrently on this host during this run,
+started by something outside this ticket's own control - the local
+slot-lock file is this session's own coordination mechanism with
+MINECRAFT-519 specifically, not a host-wide enforced lock, so it cannot by
+itself prevent an unrelated process elsewhere from running at the same
+time; this run still reached `BUILD SUCCESSFUL` regardless).
+`gradle --offline clean build test` at head `b6a8eb6` - `BUILD SUCCESSFUL`,
+8 tasks (8 executed, 0 up-to-date - a true `clean` this time, nothing
+reused from the prior run). The real JUnit XML reports total **567 tests**,
+0 skipped, 0 failures, 0 errors (542 from this ticket's own prior run plus
+MINECRAFT-520's own `BrakeBiasDistributionTest`/`ServiceBrakeBiasTest` and
+its `OverridesTest`/`PhysicsBridgeLiveOverrideApplicationTest` additions,
+now exercised together for the first time at this merged head).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
+again at this new head.
