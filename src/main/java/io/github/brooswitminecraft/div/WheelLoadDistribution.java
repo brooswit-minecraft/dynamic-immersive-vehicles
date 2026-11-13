@@ -31,18 +31,25 @@ package io.github.brooswitminecraft.div;
  * matches real vehicle behavior (the corner nearer the center of mass carries more of the static
  * load, the corner farther away carries less).
  *
- * <p><b>Bounded validation (no NaN/negative/divide-by-zero on degenerate geometry).</b> Zero
+ * <p><b>Bounded validation (no NaN/negative/zero/divide-by-zero on degenerate geometry).</b> Zero
  * wheels returns an empty array; one wheel always returns {@code [1.0]}; a singular system (e.g.
  * every wheel collinear in a way that leaves the 3x3 matrix non-invertible, or all wheels at the
  * same point) falls back to the even {@code 1/n} split for every wheel, rather than dividing by a
- * near-zero determinant. A solved share that comes out negative or non-finite (a geometrically
- * implausible layout for this rigid-equal-spring model) also falls back to the even split for
- * EVERY wheel, not a per-wheel clamp - the same "cap the TRANSFER, never independently clamp one
- * wheel's result" lesson this ticket's own DV-reference triage names for anti-roll: clamping one
- * wheel's share without rebalancing the rest would manufacture load out of nowhere (shares would
- * no longer sum to 1.0). Every returned array always sums to exactly 1.0 (defensively
- * renormalized after the solve, since floating-point division can drift a few ULPs away from
- * exact).
+ * near-zero determinant. A solved share that comes out non-positive (zero OR negative) or non-
+ * finite also falls back to the even split for EVERY wheel, not a per-wheel clamp - the same "cap
+ * the TRANSFER, never independently clamp one wheel's result" lesson this ticket's own DV-
+ * reference triage names for anti-roll: clamping one wheel's share without rebalancing the rest
+ * would manufacture load out of nowhere (shares would no longer sum to 1.0). A share of EXACTLY
+ * zero is rejected, not just negative ones: ticket review (comment 53678) named a real case -
+ * {@code x={-1,1,-1,1}, z={0,0,2,2}}, COM sitting exactly over one axle - where this rigid-plank
+ * model's own correct statics puts the far axle's static share at exactly zero. Feeding that
+ * straight into {@code suspensionSpringForShare} would calibrate spring=damper=0 for those
+ * wheels, PERMANENTLY disabling their installed suspension (dividing by a zero rate later gives
+ * no force at all, not just a small one) - including for any later pitch/landing that compresses
+ * them, which this static calibration has no way to foresee. A momentarily-zero static share is
+ * exactly the kind of geometrically-correct-but-operationally-unsafe result the even-split
+ * fallback exists for. Every returned array always sums to exactly 1.0 (defensively renormalized
+ * after the solve, since floating-point division can drift a few ULPs away from exact).
  */
 public final class WheelLoadDistribution {
  private WheelLoadDistribution() {}
@@ -77,7 +84,7 @@ public final class WheelLoadDistribution {
   double sum = 0;
   for (int i = 0; i < n; i++) {
    double s = a + b * z[i] + c * x[i];
-   if (!Double.isFinite(s) || s < 0) return evenShares;
+   if (!Double.isFinite(s) || s <= 0) return evenShares;
    result[i] = s;
    sum += s;
   }

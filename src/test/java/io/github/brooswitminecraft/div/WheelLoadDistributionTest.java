@@ -123,4 +123,21 @@ class WheelLoadDistributionTest {
    assertEquals(1.0, s, 1e-6, "trial "+trial+": shares must sum to exactly 1.0");
   }
  }
+ @Test void comOverOneAxleFallsBackToTheEvenSplitRatherThanZeroingTheFarAxle() {
+  // Ticket review comment 53678's exact reproduction: a 4-wheel layout whose COM (the origin,
+  // since x/z are already COM-relative) sits exactly over the z=0 axle. This rigid-plank
+  // model's own correct statics would otherwise put the z=2 axle's share at EXACTLY zero -
+  // geometrically honest, but PhysicsBridge.suspensionSpringForShare would then calibrate
+  // spring=damper=0 for those two wheels, PERMANENTLY disabling their installed suspension
+  // (never able to react even if later pitch/landing compresses them). This must instead
+  // fall back to the even split for every wheel, exactly like the other degenerate cases.
+  double[] x = {-1, 1, -1, 1};
+  double[] z = {0, 0, 2, 2};
+  double[] shares = WheelLoadDistribution.shares(x, z);
+  assertEquals(1.0, sum(shares), 1e-9);
+  for (double s : shares) {
+   assertTrue(s > 0, "no wheel's static share may be zero (or negative) - an installed suspension must always get a positive calibrated rate");
+   assertEquals(0.25, s, 1e-9, "a COM-over-one-axle layout must fall back to the even split, not a zeroed far axle");
+  }
+ }
 }
