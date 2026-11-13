@@ -150,4 +150,19 @@ class RotorForcesTest {
  @Test void yawTorqueScaleGrantsNoUnpoweredFreeTorqueAtZeroThrust() {
   assertEquals(0, RotorForces.yawTorque(Math.toRadians(10), 0, 2, 5.0), 1e-9);
  }
+
+ @Test void cyclicLimitDegreesIsAPerAxisClampNotACombinedDiskAngleBound() {
+  // John's review (comment 53751): cyclicLimitDegrees clamps pitch and roll INDEPENDENTLY - same
+  // as this class's own prior fixed 20-degree constant always did (PhysicsBridge.stepRotor calls
+  // cyclicTilt separately for tiltPitch and tiltRoll) - so the COMBINED disk tilt
+  // (hypot of both axes) can exceed the configured/default number when both axes are near their
+  // own limit at once. This is unchanged, original behavior, not something this ticket introduces.
+  double limit = Math.toRadians(45);
+  double pitch = RotorForces.cyclicTilt(Math.toRadians(90), limit);
+  double roll = RotorForces.cyclicTilt(Math.toRadians(90), limit);
+  assertEquals(limit, pitch, 1e-9); assertEquals(limit, roll, 1e-9);
+  double combined = Math.hypot(pitch, roll);
+  assertTrue(combined > limit, "combined (hypot) disk tilt must be allowed to exceed the per-axis limit - it is not a total-disk-angle bound");
+  assertEquals(Math.toRadians(45 * Math.sqrt(2)), combined, 1e-9);
+ }
 }

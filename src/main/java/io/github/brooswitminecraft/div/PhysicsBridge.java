@@ -2279,8 +2279,10 @@ public final class PhysicsBridge {
    * own thrust/attitude, which stays correct either way since a rotor sitting above a floating
    * hull is never itself submerged.
    *
-   * <p>MINECRAFT-522: {@code tuning.cyclicLimitDegrees} bounds the cyclic tilt clamp (replacing
-   * {@link RotorForces}'s own fixed 20-degree default when configured), and {@code
+   * <p>MINECRAFT-522: {@code tuning.cyclicLimitDegrees} bounds the PER-AXIS cyclic tilt clamp
+   * (pitch and roll independently - same as this method already did with the fixed 20-degree
+   * constant; NOT a combined/total-disk-angle bound, so the combined tilt can still exceed this
+   * number when both axes are near their limit at once), and {@code
    * tuning.cyclicAuthorityScale}/{@code tuning.yawAuthorityScale} multiply the already
    * thrust-gated cyclic/yaw torque ({@link RotorForces#cyclicTorque(double,double,double,double)}/
    * {@link RotorForces#yawTorque(double,double,double,double)}). All three default to the exact

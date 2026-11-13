@@ -108,11 +108,15 @@ public final class Overrides {
   public Double lateralGripMultiplier;
   // MINECRAFT-522: rotorcraft-only cyclic/yaw tuning, mirroring RotorForces.cyclicTilt's own
   // bounded-clamp contract and RotorForces.cyclicTorque/yawTorque's new authority-scale overloads
-  // - see those methods' own docs. cyclicLimitDegrees bounds how far the disk can be tilted
-  // (replacing the class's own hardcoded 20-degree default when set); cyclicAuthorityScale/
-  // yawAuthorityScale multiply the already thrust-gated cyclic/yaw torque, never granting
-  // unpowered free torque. All three re-read live every tick by PhysicsBridge.stepRotor, same as
-  // driveForce/maxSteerDegrees - see PhysicsBridge.applyLiveSafeFields.
+  // - see those methods' own docs. cyclicLimitDegrees bounds how far EACH AXIS (pitch and roll
+  // independently, matching the class's prior hardcoded 20-degree clamp exactly) of the disk can
+  // be tilted; it is not a combined/total-disk-angle bound - the combined tilt (hypot of both
+  // axes) can exceed this number when both axes are near their limit simultaneously, unchanged
+  // from the model's original per-axis-clamp behavior (John's review, comment 53751).
+  // cyclicAuthorityScale/yawAuthorityScale multiply the already thrust-gated cyclic/yaw torque,
+  // never granting unpowered free torque. All three re-read live every tick by
+  // PhysicsBridge.stepRotor, same as driveForce/maxSteerDegrees - see
+  // PhysicsBridge.applyLiveSafeFields.
   public Double cyclicLimitDegrees;
   public Double cyclicAuthorityScale;
   public Double yawAuthorityScale;

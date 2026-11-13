@@ -542,12 +542,19 @@ positive, capped at 45, default 20), `cyclicAuthorityScale`, and
 `yawAuthorityScale` (both strictly positive, capped at 5, default 1.0) only
 apply to a rotorcraft
 ([`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)):
-`cyclicLimitDegrees` bounds how far the rotor disk can be tilted by cyclic
-input (replacing the model's own fixed 20-degree clamp when set, but never
-past 45 - a disk cannot be tilted onto its edge - and never zero: a rotor
-with zero cyclic authority is not a configuration this ticket supports;
-disable the rotorcraft category itself via `enabled: false` if that's the
-intent), and
+`cyclicLimitDegrees` is a PER-AXIS clamp (pitch and roll independently, exactly
+matching the model's own prior fixed 20-degree clamp - John's review,
+comment 53751): it bounds how far EACH axis of cyclic input can tilt the
+rotor disk (replacing that 20-degree constant when set), never past 45 on
+either axis - a disk cannot be tilted onto its edge - and never zero: a
+rotor with zero cyclic authority is not a configuration this ticket
+supports; disable the rotorcraft category itself via `enabled: false` if
+that's the intent. Because pitch and roll are clamped independently, the
+COMBINED disk tilt with both axes at their limit can exceed the configured
+number (`hypot(limit, limit)`, e.g. ~63.6deg at the 45deg cap) - this is
+unchanged from the model's original behavior (unconfigured, the combined
+tilt already reaches `hypot(20,20)` &asymp; 28.3deg) and is not itself a
+total-disk-angle bound, and
 `cyclicAuthorityScale`/`yawAuthorityScale` multiply the already thrust-gated
 cyclic attitude torque and yaw/anti-torque authority respectively - 1.0 is a
 no-op, and a zero-thrust rotor still produces zero torque regardless of
