@@ -107,10 +107,14 @@ public final class Overrides {
   // the shared radial projection reduce achieved longitudinal force somewhat.
   public Double lateralGripMultiplier;
   // MINECRAFT-519: optional, bounded axle anti-roll coupling (see AntiRoll's own doc for the
-  // geometric pairing and the exact blend-toward-average math) - a dimensionless 0 ("no coupling
-  // at all", the documented FALLBACK, exact byte-identical default/zero equivalence) to 1 ("fully
-  // rigid bar", the paired wheels' normal loads end up exactly equal) coupling strength. 0 is the
-  // FALLBACK deliberately (ticket's "default zero/off preserving accepted handling") - unlike
+  // geometric pairing and the exact differential-travel transfer math) - a dimensionless 0 ("no
+  // coupling at all", the documented FALLBACK, exact byte-identical default/zero equivalence) to
+  // 1 (the maximum supported restoring-transfer strength) coupling strength. This AMPLIFIES the
+  // pair's existing roll-induced load difference (a real anti-roll bar's own effect) - it does
+  // NOT equalize the two loads, and with unequal calibrated spring rates (an asymmetric axle) it
+  // cannot generally equalize them even at 1.0 (review correction, comment 53781: an earlier
+  // version of this doc wrongly described 1.0 as "full equalization"). 0 is the FALLBACK
+  // deliberately (ticket's "default zero/off preserving accepted handling") - unlike
   // suspensionTravel/friction/etc. this feature did not exist before this ticket, so there is no
   // prior shared non-zero number to preserve, only "no effect at all" to preserve exactly.
   public Double antiRollStiffness;
@@ -170,8 +174,10 @@ public final class Overrides {
    if (lateralGripMultiplier != null && !(Double.isFinite(lateralGripMultiplier) && lateralGripMultiplier > 0 && lateralGripMultiplier <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Inclusive 0 (the FALLBACK/off value, explicitly valid to set - an operator may want to
    // state "no anti-roll" explicitly rather than merely omit the field) through inclusive 1 (the
-   // fully-rigid-bar limit) - see AntiRoll's own doc for why 1 is a real, meaningful upper bound
-   // (full equalization) rather than an arbitrary cap.
+   // maximum supported restoring-transfer strength) - see AntiRoll's own doc for why 1 is a real,
+   // meaningful upper bound rather than an arbitrary cap. NOT "full equalization" of the pair's
+   // loads (review correction, comment 53781) - this amplifies their existing roll-induced
+   // difference, and with unequal calibrated rates cannot generally equalize them at any setting.
    if (antiRollStiffness != null && !(Double.isFinite(antiRollStiffness) && antiRollStiffness >= 0 && antiRollStiffness <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    // MINECRAFT-522: bounded the same way the class doc on RotorForces.MAX_CYCLIC_LIMIT_DEGREES
    // explains - a real rotor disk cannot be tilted onto its edge, so even an operator-configured
