@@ -14,7 +14,8 @@
       "friction": 1.0,
       "driveForce": 8000.0,
       "brakeForce": 12000.0,
-      "maxSteerDegrees": 30.0
+      "maxSteerDegrees": 30.0,
+      "antiRollStiffness": 0.4
     },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,

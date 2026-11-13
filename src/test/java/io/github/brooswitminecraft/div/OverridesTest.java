@@ -69,6 +69,7 @@ class OverridesTest {
   assertEquals(12000.0, r.brakeForce); assertEquals(30.0, r.maxSteerDegrees);
   assertEquals(0.5, r.hullFillFactor); assertEquals(400.0, r.waterDrag); assertEquals(6000.0, r.propellerForce);
   assertEquals(0.0, r.angularWaterDrag, "angularWaterDrag's fallback is 0 - no rotational damping term unless configured");
+  assertEquals(0.0, r.antiRollStiffness, "antiRollStiffness's fallback is 0 - no axle anti-roll coupling unless configured");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -80,6 +81,39 @@ class OverridesTest {
   assertNotNull(r.brakeForce); assertNotNull(r.maxSteerDegrees);
   assertNotNull(r.hullFillFactor); assertNotNull(r.waterDrag); assertNotNull(r.propellerForce);
   assertNotNull(r.angularWaterDrag);
+  assertNotNull(r.antiRollStiffness);
+ }
+
+ // MINECRAFT-519: antiRollStiffness - dimensionless 0 (off, the FALLBACK) to 1 (fully-rigid-bar)
+ // axle anti-roll coupling strength; see AntiRoll's own doc for the actual redistribution math.
+
+ @Test void antiRollStiffnessOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.antiRollStiffness = -0.1;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.antiRollStiffness = 1.1;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var zero = new Overrides.Tuning(); zero.antiRollStiffness = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zero::validate);
+  var one = new Overrides.Tuning(); one.antiRollStiffness = 1.0; // fully-rigid-bar upper bound is allowed
+  assertDoesNotThrow(one::validate);
+  var inRange = new Overrides.Tuning(); inRange.antiRollStiffness = 0.6;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void antiRollStiffnessParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.antiRollStiffness = 0.35;
+   Overrides.setForTest(java.util.Map.of("packid:anti_roll_vehicle", override));
+   assertEquals(0.35, Overrides.resolved("packid:anti_roll_vehicle").antiRollStiffness,
+     "an explicit operator override must take precedence over the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void antiRollStiffnessIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.antiRollStiffness = 0.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
  }
 
  // MINECRAFT-518: angularWaterDrag - rotational water-drag torque coefficient for a floating
