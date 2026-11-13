@@ -68,6 +68,7 @@ class OverridesTest {
   assertEquals(0.3, r.suspensionTravel); assertEquals(1.0, r.friction); assertEquals(8000.0, r.driveForce);
   assertEquals(12000.0, r.brakeForce); assertEquals(30.0, r.maxSteerDegrees);
   assertEquals(0.5, r.hullFillFactor); assertEquals(400.0, r.waterDrag); assertEquals(6000.0, r.propellerForce);
+  assertEquals(0.0, r.angularWaterDrag, "angularWaterDrag's fallback is 0 - no rotational damping term unless configured");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -78,6 +79,37 @@ class OverridesTest {
   assertNotNull(r.suspensionTravel); assertNotNull(r.friction); assertNotNull(r.driveForce);
   assertNotNull(r.brakeForce); assertNotNull(r.maxSteerDegrees);
   assertNotNull(r.hullFillFactor); assertNotNull(r.waterDrag); assertNotNull(r.propellerForce);
+  assertNotNull(r.angularWaterDrag);
+ }
+
+ // MINECRAFT-518: angularWaterDrag - rotational water-drag torque coefficient for a floating
+ // hull, the rotational analogue of waterDrag.
+
+ @Test void angularWaterDragOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.angularWaterDrag = -1.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.angularWaterDrag = 100001.0;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var zero = new Overrides.Tuning(); zero.angularWaterDrag = 0.0; // explicit zero is allowed, same as the fallback
+  assertDoesNotThrow(zero::validate);
+  var inRange = new Overrides.Tuning(); inRange.angularWaterDrag = 250.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void angularWaterDragParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.angularWaterDrag = 123.0;
+   Overrides.setForTest(java.util.Map.of("packid:angular_drag_vehicle", override));
+   assertEquals(123.0, Overrides.resolved("packid:angular_drag_vehicle").angularWaterDrag,
+     "an explicit operator override must take precedence over the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void angularWaterDragIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.angularWaterDrag = 10.0;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
  }
 
  @Test void packMetadataFillsAGapBelowAMissingOperatorOverrideButAboveTheFallback() {

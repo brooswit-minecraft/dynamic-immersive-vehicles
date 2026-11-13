@@ -59,6 +59,16 @@ public final class Overrides {
   public Double hullFillFactor;
   public Double waterDrag;
   public Double propellerForce;
+  // MINECRAFT-518: rotational (roll/pitch/yaw) water-drag strength for a floating hull - the
+  // rotational analogue of waterDrag, damping the hull's own angular velocity directly rather
+  // than only as a side effect of waterDrag applied at each float's off-center position. An
+  // inertia-normalized angular decay strength (review correction, comment 53689), not a torque/
+  // Nm coefficient - see Buoyancy.angularDragRetention's own doc for why no moment of inertia is
+  // involved anywhere in its formula. 0 (the documented FALLBACK) reproduces the exact prior
+  // behavior - no dedicated
+  // rotational damping term at all. Like waterDrag/propellerForce, re-read live every tick by
+  // BuoyantForces.apply - see PhysicsBridge.applyLiveSafeFields.
+  public Double angularWaterDrag;
   // Opt-in self-righting assist (ticket comment 53182/53188) - ALL FIVE must be explicitly set
   // together for the assist to activate at all (see Overrides.selfRightingConfig); there is no
   // flat fallback for any of these fields, unlike the physics defaults above - an unconfigured
@@ -109,6 +119,7 @@ public final class Overrides {
    if (hullFillFactor != null && !(hullFillFactor > 0 && hullFillFactor <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (waterDrag != null && !(waterDrag >= 0 && waterDrag <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (propellerForce != null && !(propellerForce >= 0 && propellerForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (angularWaterDrag != null && !(angularWaterDrag >= 0 && angularWaterDrag <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (selfRightStrength != null && !(Double.isFinite(selfRightStrength) && selfRightStrength >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (selfRightDamping != null && !(Double.isFinite(selfRightDamping) && selfRightDamping >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (selfRightMaxTorque != null && !(Double.isFinite(selfRightMaxTorque) && selfRightMaxTorque >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
@@ -151,6 +162,7 @@ public final class Overrides {
    if (hullFillFactor != null) throw new IllegalArgumentException("part overrides do not support 'hullFillFactor' (no part-level consumer yet)");
    if (waterDrag != null) throw new IllegalArgumentException("part overrides do not support 'waterDrag' (no part-level consumer yet)");
    if (propellerForce != null) throw new IllegalArgumentException("part overrides do not support 'propellerForce' (no part-level consumer yet)");
+   if (angularWaterDrag != null) throw new IllegalArgumentException("part overrides do not support 'angularWaterDrag' (no part-level consumer yet)");
    if (selfRightStrength != null || selfRightDamping != null || selfRightMaxTorque != null
      || selfRightFadeStartDegrees != null || selfRightFadeEndDegrees != null)
     throw new IllegalArgumentException("part overrides do not support selfRight* fields (no part-level consumer yet)");
@@ -171,6 +183,7 @@ public final class Overrides {
   FALLBACK.maxSteerDegrees=30.0; FALLBACK.hullFillFactor=0.5; FALLBACK.waterDrag=400.0; FALLBACK.propellerForce=6000.0;
   FALLBACK.upperMassFraction=0.5;
   FALLBACK.lateralGripMultiplier=1.0;
+  FALLBACK.angularWaterDrag=0.0;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -181,6 +194,7 @@ public final class Overrides {
   c.selfRightStrength=t.selfRightStrength; c.selfRightDamping=t.selfRightDamping; c.selfRightMaxTorque=t.selfRightMaxTorque;
   c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
+  c.angularWaterDrag=t.angularWaterDrag;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -205,6 +219,7 @@ public final class Overrides {
   m.selfRightFadeEndDegrees = child.selfRightFadeEndDegrees!=null?child.selfRightFadeEndDegrees:parent.selfRightFadeEndDegrees;
   m.upperMassFraction = child.upperMassFraction!=null?child.upperMassFraction:parent.upperMassFraction;
   m.lateralGripMultiplier = child.lateralGripMultiplier!=null?child.lateralGripMultiplier:parent.lateralGripMultiplier;
+  m.angularWaterDrag = child.angularWaterDrag!=null?child.angularWaterDrag:parent.angularWaterDrag;
   return m;
  }
  /**
@@ -366,6 +381,7 @@ public final class Overrides {
   result.hullFillFactor = firstNonNull(override!=null?override.hullFillFactor:null, packMetadata!=null?packMetadata.hullFillFactor:null, ivAdapted!=null?ivAdapted.hullFillFactor:null, physicallyDerived!=null?physicallyDerived.hullFillFactor:null, FALLBACK.hullFillFactor);
   result.waterDrag = firstNonNull(override!=null?override.waterDrag:null, packMetadata!=null?packMetadata.waterDrag:null, ivAdapted!=null?ivAdapted.waterDrag:null, physicallyDerived!=null?physicallyDerived.waterDrag:null, FALLBACK.waterDrag);
   result.propellerForce = firstNonNull(override!=null?override.propellerForce:null, packMetadata!=null?packMetadata.propellerForce:null, ivAdapted!=null?ivAdapted.propellerForce:null, physicallyDerived!=null?physicallyDerived.propellerForce:null, FALLBACK.propellerForce);
+  result.angularWaterDrag = firstNonNull(override!=null?override.angularWaterDrag:null, packMetadata!=null?packMetadata.angularWaterDrag:null, ivAdapted!=null?ivAdapted.angularWaterDrag:null, physicallyDerived!=null?physicallyDerived.angularWaterDrag:null, FALLBACK.angularWaterDrag);
   // Self-righting (comment 53182/53188): no FALLBACK entry - stays null (meaning "assist off",
   // via selfRightingConfig's all-or-nothing check) unless some level actually sets it.
   result.selfRightStrength = firstNonNull(override!=null?override.selfRightStrength:null, packMetadata!=null?packMetadata.selfRightStrength:null, ivAdapted!=null?ivAdapted.selfRightStrength:null, physicallyDerived!=null?physicallyDerived.selfRightStrength:null);

@@ -32,7 +32,14 @@ import java.util.Map;
  * {@link PartPropellerAccessor}) rather than one vehicle-wide signal applied to every installed
  * propeller; an installed rotor propeller is excluded here deliberately - its thrust is already
  * supplied by {@code PhysicsBridge.Body.stepRotor}'s own collective/cyclic model regardless of
- * water, so counting it again here would double-apply the same propulsive force.
+ * water, so counting it again here would double-apply the same propulsive force. MINECRAFT-518
+ * additionally applies an optional rotational (roll/pitch/yaw) water-drag damping, averaged
+ * across every float's own submerged fraction - a dedicated damping term for rotation itself, on
+ * top of (never a replacement for) the per-float righting torque above; its tuning.angularWaterDrag
+ * coefficient defaults to 0 (no change from prior behavior) unless an operator configures it.
+ * Applied as a direct, implicit (unconditionally stable) velocity retention via {@link
+ * Buoyancy#angularDragRetention} - never as an inertia-converted impulse - per review finding
+ * 53679 (see that method's own doc for why an impulse-based approach was unsafe).
  */
 final class BuoyantForces {
  private BuoyantForces() {}
@@ -45,6 +52,7 @@ final class BuoyantForces {
   var floats = floats(v);
   double volumePerFloat = floats.isEmpty() ? 0 : hullVolume / floats.size();
   boolean awake = false;
+  double totalFraction = 0;
   for (var flt : floats) {
    double radius = Math.max(.1, flt.getHeight() / 2);
    Vector3d anchor = new Vector3d(flt.localOffset.x, flt.localOffset.y, flt.localOffset.z).sub(center);
@@ -53,6 +61,7 @@ final class BuoyantForces {
    double waterSurface = waterSurfaceAt(level, point.x, point.z, point.y + radius + 1);
    double fraction = Buoyancy.submergedFraction(point.y - radius, point.y + radius, waterSurface);
    flt.contactThisTick = fraction > 0;
+   totalFraction += fraction;
    if (fraction <= 0) continue;
    flt.animateAsOnGround = true;
    awake = true;
@@ -62,6 +71,45 @@ final class BuoyantForces {
    Vector3d force = new Vector3d(0, Buoyancy.buoyantForce(fraction, volumePerFloat), 0);
    if (speed > 1e-6) force.fma(-dragMagnitude / speed, localVelocity);
    handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(force).mul(PhysicsBridge.DT)));
+  }
+  // MINECRAFT-518: rotational (roll/pitch/yaw) water drag, opposing the hull's own angular
+  // velocity - the rotational analogue of each float's own linear drag term above, averaged
+  // across every float's submerged fraction (0 with no floats at all, matching the untouched
+  // volumePerFloat/awake behavior for that case). tuning.angularWaterDrag defaults to 0 (see
+  // Overrides.FALLBACK), which reproduces the exact prior behavior of no dedicated rotational
+  // damping term - this augments, never replaces, the per-float righting torque above.
+  //
+  // Review finding (John, comment 53679): applying this as an inertia-converted IMPULSE could
+  // overshoot past zero and reverse/amplify the hull's spin for a light hull and a coefficient
+  // within this field's own valid range - see Buoyancy.angularDragRetention's own doc for the
+  // worked example and the fix. Fixed by scaling the hull's own CURRENT angular velocity
+  // directly by a retention fraction mathematically guaranteed to stay in (0,1] (never an
+  // impulse divided by an inertia this bridge cannot read at all via RigidBodyHandle), via
+  // addLinearAndAngularVelocity (a direct velocity add/scale, not a force/impulse) - world-frame,
+  // like `angular` itself already is, so no inverse-orientation transform is needed here (unlike
+  // the per-float impulses above, which are LOCAL-frame).
+  //
+  // Second review finding (John, comment 53689): `angular` is the CALLER's snapshot, taken
+  // before this method's own per-float impulses (and, for an amphibious Body, that domain's own
+  // ground/flight forces) were applied this same tick. If the underlying Sable/Rapier pipeline
+  // mutates the handle's stored velocity synchronously when an impulse is applied (not merely
+  // queuing it for the next physics step), scaling the STALE snapshot and adding that delta onto
+  // whatever the handle's velocity has already become this tick could still land on a result that
+  // over/under-damps relative to the body's actual current spin - a real staleness/ordering risk,
+  // independent of (and smaller in degree than) the magnitude-unboundedness defect comment 53679
+  // already fixed. Fixed by reading the handle's own angular velocity FRESH, immediately before
+  // this computation, rather than trusting the parameter captured at the top of this method -
+  // correct regardless of whether Sable applies impulses synchronously or defers them, and costs
+  // one extra getter call.
+  Vector3d currentAngular = handle.getAngularVelocity(new Vector3d());
+  double angularSpeed = currentAngular.length();
+  if (!floats.isEmpty() && angularSpeed > 1e-6 && tuning.angularWaterDrag > 0) {
+   double averageFraction = totalFraction / floats.size();
+   if (averageFraction > 0) {
+    double retention = Buoyancy.angularDragRetention(angularSpeed, averageFraction, tuning.angularWaterDrag, PhysicsBridge.DT);
+    Vector3d deltaAngular = new Vector3d(currentAngular).mul(retention - 1.0);
+    handle.addLinearAndAngularVelocity(new Vector3d(), deltaAngular);
+   }
   }
   // Per-propeller drive, keyed by actual engine linkage (PartEngineAccessor.linkedPropellers -
   // IV's own private field, not reachable through any public API) rather than one vehicle-wide

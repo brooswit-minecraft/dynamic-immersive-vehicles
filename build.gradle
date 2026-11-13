@@ -125,6 +125,15 @@ neoForge {
    if (System.getenv('DIV_WHEEL_AUX_PROBE') == 'true') {
     jvmArgument('-Ddiv.experimentalWheelAuxProbe=true')
    }
+   // MINECRAFT-518 review (comment 53675/53676/53679/53689/53701): opt-in float-only-hull
+   // angular-water-drag runtime probe - same gating pattern as every other probe above; OFF for
+   // every normal `gradle runServer`. Also enables the existing GroundContactDiagnostics (review
+   // 53701's "verify actual BuoyantBody activation") so each scenario's own classify/constructed
+   // log lines independently confirm floating=true / class=BuoyantBody, not a native fallback.
+   if (System.getenv('DIV_BUOYANCY_ANGULAR_DRAG_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalBuoyancyAngularDrag=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+   }
    // MINECRAFT-517 independent review (PR #16): opt-in real-oak_log canonical-texture/rotation
    // smoke test - same gating pattern as every other probe above; OFF for every normal
    // `gradle runServer`.

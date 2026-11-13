@@ -293,8 +293,9 @@ public final class PhysicsBridge {
   * already re-reads fresh from its own live {@code tuning} object every tick/call, rather than
   * caching into a separate field at construction time (ticket 53518/MINECRAFT-505) - confirmed
   * by direct inspection of every {@code tuning.X} read site in this file (stepGround/stepFlight/
-  * stepRotor) and in BuoyantForces.apply (waterDrag/propellerForce): suspensionTravel/friction/
-  * driveForce/brakeForce/maxSteerDegrees/lateralGripMultiplier/waterDrag/propellerForce. Mutating
+  * stepRotor) and in BuoyantForces.apply (waterDrag/propellerForce/angularWaterDrag):
+  * suspensionTravel/friction/driveForce/brakeForce/maxSteerDegrees/lateralGripMultiplier/
+  * waterDrag/propellerForce/angularWaterDrag. Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -319,6 +320,7 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.lateralGripMultiplier, fresh.lateralGripMultiplier)) { target.lateralGripMultiplier = fresh.lateralGripMultiplier; appliedOut.add("lateralGripMultiplier"); }
   if (!java.util.Objects.equals(target.waterDrag, fresh.waterDrag)) { target.waterDrag = fresh.waterDrag; appliedOut.add("waterDrag"); }
   if (!java.util.Objects.equals(target.propellerForce, fresh.propellerForce)) { target.propellerForce = fresh.propellerForce; appliedOut.add("propellerForce"); }
+  if (!java.util.Objects.equals(target.angularWaterDrag, fresh.angularWaterDrag)) { target.angularWaterDrag = fresh.angularWaterDrag; appliedOut.add("angularWaterDrag"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so

@@ -71,7 +71,14 @@ each vehicle from IV's own definition at the moment it is needed:
   quadratic water drag, sampled at that device's own position against the
   local Minecraft water surface; a hull resting unevenly in the water is
   righted by that per-device force distribution rather than a separate
-  stability calculation. Installed non-rotor `PartPropeller`s add forward/
+  stability calculation. An optional, configurable rotational water-drag
+  coefficient (`angularWaterDrag`, MINECRAFT-518) additionally damps the
+  hull's own roll/pitch/yaw directly - a dedicated stability knob on top
+  of (never a replacement for) that per-float righting torque, applied as
+  a direct, implicit (unconditionally stable - never overshoots or
+  reverses the hull's spin, regardless of the configured value) velocity
+  retention rather than a force, defaulting to 0 (no change from prior
+  behavior) unless configured. Installed non-rotor `PartPropeller`s add forward/
   reverse thrust, steered by the rudder input, allocated per actual
   engine-to-propeller linkage rather than one vehicle-wide signal applied to
   every installed propeller. IV exposes neither that linkage nor a
@@ -504,19 +511,22 @@ after changes.
       "hullFillFactor": 0.5,
       "waterDrag": 400.0,
       "propellerForce": 6000.0,
+      "angularWaterDrag": 0.0,
       "maxSteerDegrees": 30.0
     }
   }
 }
 ```
 
-`massKg` is optional; omit it to use IV's calculated vehicle mass. The three
+`massKg` is optional; omit it to use IV's calculated vehicle mass. The four
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
-fully submerged, since a real hull is not a solid box), `waterDrag`, and
+fully submerged, since a real hull is not a solid box), `waterDrag`,
 `propellerForce` (split evenly across the non-rotor propellers actually
 operational this tick - linked to a running engine, active, and turning -
-not every installed propeller) - are ignored by a ground/flight vehicle
+not every installed propeller), and `angularWaterDrag` (an optional
+roll/pitch/yaw damping strength, 0 by default - no change from
+prior behavior unless configured) - are ignored by a ground/flight vehicle
 with no float device, and `suspensionTravel`/`friction`/`driveForce`/
 `brakeForce` are ignored by a float-only hull. A copyable example is also
 available at
@@ -572,7 +582,7 @@ break anything already running.
 A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
-`propellerForce`. Fields baked in at vehicle construction - `massKg`,
+`propellerForce`, `angularWaterDrag`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The

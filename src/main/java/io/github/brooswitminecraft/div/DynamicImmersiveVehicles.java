@@ -92,5 +92,12 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.WheelAuxProbe.maybeRun(overworld);
   });
+  // Opt-in, CI/isolated-host-only float-only-hull angular-water-drag probe (review comment
+  // 53675/53676/53679, MINECRAFT-518) - OFF by default, a strict no-op otherwise. Never touches
+  // any real vehicle, Zippy, or world content - see BuoyancyAngularDragProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.BuoyancyAngularDragProbe.maybeRun(overworld);
+  });
  }
 }

@@ -30,6 +30,46 @@ class BuoyancyTest {
   double at1 = Buoyancy.drag(1, 1, 3), at2 = Buoyancy.drag(2, 1, 3);
   assertEquals(4 * at1, at2, 1e-9);
  }
+ // MINECRAFT-518 review (comment 53679): the retention fraction returned here must always be in
+ // (0,1] regardless of how large angularSpeed/submergedFraction/angularDragCoefficient/dt are -
+ // the whole point of the implicit (not explicit-impulse) formulation is that it is impossible to
+ // overshoot past zero or reverse/amplify the hull's spin, with no inertia needed anywhere.
+
+ @Test void angularDragRetentionIsOneWhenNotSubmergedOrNotRotatingOrZeroCoefficient() {
+  // Retention 1 means "no change at all" - matches the exact prior behavior (no dedicated
+  // rotational damping term) whenever any factor in the product is zero.
+  assertEquals(1.0, Buoyancy.angularDragRetention(10, 0, 5, 0.05));
+  assertEquals(1.0, Buoyancy.angularDragRetention(0, 1, 5, 0.05));
+  assertEquals(1.0, Buoyancy.angularDragRetention(50, 1, 0, 0.05));
+ }
+ @Test void angularDragRetentionIsAlwaysInZeroToOneRangeAcrossWideInputs() {
+  // The exact regime review's worked example exploited for the old explicit-impulse formula
+  // (a large coefficient, small inertia) - here there is no inertia to be unaware of at all, so
+  // even an extreme coefficient/speed/fraction/dt combination must stay bounded.
+  for (double coefficient : new double[]{0, 1, 100, 100000, 1e9}) {
+   for (double speed : new double[]{0, 1e-3, 1, 50, 1e6}) {
+    for (double fraction : new double[]{0, 0.3, 1}) {
+     double retention = Buoyancy.angularDragRetention(speed, fraction, coefficient, 0.05);
+     assertTrue(retention > 0 && retention <= 1.0,
+       "retention=" + retention + " out of (0,1] for coefficient=" + coefficient + " speed=" + speed + " fraction=" + fraction);
+    }
+   }
+  }
+ }
+ @Test void angularDragRetentionNeverOvershootsOrReversesSpinEvenAtReviewsExactWorkedExample() {
+  // Review's own numbers (comment 53679): coefficient=100000, fraction=1, speed=1 rad/s, at the
+  // explicit formula's dt=0.05 - the OLD explicit-impulse formula (if it had access to an
+  // inertia of 1000 kg*m^2) would have produced omega'=-4 (reversed and amplified). The NEW
+  // retention-based approach needs no inertia at all and must still land in (0,1].
+  double retention = Buoyancy.angularDragRetention(1, 1, 100000, 0.05);
+  assertTrue(retention > 0 && retention <= 1.0, "retention=" + retention + " must stay in (0,1], never reversing or amplifying spin");
+ }
+ @Test void angularDragRetentionDecreasesAsCoefficientOrSpeedOrFractionGrows() {
+  double baseline = Buoyancy.angularDragRetention(1, 1, 1, 0.05);
+  assertTrue(Buoyancy.angularDragRetention(1, 1, 10, 0.05) < baseline, "a larger coefficient must damp more (smaller retention)");
+  assertTrue(Buoyancy.angularDragRetention(5, 1, 1, 0.05) < baseline, "a larger angular speed must damp more");
+  assertTrue(Buoyancy.angularDragRetention(1, 0.1, 1, 0.05) > baseline, "a smaller submerged fraction must damp less (larger retention)");
+ }
  @Test void propellerAboveWaterProducesNoThrustRegardlessOfThrottle() {
   assertEquals(0, Buoyancy.propellerThrust(1, 5000, false, true));
   assertEquals(0, Buoyancy.propellerThrust(-1, 5000, false, true));
