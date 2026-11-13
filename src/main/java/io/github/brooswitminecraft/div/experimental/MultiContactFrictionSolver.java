@@ -64,8 +64,16 @@ public final class MultiContactFrictionSolver {
     +torqueAxisBody.y*torqueAxisBody.y/inertiaBody.y()+torqueAxisBody.z*torqueAxisBody.z/inertiaBody.z();
   return 1.0/(1.0/mass+rotationalTerm);
  }
- /** One wheel's world-frame contact geometry/inputs for {@link #solveFriction}. */
- public record FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier) {}
+ /** One wheel's world-frame contact geometry/inputs for {@link #solveFriction}.
+  * {@code frictionMultiplier}/{@code rollingResistanceMultiplier} (MINECRAFT-508) scale this
+  * contact's own ground-surface response relative to dry pavement; the 5-arg constructor below
+  * defaults both to 1.0, reproducing today's exact (pre-surface) values byte-identically. */
+ public record FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
+     double frictionMultiplier, double rollingResistanceMultiplier) {
+  public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier) {
+   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0);
+  }
+ }
  /** One wheel's accumulated longitudinal/lateral tire force after the bounded solve. */
  public record FrictionResult(double longitudinal, double lateral) {}
  /** Fixed iteration bound - cheap (iterations x wheelCount simple vector ops per tick). A hard
@@ -119,8 +127,9 @@ public final class MultiContactFrictionSolver {
     // Rolling resistance is a continuous, velocity-proportional damping law (F=-k*v, k=20) -
     // recomputing it fresh from the current speed each pass is physically correct (same as a
     // real damper), not a one-shot "cancel everything" formula, so it does not need the
-    // accumulate treatment below.
-    double rollingResistance=-speed*20;
+    // accumulate treatment below. MINECRAFT-508: k is scaled by this contact's own ground-
+    // surface rollingResistanceMultiplier (1.0 reproduces today's exact k=20 byte-identically).
+    double rollingResistance=-speed*20*c.rollingResistanceMultiplier();
     // Drive is a genuinely PRESCRIBED target (a constant commanded force, not derived from
     // current slip) - recomputing it fresh each pass and replacing the prior value is correct.
     // Braking's own min(brakeForcePerWheel, |speed|*mass/wheelCount/dt) is NOT purely prescribed
@@ -162,7 +171,9 @@ public final class MultiContactFrictionSolver {
     // frictionAnisotropic) bounds the CONVERGED STEADY STATE itself via a smaller lateral
     // semi-axis, independent of iteration count - lateralGripMultiplier=1.0 is algebraically
     // byte-identical to the original circular TireForces.friction (see that method's own doc).
-    var tire=TireForces.frictionAnisotropic(longitudinalTarget,candidateLateral,c.normal(),friction,lateralGripMultiplier);
+    // MINECRAFT-508: this contact's own ground-surface frictionMultiplier scales the shared mu
+    // (1.0 reproduces today's exact `friction` value byte-identically).
+    var tire=TireForces.frictionAnisotropic(longitudinalTarget,candidateLateral,c.normal(),friction*c.frictionMultiplier(),lateralGripMultiplier);
     double deltaLong=tire.longitudinal()-accLong[i], deltaLat=tire.lateral()-accLat[i];
     accLong[i]=tire.longitudinal(); accLat[i]=tire.lateral();
     Vector3d impulse=new Vector3d(c.forward()).mul(deltaLong*dt).fma(deltaLat*dt,c.right());

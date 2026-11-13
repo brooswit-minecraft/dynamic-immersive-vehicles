@@ -1,0 +1,16 @@
+{
+  "values": [
+    "minecraft:stone",
+    "minecraft:smooth_stone",
+    "minecraft:stone_bricks",
+    "minecraft:polished_andesite",
+    "minecraft:polished_diorite",
+    "minecraft:polished_granite",
+    "minecraft:cobblestone",
+    "minecraft:stone_slab",
+    "minecraft:white_concrete",
+    "minecraft:terracotta",
+    "minecraft:deepslate_bricks",
+    "minecraft:deepslate_tiles"
+  ]
+}
