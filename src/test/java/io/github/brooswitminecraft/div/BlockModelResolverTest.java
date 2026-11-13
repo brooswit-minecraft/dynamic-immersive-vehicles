@@ -80,10 +80,11 @@ class BlockModelResolverTest {
         assertEquals("minecraft:block/oak_log", textureOf(faces, Face.DOWN));
         assertEquals("minecraft:block/oak_log", textureOf(faces, Face.EAST));
         assertEquals("minecraft:block/oak_log", textureOf(faces, Face.WEST));
-        // World NORTH came from the model's own DOWN (end) face, rotated x=90,y=0 (verified via
-        // Face.rotate(DOWN,90,0)==NORTH) - the rotation a UV-basis consumer
-        // (DirectionalGroundSurface) needs is carried alongside the texture.
-        assertEquals(Face.DOWN, faces.get(Face.NORTH).modelFace());
+        // World NORTH came from the model's own UP (end) face, rotated x=90,y=0 (verified via
+        // Face.rotate(UP,90,0)==NORTH, and against real vanilla furnace/dispenser ground truth in
+        // FaceTest) - the rotation a UV-basis consumer (DirectionalGroundSurface) needs is carried
+        // alongside the texture.
+        assertEquals(Face.UP, faces.get(Face.NORTH).modelFace());
         assertEquals(90, faces.get(Face.NORTH).rotationXDegrees());
         assertEquals(0, faces.get(Face.NORTH).rotationYDegrees());
     }
@@ -207,5 +208,52 @@ class BlockModelResolverTest {
         Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver.resolve("minecraft", "cropped_block", Map.of(), loader).orElseThrow();
         assertFalse(faces.containsKey(Face.UP), "cropped face UV should be omitted, not guessed");
         assertTrue(faces.containsKey(Face.DOWN), "an uncropped face on the same element should still resolve");
+    }
+
+    /** Review finding: {@code uvlock} keeps the texture screen/world-aligned instead of rotating
+     * with the model - a different remapping this resolver does not implement. Must refuse, not
+     * silently apply the plain (unlocked) inverse rotation as if {@code uvlock} weren't set. */
+    @Test void uvlockVariantReturnsNoEvidence() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/uvlocked_log", """
+                        {"variants": {"axis=x": {"model": "minecraft:block/cube_column", "x": 90, "y": 90, "uvlock": true}}}""",
+                "minecraft:models/block/cube_column", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                            "up": {"texture": "minecraft:block/end"}, "down": {"texture": "minecraft:block/end"},
+                            "north": {"texture": "minecraft:block/side"}, "south": {"texture": "minecraft:block/side"},
+                            "east": {"texture": "minecraft:block/side"}, "west": {"texture": "minecraft:block/side"}}}]}"""));
+        assertFalse(BlockModelResolver.resolve("minecraft", "uvlocked_log", Map.of("axis", "x"), loader).isPresent());
+    }
+
+    /** A weighted-random variant list whose entries agree on model/x/y/uvlock (only "weight"
+     * differs, the normal case for a cosmetic random-rotation list) is a safe, deterministic
+     * resolve - any entry is representative. */
+    @Test void variantArrayWithEquivalentEntriesResolves() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/random_stone", """
+                        {"variants": {"": [
+                            {"model": "minecraft:block/stone", "weight": 1},
+                            {"model": "minecraft:block/stone", "weight": 1}
+                        ]}}""",
+                "minecraft:models/block/stone", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                            "up": {"texture": "minecraft:block/stone"}}}]}"""));
+        assertTrue(BlockModelResolver.resolve("minecraft", "random_stone", Map.of(), loader).isPresent());
+    }
+
+    /** A weighted-random variant list whose entries genuinely disagree (different model or
+     * rotation) can't be resolved by this stateless resolver (it can't reproduce vanilla's
+     * position-seeded random pick) - refuse rather than arbitrarily commit to the first entry. */
+    @Test void variantArrayWithDifferingEntriesReturnsNoEvidence() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/random_rotated_stone", """
+                        {"variants": {"": [
+                            {"model": "minecraft:block/stone", "weight": 1},
+                            {"model": "minecraft:block/stone", "y": 90, "weight": 1}
+                        ]}}""",
+                "minecraft:models/block/stone", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                            "up": {"texture": "minecraft:block/stone"}}}]}"""));
+        assertFalse(BlockModelResolver.resolve("minecraft", "random_rotated_stone", Map.of(), loader).isPresent());
     }
 }

@@ -9,11 +9,22 @@ package io.github.brooswitminecraft.div;
  * directional 16x16-per-face response and rotated-log orientation remain deferred") and this
  * ticket now owns.
  *
- * <p>Rotation order/sense (apply x about the X axis first, then y about the Y axis, both via the
- * standard right-handed rotation matrices on the face's own normal vector) was derived from, and
- * is verified against, the real vanilla {@code oak_log} blockstate's own {@code axis=x}/
- * {@code axis=z} entries - see {@code BlockModelResolverTest} for the exact fixture and expected
- * faces.
+ * <p>Rotation sense (independent review, PR #16 comment: NORTH with y=90 must become EAST, not
+ * WEST - a log's own paired/symmetric faces conceal a handedness error, since swapping EAST/WEST
+ * or NORTH/SOUTH changes nothing the log's own fixture can observe): Minecraft's blockstate
+ * {@code x}/{@code y} rotation is CLOCKWISE when viewed from the positive end of that axis
+ * looking toward the origin - the opposite sense from the textbook right-hand/CCW rotation
+ * matrix. Verified against two real vanilla blockstates whose faces are NOT symmetric, so a
+ * handedness error cannot hide the way it can on a log:
+ * <ul>
+ *  <li>{@code furnace} (default model front face points NORTH): {@code facing=east} is
+ *  {@code y:90}, so {@code rotate(NORTH,0,90)} must be EAST.</li>
+ *  <li>{@code dispenser} (default model front face also points NORTH): {@code facing=down} is
+ *  {@code x:90}, so {@code rotate(NORTH,90,0)} must be DOWN.</li>
+ * </ul>
+ * Order: x about the X axis first, then y about the Y axis (both blockstate rotations, composed
+ * in world space) - see {@code BlockModelResolverTest}'s {@code oak_log axis=x}/{@code axis=z}
+ * fixture for the composed (both-axes) case.
  */
 public enum Face {
     UP(0, 1, 0), DOWN(0, -1, 0), NORTH(0, 0, -1), SOUTH(0, 0, 1), EAST(1, 0, 0), WEST(-1, 0, 0);
@@ -77,12 +88,12 @@ public enum Face {
 
     private static double[] rotateX(double x, double y, double z, int degrees) {
         int c = cos(degrees), s = sin(degrees);
-        return new double[] {x, y * c - z * s, y * s + z * c};
+        return new double[] {x, y * c + z * s, -y * s + z * c};
     }
 
     private static double[] rotateY(double x, double y, double z, int degrees) {
         int c = cos(degrees), s = sin(degrees);
-        return new double[] {x * c + z * s, y, -x * s + z * c};
+        return new double[] {x * c - z * s, y, x * s + z * c};
     }
 
     private static int cos(int degrees) {

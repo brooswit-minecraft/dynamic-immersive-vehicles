@@ -79,11 +79,12 @@ class DirectionalGroundSurfaceTest {
      * Rotated-face behavior test (review finding, PR #16 comment 6861624029): for a block whose
      * resolved texture came from model face {@code NORTH} rotated {@code x=90,y=90} (exactly
      * {@code oak_log}'s real {@code axis=x} blockstate - see {@code BlockModelResolverTest}),
-     * {@code Face.rotate(NORTH,90,90)==UP} (verified in {@code FaceTest}), so this texture ends
-     * up on the world UP face. Travelling along world X maps BACK into model-local space as
-     * {@code (0,1,0)} ({@code Face.inverseRotateVector(1,0,0,90,90)}), i.e. along the model
-     * NORTH face's own V axis - the grain direction on {@link #grainAlongV}'s fixture - while
-     * travelling along world Z maps back to {@code (-1,0,0)}, across it. The rotation-aware
+     * {@code Face.rotate(NORTH,90,90)==DOWN} (verified against real vanilla furnace/dispenser
+     * ground truth in {@code FaceTest}), so this texture ends up on the world DOWN face.
+     * Travelling along world X maps BACK into model-local space as {@code (0,1,0)}
+     * ({@code Face.inverseRotateVector(1,0,0,90,90)}), i.e. along the model NORTH face's own V
+     * axis - the grain direction on {@link #grainAlongV}'s fixture - while travelling along world
+     * Z maps back to {@code (1,0,0)}, across it. The rotation-aware
      * {@link DirectionalGroundSurface#combine(GroundSurface, Optional, Face, int, int, double,
      * double, double, double, double, double)} must reflect that: world-X travel grippier than
      * world-Z travel on this specific rotated block.
@@ -105,7 +106,7 @@ class DirectionalGroundSurfaceTest {
      */
     @Test void worldFaceConventionAloneGetsThisRotatedBlockBackwards() {
         Face worldFace = Face.rotate(Face.NORTH, 90, 90);
-        assertEquals(Face.UP, worldFace);
+        assertEquals(Face.DOWN, worldFace);
 
         FaceUv.Uv naiveWorldXTravel = FaceUv.direction(worldFace, 1, 0, 0);
         FaceUv.Uv naiveWorldZTravel = FaceUv.direction(worldFace, 0, 0, 1);

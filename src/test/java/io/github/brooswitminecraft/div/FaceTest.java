@@ -21,13 +21,26 @@ class FaceTest {
         }
     }
 
+    /**
+     * Ground truth against two real vanilla blockstates whose model front face is NOT symmetric
+     * (unlike a log's paired end/side faces, which conceal a handedness error) - see the class
+     * doc for the exact blockstate entries these come from.
+     */
+    @Test void rotationHandednessMatchesRealVanillaFurnaceAndDispenserBlockstates() {
+        assertEquals(Face.EAST, Face.rotate(Face.NORTH, 0, 90), "furnace facing=east is y:90");
+        assertEquals(Face.SOUTH, Face.rotate(Face.NORTH, 0, 180), "furnace facing=south is y:180");
+        assertEquals(Face.WEST, Face.rotate(Face.NORTH, 0, 270), "furnace facing=west is y:270");
+        assertEquals(Face.DOWN, Face.rotate(Face.NORTH, 90, 0), "dispenser facing=down is x:90");
+        assertEquals(Face.UP, Face.rotate(Face.NORTH, 270, 0), "dispenser facing=up is x:270");
+    }
+
     @Test void axisZLogRotationMovesEndGrainToNorthSouth() {
         // model UP/DOWN carry the end-grain texture on a standing log (see BlockModelResolverTest).
-        assertEquals(Face.SOUTH, Face.rotate(Face.UP, 90, 0));
-        assertEquals(Face.NORTH, Face.rotate(Face.DOWN, 90, 0));
-        // model NORTH/SOUTH (side/bark texture) end up as up/down.
-        assertEquals(Face.UP, Face.rotate(Face.NORTH, 90, 0));
-        assertEquals(Face.DOWN, Face.rotate(Face.SOUTH, 90, 0));
+        assertEquals(Face.NORTH, Face.rotate(Face.UP, 90, 0));
+        assertEquals(Face.SOUTH, Face.rotate(Face.DOWN, 90, 0));
+        // model NORTH/SOUTH (side/bark texture) end up as down/up.
+        assertEquals(Face.DOWN, Face.rotate(Face.NORTH, 90, 0));
+        assertEquals(Face.UP, Face.rotate(Face.SOUTH, 90, 0));
         // east/west (side texture) are unaffected by a pure X rotation.
         assertEquals(Face.EAST, Face.rotate(Face.EAST, 90, 0));
         assertEquals(Face.WEST, Face.rotate(Face.WEST, 90, 0));
@@ -36,10 +49,10 @@ class FaceTest {
     @Test void axisXLogRotationMovesEndGrainToEastWest() {
         assertEquals(Face.EAST, Face.rotate(Face.UP, 90, 90));
         assertEquals(Face.WEST, Face.rotate(Face.DOWN, 90, 90));
-        assertEquals(Face.UP, Face.rotate(Face.NORTH, 90, 90));
-        assertEquals(Face.DOWN, Face.rotate(Face.SOUTH, 90, 90));
-        assertEquals(Face.NORTH, Face.rotate(Face.EAST, 90, 90));
-        assertEquals(Face.SOUTH, Face.rotate(Face.WEST, 90, 90));
+        assertEquals(Face.DOWN, Face.rotate(Face.NORTH, 90, 90));
+        assertEquals(Face.UP, Face.rotate(Face.SOUTH, 90, 90));
+        assertEquals(Face.SOUTH, Face.rotate(Face.EAST, 90, 90));
+        assertEquals(Face.NORTH, Face.rotate(Face.WEST, 90, 90));
     }
 
     @Test void everyFaceRotationIsItsOwnPermutationOfAllSixFaces() {

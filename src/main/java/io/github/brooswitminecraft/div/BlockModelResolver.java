@@ -22,13 +22,16 @@ import java.util.TreeMap;
  * laid logs" requirement.
  *
  * <p>Honest best-effort beyond that: a variant this can't safely resolve - no "variants" block
- * (multipart), a rotation that isn't a multiple of 90 degrees, a face with its own UV rotation or
- * crop, a texture variable it never saw, a model that isn't a single full-cube element - comes
- * back with that face (or the whole block) simply absent, rather than a guessed mapping. The
- * sampler this feeds assumes the contacted face spans the full 0..1 of block-local space and the
- * full 0..1 of the texture, which only holds for a plain full-size cube, right-angle-rotated or
- * not: anything else (a slab's partial extent, a stair's several elements, a cropped face UV)
- * would silently misreport evidence for geometry that isn't what the tire actually touched.
+ * (multipart), {@code uvlock: true} (a different, unsupported UV remapping - see the
+ * {@code uvlock} check in {@link #resolve}), a rotation that isn't a multiple of 90 degrees, a
+ * weighted-random variant list whose entries genuinely disagree on model/rotation/uvlock (see
+ * {@link #allEntriesEquivalent}), a face with its own UV rotation or crop, a texture variable it
+ * never saw, a model that isn't a single full-cube element - comes back with that face (or the
+ * whole block) simply absent, rather than a guessed mapping. The sampler this feeds assumes the
+ * contacted face spans the full 0..1 of block-local space and the full 0..1 of the texture, which
+ * only holds for a plain full-size cube, right-angle-rotated or not: anything else (a slab's
+ * partial extent, a stair's several elements, a cropped face UV) would silently misreport
+ * evidence for geometry that isn't what the tire actually touched.
  */
 final class BlockModelResolver {
     private static final int MAX_MODEL_DEPTH = 16;
@@ -70,6 +73,14 @@ final class BlockModelResolver {
         }
         Map<String, Object> matched = matchVariant(variants, stateValues);
         if (matched == null) {
+            return Optional.empty();
+        }
+        if (truthy(matched.get("uvlock"))) {
+            // uvlock keeps the texture itself screen/world-aligned regardless of the model's own
+            // rotation (a different remapping than the plain inverse-rotation this class applies
+            // for an unlocked variant) - review finding: silently treating a locked variant as
+            // unlocked would read grain direction off the wrong basis just as the original
+            // world-face bug did. Not supported; refuse rather than guess.
             return Optional.empty();
         }
         double rotX = numberOf(matched.get("x"));
@@ -173,12 +184,49 @@ final class BlockModelResolver {
             if (keyMatches(entry.getKey(), stateValues)) {
                 Object value = entry.getValue();
                 if (value instanceof List<?> list) {
-                    return list.isEmpty() ? null : asObject(list.get(0));
+                    // A weighted-random list of candidate models: vanilla picks one at random per
+                    // placement (seeded by position), which this stateless, non-Minecraft-typed
+                    // resolver has no way to reproduce. When every entry is equivalent for this
+                    // resolver's purposes (same model/x/y/uvlock - only e.g. "weight" differs, or
+                    // there's cosmetic variance this doesn't model, like resolve()'s own +y/x
+                    // check rejecting anything it can't carry through), any one of them is a safe
+                    // representative. When they genuinely differ, which one a tire's contact point
+                    // would see is unknowable here - refuse rather than arbitrarily picking the
+                    // first and reporting it as certain (review finding).
+                    if (list.isEmpty()) {
+                        return null;
+                    }
+                    return allEntriesEquivalent(list) ? asObject(list.get(0)) : null;
                 }
                 return asObject(value);
             }
         }
         return null;
+    }
+
+    /** Whether every entry in a weighted-random variant list agrees on the fields this resolver
+     * actually reads ({@code model}/{@code x}/{@code y}/{@code uvlock}) - if so, "weight" is the
+     * only thing that could differ, and picking any one entry is a safe, deterministic choice. */
+    private static boolean allEntriesEquivalent(List<?> list) {
+        Map<String, Object> first = asObject(list.get(0));
+        if (first == null) {
+            return false;
+        }
+        for (int i = 1; i < list.size(); i++) {
+            Map<String, Object> entry = asObject(list.get(i));
+            if (entry == null
+                    || !java.util.Objects.equals(first.get("model"), entry.get("model"))
+                    || numberOf(first.get("x")) != numberOf(entry.get("x"))
+                    || numberOf(first.get("y")) != numberOf(entry.get("y"))
+                    || truthy(first.get("uvlock")) != truthy(entry.get("uvlock"))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean truthy(Object value) {
+        return value instanceof Boolean b && b;
     }
 
     private static boolean keyMatches(String key, Map<String, String> stateValues) {
