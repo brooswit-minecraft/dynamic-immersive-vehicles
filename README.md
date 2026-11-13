@@ -635,6 +635,32 @@ expected to piggyback on that same `OverridesHotReload` mechanism rather than
 add a second, separate one - that wiring is not part of this ticket's bounded
 scope.
 
+### Directional block-face tire response (MINECRAFT-517)
+
+Layered on top of the MINECRAFT-508 baseline above, not a replacement for it:
+`DirectionalGroundSurface` reads the CANONICAL texture Minecraft/NeoForge/this
+mod ship for the contacted block's contacted face - read straight off the
+classpath, never through the active resource pack, so the result is the same
+on a bare dedicated server with no resource pack installed and cannot be
+changed by a cosmetic pack - and adjusts `frictionMultiplier` by how rough
+that texture is in the direction the wheel is actually travelling. A log
+lying on its side shows its end-grain texture on whichever world faces its
+axis points at (`BlockModelResolver`/`Face#rotate` carry a blockstate's own
+right-angle `x`/`y` variant rotation through, something Dynamic Terrain's own
+resolver - this logic is adapted from, not a dependency on, DT - deliberately
+refuses to do), so travelling along that grain reads as smoother than crossing
+it, a difference that could not exist under M508's one-multiplier-per-block
+baseline.
+
+This is always a bounded ADJUSTMENT, never a replacement: `rollingResistanceMultiplier`
+is untouched, and `frictionMultiplier` is never reduced by more than
+`DirectionalGroundSurface.MAX_GRAIN_PENALTY` (25%) off the M508 baseline.
+Whenever the canonical texture, the block's model, or its rotation can't be
+resolved honestly (an unsupported block shape, a missing asset, a model this
+doesn't understand, no travel-direction evidence at all), `DirectionalGroundSurface.at`
+returns the exact M508 baseline unchanged - see that class's own doc for the
+full fallback contract.
+
 ## Build
 
 CI uses Java 21 and Gradle 8.8. It resolves the exact official dependency

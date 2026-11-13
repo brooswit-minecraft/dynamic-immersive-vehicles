@@ -844,6 +844,31 @@ public final class PhysicsBridge {
  static double suspensionDamper(double mass, int wheelCount, double spring) {
   return 2*Math.sqrt(spring*mass/wheelCount)*.7;
  }
+ /**
+  * MINECRAFT-506: the same ride-height-equilibrium calibration as {@link #suspensionSpring},
+  * generalized from an assumed-even {@code 1/wheelCount} static load split to this wheel's own
+  * geometry-derived {@code loadShare} (see {@link WheelLoadDistribution}). At
+  * {@code loadShare == 1.0/wheelCount} this is algebraically IDENTICAL to
+  * {@code suspensionSpring(mass,wheelCount,suspensionTravel,gravity)} - the symmetric default
+  * case matches to within ordinary floating-point rounding (a different operation ORDER than
+  * {@code mass*gravity/wheelCount}, so not guaranteed bit-for-bit, but equal to many more digits
+  * than this simulation's own tolerances ever distinguish - verified by
+  * {@code WheelLoadDistributionTest}'s own symmetric-case equivalence assertion). For an
+  * asymmetric layout this correctly gives the wheel/axle closer to
+  * the chassis COM a STIFFER calibrated spring (it is carrying more of the real static load), and
+  * one farther away a softer one - still balancing to the SAME travel*.5 ride-height equilibrium
+  * either way (the per-wheel anchor offset itself, {@code suspensionTravel*.5}, does not need to
+  * change per wheel - only the rate that holds that height under this wheel's own real share of
+  * the weight does).
+  */
+ static double suspensionSpringForShare(double mass, double loadShare, double suspensionTravel, double gravity) {
+  return mass*loadShare*gravity/(suspensionTravel*.5);
+ }
+ /** {@link #suspensionDamper}'s own share-generalized counterpart - same relationship to it that
+  * {@link #suspensionSpringForShare} has to {@link #suspensionSpring}. */
+ static double suspensionDamperForShare(double mass, double loadShare, double spring) {
+  return 2*Math.sqrt(spring*mass*loadShare)*.7;
+ }
  /** Default length, in ticks, of {@code Body}'s bounded ground-contact trace (ticket comment
   * 53095/53098) when {@code -Ddiv.debugGroundContactTicks} is unset or invalid. */
  static final int DEFAULT_DEBUG_GROUND_CONTACT_TICKS = 200;
@@ -1552,6 +1577,11 @@ public final class PhysicsBridge {
    // runtime (see VERIFICATION.md) - adding a ServerLevel-typed method to the outer class would
    // pull that requirement into every one of its pure-function unit tests.
    double gravity=DimensionPhysicsData.getGravity(level).length();
+   // Nominal, even-split spring/damper - kept ONLY for the diagnostic log line below (so a
+   // capture still reports a single representative rate instead of a whole per-wheel array).
+   // MINECRAFT-506: the ACTUAL per-wheel force calculation below no longer uses these two
+   // variables at all - it uses wheelSpring/wheelDamper, computed per wheel from that wheel's
+   // own geometry-derived static load share (see WheelLoadDistribution).
    double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel,gravity);
    double damper=suspensionDamper(mass,wheels.size(),spring);
    boolean contact=false;
@@ -1633,8 +1663,28 @@ public final class PhysicsBridge {
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
      double skidSteerMultiplier, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface) {}
+   // MINECRAFT-506: each wheel's own static load SHARE, from its horizontal (x,z) anchor
+   // position relative to `center` - the same geometry already used to build `anchor` just
+   // below, read once here as its own x/z pair so WheelLoadDistribution never needs a
+   // Minecraft/Sable type. For the common symmetric layout this is exactly 1/wheels.size() for
+   // every wheel (see WheelLoadDistributionTest's own symmetric-equivalence case), so the
+   // per-wheel spring/damper computed from it below matches today's vehicle-wide
+   // suspensionSpring/suspensionDamper(mass,wheels.size(),...) to ordinary floating-point
+   // rounding for every currently-accepted default/symmetric vehicle - only an asymmetric
+   // layout (COM offset toward one axle/corner) actually changes any wheel's calibrated rate.
+   double[] loadShareX=new double[wheels.size()], loadShareZ=new double[wheels.size()];
+   for (int i=0;i<wheels.size();i++) {
+    var w=wheels.get(i);
+    loadShareX[i]=w.localOffset.x-center.x;
+    loadShareZ[i]=w.localOffset.z-center.z;
+   }
+   double[] loadShares=WheelLoadDistribution.shares(loadShareX,loadShareZ);
    List<WheelHit> hits=new java.util.ArrayList<>();
+   int wheelIndex=0;
    for(var wheel:wheels) {
+    double loadShare=loadShares[wheelIndex++];
+    double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity);
+    double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring);
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
     boolean upperOwned=twoBodyActive && io.github.brooswitminecraft.div.experimental.TwoBodyChassis.isUpperHalf(anchor.y);
@@ -1659,8 +1709,11 @@ public final class PhysicsBridge {
     Vector3d point=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(pose.position());
     // Opt-in experimental effective-mass damping candidate (ticket comments 53214/53219) - OFF
     // (EXPERIMENTAL_EFFECTIVE_MASS_DAMPING false, the shipped default) means damperResult is
-    // exactly new EffectiveMassDamperResult(damper, NaN) - damperUsed==damper byte-for-byte,
-    // nothing about today's behavior changes. This formula DIVIDES by the inertia tensor it is
+    // exactly new EffectiveMassDamperResult(wheelDamper, NaN) - damperUsed==wheelDamper exactly
+    // (MINECRAFT-506: wheelDamper itself matches the old vehicle-wide `damper` to ordinary
+    // floating-point rounding for every symmetric/default vehicle - see
+    // suspensionDamperForShare's own doc), nothing about today's behavior changes. This formula
+    // DIVIDES by the inertia tensor it is
     // given, so (review 53280/53282/53285) it must use the AGGREGATE mass/inertia (`mass`/
     // aggregateInertiaBody) with a lever arm measured from the SAME assembly COM
     // (predictorLeverArmCorrection) - a mix of owner-isolated inertia with a differently-
@@ -1672,17 +1725,30 @@ public final class PhysicsBridge {
     // measured record showing this is NOT a validated fix.
     Vector3d predictorPoint=new Vector3d(point).add(predictorLeverArmCorrection);
     var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
-      ? effectiveMassDamper(spring,mass,predictorPoint,up,inverse,aggregateInertiaBody,damper)
-      : new EffectiveMassDamperResult(damper, Double.NaN);
-    double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),spring,damperResult.damper()));
+      ? effectiveMassDamper(wheelSpring,mass,predictorPoint,up,inverse,aggregateInertiaBody,wheelDamper)
+      : new EffectiveMassDamperResult(wheelDamper, Double.NaN);
+    // The vehicle-wide mass*gravity safety cap is UNCHANGED (not tightened to mass*gravity*
+    // loadShare) - it is documented as a safety cap, not a load-distribution model (see
+    // suspensionSpring's own doc), and tightening it would itself change default/symmetric
+    // behavior under hard compression, which this ticket's "preserve defaults" constraint rules
+    // out. Only the calibrated RATE that normally keeps compression near travel*.5 varies by
+    // load share; this clamp is the same last-resort backstop every wheel already had.
+    double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),wheelSpring,damperResult.damper()));
     double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
-    // MINECRAFT-508: baseline ground-surface response (tag-driven pavement/dirt/grass/gravel/
-    // ice; directional per-pixel/16x16-face response is a deferred later sprint, not this
-    // lookup) - resolved from the actual terrain hit block, not the suspension anchor.
-    GroundSurface surface=GroundSurfaces.at(level,((net.minecraft.world.phys.BlockHitResult)hit).getBlockPos());
+    // MINECRAFT-508/517: tag-driven pavement/dirt/grass/gravel/ice baseline, layered with
+    // MINECRAFT-517's directional per-face canonical-texture grain response (safe no-op fallback
+    // to the exact MINECRAFT-508 baseline when that texture/model can't be resolved - see
+    // DirectionalGroundSurface's own doc) - resolved from the actual terrain hit block/face, not
+    // the suspension anchor. `forward` is this wheel's own rolling direction, the travel
+    // direction grain response is relative to.
+    var terrainHit=(net.minecraft.world.phys.BlockHitResult)hit;
+    Vector3d hitLocal=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(
+      terrainHit.getBlockPos().getX(),terrainHit.getBlockPos().getY(),terrainHit.getBlockPos().getZ());
+    GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
+      hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
       damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface));
    }
