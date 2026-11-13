@@ -238,6 +238,72 @@ bindings feel right and the wheel reconnects cleanly in practice - is
 John's own device-level verification; this project has no CI hardware to
 exercise a real wheel.
 
+### Comprehensive G29 + shifter control map (all-native, no DIV code)
+
+Requested scope (ticket comment 53557): map as many of IV's existing car
+controls to the wheel's inputs as practical, with a separate H-pattern
+shifter and (eventually) a handbrake. Everything below is IV's own control,
+bound through its controls GUI/`controlsettings.json` exactly like the pedals
+above - there is nothing here for this project to build or ship. Zippy's own
+installed profile currently shows **no G29/shifter/handbrake device present**
+(ticket comment 53557's device inventory: historical G29/PS4/PS3 compat IDs
+all `Present=false`, 83 joystick control entries all unassigned,
+`buttonIndex=0` placeholders are not real bindings) - the table below is what
+to bind once the wheel is actually connected and its real axis/button indices
+are read from IV's controls GUI; **do not guess indices from the historical
+IDs**, and do not treat this table as "already configured."
+
+| Car control | IV control(s) | Suggested G29 input |
+|---|---|---|
+| Steering | `CAR_TURN` | Wheel rotation axis |
+| Throttle | `CAR_GAS` | Gas pedal axis |
+| Brake (analog, this ticket's fix) | `CAR_BRAKE` | Brake pedal axis |
+| Clutch | *(no native IV control)* | not mapped - IV has no clutch input to bind it to |
+| Gear up/down (**paddles - required**) | `CAR_SHIFT_U` / `CAR_SHIFT_D` | Left/right paddle buttons |
+| Gear select (H-pattern) | `CAR_SHIFT_1`-`CAR_SHIFT_9`/`CAR_SHIFT_R` | Shifter's own per-gear switches |
+| Parking brake (digital toggle) | `CAR_PARK` | A spare wheel/shifter button |
+| Horn | `CAR_HORN` | A spare wheel button |
+| Headlights | `CAR_LIGHTS` | A spare wheel button |
+| Turn signals | `CAR_TURNSIGNAL_L` / `CAR_TURNSIGNAL_R` | Wheel's turn-signal stalk/buttons, if present |
+| Dashboard/instrument panel | `CAR_PANEL` | A spare wheel button |
+| Radio | `CAR_RADIO` | A spare wheel button |
+| Camera look / change view / zoom | `CAR_LOOK_*`, `CAR_CHANGEVIEW`, `CAR_ZOOM_I`/`CAR_ZOOM_O` | Wheel's view hat/buttons, if present |
+| Joystick input inhibit (disable joystick control temporarily) | `CAR_JS_INHIBIT` | A spare button, optional |
+
+Deliberately **not** mapped: `CAR_GUN_FIRE`/`CAR_GUN_SWITCH` (weapon controls -
+"do not map weapons/custom actions blindly" per the ticket; a driving wheel
+has no sensible weapon-trigger affordance and nothing in this ticket's scope
+calls for one).
+
+**Two native constraints, not DIV bugs, worth stating plainly rather than
+glossing over:**
+
+- **`useShifter` is a single exclusive toggle, not independent per-control.**
+  Reading IV's own `ControlSystem.controlGroundVehicle` directly: when
+  `useShifter=true`, only the H-pattern `CAR_SHIFT_1`-`R` branch runs and the
+  paddle/sequential `CAR_SHIFT_U`/`CAR_SHIFT_D` branch is skipped entirely
+  (and vice versa) - IV does not support H-pattern direct-select and
+  paddle sequential-shift being simultaneously active. Since paddles shifting
+  gears is the explicit firm requirement (ticket comment 53524), the setting
+  that satisfies it is **`useShifter=false`** - the physical H-pattern
+  shifter's gear positions will not directly select a gear in that mode (its
+  shift-up/shift-down micro-switches, if it has them, could still be bound to
+  `CAR_SHIFT_U`/`CAR_SHIFT_D` alongside the paddles, but its H-pattern gate
+  itself would do nothing). If H-pattern direct-select is wanted instead,
+  `useShifter=true` is required and the paddles go inert - this is a real
+  either/or in the installed mod, not a configuration bug to fix.
+- **IV has no analog handbrake control at all** - `CAR_PARK` is the only
+  parking/handbrake-adjacent control and it is a plain digital toggle (see
+  the enum's own `isMomentary=true`/boolean definition), not an axis. There
+  is no separate "handbrake" input distinct from the existing parking brake
+  to bind a future handbrake device to, and this project is not adding one -
+  that would be new DIV code building a parallel input stack, which is out
+  of this ticket's scope. When the handbrake hardware arrives, the practical
+  option is binding it to the existing `CAR_PARK` toggle (full-stop,
+  digital), explicitly documented here as the supported semantic rather than
+  silently treated as either a full service brake or assumed to already
+  support analog pull strength.
+
 ## Configuration
 
 JSON is now **optional per-car tuning**, never an activation prerequisite. A
