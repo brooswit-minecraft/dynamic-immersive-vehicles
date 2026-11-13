@@ -23,7 +23,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   var fresh = Overrides.defaultTuning();
   fresh.suspensionTravel = 0.5; fresh.friction = 1.5; fresh.driveForce = 9000.0; fresh.brakeForce = 13000.0;
   fresh.maxSteerDegrees = 35.0; fresh.lateralGripMultiplier = 0.7; fresh.waterDrag = 450.0; fresh.propellerForce = 7000.0;
-  fresh.angularWaterDrag = 50.0;
+  fresh.angularWaterDrag = 50.0; fresh.brakeBiasFront = 0.65;
   // MINECRAFT-522: the three new rotor fields must go through this same live-mutation path -
   // John's review (comment 53751) flagged that this test exercised every pre-existing live-safe
   // field but never changed/asserted these.
@@ -33,8 +33,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
   assertEquals(13000.0, target.brakeForce); assertEquals(35.0, target.maxSteerDegrees); assertEquals(0.7, target.lateralGripMultiplier);
   assertEquals(450.0, target.waterDrag); assertEquals(7000.0, target.propellerForce); assertEquals(50.0, target.angularWaterDrag);
+  assertEquals(0.65, target.brakeBiasFront);
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
-  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag",
+  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","brakeBiasFront",
       "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale"),
     new TreeSet<>(applied));
  }

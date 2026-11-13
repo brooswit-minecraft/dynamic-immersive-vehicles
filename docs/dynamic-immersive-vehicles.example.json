@@ -23,6 +23,10 @@
       "cyclicAuthorityScale": 1.3,
       "yawAuthorityScale": 0.8
     },
+    "examplepack:front_biased_car": {
+      "brakeForce": 12000.0,
+      "brakeBiasFront": 0.7
+    },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
       "hullFillFactor": 0.5,

@@ -120,6 +120,17 @@ public final class Overrides {
   public Double cyclicLimitDegrees;
   public Double cyclicAuthorityScale;
   public Double yawAuthorityScale;
+  // MINECRAFT-520: configurable front/rear SERVICE-brake distribution - 0.0 sends the whole
+  // tuning.brakeForce budget to the geometric rear axle group, 1.0 sends it all to the front
+  // group, 0.5 is the neutral/even axle split. No FALLBACK entry (like selfRight*/massKg/
+  // enabled above, NOT like brakeForce/friction/etc.) - null/unset means "no operator bias
+  // configured at all", which PhysicsBridge/BrakeBiasDistribution treats as the exact pre-
+  // ticket behavior (plain brakeForce/wheelCount for every wheel), not merely a 0.5 default;
+  // see BrakeBiasDistribution's own doc for why an explicit 0.5 is a materially different claim
+  // from "unset" on an asymmetric axle-count vehicle. Deliberately independent of the parking
+  // brake and the separate analog handbrake - see PhysicsBridge.perWheelBrakeMagnitude's own doc
+  // for why those two never get redistributed by this bias.
+  public Double brakeBiasFront;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -159,6 +170,11 @@ public final class Overrides {
    // capped at 5x to keep this a tuning knob, not a way to grant unbounded attitude/yaw torque.
    if (cyclicAuthorityScale != null && !(Double.isFinite(cyclicAuthorityScale) && cyclicAuthorityScale > 0 && cyclicAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (yawAuthorityScale != null && !(Double.isFinite(yawAuthorityScale) && yawAuthorityScale > 0 && yawAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Inclusive at both ends (0.0 all-rear, 1.0 all-front are the documented, legitimate
+   // extremes - see BrakeBiasDistributionTest's own front/rear-extreme coverage), unlike
+   // lateralGripMultiplier's exclusive-zero: a brake bias of exactly 0 or 1 is a normal,
+   // physically sensible configuration (e.g. a rear-brakes-only trike), not a degenerate one.
+   if (brakeBiasFront != null && !(Double.isFinite(brakeBiasFront) && brakeBiasFront >= 0 && brakeBiasFront <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
@@ -195,6 +211,7 @@ public final class Overrides {
    if (cyclicLimitDegrees != null) throw new IllegalArgumentException("part overrides do not support 'cyclicLimitDegrees' (no part-level consumer yet)");
    if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
+   if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -228,6 +245,7 @@ public final class Overrides {
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   c.angularWaterDrag=t.angularWaterDrag;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
+  c.brakeBiasFront=t.brakeBiasFront;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -256,6 +274,7 @@ public final class Overrides {
   m.cyclicLimitDegrees = child.cyclicLimitDegrees!=null?child.cyclicLimitDegrees:parent.cyclicLimitDegrees;
   m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
+  m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   return m;
  }
  /**
@@ -430,6 +449,10 @@ public final class Overrides {
   result.cyclicLimitDegrees = firstNonNull(override!=null?override.cyclicLimitDegrees:null, packMetadata!=null?packMetadata.cyclicLimitDegrees:null, ivAdapted!=null?ivAdapted.cyclicLimitDegrees:null, physicallyDerived!=null?physicallyDerived.cyclicLimitDegrees:null, FALLBACK.cyclicLimitDegrees);
   result.cyclicAuthorityScale = firstNonNull(override!=null?override.cyclicAuthorityScale:null, packMetadata!=null?packMetadata.cyclicAuthorityScale:null, ivAdapted!=null?ivAdapted.cyclicAuthorityScale:null, physicallyDerived!=null?physicallyDerived.cyclicAuthorityScale:null, FALLBACK.cyclicAuthorityScale);
   result.yawAuthorityScale = firstNonNull(override!=null?override.yawAuthorityScale:null, packMetadata!=null?packMetadata.yawAuthorityScale:null, ivAdapted!=null?ivAdapted.yawAuthorityScale:null, physicallyDerived!=null?physicallyDerived.yawAuthorityScale:null, FALLBACK.yawAuthorityScale);
+  // No FALLBACK entry (mirrors selfRight*/enabled/massKg above) - stays null unless some level
+  // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
+  // needs to reproduce the pre-ticket even split.
+  result.brakeBiasFront = firstNonNull(override!=null?override.brakeBiasFront:null, packMetadata!=null?packMetadata.brakeBiasFront:null, ivAdapted!=null?ivAdapted.brakeBiasFront:null, physicallyDerived!=null?physicallyDerived.brakeBiasFront:null);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}
