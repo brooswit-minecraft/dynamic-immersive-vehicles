@@ -104,4 +104,50 @@ class RotorForcesTest {
  @Test void zeroDiameterGivesZeroRadius() {
   assertEquals(0, RotorForces.rotorRadiusMeters(0));
  }
+
+ // MINECRAFT-522: configurable cyclic-limit and cyclic/yaw authority tuning.
+
+ @Test void cyclicTiltWithExplicitLimitClampsAtThatLimitNotTwentyDegrees() {
+  double tenDegreeLimit = Math.toRadians(10);
+  assertEquals(tenDegreeLimit, RotorForces.cyclicTilt(Math.toRadians(45), tenDegreeLimit), 1e-9);
+  assertEquals(-tenDegreeLimit, RotorForces.cyclicTilt(Math.toRadians(-45), tenDegreeLimit), 1e-9);
+  double fiveDegrees = Math.toRadians(5);
+  assertEquals(fiveDegrees, RotorForces.cyclicTilt(fiveDegrees, tenDegreeLimit), 1e-9, "within the configured limit, passes through unchanged");
+ }
+
+ @Test void cyclicTiltWithNoExplicitLimitMatchesTheTwentyDegreeDefault() {
+  double input = Math.toRadians(30);
+  assertEquals(RotorForces.cyclicTilt(input), RotorForces.cyclicTilt(input, Math.toRadians(20)), 1e-9);
+ }
+
+ @Test void cyclicTorqueWithUnitScaleMatchesTheUnscaledOverload() {
+  double tilt = Math.toRadians(10), thrust = 5000, radius = 2;
+  assertEquals(RotorForces.cyclicTorque(tilt, thrust, radius), RotorForces.cyclicTorque(tilt, thrust, radius, 1.0), 1e-9);
+ }
+
+ @Test void cyclicTorqueScalesLinearlyWithAuthorityScale() {
+  double tilt = Math.toRadians(10), thrust = 5000, radius = 2;
+  double base = RotorForces.cyclicTorque(tilt, thrust, radius, 1.0);
+  assertEquals(2 * base, RotorForces.cyclicTorque(tilt, thrust, radius, 2.0), 1e-6);
+  assertEquals(0.5 * base, RotorForces.cyclicTorque(tilt, thrust, radius, 0.5), 1e-6);
+ }
+
+ @Test void cyclicTorqueScaleGrantsNoUnpoweredFreeTorqueAtZeroThrust() {
+  assertEquals(0, RotorForces.cyclicTorque(Math.toRadians(10), 0, 2, 5.0), 1e-9);
+ }
+
+ @Test void yawTorqueWithUnitScaleMatchesTheUnscaledOverload() {
+  double rudder = Math.toRadians(10), thrust = 5000, tailArm = 2;
+  assertEquals(RotorForces.yawTorque(rudder, thrust, tailArm), RotorForces.yawTorque(rudder, thrust, tailArm, 1.0), 1e-9);
+ }
+
+ @Test void yawTorqueScalesLinearlyWithAuthorityScale() {
+  double rudder = Math.toRadians(10), thrust = 5000, tailArm = 2;
+  double base = RotorForces.yawTorque(rudder, thrust, tailArm, 1.0);
+  assertEquals(3 * base, RotorForces.yawTorque(rudder, thrust, tailArm, 3.0), 1e-6);
+ }
+
+ @Test void yawTorqueScaleGrantsNoUnpoweredFreeTorqueAtZeroThrust() {
+  assertEquals(0, RotorForces.yawTorque(Math.toRadians(10), 0, 2, 5.0), 1e-9);
+ }
 }

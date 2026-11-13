@@ -106,6 +106,16 @@ public final class Overrides {
   // own doc): a genuinely combined high-demand tick (e.g. hard braking mid-turn) can still see
   // the shared radial projection reduce achieved longitudinal force somewhat.
   public Double lateralGripMultiplier;
+  // MINECRAFT-522: rotorcraft-only cyclic/yaw tuning, mirroring RotorForces.cyclicTilt's own
+  // bounded-clamp contract and RotorForces.cyclicTorque/yawTorque's new authority-scale overloads
+  // - see those methods' own docs. cyclicLimitDegrees bounds how far the disk can be tilted
+  // (replacing the class's own hardcoded 20-degree default when set); cyclicAuthorityScale/
+  // yawAuthorityScale multiply the already thrust-gated cyclic/yaw torque, never granting
+  // unpowered free torque. All three re-read live every tick by PhysicsBridge.stepRotor, same as
+  // driveForce/maxSteerDegrees - see PhysicsBridge.applyLiveSafeFields.
+  public Double cyclicLimitDegrees;
+  public Double cyclicAuthorityScale;
+  public Double yawAuthorityScale;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -135,6 +145,16 @@ public final class Overrides {
    // Never above 1: this knob is explicitly for REDUCING lateral grip (John's own "less grip...
    // so it slides"), not for granting more lateral authority than the real friction circle.
    if (lateralGripMultiplier != null && !(Double.isFinite(lateralGripMultiplier) && lateralGripMultiplier > 0 && lateralGripMultiplier <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-522: bounded the same way the class doc on RotorForces.MAX_CYCLIC_LIMIT_DEGREES
+   // explains - a real rotor disk cannot be tilted onto its edge, so even an operator-configured
+   // limit is capped there, never just "whatever value was typed".
+   if (cyclicLimitDegrees != null && !(Double.isFinite(cyclicLimitDegrees) && cyclicLimitDegrees > 0 && cyclicLimitDegrees <= io.github.brooswitminecraft.div.RotorForces.MAX_CYCLIC_LIMIT_DEGREES)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Authority scale multiplies already thrust-gated torque (RotorForces.cyclicTorque/yawTorque) -
+   // strictly positive (a zero or negative scale would be a confusing way to disable attitude/yaw
+   // authority entirely; that is what cyclicLimitDegrees/disabling the rotorcraft itself is for),
+   // capped at 5x to keep this a tuning knob, not a way to grant unbounded attitude/yaw torque.
+   if (cyclicAuthorityScale != null && !(Double.isFinite(cyclicAuthorityScale) && cyclicAuthorityScale > 0 && cyclicAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (yawAuthorityScale != null && !(Double.isFinite(yawAuthorityScale) && yawAuthorityScale > 0 && yawAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
@@ -168,6 +188,9 @@ public final class Overrides {
     throw new IllegalArgumentException("part overrides do not support selfRight* fields (no part-level consumer yet)");
    if (upperMassFraction != null) throw new IllegalArgumentException("part overrides do not support 'upperMassFraction' (no part-level consumer yet)");
    if (lateralGripMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'lateralGripMultiplier' (no part-level consumer yet)");
+   if (cyclicLimitDegrees != null) throw new IllegalArgumentException("part overrides do not support 'cyclicLimitDegrees' (no part-level consumer yet)");
+   if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
+   if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -176,7 +199,9 @@ public final class Overrides {
   * Values/units/provenance unchanged from the shared numbers this ticket's physics work has
   * always used: driveForce 8000N, brakeForce 12000N, suspensionTravel 0.3m, friction mu=1.0
   * (dimensionless), maxSteerDegrees 30deg, hullFillFactor 0.5 (dimensionless), waterDrag 400
-  * (solver-internal units), propellerForce 6000N. */
+  * (solver-internal units), propellerForce 6000N. MINECRAFT-522: cyclicLimitDegrees 20deg and
+  * cyclicAuthorityScale/yawAuthorityScale 1.0 (unit scaling) reproduce RotorForces' own prior
+  * hardcoded constant/behavior exactly - see that class's doc. */
  private static final Tuning FALLBACK = new Tuning();
  static {
   FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
@@ -184,6 +209,9 @@ public final class Overrides {
   FALLBACK.upperMassFraction=0.5;
   FALLBACK.lateralGripMultiplier=1.0;
   FALLBACK.angularWaterDrag=0.0;
+  FALLBACK.cyclicLimitDegrees=20.0;
+  FALLBACK.cyclicAuthorityScale=1.0;
+  FALLBACK.yawAuthorityScale=1.0;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -195,6 +223,7 @@ public final class Overrides {
   c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   c.angularWaterDrag=t.angularWaterDrag;
+  c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -220,6 +249,9 @@ public final class Overrides {
   m.upperMassFraction = child.upperMassFraction!=null?child.upperMassFraction:parent.upperMassFraction;
   m.lateralGripMultiplier = child.lateralGripMultiplier!=null?child.lateralGripMultiplier:parent.lateralGripMultiplier;
   m.angularWaterDrag = child.angularWaterDrag!=null?child.angularWaterDrag:parent.angularWaterDrag;
+  m.cyclicLimitDegrees = child.cyclicLimitDegrees!=null?child.cyclicLimitDegrees:parent.cyclicLimitDegrees;
+  m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
+  m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
   return m;
  }
  /**
@@ -391,6 +423,9 @@ public final class Overrides {
   result.selfRightFadeEndDegrees = firstNonNull(override!=null?override.selfRightFadeEndDegrees:null, packMetadata!=null?packMetadata.selfRightFadeEndDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeEndDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeEndDegrees:null);
   result.upperMassFraction = firstNonNull(override!=null?override.upperMassFraction:null, packMetadata!=null?packMetadata.upperMassFraction:null, ivAdapted!=null?ivAdapted.upperMassFraction:null, physicallyDerived!=null?physicallyDerived.upperMassFraction:null, FALLBACK.upperMassFraction);
   result.lateralGripMultiplier = firstNonNull(override!=null?override.lateralGripMultiplier:null, packMetadata!=null?packMetadata.lateralGripMultiplier:null, ivAdapted!=null?ivAdapted.lateralGripMultiplier:null, physicallyDerived!=null?physicallyDerived.lateralGripMultiplier:null, FALLBACK.lateralGripMultiplier);
+  result.cyclicLimitDegrees = firstNonNull(override!=null?override.cyclicLimitDegrees:null, packMetadata!=null?packMetadata.cyclicLimitDegrees:null, ivAdapted!=null?ivAdapted.cyclicLimitDegrees:null, physicallyDerived!=null?physicallyDerived.cyclicLimitDegrees:null, FALLBACK.cyclicLimitDegrees);
+  result.cyclicAuthorityScale = firstNonNull(override!=null?override.cyclicAuthorityScale:null, packMetadata!=null?packMetadata.cyclicAuthorityScale:null, ivAdapted!=null?ivAdapted.cyclicAuthorityScale:null, physicallyDerived!=null?physicallyDerived.cyclicAuthorityScale:null, FALLBACK.cyclicAuthorityScale);
+  result.yawAuthorityScale = firstNonNull(override!=null?override.yawAuthorityScale:null, packMetadata!=null?packMetadata.yawAuthorityScale:null, ivAdapted!=null?ivAdapted.yawAuthorityScale:null, physicallyDerived!=null?physicallyDerived.yawAuthorityScale:null, FALLBACK.yawAuthorityScale);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}
