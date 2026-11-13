@@ -114,6 +114,17 @@ public final class Overrides {
   // suspensionTravel/friction/etc. this feature did not exist before this ticket, so there is no
   // prior shared non-zero number to preserve, only "no effect at all" to preserve exactly.
   public Double antiRollStiffness;
+  // MINECRAFT-520: configurable front/rear SERVICE-brake distribution - 0.0 sends the whole
+  // tuning.brakeForce budget to the geometric rear axle group, 1.0 sends it all to the front
+  // group, 0.5 is the neutral/even axle split. No FALLBACK entry (like selfRight*/massKg/
+  // enabled above, NOT like brakeForce/friction/etc.) - null/unset means "no operator bias
+  // configured at all", which PhysicsBridge/BrakeBiasDistribution treats as the exact pre-
+  // ticket behavior (plain brakeForce/wheelCount for every wheel), not merely a 0.5 default;
+  // see BrakeBiasDistribution's own doc for why an explicit 0.5 is a materially different claim
+  // from "unset" on an asymmetric axle-count vehicle. Deliberately independent of the parking
+  // brake and the separate analog handbrake - see PhysicsBridge.perWheelBrakeMagnitude's own doc
+  // for why those two never get redistributed by this bias.
+  public Double brakeBiasFront;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -148,6 +159,11 @@ public final class Overrides {
    // fully-rigid-bar limit) - see AntiRoll's own doc for why 1 is a real, meaningful upper bound
    // (full equalization) rather than an arbitrary cap.
    if (antiRollStiffness != null && !(Double.isFinite(antiRollStiffness) && antiRollStiffness >= 0 && antiRollStiffness <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Inclusive at both ends (0.0 all-rear, 1.0 all-front are the documented, legitimate
+   // extremes - see BrakeBiasDistributionTest's own front/rear-extreme coverage), unlike
+   // lateralGripMultiplier's exclusive-zero: a brake bias of exactly 0 or 1 is a normal,
+   // physically sensible configuration (e.g. a rear-brakes-only trike), not a degenerate one.
+   if (brakeBiasFront != null && !(Double.isFinite(brakeBiasFront) && brakeBiasFront >= 0 && brakeBiasFront <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
@@ -182,6 +198,7 @@ public final class Overrides {
    if (upperMassFraction != null) throw new IllegalArgumentException("part overrides do not support 'upperMassFraction' (no part-level consumer yet)");
    if (lateralGripMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'lateralGripMultiplier' (no part-level consumer yet)");
    if (antiRollStiffness != null) throw new IllegalArgumentException("part overrides do not support 'antiRollStiffness' (no part-level consumer yet)");
+   if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -211,6 +228,7 @@ public final class Overrides {
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   c.angularWaterDrag=t.angularWaterDrag;
   c.antiRollStiffness=t.antiRollStiffness;
+  c.brakeBiasFront=t.brakeBiasFront;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -237,6 +255,7 @@ public final class Overrides {
   m.lateralGripMultiplier = child.lateralGripMultiplier!=null?child.lateralGripMultiplier:parent.lateralGripMultiplier;
   m.angularWaterDrag = child.angularWaterDrag!=null?child.angularWaterDrag:parent.angularWaterDrag;
   m.antiRollStiffness = child.antiRollStiffness!=null?child.antiRollStiffness:parent.antiRollStiffness;
+  m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   return m;
  }
  /**
@@ -409,6 +428,10 @@ public final class Overrides {
   result.upperMassFraction = firstNonNull(override!=null?override.upperMassFraction:null, packMetadata!=null?packMetadata.upperMassFraction:null, ivAdapted!=null?ivAdapted.upperMassFraction:null, physicallyDerived!=null?physicallyDerived.upperMassFraction:null, FALLBACK.upperMassFraction);
   result.lateralGripMultiplier = firstNonNull(override!=null?override.lateralGripMultiplier:null, packMetadata!=null?packMetadata.lateralGripMultiplier:null, ivAdapted!=null?ivAdapted.lateralGripMultiplier:null, physicallyDerived!=null?physicallyDerived.lateralGripMultiplier:null, FALLBACK.lateralGripMultiplier);
   result.antiRollStiffness = firstNonNull(override!=null?override.antiRollStiffness:null, packMetadata!=null?packMetadata.antiRollStiffness:null, ivAdapted!=null?ivAdapted.antiRollStiffness:null, physicallyDerived!=null?physicallyDerived.antiRollStiffness:null, FALLBACK.antiRollStiffness);
+  // No FALLBACK entry (mirrors selfRight*/enabled/massKg above) - stays null unless some level
+  // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
+  // needs to reproduce the pre-ticket even split.
+  result.brakeBiasFront = firstNonNull(override!=null?override.brakeBiasFront:null, packMetadata!=null?packMetadata.brakeBiasFront:null, ivAdapted!=null?ivAdapted.brakeBiasFront:null, physicallyDerived!=null?physicallyDerived.brakeBiasFront:null);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

@@ -17,6 +17,10 @@
       "maxSteerDegrees": 30.0,
       "antiRollStiffness": 0.4
     },
+    "examplepack:front_biased_car": {
+      "brakeForce": 12000.0,
+      "brakeBiasFront": 0.7
+    },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
       "hullFillFactor": 0.5,

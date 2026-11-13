@@ -296,8 +296,8 @@ public final class PhysicsBridge {
   * stepRotor) and in BuoyantForces.apply (waterDrag/propellerForce/angularWaterDrag):
   * suspensionTravel/friction/driveForce/brakeForce/maxSteerDegrees/lateralGripMultiplier/
   * waterDrag/propellerForce/angularWaterDrag/antiRollStiffness (MINECRAFT-519 - stepGround reads
-  * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list).
-  * Mutating
+  * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
+  * brakeBiasFront (MINECRAFT-520, same reasoning). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -324,6 +324,7 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.propellerForce, fresh.propellerForce)) { target.propellerForce = fresh.propellerForce; appliedOut.add("propellerForce"); }
   if (!java.util.Objects.equals(target.angularWaterDrag, fresh.angularWaterDrag)) { target.angularWaterDrag = fresh.angularWaterDrag; appliedOut.add("angularWaterDrag"); }
   if (!java.util.Objects.equals(target.antiRollStiffness, fresh.antiRollStiffness)) { target.antiRollStiffness = fresh.antiRollStiffness; appliedOut.add("antiRollStiffness"); }
+  if (!java.util.Objects.equals(target.brakeBiasFront, fresh.brakeBiasFront)) { target.brakeBiasFront = fresh.brakeBiasFront; appliedOut.add("brakeBiasFront"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
@@ -871,6 +872,33 @@ public final class PhysicsBridge {
   * {@link #suspensionSpringForShare} has to {@link #suspensionSpring}. */
  static double suspensionDamperForShare(double mass, double loadShare, double spring) {
   return 2*Math.sqrt(spring*mass*loadShare)*.7;
+ }
+ /**
+  * MINECRAFT-520: this wheel's own composed {@code MultiContactFrictionSolver.FrictionContact}
+  * brake magnitude, folding the configurable front/rear bias into ONLY the service-pedal
+  * component, exactly the way {@link BrakeBiasDistribution}'s own doc promises:
+  * <ul>
+  * <li>{@code parkingBrakeActive} short-circuits to a flat {@code 1.0} for every wheel,
+  * completely bypassing {@code brakeShareRatio} - a parking brake is a full, uniform,
+  * all-wheels lock, independent of whatever service-brake bias is configured (the ticket's own
+  * "keep parking brake...semantics independent, don't silently convert them into service
+  * bias"). This matches the exact pre-ticket value for this case (the old shared
+  * {@code brakeMagnitude} was already forced to {@code 1.0} whenever the parking brake was
+  * active, for every wheel, regardless of the steering/handbrake branch below).</li>
+  * <li>Otherwise, the service pedal's own 0-1 magnitude is scaled by {@code brakeShareRatio}
+  * (1.0 for an unconfigured/fallback bias - see {@link BrakeBiasDistribution#shares} - so this
+  * multiply is a pure no-op then) BEFORE composing with the separate analog handbrake, which is
+  * never itself scaled by the bias - a rear/handbrake-capable wheel keeps getting the handbrake's
+  * own full, unscaled magnitude whenever that is larger than the (now possibly biased) service
+  * component, same {@code max} composition {@code turnsWithSteer} already governed pre-ticket.</li>
+  * </ul>
+  * Pure/testable, no Minecraft types - mirrors {@link #suspensionSpringForShare}'s own seam.
+  */
+ static double perWheelBrakeMagnitude(boolean turnsWithSteer, boolean parkingBrakeActive,
+     double servicePedalMagnitude, double handbrakeMagnitude, double brakeShareRatio) {
+  if (parkingBrakeActive) return 1.0;
+  double biasedService = servicePedalMagnitude * brakeShareRatio;
+  return turnsWithSteer ? biasedService : Math.max(biasedService, handbrakeMagnitude);
  }
  /** Default length, in ticks, of {@code Body}'s bounded ground-contact trace (ticket comment
   * 53095/53098) when {@code -Ddiv.debugGroundContactTicks} is unset or invalid. */
@@ -1672,11 +1700,11 @@ public final class PhysicsBridge {
    // localVelocity, damperUsed, ...) untouched and exactly what Phase 1 actually measured.
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
-     double skidSteerMultiplier, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface,
+     double skidSteerMultiplier, double brakeShareRatio, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface,
      int wheelIndex) {
     WheelHit withNormal(double newNormal) {
      return new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,newNormal,forward,right,point,
-       skidSteerMultiplier,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
+       skidSteerMultiplier,brakeShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
     }
    }
    // MINECRAFT-506: each wheel's own static load SHARE, from its horizontal (x,z) anchor
@@ -1695,11 +1723,22 @@ public final class PhysicsBridge {
     loadShareZ[i]=w.localOffset.z-center.z;
    }
    double[] loadShares=WheelLoadDistribution.shares(loadShareX,loadShareZ);
+   // MINECRAFT-520: each wheel's own SERVICE-BRAKE budget share, from the same per-wheel `z`
+   // used for loadShareZ above (see BrakeBiasDistribution's own doc for the geometric front/
+   // rear axle grouping). Expressed here as a RATIO (share*wheelCount) rather than the raw
+   // 0..1 share, so it composes directly with perWheelBrakeMagnitude's pedal-magnitude multiply
+   // below: a ratio of exactly 1.0 for every wheel (tuning.brakeBiasFront unset, or any layout
+   // BrakeBiasDistribution falls back on) reproduces today's uniform per-wheel brake budget
+   // byte-identically, since 1.0 is the pure no-op multiplier.
+   double[] brakeShares=BrakeBiasDistribution.shares(loadShareZ,tuning.brakeBiasFront);
+   double[] brakeShareRatios=new double[brakeShares.length];
+   for (int i=0;i<brakeShares.length;i++) brakeShareRatios[i]=brakeShares[i]*wheels.size();
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
     int wheelIdx=wheelIndex++;
     double loadShare=loadShares[wheelIdx];
+    double brakeShareRatio=brakeShareRatios[wheelIdx];
     double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity);
     double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring);
     double radius=wheel.getHeight()/2;
@@ -1767,7 +1806,7 @@ public final class PhysicsBridge {
     GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
       hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
+      brakeShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
    }
    // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
    // class-level correction for the full defect this closes). For the single-body path this is
@@ -1968,8 +2007,14 @@ public final class PhysicsBridge {
    // uniformly - a non-steering ("rear") wheel carries max(service,handbrake); a steering
    // ("front") wheel carries only the service brake, same as before this ticket's handbrake
    // addition. Parking brake keeps forcing brakeMagnitude (and so every wheel) to 1.0, unchanged.
+   // MINECRAFT-520: h.brakeShareRatio() folds the configured front/rear service-brake bias into
+   // ONLY the service-pedal component below, via perWheelBrakeMagnitude - see that method's own
+   // doc for why the parking brake and the handbrake stay exactly as unbiased as they were
+   // before this ticket, and why an unconfigured/fallback bias (ratio 1.0 for every wheel) is a
+   // pure no-op reproducing this exact pre-ticket formula.
    var contacts=hits.stream().map(h->{
-    double wheelBrakeMagnitude = h.wheel().placementDefinition.turnsWithSteer ? brakeMagnitude : Math.max(brakeMagnitude,handbrakeMagnitudeThisTick);
+    double wheelBrakeMagnitude = perWheelBrakeMagnitude(h.wheel().placementDefinition.turnsWithSteer,
+      v.parkingBrakeVar.isActive, brakeMagnitude, handbrakeMagnitudeThisTick, h.brakeShareRatio());
     return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
      h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude);
