@@ -24,14 +24,38 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.suspensionTravel = 0.5; fresh.friction = 1.5; fresh.driveForce = 9000.0; fresh.brakeForce = 13000.0;
   fresh.maxSteerDegrees = 35.0; fresh.lateralGripMultiplier = 0.7; fresh.waterDrag = 450.0; fresh.propellerForce = 7000.0;
   fresh.angularWaterDrag = 50.0; fresh.brakeBiasFront = 0.65;
+  // MINECRAFT-522: the three new rotor fields must go through this same live-mutation path -
+  // John's review (comment 53751) flagged that this test exercised every pre-existing live-safe
+  // field but never changed/asserted these.
+  fresh.cyclicLimitDegrees = 12.0; fresh.cyclicAuthorityScale = 1.4; fresh.yawAuthorityScale = 0.6;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
   assertEquals(13000.0, target.brakeForce); assertEquals(35.0, target.maxSteerDegrees); assertEquals(0.7, target.lateralGripMultiplier);
   assertEquals(450.0, target.waterDrag); assertEquals(7000.0, target.propellerForce); assertEquals(50.0, target.angularWaterDrag);
   assertEquals(0.65, target.brakeBiasFront);
-  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","brakeBiasFront"),
+  assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
+  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","brakeBiasFront",
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale"),
     new TreeSet<>(applied));
+ }
+
+ @Test void removingARotorFieldOverrideLiveAppliesBackDownToItsDocumentedDefault() {
+  // MINECRAFT-522 (John's review, comment 53751): an operator who previously configured these
+  // three fields and then removes that config entry entirely must see the live vehicle actually
+  // fall back to the documented default (20deg/1.0/1.0) on the next reload - not get stuck at
+  // its last explicit value. `fresh` here is exactly what Overrides.resolved() returns for an
+  // unconfigured vehicle (the FALLBACK level) - simulating the override having been removed.
+  var target = Overrides.defaultTuning();
+  target.cyclicLimitDegrees = 12.0; target.cyclicAuthorityScale = 1.4; target.yawAuthorityScale = 0.6;
+  var fresh = Overrides.defaultTuning(); // no override at all -> FALLBACK defaults
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(20.0, target.cyclicLimitDegrees, "must revert to the documented 20-degree default once the override is removed");
+  assertEquals(1.0, target.cyclicAuthorityScale, "must revert to unit scaling once the override is removed");
+  assertEquals(1.0, target.yawAuthorityScale, "must revert to unit scaling once the override is removed");
+  assertTrue(applied.containsAll(List.of("cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale")),
+    "the revert-to-default must itself be reported as an applied live change");
  }
 
  @Test void unchangedFieldsAreNotReportedAsApplied() {

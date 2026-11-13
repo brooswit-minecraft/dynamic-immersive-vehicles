@@ -69,6 +69,9 @@ class OverridesTest {
   assertEquals(12000.0, r.brakeForce); assertEquals(30.0, r.maxSteerDegrees);
   assertEquals(0.5, r.hullFillFactor); assertEquals(400.0, r.waterDrag); assertEquals(6000.0, r.propellerForce);
   assertEquals(0.0, r.angularWaterDrag, "angularWaterDrag's fallback is 0 - no rotational damping term unless configured");
+  assertEquals(20.0, r.cyclicLimitDegrees, "cyclicLimitDegrees' fallback matches RotorForces' own prior hardcoded 20-degree clamp");
+  assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
+  assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -80,6 +83,64 @@ class OverridesTest {
   assertNotNull(r.brakeForce); assertNotNull(r.maxSteerDegrees);
   assertNotNull(r.hullFillFactor); assertNotNull(r.waterDrag); assertNotNull(r.propellerForce);
   assertNotNull(r.angularWaterDrag);
+  assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
+ }
+
+ // MINECRAFT-522: cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale - bounded cyclic
+ // tilt-limit and cyclic/yaw attitude-authority tuning for a rotorcraft.
+
+ @Test void cyclicLimitDegreesOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.cyclicLimitDegrees = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.cyclicLimitDegrees = -5.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.cyclicLimitDegrees = 45.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.cyclicLimitDegrees = 45.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.cyclicLimitDegrees = 15.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void cyclicAndYawAuthorityScaleOutOfRangeFailsValidation() {
+  var zeroCyclic = new Overrides.Tuning(); zeroCyclic.cyclicAuthorityScale = 0.0;
+  assertThrows(IllegalArgumentException.class, zeroCyclic::validate);
+  var negativeCyclic = new Overrides.Tuning(); negativeCyclic.cyclicAuthorityScale = -1.0;
+  assertThrows(IllegalArgumentException.class, negativeCyclic::validate);
+  var tooLargeCyclic = new Overrides.Tuning(); tooLargeCyclic.cyclicAuthorityScale = 5.01;
+  assertThrows(IllegalArgumentException.class, tooLargeCyclic::validate);
+  var inRangeCyclic = new Overrides.Tuning(); inRangeCyclic.cyclicAuthorityScale = 2.0;
+  assertDoesNotThrow(inRangeCyclic::validate);
+
+  var zeroYaw = new Overrides.Tuning(); zeroYaw.yawAuthorityScale = 0.0;
+  assertThrows(IllegalArgumentException.class, zeroYaw::validate);
+  var tooLargeYaw = new Overrides.Tuning(); tooLargeYaw.yawAuthorityScale = 100.0;
+  assertThrows(IllegalArgumentException.class, tooLargeYaw::validate);
+  var inRangeYaw = new Overrides.Tuning(); inRangeYaw.yawAuthorityScale = 1.5;
+  assertDoesNotThrow(inRangeYaw::validate);
+ }
+
+ @Test void cyclicTuningParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.cyclicLimitDegrees = 12.0; override.cyclicAuthorityScale = 2.0; override.yawAuthorityScale = 0.5;
+   Overrides.setForTest(java.util.Map.of("packid:rotor_vehicle", override));
+   var r = Overrides.resolved("packid:rotor_vehicle");
+   assertEquals(12.0, r.cyclicLimitDegrees, "an explicit operator override must take precedence over the 20deg fallback");
+   assertEquals(2.0, r.cyclicAuthorityScale);
+   assertEquals(0.5, r.yawAuthorityScale);
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void cyclicTuningFieldsAreRejectedOnAPartOverride() {
+  var limit = new Overrides.Tuning(); limit.cyclicLimitDegrees = 10.0;
+  assertThrows(IllegalArgumentException.class, limit::validateSupportedForPart);
+  var cyclicScale = new Overrides.Tuning(); cyclicScale.cyclicAuthorityScale = 1.5;
+  assertThrows(IllegalArgumentException.class, cyclicScale::validateSupportedForPart);
+  var yawScale = new Overrides.Tuning(); yawScale.yawAuthorityScale = 1.5;
+  assertThrows(IllegalArgumentException.class, yawScale::validateSupportedForPart);
  }
 
  // MINECRAFT-518: angularWaterDrag - rotational water-drag torque coefficient for a floating
