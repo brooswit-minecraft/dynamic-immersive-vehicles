@@ -100,7 +100,7 @@ class MultiStateSolverConvergenceTest {
    Vector3d bf=new Vector3d(solverVelocity), ba=new Vector3d(solverAngular);
    double driveForcePerWheel=active.isEmpty()?0:shapedDrive/4.0;
    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,
-     braking,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+     (braking?1.0:0.0),BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
    velocity.add(new Vector3d(solverVelocity).sub(bf));
    angular.add(new Vector3d(solverAngular).sub(ba));
    bodyPositionY += velocity.y*DT;
@@ -132,7 +132,7 @@ class MultiStateSolverConvergenceTest {
   for (int k=0;k<active.size();k++) { WheelState w=frozen.wheels()[active.get(k)]; contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0); }
   Vector3d velocity=new Vector3d(frozen.solverVelocity()), angular=new Vector3d(frozen.solverAngular());
   var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody(),frozen.orientation(),frozen.inverse(),velocity,angular,
-    frozen.braking(),BRAKE_FORCE/4.0,frozen.driveForcePerWheel(),FRICTION,1.0,DT,iterations);
+    (frozen.braking()?1.0:0.0),BRAKE_FORCE/4.0,frozen.driveForcePerWheel(),FRICTION,1.0,DT,iterations);
   int[] activeWheelIndex=active.stream().mapToInt(Integer::intValue).toArray();
   return new SolveOutcome(velocity, angular, results, activeWheelIndex);
  }
@@ -204,7 +204,7 @@ class MultiStateSolverConvergenceTest {
      new MultiContactFrictionSolver.FrictionContact(new Vector3d(0.375,-0.15,1.25), new Vector3d(0,0,1), new Vector3d(1,0,0), normal, 1.0)};
    Vector3d velocity=new Vector3d(0.3,0,0.1), angular=new Vector3d(0,0,0);
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,velocity,angular,
-     false,0,500,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+     0.0,0,500,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
    var r=results[0];
    double bound=FRICTION*normal;
    double mag=Math.hypot(r.longitudinal(), r.lateral());

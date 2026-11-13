@@ -40,7 +40,7 @@ class FrictionSolverCandidateIterationRegressionTest {
    var contacts=fourWheelContacts(normal);
    Vector3d velocity=new Vector3d(0.6,0,1.2), angular=new Vector3d(0.01,0,0.02);
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,new Quaterniond(),new Quaterniond(),velocity,angular,
-     braking,BRAKE_FORCE/4.0,drive,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+     (braking?1.0:0.0),BRAKE_FORCE/4.0,drive,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
    for (var r : results) assertTrue(Double.isFinite(r.longitudinal()) && Double.isFinite(r.lateral()),
      "normal="+normal+" drive="+drive+" braking="+braking+" must produce finite output at "+CANDIDATE_ITERATIONS+" iterations");
    assertTrue(Double.isFinite(velocity.x) && Double.isFinite(velocity.y) && Double.isFinite(velocity.z), "velocity must stay finite");
@@ -55,7 +55,7 @@ class FrictionSolverCandidateIterationRegressionTest {
    var contacts=fourWheelContacts(normal);
    Vector3d velocity=new Vector3d(0.6,0,1.2), angular=new Vector3d(0.01,0,0.02);
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,new Quaterniond(),new Quaterniond(),velocity,angular,
-     false,BRAKE_FORCE/4.0,drive,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+     0.0,BRAKE_FORCE/4.0,drive,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
    for (var r : results) {
     double mag=Math.hypot(r.longitudinal(), r.lateral());
     assertTrue(mag <= FRICTION*normal + 1e-6, "normal="+normal+" drive="+drive+" must respect the friction-circle bound at "+CANDIDATE_ITERATIONS+" iterations - mag="+mag+" bound="+(FRICTION*normal));
@@ -75,9 +75,9 @@ class FrictionSolverCandidateIterationRegressionTest {
  @Test void noRepeatedLongitudinalAccumulationAtCandidateIterations() {
   double driveForcePerWheel=500; // well within the friction budget at normal=5000, mu=1
   var results4=MultiContactFrictionSolver.solveFriction(fourWheelContacts(5000),MASS,INERTIA,new Quaterniond(),new Quaterniond(),new Vector3d(),new Vector3d(),
-    false,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,4);
+    0.0,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,4);
   var results64=MultiContactFrictionSolver.solveFriction(fourWheelContacts(5000),MASS,INERTIA,new Quaterniond(),new Quaterniond(),new Vector3d(),new Vector3d(),
-    false,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+    0.0,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
   for (int i=0;i<4;i++) {
    double diff=Math.abs(results64[i].longitudinal()-results4[i].longitudinal());
    assertTrue(diff <= driveForcePerWheel*0.1,
@@ -94,7 +94,7 @@ class FrictionSolverCandidateIterationRegressionTest {
    var contacts=fourWheelContacts(962.5);
    Vector3d velocity=new Vector3d(0,0,sign*2.0), angular=new Vector3d(0,0,0);
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,new Quaterniond(),new Quaterniond(),velocity,angular,
-     true,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+     1.0,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
    for (var r : results) assertTrue(Math.signum(r.longitudinal())==-Math.signum(sign) || r.longitudinal()==0,
      "braking must oppose motion (sign="+sign+") at "+CANDIDATE_ITERATIONS+" iterations - got longitudinal="+r.longitudinal());
   }
@@ -107,7 +107,7 @@ class FrictionSolverCandidateIterationRegressionTest {
   var contacts=fourWheelContacts(962.5);
   Vector3d velocity=new Vector3d(0,0,0), angular=new Vector3d(0,0,0);
   var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,new Quaterniond(),new Quaterniond(),velocity,angular,
-    false,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+    0.0,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
   for (var r : results) assertEquals(0, r.longitudinal(), 1e-9, "zero drive, zero velocity, symmetric load must realize zero longitudinal force at "+CANDIDATE_ITERATIONS+" iterations");
   assertEquals(0, angular.length(), 1e-9, "symmetric quiet load must not introduce any angular velocity at "+CANDIDATE_ITERATIONS+" iterations");
  }
