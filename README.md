@@ -332,10 +332,16 @@ CLIENT config.
     sample is validated for consistency across every CONFIGURED H-pattern
     channel specifically, not merely "any channel active" - if even one
     configured button's device is absent, the whole sample is treated as
-    disabled rather than partially trusted. Reading a channel also combines
-    `getJoystickComponentCount` with `isJoystickComponentAxis`, since some
-    IV backends mix buttons and axes in that same count - an index within
-    range is not on its own proof the component is a button.
+    disabled rather than partially trusted. Each configured channel's bound
+    index is also checked against `getJoystickComponentCount` AND
+    `isJoystickComponentAxis` before ever reading it (the same discipline
+    the handbrake axis guard already applied - an out-of-range index, or
+    one that is actually an axis rather than a button on the device, makes
+    the sample untrustworthy exactly like an absent device does). A sample
+    where more than one configured slot reads pressed simultaneously is
+    genuinely ambiguous (a device glitch, or a shifter resting between two
+    detents) and is rejected outright (disabled) rather than silently
+    resolved by picking the lowest index.
   - Server-side authorization/validation (ticket comment 53603): only the
     vehicle's own controlling (driver) seat occupant's packets are accepted
     (`PhysicsBridge.isControllingRider`) - a passenger is rejected outright.
@@ -353,7 +359,14 @@ CLIENT config.
     revoked owner can never sneak in one more tick of input. A fresh
     owner's request for the same slot the previous owner held genuinely
     re-climbs to it (never silently treated as "already there" from stale
-    tracker state).
+    tracker state) - including an IMMEDIATE handoff with no intervening
+    sweep tick at all: `recordWheelAuxOwner` itself clears the vehicle's
+    complete wheel-aux state whenever the recorded owner actually CHANGES,
+    before recording the new one, so a new controller's packet arriving
+    before the next ownership-loss sweep ever runs cannot silently inherit
+    the previous owner's still-latched tracker (a repeat packet from the
+    SAME still-current owner is a no-op here, so an in-progress climb is
+    never reset merely by that owner sending another packet).
   - **A real per-tick client heartbeat, not only changed-value sends**
     (ticket comment 53617: the server-side staleness timeout was
     independently discovered releasing a continuously-held handbrake after
@@ -408,24 +421,44 @@ this project's established pattern (`AnchorFrameProbe`, `BrakeSweepProbe`,
 `GroundSurfaceTagProbe`, etc.), gated by `-Ddiv.experimentalWheelAuxProbe=true`
 (wired in `build.gradle` via `DIV_WHEEL_AUX_PROBE=true gradle runServer`) and
 a strict no-op otherwise. It spawns a real chassis/engine/controller-seat,
-then drives `PhysicsBridge.setHPatternTarget`/`recordWheelAuxOwner`/
-`advanceWheelAuxInputs` directly against them and asserts against the real
-`PartEngine.currentGearVar`:
+then drives `PhysicsBridge.setHPatternTarget`/`setHandbrakeMagnitude`/
+`recordWheelAuxOwner`/`advanceWheelAuxInputs` directly against them and
+asserts against the real `PartEngine.currentGearVar` and (via
+`PhysicsBridge.currentHandbrakeMagnitudeForTesting`, exposed purely for this
+kind of direct observation) the real handbrake state:
 
-1. a single recorded target climbs multiple gears across multiple real
-   server ticks with no further input (the exact stall this project's
-   earlier, now-removed `HPatternShifterBidirectionalProductionGapTest`
-   claimed to cover by looping `Tracker` directly instead - John's review
-   correctly flagged that as not actually exercising production code; this
-   probe is its replacement, run against the real entry points instead)
+1. a single recorded H-pattern target - set exactly ONCE, never re-sent -
+   climbs multiple gears across multiple real server ticks (the exact
+   stall this project's earlier, now-removed
+   `HPatternShifterBidirectionalProductionGapTest` claimed to cover by
+   looping `Tracker` directly instead - John's review correctly flagged
+   that as not actually exercising production code, AND correctly flagged
+   an earlier version of this probe's own step 1 for re-sending the target
+   every tick, which cannot distinguish "climbs from one input" from
+   "climbs because told to every tick"; this probe is the real
+   replacement, recording once and relying purely on the actual per-tick
+   hook for every subsequent tick)
 2. dismounting the controlling seat revokes ownership before a newly
    recorded target can apply
 3. a fresh owner remounting the same seat and requesting the same slot
    genuinely re-climbs to it
-4. a stale (timed-out) target no longer fights an independent gear change
+4. an IMMEDIATE A->B controller handoff, with NO intervening ownership-
+   loss sweep tick at all, and B requesting the SAME slot A had already
+   achieved, genuinely re-climbs to it rather than silently inheriting A's
+   stale "already achieved" tracker latch (review: `recordWheelAuxOwner`'s
+   own `put()` could otherwise let B's packet overwrite A's UUID before
+   the next sweep ever ran, leaving A's tracker/target to apply to B)
+5. a handbrake that is repeatedly RESENT (simulating `WheelAuxInput`'s own
+   periodic heartbeat) stays fully applied well past the 100-tick
+   staleness timeout, observed directly rather than inferred from an
+   unrelated gear change
+6. the SAME handbrake, once resends genuinely stop (true silence, not
+   merely an unrelated change), actually expires back to 0.0 at that same
+   timeout - the genuine staleness-release path, not the achieved-latch
+   side effect an earlier version of this probe's step 4 actually measured
 
 Verified locally via `gradle runServer` against a real headless dedicated
-server: `[DIV wheelAuxProbe] COMPLETE pass=4 fail=0`. CI cannot currently
+server: `[DIV wheelAuxProbe] COMPLETE pass=6 fail=0`. CI cannot currently
 run this (the hosted runner's own established billing/spend-capacity
 restriction - see ticket comment 53620 - blocks every job from starting,
 not a code failure), so this local run plus `gradle clean build`/`gradle

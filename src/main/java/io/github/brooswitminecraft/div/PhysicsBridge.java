@@ -74,6 +74,16 @@ public final class PhysicsBridge {
   handbrakeMagnitude.put(v, Math.max(0.0, Math.min(1.0, magnitude)));
   handbrakeLastUpdateTick.put(v, wheelAuxTickCounter);
  }
+ /** Test/probe observability only (ticket comment: review on PR #13's own ask for "real
+  * handbrake/state observation", not an inference from the gear-shift latch) - {@link #stepGround}
+  * reads this same map directly for the actual physics composition; this is the SAME value,
+  * exposed read-only so a runtime probe can assert it directly instead of only inferring release
+  * via an unrelated gear change. Returns exactly 0.0 for a vehicle with no recorded (or already
+  * cleared/expired) handbrake entry, matching what an unloaded wheel actually gets at
+  * {@code stepGround} time. */
+ public static double currentHandbrakeMagnitudeForTesting(EntityVehicleF_Physics v) {
+  return handbrakeMagnitude.getOrDefault(v, 0.0);
+ }
  /**
   * Client → server: the physical H-pattern shifter's currently-read slot (see {@link
   * HPatternShifter} for the sentinel values). Only RECORDS the target and its freshness here -
@@ -104,6 +114,17 @@ public final class PhysicsBridge {
   * check).
   */
  public static void recordWheelAuxOwner(EntityVehicleF_Physics v, java.util.UUID playerId) {
+  // Review (comment on PR #13, fd7fac1): an immediate A->B controller handoff - B's own packet
+  // arriving before the NEXT tick's ownership-loss sweep even runs - must not let B silently
+  // inherit A's still-latched H-pattern tracker/target/handbrake. Clear unconditionally on any
+  // actual owner CHANGE (never on a repeat packet from the same still-current owner, which must
+  // not reset an in-progress climb every tick) before recording the new owner, so B's own
+  // subsequent setHPatternTarget/setHandbrakeMagnitude calls (which the caller always issues
+  // right after this) start from a fresh Tracker - the ownership-loss sweep in
+  // advanceWheelAuxInputs remains the complementary path for a dismount/disconnect that happens
+  // WITHOUT a new owner ever taking over.
+  var previousOwner = wheelAuxOwner.get(v);
+  if (previousOwner != null && !previousOwner.equals(playerId)) clearWheelAuxState(v);
   wheelAuxOwner.put(v, playerId);
  }
  /**

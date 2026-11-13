@@ -43,6 +43,7 @@ public final class WheelAuxProbe {
  private static final int CHUNK_RADIUS = 1;
  private static final int MAX_TERRAIN_WAIT_TICKS = 200;
  private static final UUID TEST_PLAYER_ID = UUID.randomUUID();
+ private static final UUID TEST_PLAYER_ID_B = UUID.randomUUID();
 
  private enum Phase { WAIT_TERRAIN, SPAWN, RUN, DONE }
  private static Phase phase = Phase.WAIT_TERRAIN;
@@ -153,7 +154,7 @@ public final class WheelAuxProbe {
   var seatItem = new ItemPartSeat(seatJson, seatJson.definitions.get(0), PACK_ID);
   seat = new PartSeat(vehicle, null, seatSlot, seatItem, null);
   vehicle.addPart(seat, false);
-  seat.rider = new FakeRider();
+  seat.rider = new FakeRider(TEST_PLAYER_ID);
 
   LOGGER.info("[DIV wheelAuxProbe] spawned vehicle=" + vehicle.uniqueUUID + " engine gear=" + engine.currentGearVar.currentValue
     + " controllerSeat.isController=" + seat.placementDefinition.isController);
@@ -170,18 +171,29 @@ public final class WheelAuxProbe {
   * (the SAME global per-server-tick hook production uses, not a private copy) some number of
   * times before checking the real engine's own {@code currentGearVar}.
   */
+ // Mirrors WheelAuxInput.HEARTBEAT_TICKS - deliberately duplicated rather than imported, since
+ // this probe exists to independently verify the real behavior, not share a constant that could
+ // silently drift out of sync with the client's own and still "pass".
+ private static final int HEARTBEAT_TICKS = 20;
+ private static final long STALE_TIMEOUT_TICKS = 100;
+
  private static void run() {
   ticksInStep++;
   switch (runStep) {
-   case 0 -> { // Step 1: production-tick continuation - ONE recorded target, MANY ticks, no resend.
-    PhysicsBridge.recordWheelAuxOwner(vehicle, TEST_PLAYER_ID);
-    PhysicsBridge.setHPatternTarget(vehicle, 3);
+   case 0 -> { // Step 1: production-tick continuation - ONE recorded target (review on PR #13:
+               // the prior version of this probe re-sent setHPatternTarget every tick, which
+               // cannot actually distinguish "climbs across many ticks from one input" from
+               // "climbs because it's told to every tick" - record ONCE here, then rely purely
+               // on the real per-tick hook for every subsequent tick.
+    if (ticksInStep == 1) {
+     PhysicsBridge.recordWheelAuxOwner(vehicle, TEST_PLAYER_ID);
+     PhysicsBridge.setHPatternTarget(vehicle, 3);
+    }
+    PhysicsBridge.advanceWheelAuxInputs();
     if (ticksInStep >= 6) {
      check("step1-productionTickContinuation", engine.currentGearVar.currentValue == 3.0,
-       "expected real PartEngine.currentGearVar to reach 3 from a single recorded target over 6 ticks - got " + engine.currentGearVar.currentValue);
+       "expected real PartEngine.currentGearVar to reach 3 from a SINGLE recorded target (set once, at tick 1) over 6 real ticks of the actual per-tick hook - got " + engine.currentGearVar.currentValue);
      runStep = 1; ticksInStep = 0;
-    } else {
-     PhysicsBridge.advanceWheelAuxInputs();
     }
    }
    case 1 -> { // Step 2: ownership-loss revocation - dismount (clear rider), request a NEW higher
@@ -202,7 +214,7 @@ public final class WheelAuxProbe {
                // revoked tracker had already seen must NOT be silently ignored (comment 53617's
                // "remount/swap can inherit achieved latch").
     if (ticksInStep == 1) {
-     seat.rider = new FakeRider();
+     seat.rider = new FakeRider(TEST_PLAYER_ID);
      PhysicsBridge.recordWheelAuxOwner(vehicle, TEST_PLAYER_ID);
      PhysicsBridge.setHPatternTarget(vehicle, gearBeforeRevocation); // same slot as current gear
      // Force the gear away first so reaching it again is an observable climb, not a no-op.
@@ -215,17 +227,54 @@ public final class WheelAuxProbe {
      runStep = 3; ticksInStep = 0;
     }
    }
-   case 3 -> { // Step 4: staleness fallback - stop sending entirely (simulating a hung client
-               // that never loses control) for well over the 100-tick timeout, THEN confirm the
-               // released state no longer fights an independent external gear change.
-    if (ticksInStep <= 110) {
-     PhysicsBridge.advanceWheelAuxInputs(); // no further setHPatternTarget calls at all
-    } else {
-     engine.shiftDown(); // independent external change, simulating a paddle after the timeout
-     int afterExternalChange = (int) engine.currentGearVar.currentValue;
-     PhysicsBridge.advanceWheelAuxInputs();
-     check("step4-staleTimeoutReleasesState", engine.currentGearVar.currentValue == afterExternalChange,
-       "expected the stale (timed-out) target to no longer fight an independent gear change - before=" + afterExternalChange + " after=" + engine.currentGearVar.currentValue);
+   case 3 -> { // Step 4: an IMMEDIATE A->B controller handoff with NO intervening ownership-loss
+               // sweep at all (review on PR #13's own finding: recordWheelAuxOwner's unconditional
+               // put() let B's packet silently inherit A's still-achieved tracker for the same
+               // slot if B's own packet arrived before the next advanceWheelAuxInputs tick ever
+               // ran). Deliberately never calls advanceWheelAuxInputs between A's climb and B's
+               // takeover, so this can ONLY pass if recordWheelAuxOwner itself clears A's state
+               // on the owner change - the per-tick sweep is not given any chance to do it first.
+    if (ticksInStep == 1) {
+     gearBeforeRevocation = (int) engine.currentGearVar.currentValue; // A's already-achieved slot
+     PhysicsBridge.recordWheelAuxOwner(vehicle, TEST_PLAYER_ID_B); // immediate handoff, same tick
+     PhysicsBridge.setHPatternTarget(vehicle, gearBeforeRevocation); // B selects the SAME slot A had
+     if (gearBeforeRevocation <= 0) engine.shiftUp(); else engine.shiftDown(); // move away so re-reaching it is observable
+     seat.rider = new FakeRider(TEST_PLAYER_ID_B); // B is now the controlling rider
+    }
+    PhysicsBridge.advanceWheelAuxInputs();
+    if (ticksInStep >= 6) {
+     check("step4-immediateHandoffNoInterveningSweepResumesForNewOwner", engine.currentGearVar.currentValue == gearBeforeRevocation,
+       "expected B's immediate takeover (no intervening ownership-loss sweep) requesting the SAME slot A had already achieved to actually climb to it fresh, not be silently latched-ignored from A's stale tracker - got " + engine.currentGearVar.currentValue);
+     runStep = 4; ticksInStep = 0;
+    }
+   }
+   case 4 -> { // Step 5: a REPEATEDLY RESENT handbrake (simulating WheelAuxInput's own periodic
+               // heartbeat - review: "assert held handbrake with repeated heartbeat beyond 100
+               // ticks remains applied") must survive well past the 100-tick staleness timeout,
+               // observed directly via PhysicsBridge.currentHandbrakeMagnitudeForTesting, not
+               // inferred from an unrelated gear change.
+    if (ticksInStep == 1) {
+     seat.rider = new FakeRider(TEST_PLAYER_ID);
+     PhysicsBridge.recordWheelAuxOwner(vehicle, TEST_PLAYER_ID);
+     PhysicsBridge.setHandbrakeMagnitude(vehicle, 1.0);
+    } else if ((ticksInStep - 1) % HEARTBEAT_TICKS == 0) {
+     PhysicsBridge.setHandbrakeMagnitude(vehicle, 1.0); // the heartbeat resend itself
+    }
+    PhysicsBridge.advanceWheelAuxInputs();
+    if (ticksInStep >= STALE_TIMEOUT_TICKS + 20) { // well past one timeout window, several heartbeats in
+     check("step5-heartbeatSurvivesStaleTimeout", PhysicsBridge.currentHandbrakeMagnitudeForTesting(vehicle) == 1.0,
+       "expected a repeatedly-resent (heartbeat) handbrake to remain fully applied well past the " + STALE_TIMEOUT_TICKS + "-tick staleness timeout - got " + PhysicsBridge.currentHandbrakeMagnitudeForTesting(vehicle));
+     runStep = 5; ticksInStep = 0;
+    }
+   }
+   case 5 -> { // Step 6: TRUE silence (no further resend at all - review's "then ownership loss/
+               // true silence clears it") must let the SAME staleness timeout actually release
+               // the handbrake back to 0.0 - the genuine expiry path, not the achieved-latch
+               // side effect the old step4's gear assertion actually exercised.
+    PhysicsBridge.advanceWheelAuxInputs(); // no further setHandbrakeMagnitude calls at all
+    if (ticksInStep >= STALE_TIMEOUT_TICKS + 20) {
+     check("step6-trueSilenceExpiresHandbrake", PhysicsBridge.currentHandbrakeMagnitudeForTesting(vehicle) == 0.0,
+       "expected the handbrake to actually expire back to 0.0 once resends genuinely stop for over " + STALE_TIMEOUT_TICKS + " ticks - got " + PhysicsBridge.currentHandbrakeMagnitudeForTesting(vehicle));
      finish();
     }
    }
@@ -251,8 +300,10 @@ public final class WheelAuxProbe {
   * only ever calls {@link #getID()} on a seat's rider, so every other method is deliberately
   * unimplemented; a real player IWrapperPlayer is not needed for this probe's purposes. */
  private static final class FakeRider implements IWrapperEntity {
+  private final UUID id;
+  FakeRider(UUID id) { this.id = id; }
   @Override public boolean isValid() { return true; }
-  @Override public UUID getID() { return TEST_PLAYER_ID; }
+  @Override public UUID getID() { return id; }
   @Override public String getName() { throw new UnsupportedOperationException(); }
   @Override public AWrapperWorld getWorld() { throw new UnsupportedOperationException(); }
   @Override public minecrafttransportsimulator.entities.components.AEntityB_Existing getEntityRiding() { throw new UnsupportedOperationException(); }

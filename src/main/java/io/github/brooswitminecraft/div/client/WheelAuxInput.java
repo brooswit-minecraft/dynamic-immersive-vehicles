@@ -100,11 +100,31 @@ public final class WheelAuxInput {
   for (var button : H_PATTERN_BUTTONS) {
    if (button.config.joystickName == null) continue;
    anyConfigured = true;
-   if (!InterfaceManager.inputInterface.isJoystickPresent(button.config.joystickName)) return HPatternShifter.DISABLED;
+   // Review on PR #13 (fd7fac1): this project's own handbrake axis guard checks the configured
+   // index is within range AND component-type-correct before ever reading it; the H-pattern
+   // buttons did not, despite IV's own ControlsJoystick.isPressed() calling
+   // getJoystickButtonValue(joystickName, buttonIndex) with no such guard at all. Apply the SAME
+   // discipline here: a configured slot whose index is out of range, OR whose bound component is
+   // actually an AXIS (not a button) on the device, makes the whole sample untrustworthy for the
+   // same reason an absent device does - disable outright rather than risk reading garbage.
+   String joystickName = button.config.joystickName;
+   if (!InterfaceManager.inputInterface.isJoystickPresent(joystickName)) return HPatternShifter.DISABLED;
+   int buttonIndex = button.config.buttonIndex;
+   if (buttonIndex < 0 || buttonIndex >= InterfaceManager.inputInterface.getJoystickComponentCount(joystickName)) return HPatternShifter.DISABLED;
+   if (InterfaceManager.inputInterface.isJoystickComponentAxis(joystickName, buttonIndex)) return HPatternShifter.DISABLED;
   }
   if (!anyConfigured) return HPatternShifter.DISABLED;
-  for (int i = 0; i < 9; i++) if (H_PATTERN_BUTTONS[i].isPressed()) return i + 1;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_R.isPressed()) return HPatternShifter.REVERSE_REQUEST;
+  // Review: an ambiguous sample (more than one configured slot reading pressed at once - a
+  // device glitch, or a player's shifter genuinely sitting between two detents) must never be
+  // silently resolved by picking the lowest index; that is a real gear decision made from bad
+  // data. Scan every slot once, count how many read pressed, and only accept a target when
+  // EXACTLY one does.
+  int pressedCount = 0, pressedForward = -1;
+  for (int i = 0; i < 9; i++) if (H_PATTERN_BUTTONS[i].isPressed()) { pressedCount++; pressedForward = i + 1; }
+  boolean reversePressed = ControlSystem.ControlsJoystick.CAR_SHIFT_R.isPressed();
+  if (reversePressed) pressedCount++;
+  if (pressedCount > 1) return HPatternShifter.DISABLED;
+  if (pressedCount == 1) return reversePressed ? HPatternShifter.REVERSE_REQUEST : pressedForward;
   return HPatternShifter.NEUTRAL_REQUEST;
  }
 
