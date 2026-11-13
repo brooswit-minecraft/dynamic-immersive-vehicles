@@ -1200,7 +1200,7 @@ live-safe fields `applyLiveSafeFields` mutates in place (and confirms it
 is absent from `reportFieldsNeedingRespawn`'s construction-cached set,
 unchanged from before this ticket).
 
-**Production-path runtime evidence (review 53675/53676, Servy slot
+**Production-path runtime evidence (review 53675/53676/53701, Servy slot
 coordinated with and released by MINECRAFT-506), added after the fixes
 above.** `BuoyantForces.apply`'s actual velocity-retention application
 against a live rigid body was in the same live-entity/`ServerLevel`/
@@ -1210,27 +1210,43 @@ in this repository. New `BuoyancyAngularDragProbe` (opt-in via
 `-Ddiv.experimentalBuoyancyAngularDrag=true`, same pattern as
 `GroundSupportFixtureProbe`) closes that gap for this specific addition: a
 real `EntityVehicleF_Physics` with one `canFloat` `PartGroundDevice` (no
-engine), spawned pre-tilted 25 degrees roll over a real carved water pool,
-driven by the real Mixin-intercepted tick loop - three scenarios,
-`divtest:boatdrag-off` (`angularWaterDrag` unset, the 0.0 fallback),
-`divtest:boatdrag-on` (`angularWaterDrag: 80`), and
-`divtest:boatdrag-beached` (`angularWaterDrag: 80`, spawned on a plain
-stone platform with no water anywhere nearby).
+engine), spawned pre-tilted 25 degrees roll, driven by the real
+Mixin-intercepted tick loop - four scenarios:
+`divtest:boatdrag-off` (water, `angularWaterDrag` unset/0.0 fallback),
+`divtest:boatdrag-on` (water, `angularWaterDrag: 80`),
+`divtest:boatdrag-beached` (no water, `angularWaterDrag: 80`), and
+`divtest:boatdrag-beached-off` (no water, `angularWaterDrag` unset/0.0 -
+review follow-up 53701's explicit ask for a matched zero-drag control,
+since `beached` alone "cannot establish unchanged behavior").
 
 Run locally (`DIV_BUOYANCY_ANGULAR_DRAG_PROBE=true gradle runServer`,
-Servy slot confirmed free by MINECRAFT-506's own release notices) with an
-explicit `massKg: 400.0` override seeded for all three test vehicles in
-`run/config/dynamic-immersive-vehicles.json` (a first attempt without an
-explicit `massKg` left mass at `Math.max(50, v.getMass())` - effectively
-a near-massless synthetic hull - and both water scenarios launched off the
-carved pool within 4-6 ticks under their own real buoyant force, the same
-"seed massKg explicitly" lesson `GroundSupportFixtureProbe`'s own doc
-already states for exactly this reason). With that fixed, measured over
-140 ticks (7s):
+with `-Ddiv.debugGroundContact=true` also enabled by this probe's own
+`build.gradle` gate) with an explicit `massKg: 400.0` override seeded for
+all four test vehicles in `run/config/dynamic-immersive-vehicles.json` (a
+first attempt without an explicit `massKg` left mass at `Math.max(50,
+v.getMass())` - effectively a near-massless synthetic hull - and both
+water scenarios launched off the carved pool within 4-6 ticks under their
+own real buoyant force, the same "seed massKg explicitly" lesson
+`GroundSupportFixtureProbe`'s own doc already states for exactly this
+reason). Measured over 140 ticks (7s) at this exact head:
 
-- `off` (`angularWaterDrag` at its 0.0 fallback): the pre-tilted hull did
-  NOT settle - it tumbled/oscillated past the tipping point, reaching
-  roll angles near 180 degrees (essentially inverted) and continuing to
+- **Independent activation evidence** (review follow-up: "verify actual
+  BuoyantBody activation", not just "something moved"): the existing,
+  already-shipped `GroundContactDiagnostics` logged, for every one of the
+  four scenarios' own `key`, both `classify ... ground=false floating=true
+  decision=ACTIVATE` and `constructed ... class=BuoyantBody` - independent
+  confirmation of the real production classification/construction path,
+  not a native-physics fallback coincidentally producing similar motion.
+- **Actual resolved coefficients** (review follow-up: "explicitly record
+  actual resolved off/on coefficients, probe highDrag flag is only a
+  label"): read live through the same public `Overrides.resolved` every
+  real vehicle uses and logged at spawn - `off`:
+  `resolvedAngularWaterDrag=0.0`, `on`: `80.0`, `beached`: `80.0`,
+  `beachedOff`: `0.0`. Exactly the configured values, confirmed through
+  the real resolution chain, not merely asserted.
+- `off` (resolved `angularWaterDrag=0.0`): the pre-tilted hull did NOT
+  settle - it tumbled/oscillated past the tipping point, reaching roll
+  angles near 180 degrees (essentially inverted) and continuing to
   oscillate there, for a cumulative absolute roll change of **3015
   degrees** over the window. This is the EXISTING buoyancy/righting-torque
   model's own real behavior for this specific two-float (left/right only,
@@ -1239,44 +1255,57 @@ already states for exactly this reason). With that fixed, measured over
   branch is skipped entirely by `tuning.angularWaterDrag > 0`, confirmed
   by inspection) - disclosed here as an honest observation about the
   baseline, not a defect this ticket is fixing.
-- `on` (`angularWaterDrag: 80`): the SAME pre-tilted starting condition
-  instead settled smoothly - peaking at roll=29 degrees then decaying
-  cleanly to roll approximately 0 degrees (final: -0.05 degrees) by the
-  end of the window, for a cumulative absolute roll change of only
+- `on` (resolved `angularWaterDrag=80.0`): the SAME pre-tilted starting
+  condition instead settled smoothly - peaking at roll=29 degrees then
+  decaying cleanly to roll approximately 0 degrees (final: -0.05 degrees)
+  by the end of the window, for a cumulative absolute roll change of only
   **38.9 degrees** - about 1/78th of `off`'s rotational activity. This is
   real, substantial, measured evidence that `angularWaterDrag` actually
   changes the hull's rotational behavior through the real production path
   (Mixin -> `PhysicsBridge` -> `BuoyantBody` -> `BuoyantForces.apply` ->
   Sable/Rapier), not just at the pure-function/unit-test level - review's
   core ask.
-- `beached` (`angularWaterDrag: 80`, no water anywhere nearby): stayed
-  essentially frozen at its initial 25-degree tilt for the entire window
-  (cumulative absolute roll change: 0.002 degrees, numerical noise) -
-  confirming review's explicit "unsubmerged/default cases are no-ops"
-  ask: with no float device ever submerged, `BuoyantForces.apply`'s own
-  `averageFraction>0` gate never engages the retention regardless of how
-  large the configured coefficient is.
-- All three scenarios stayed finite and within the bounded test area for
+- **off/on comparator, now an actual gate** (review follow-up: "do not
+  report a pass solely because the server exits" - `maybeLogComparison`
+  now fails loudly, flipping both scenarios to `FAILED`, unless BOTH hold:
+  `off`'s own activity is nontrivial, >= 5 degrees cumulative - ruling out
+  a vacuous "both barely moved" false positive - AND `on`'s activity is at
+  most half of `off`'s): `offWasNontrivial=true onIsSubstantiallyLessActive=true
+  result=PASS`.
+- `beached` (resolved `angularWaterDrag=80.0`, no water anywhere nearby)
+  vs. `beachedOff` (resolved `angularWaterDrag=0.0`, no water, otherwise
+  identical): both stayed essentially frozen at the initial 25-degree
+  tilt for the entire window - cumulative absolute roll change **0.002
+  degrees for BOTH**, a measured `diff=0.0` between them. The matched
+  zero-drag control confirms this is not merely "beached happened to stay
+  put" but that configuring `angularWaterDrag` makes NO measurable
+  difference at all while unsubmerged, exactly review's "unsubmerged/
+  default cases are no-ops" ask, now with the control review's follow-up
+  explicitly required: `result=PASS` (diff within the 2-degree tolerance).
+- All four scenarios stayed finite and within the bounded test area for
   the full window (review's "state remains finite/stable" ask) once the
   `massKg` fix above was applied.
 
-Full server log evidence (chunk grid requests, each scenario's spawn line,
-periodic tick samples, each `COMPLETE` line, the `COMPARISON` and
-`UNSUBMERGED-NOOP-CHECK` summary lines) was produced by this exact run;
-not committed to this repository (the probe's own disposable `run/`
-directory is gitignored, same as every other probe here), consistent with
-this ticket's "exact-head local tests/runtime ... honest disclosure"
-requirement - the numbers above are transcribed directly from that run's
-log output, not estimated or reconstructed.
+Full server log evidence (chunk grid requests, `GroundContactDiagnostics`
+classify/constructed lines, each scenario's spawn line with its resolved
+coefficient, periodic tick samples, each `COMPLETE` line, and both gated
+`COMPARISON`/`UNSUBMERGED-NOOP-CHECK result=PASS` lines) was produced by
+this exact run; not committed to this repository (the probe's own
+disposable `run/` directory is gitignored, same as every other probe
+here), consistent with this ticket's "exact-head local tests/runtime ...
+honest disclosure" requirement - the numbers above are transcribed
+directly from that run's log output, not estimated or reconstructed.
 
-**Disclosed, deliberate scope limit, unchanged from `BuoyancyAngularDragProbe`'s
-own doc:** this run does not exercise the config hot-reload path itself
-(review's "verify live-safe reload takes effect") - that remains covered
-only at the unit level, by `PhysicsBridgeLiveOverrideApplicationTest`
-confirming `angularWaterDrag` is one of `applyLiveSafeFields`'s
-mutated-in-place fields (i.e. that `BuoyantForces.apply` re-reads the SAME
-live `Tuning` object every tick), not by a live on-disk-edit-and-reload
-exercised through this specific runtime probe.
+**Disclosed, deliberate scope limit (review comment 53701 explicitly
+accepted this as a legitimate fallback: "add the focused reload check if
+practical, otherwise keep that limitation distinct from code tests"):**
+this run does not exercise the config hot-reload path itself (review's
+"verify live-safe reload takes effect") - that remains covered only at the
+unit level, by `PhysicsBridgeLiveOverrideApplicationTest` confirming
+`angularWaterDrag` is one of `applyLiveSafeFields`'s mutated-in-place
+fields (i.e. that `BuoyantForces.apply` re-reads the SAME live `Tuning`
+object every tick), not by a live on-disk-edit-and-reload exercised
+through this specific runtime probe.
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
 playable-MVP claim for any category above - ground, flight, or boat. The

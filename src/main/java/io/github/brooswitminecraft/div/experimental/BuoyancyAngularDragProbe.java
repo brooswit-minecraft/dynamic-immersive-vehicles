@@ -53,22 +53,42 @@ import java.util.Set;
  *  no-ops" ask: with no float device ever submerged, {@code BuoyantForces.apply}'s own {@code
  *  averageFraction>0} gate must never engage the retention at all, so this scenario's roll
  *  trajectory should settle under ordinary gravity/collision alone, not attenuated rotation.</li>
+ *  <li>{@code beachedOff} - review follow-up (comment 53701): "beached case without a matched
+ *  zero-drag control cannot alone establish unchanged behavior". The SAME stone platform, no
+ *  water, but NO {@code angularWaterDrag} override (the 0.0 fallback) - a true zero-drag control
+ *  for {@code beached} to be compared against, not merely observed alone.</li>
  * </ul>
- * All three are checked every tick for finiteness and a bounded position (same discipline as
+ * All four are checked every tick for finiteness and a bounded position (same discipline as
  * {@code GroundSupportFixtureProbe}'s own {@code checkFiniteOrFail}) - review's explicit "state
- * remains finite/stable" ask.
+ * remains finite/stable" ask. {@link #maybeLogComparison} turns both comparisons into actual
+ * FAILED-or-not gates (review follow-up: "do not report a pass solely because the server exits"),
+ * not merely informational log lines, and each scenario's own ACTUAL RESOLVED
+ * {@code angularWaterDrag} coefficient (via the same public {@code Overrides.resolved} every real
+ * vehicle uses, not merely the {@code highDrag} label) is logged at spawn time (review follow-up:
+ * "explicitly record actual resolved off/on coefficients").
  *
- * <p><b>Disclosed, deliberate scope limit:</b> this probe does NOT exercise the config
- * hot-reload path (review's "verify live-safe reload takes effect") - {@code
- * angularWaterDrag} is read fresh from the config file ONLY at mod init for these two
- * fixture vehicles (same constraint {@code GroundSupportFixtureProbe} itself documents for its
- * own config), and driving an actual on-disk edit, waiting out the server's own file-poll
- * interval, and re-perturbing an already-active hull mid-run is independent additional
- * complexity. That specific path is instead covered by {@code PhysicsBridgeLiveOverrideApplicationTest}
- * (confirms {@code angularWaterDrag} is one of {@code applyLiveSafeFields}'s mutated-in-place
- * fields, i.e. that {@code BuoyantForces.apply} re-reads the SAME live {@code Tuning} object
- * every tick) at the unit level - not a production-path gap this probe leaves silently
- * undisclosed.
+ * <p><b>Disclosed, deliberate scope limit (acknowledged explicitly acceptable by review, comment
+ * 53701: "add the focused reload check if practical, otherwise keep that limitation distinct from
+ * code tests"):</b> this probe does NOT exercise the config hot-reload path (review's "verify
+ * live-safe reload takes effect") - {@code angularWaterDrag} is read fresh from the config file
+ * ONLY at mod init for these fixture vehicles (same constraint {@code GroundSupportFixtureProbe}
+ * itself documents for its own config), and driving an actual on-disk edit, waiting out the
+ * server's own file-poll interval, and re-perturbing an already-active hull mid-run is
+ * independent additional complexity. That specific path is instead covered by {@code
+ * PhysicsBridgeLiveOverrideApplicationTest} (confirms {@code angularWaterDrag} is one of {@code
+ * applyLiveSafeFields}'s mutated-in-place fields, i.e. that {@code BuoyantForces.apply} re-reads
+ * the SAME live {@code Tuning} object every tick) at the unit level - not a production-path gap
+ * this probe leaves silently undisclosed.
+ *
+ * <p><b>Independent BuoyantBody activation evidence (review follow-up 53701):</b> this probe's
+ * own log lines alone cannot distinguish DIV's real {@code BuoyantBody} actually driving the
+ * observed motion from some other fallback coincidentally producing similar-looking motion. Run
+ * with {@code -Ddiv.debugGroundContact=true} (this probe's own {@code build.gradle} gate always
+ * sets it, same as {@code GroundSupportFixtureProbe}'s) and cross-check the EXISTING, already-
+ * shipped {@code GroundContactDiagnostics} log lines for each scenario's own {@code key}: {@code
+ * classify ... key=divtest:boatdrag-on floating=true} and {@code constructed ... key=divtest:
+ * boatdrag-on class=BuoyantBody} - the same independent activation-evidence pattern {@code
+ * GroundSupportFixtureProbe}'s own CI job already established for the ground/wheel case.
  *
  * <p>Opt-in via {@code -Ddiv.experimentalBuoyancyAngularDrag=true} - OFF by default, never runs
  * during normal play, never touches any real vehicle, Zippy, or world content. Runs ONCE per
@@ -124,7 +144,8 @@ public final class BuoyancyAngularDragProbe {
   }
  }
 
- private static Scenario off, on, beached;
+ private static Scenario off, on, beached, beachedOff;
+ private static Scenario[] all;
  private static boolean configured = false;
 
  public static void maybeRun(ServerLevel level) {
@@ -136,11 +157,13 @@ public final class BuoyancyAngularDragProbe {
    off = new Scenario("off", "boatdrag-off", 900, 900, true, false);
    on = new Scenario("on", "boatdrag-on", 900, 932, true, true);
    beached = new Scenario("beached", "boatdrag-beached", 900, 964, false, true);
-   for (Scenario s : new Scenario[]{off, on, beached}) requestChunkGrid(level, s);
-   LOGGER.info("[DIV buoyancyAngularDrag] requested terrain chunk grids for off/on/beached scenarios");
+   beachedOff = new Scenario("beachedOff", "boatdrag-beached-off", 900, 996, false, false);
+   all = new Scenario[]{off, on, beached, beachedOff};
+   for (Scenario s : all) requestChunkGrid(level, s);
+   LOGGER.info("[DIV buoyancyAngularDrag] requested terrain chunk grids for off/on/beached/beachedOff scenarios");
    return;
   }
-  for (Scenario s : new Scenario[]{off, on, beached}) tick(level, s);
+  for (Scenario s : all) tick(level, s);
  }
 
  private static void requestChunkGrid(ServerLevel level, Scenario s) {
@@ -239,8 +262,13 @@ public final class BuoyancyAngularDragProbe {
   s.lastRollDegrees = INITIAL_ROLL_DEGREES;
   s.phase = Phase.MEASURE;
   s.ticksInPhase = 0;
+  // Review follow-up 53701: "explicitly record actual resolved off/on coefficients (probe
+  // highDrag flag is only a label)" - read the ACTUAL resolved value through the same public
+  // Overrides.resolved every real vehicle uses, not the probe's own highDrag boolean.
+  double resolvedAngularWaterDrag = io.github.brooswitminecraft.div.Overrides.resolved(PACK_ID + ":" + s.systemName).angularWaterDrag;
   LOGGER.info("[DIV buoyancyAngularDrag] scenario=" + s.label + " spawned at " + vehicle.position + " water=" + s.water
-    + " key=" + PACK_ID + ":" + s.systemName + " initialRollDegrees=" + INITIAL_ROLL_DEGREES + " - beginning MEASURE phase");
+    + " key=" + PACK_ID + ":" + s.systemName + " initialRollDegrees=" + INITIAL_ROLL_DEGREES
+    + " resolvedAngularWaterDrag=" + resolvedAngularWaterDrag + " - beginning MEASURE phase");
  }
 
  private static JSONVehicle buildVehicleDefinition(String systemName) {
@@ -358,24 +386,43 @@ public final class BuoyancyAngularDragProbe {
   }
  }
 
- /** Logged once both the matched water scenarios (off/on) are done - the actual comparison
-  * review asked for: with angularWaterDrag actually applied through Sable in production,
-  * {@code on}'s cumulative rotational activity over the same window must be lower than
-  * {@code off}'s. Left as a logged observation (not an automatic PASS/FAIL assertion) since the
-  * exact magnitude of that difference depends on the real Sable/MTS buoyancy/collision solver
-  * this probe does not control - the same reason GroundSupportFixtureProbe's own DRIVE/BRAKE/TURN
-  * checks use loose, explicitly-chosen thresholds rather than an exact target curve. */
+ // Review follow-up 53701: "require nontrivial matched off/on angular response" - off itself
+ // must show real rotational activity (otherwise a "damped" verdict would be vacuous: both
+ // scenarios barely moving is not evidence of anything), and on's reduction must be substantial,
+ // not a marginal/noise-level difference.
+ private static final double MIN_NONTRIVIAL_ACTIVITY_DEGREES = 5.0;
+ private static final double REQUIRED_ON_OVER_OFF_RATIO = 0.5; // on must be at most half of off's activity
+ // Review follow-up 53701: "beached case without a matched zero-drag control cannot alone
+ // establish unchanged behavior" - beached and beachedOff must land within this tolerance of
+ // each other to count as a genuine no-op (both scenarios start identically and never touch
+ // water, so their trajectories should be driven by gravity/collision alone, independent of
+ // the configured angularWaterDrag value).
+ private static final double NOOP_MATCH_TOLERANCE_DEGREES = 2.0;
+
+ /** Turns both comparisons review asked for into actual FAILED-or-not gates (review follow-up:
+  * "do not report a pass solely because the server exits") - logged once every scenario each
+  * comparison depends on has reached {@code DONE}. */
  private static void maybeLogComparison() {
   if (off.phase == Phase.DONE && on.phase == Phase.DONE) {
-   boolean damped = on.cumulativeAbsRollDelta < off.cumulativeAbsRollDelta;
-   LOGGER.info("[DIV buoyancyAngularDrag] COMPARISON off.cumulativeAbsRollDelta=" + off.cumulativeAbsRollDelta
-     + " on.cumulativeAbsRollDelta=" + on.cumulativeAbsRollDelta + " onIsLessActive=" + damped
-     + " - review's actual ask: does configuring angularWaterDrag measurably reduce rotational activity through the real production path");
+   boolean offWasNontrivial = off.cumulativeAbsRollDelta >= MIN_NONTRIVIAL_ACTIVITY_DEGREES;
+   boolean onIsSubstantiallyLessActive = on.cumulativeAbsRollDelta <= off.cumulativeAbsRollDelta * REQUIRED_ON_OVER_OFF_RATIO;
+   boolean pass = offWasNontrivial && onIsSubstantiallyLessActive;
+   String line = "[DIV buoyancyAngularDrag] COMPARISON off.cumulativeAbsRollDelta=" + off.cumulativeAbsRollDelta
+     + " on.cumulativeAbsRollDelta=" + on.cumulativeAbsRollDelta + " offWasNontrivial=" + offWasNontrivial
+     + " onIsSubstantiallyLessActive=" + onIsSubstantiallyLessActive
+     + " - review's actual ask: does configuring angularWaterDrag measurably reduce rotational activity through the real production path";
+   if (pass) LOGGER.info(line + " result=PASS");
+   else { LOGGER.error(line + " result=FAILED"); off.phase = Phase.FAILED; on.phase = Phase.FAILED; }
   }
-  if (beached.phase == Phase.DONE && on.phase == Phase.DONE) {
-   LOGGER.info("[DIV buoyancyAngularDrag] UNSUBMERGED-NOOP-CHECK beached(highDrag,noWater).cumulativeAbsRollDelta=" + beached.cumulativeAbsRollDelta
-     + " - this scenario never has a submerged float device, so BuoyantForces.apply's averageFraction>0 gate must never engage"
-     + " angularWaterDrag regardless of its configured value; its roll trajectory should reflect ordinary gravity/collision settling only.");
+  if (beached.phase == Phase.DONE && beachedOff.phase == Phase.DONE) {
+   double diff = Math.abs(beached.cumulativeAbsRollDelta - beachedOff.cumulativeAbsRollDelta);
+   boolean pass = diff <= NOOP_MATCH_TOLERANCE_DEGREES;
+   String line = "[DIV buoyancyAngularDrag] UNSUBMERGED-NOOP-CHECK beached(angularWaterDrag=80).cumulativeAbsRollDelta=" + beached.cumulativeAbsRollDelta
+     + " beachedOff(angularWaterDrag=0).cumulativeAbsRollDelta=" + beachedOff.cumulativeAbsRollDelta + " diff=" + diff
+     + " - matched zero-drag control: with no float device ever submerged, BuoyantForces.apply's averageFraction>0"
+     + " gate must never engage angularWaterDrag regardless of its configured value, so these two must land within tolerance of each other";
+   if (pass) LOGGER.info(line + " result=PASS");
+   else { LOGGER.error(line + " result=FAILED"); beached.phase = Phase.FAILED; beachedOff.phase = Phase.FAILED; }
   }
  }
 }
