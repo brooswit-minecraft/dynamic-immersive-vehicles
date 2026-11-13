@@ -88,11 +88,11 @@ class WindowTwoSolverConvergenceTest {
    java.util.List<WheelState> active=new java.util.ArrayList<>();
    for (WheelState w : wheels) if (w.hit()) active.add(w);
    var contacts=new MultiContactFrictionSolver.FrictionContact[active.size()];
-   for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0); }
+   for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0,(braking?1.0:0.0)); }
    Vector3d bf=new Vector3d(solverVelocity), ba=new Vector3d(solverAngular);
    double driveForcePerWheel=active.isEmpty()?0:shapedDrive/4.0;
    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,
-     (braking?1.0:0.0),BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+     BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
    velocity.add(new Vector3d(solverVelocity).sub(bf));
    angular.add(new Vector3d(solverAngular).sub(ba));
    bodyPositionY += velocity.y*DT;
@@ -122,11 +122,11 @@ class WindowTwoSolverConvergenceTest {
   java.util.List<Integer> activeOrder=new java.util.ArrayList<>();
   for (int idx : order) if (frozen.wheels()[idx].hit()) activeOrder.add(idx);
   var contacts=new MultiContactFrictionSolver.FrictionContact[activeOrder.size()];
-  for (int k=0;k<activeOrder.size();k++) { WheelState w=frozen.wheels()[activeOrder.get(k)]; contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0); }
+  for (int k=0;k<activeOrder.size();k++) { WheelState w=frozen.wheels()[activeOrder.get(k)]; contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0,(frozen.braking()?1.0:0.0)); }
   Vector3d velocity=new Vector3d(frozen.solverVelocity()), angular=new Vector3d(frozen.solverAngular());
   Vector3d angularBefore=new Vector3d(angular);
   var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody(),frozen.orientation(),frozen.inverse(),velocity,angular,
-    (frozen.braking()?1.0:0.0),BRAKE_FORCE/4.0,frozen.driveForcePerWheel(),FRICTION,1.0,DT,iterations);
+    BRAKE_FORCE/4.0,frozen.driveForcePerWheel(),FRICTION,1.0,DT,iterations);
   double netLong=0, netLat=0; for (var r:results) { netLong+=r.longitudinal(); netLat+=r.lateral(); }
   return new ConvergenceSample(iterations, netLong, netLat, angular.z-angularBefore.z);
  }

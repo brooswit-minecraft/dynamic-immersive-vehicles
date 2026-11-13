@@ -27,8 +27,8 @@ class MultiContactFrictionSolverBrakingTest {
  private static double finalSpeedAtMagnitude(double initialSpeed, double brakeMagnitude, double driveForcePerWheel, int iterations) {
   Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
   Vector3d angular=new Vector3d(0,0,0);
-  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,brakeMagnitude,BRAKE_FORCE,driveForcePerWheel,FRICTION,1.0,DT,iterations);
+  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0,brakeMagnitude)};
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,BRAKE_FORCE,driveForcePerWheel,FRICTION,1.0,DT,iterations);
   return velocity.dot(FORWARD);
  }
 
@@ -82,8 +82,8 @@ class MultiContactFrictionSolverBrakingTest {
    for (int n : new int[]{1,2,4,8,32,64}) { // 32/64 added: ticket comment 53131, candidate-iteration coverage
     Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
     Vector3d angular=new Vector3d(0,0,0);
-    var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(offCenterPoint,FORWARD,RIGHT,NORMAL,1.0)};
-    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,1.0,BRAKE_FORCE,0,FRICTION,1.0,DT,n);
+    var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(offCenterPoint,FORWARD,RIGHT,NORMAL,1.0,1.0)};
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,BRAKE_FORCE,0,FRICTION,1.0,DT,n);
     assertTrue(Double.isFinite(angular.length()), "off-center braking must not produce a non-finite induced angular velocity");
     double contactSlip=new Vector3d(angular).cross(offCenterPoint).add(velocity).dot(FORWARD);
     assertTrue(Math.abs(contactSlip) < Math.abs(initialSpeed)*0.05,
@@ -130,8 +130,8 @@ class MultiContactFrictionSolverBrakingTest {
   // the previous version's 0.3/0.3 m/s never got near the budget, so compliance was untested).
   Vector3d velocity=new Vector3d(FORWARD).mul(50).add(new Vector3d(RIGHT).mul(50)); // large demand, well over budget
   Vector3d angular=new Vector3d(0,0,0);
-  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,1.0,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0,1.0)};
+  var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   double magnitude=Math.hypot(results[0].longitudinal(),results[0].lateral());
   double budget=NORMAL*FRICTION;
   assertTrue(magnitude <= budget+1e-6,
@@ -140,10 +140,10 @@ class MultiContactFrictionSolverBrakingTest {
  }
 
  @Test void zeroNormalLoadProducesNoNaNOrInstability() {
-  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,0.0,1.0)};
+  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,0.0,1.0,1.0)};
   Vector3d velocity=new Vector3d(FORWARD).mul(5.0);
   Vector3d angular=new Vector3d(0,0,0);
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,1.0,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   assertEquals(5.0, velocity.z, 1e-9, "zero normal load means zero friction budget - an airborne/unloaded wheel must not brake or steer at all");
   assertTrue(Double.isFinite(velocity.x) && Double.isFinite(velocity.y) && Double.isFinite(velocity.z));
  }
@@ -161,10 +161,10 @@ class MultiContactFrictionSolverBrakingTest {
   Vector3d velocity=new Vector3d(FORWARD).mul(2.0);
   Vector3d angular=new Vector3d(0,0,0);
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{
-    new MultiContactFrictionSolver.FrictionContact(p1,FORWARD,RIGHT,NORMAL,1.0),
-    new MultiContactFrictionSolver.FrictionContact(p2,FORWARD,RIGHT,NORMAL,1.0)};
+    new MultiContactFrictionSolver.FrictionContact(p1,FORWARD,RIGHT,NORMAL,1.0,1.0),
+    new MultiContactFrictionSolver.FrictionContact(p2,FORWARD,RIGHT,NORMAL,1.0,1.0)};
   for (int tick=0; tick<30; tick++)
-   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,1.0,BRAKE_FORCE,0,FRICTION,1.0,DT,iterations);
+   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,BRAKE_FORCE,0,FRICTION,1.0,DT,iterations);
   assertTrue(Double.isFinite(velocity.z) && Math.abs(velocity.z) <= 2.0 && Math.abs(angular.length()) < 1.0,
     "two coupled contacts braking together for 30 ticks at "+iterations+" iterations should settle, not diverge - velocity.z="+velocity.z+" |angular|="+angular.length());
  }
@@ -222,5 +222,47 @@ class MultiContactFrictionSolverBrakingTest {
    assertTrue(fullBrakeSpeed <= partial,
      "parking brake's forced full magnitude must stop at least as much as any lesser pedal press - magnitude="+magnitude+" partial="+partial+" full="+fullBrakeSpeed);
   }
+ }
+
+ /**
+  * Ticket MINECRAFT-504 review comment 53617 point 6: moving brakeMagnitude from a single
+  * {@code solveFriction} parameter to a PER-CONTACT {@link MultiContactFrictionSolver.FrictionContact}
+  * field is the whole point of PhysicsBridge's "per-wheel (not vehicle-wide) handbrake" fix
+  * (handbrake only composed into the wheel-aux brake magnitude for wheels where
+  * {@code !placementDefinition.turnsWithSteer}, i.e. non-steering/rear wheels). A unit test that
+  * only ever constructs ONE contact (every test above) cannot regress a per-contact bug: the old
+  * boolean/double parameter and the new per-contact field are indistinguishable with one wheel.
+  * This test puts two otherwise-identical contacts (same point distance from COM, same normal
+  * load, same starting speed) side by side in the SAME solver call with DIFFERENT
+  * brakeMagnitude values - a "front" wheel at service-brake-only (0.3) and a "rear" wheel with
+  * the handbrake composed in (max(0.3, 1.0)=1.0, mirroring PhysicsBridge.stepGround's own
+  * Math.max(brakeMagnitude, handbrakeMagnitudeThisTick) - see that method's doc) - and asserts
+  * the solver actually returns a LARGER braking force for the higher-magnitude contact. If the
+  * signature regressed back to a single shared magnitude (or any caller-level bug collapsed both
+  * wheels onto the same value before reaching the solver), this test fails because both returned
+  * forces would be identical instead of distinct.
+  */
+ @Test void differentPerContactBrakeMagnitudesProduceDistinctBrakingForcesForFrontVsRearWheel() {
+  Vector3d frontPoint=new Vector3d(0.9,0,1.3), rearPoint=new Vector3d(0.9,0,-1.3); // symmetric front/rear offsets from COM
+  double frontMagnitude=0.3; // service brake only - steering wheel, handbrake never composed in
+  double rearMagnitude=Math.max(0.3,1.0); // service brake + handbrake composed in, as PhysicsBridge.stepGround does for a non-steering wheel - evaluates to 1.0
+  assertTrue(rearMagnitude > frontMagnitude, "sanity check on the scenario itself");
+  Vector3d velocity=new Vector3d(FORWARD).mul(10.0);
+  Vector3d angular=new Vector3d(0,0,0);
+  var contacts=new MultiContactFrictionSolver.FrictionContact[]{
+    new MultiContactFrictionSolver.FrictionContact(frontPoint,FORWARD,RIGHT,NORMAL,1.0,frontMagnitude),
+    new MultiContactFrictionSolver.FrictionContact(rearPoint,FORWARD,RIGHT,NORMAL,1.0,rearMagnitude)};
+  var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  double frontBrakeForce=Math.abs(results[0].longitudinal());
+  double rearBrakeForce=Math.abs(results[1].longitudinal());
+  assertTrue(rearBrakeForce > frontBrakeForce,
+    "the higher-magnitude (handbrake-composed) rear contact must produce strictly MORE braking force than the lower-magnitude front contact in the SAME solve call - front="+frontBrakeForce+" rear="+rearBrakeForce+" - a regression back to a single shared brakeMagnitude parameter would make these equal");
+  // Both wheels share the same rotational-coupling geometry here (identical lateral offset,
+  // symmetric distance from COM), so the gap between them is attributable ONLY to their distinct
+  // declared brakeMagnitude - not to position/inertia differences - confirming the solver is
+  // actually consuming each contact's OWN per-contact field rather than any single shared value.
+  double proportionalExpectation=frontBrakeForce*(rearMagnitude/frontMagnitude);
+  assertTrue(rearBrakeForce <= proportionalExpectation+1e-6,
+    "rear braking force should scale with its own magnitude relative to front's, within the shared friction/force budget - front="+frontBrakeForce+" rear="+rearBrakeForce+" naive proportional expectation="+proportionalExpectation);
  }
 }

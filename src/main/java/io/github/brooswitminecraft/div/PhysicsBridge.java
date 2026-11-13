@@ -38,6 +38,169 @@ import java.util.function.Supplier;
 /** One server-owned Sable body. IV retains models, seats, controls, persistence and packets. */
 public final class PhysicsBridge {
  private static final BodyRegistry<EntityVehicleF_Physics, VehicleBody> registry = new BodyRegistry<>();
+ // G29/wheel hybrid H-pattern + paddle shifting and analog handbrake (ticket MINECRAFT-504,
+ // comments 53557/53572/53573/53603). Keyed by entity/part identity (IdentityHashMap), matching
+ // this class's existing per-vehicle-state pattern (brokenDefinitions/pendingInheritedVelocity
+ // above) - cleaned up from the SAME cleanup()/unload() sweeps those use, PLUS a bounded staleness
+ // sweep in advanceWheelAuxInputs (comment 53603: a client that stops sending - dismount, logout,
+ // crash - must not leave a vehicle braking/stuck mid-shift forever).
+ private static final java.util.Map<EntityVehicleF_Physics, Double> handbrakeMagnitude = new IdentityHashMap<>();
+ private static final java.util.Map<EntityVehicleF_Physics, Long> handbrakeLastUpdateTick = new IdentityHashMap<>();
+ private static final java.util.Map<PartEngine, Integer> hPatternTargetByEngine = new IdentityHashMap<>();
+ private static final java.util.Map<PartEngine, Long> hPatternLastUpdateTick = new IdentityHashMap<>();
+ private static final java.util.Map<PartEngine, HPatternShifter.Tracker> hPatternTrackers = new IdentityHashMap<>();
+ // The player currently AUTHORIZED to drive this vehicle's wheel-aux state (ticket comment
+ // 53617): recorded only once WheelAuxPayload's own controller-seat check has already passed,
+ // and checked EVERY tick in advanceWheelAuxInputs - a dismount/disconnect/seat change is
+ // caught immediately (own ownership-loss sweep), not left to wait out the staleness timeout
+ // below (that timeout is now purely the belt-and-suspenders fallback for a client that stops
+ // sending ENTIRELY without ever losing control, e.g. a hung game process still seated).
+ private static final java.util.Map<EntityVehicleF_Physics, java.util.UUID> wheelAuxOwner = new IdentityHashMap<>();
+ private static long wheelAuxTickCounter = 0;
+ // 100 ticks = 5s at 20tps - generous enough that ordinary network jitter/lag never triggers it,
+ // short enough that a genuinely stuck client releases promptly even without an ownership-loss
+ // event (comment 53603/53617).
+ private static final long WHEEL_AUX_STALE_TIMEOUT_TICKS = 100;
+ /**
+  * Client → server: the live analog handbrake pedal/lever magnitude (0-1), read and calibrated
+  * entirely client-side (own axis, own deadzone, own inversion - never the service-brake axis
+  * or the native digital parking-brake toggle). Safe to call every tick; a missing/disabled
+  * channel is simply 0.0 from the caller's own {@code WheelAxisCalibration}, never stale.
+  * Rejects a non-finite magnitude outright (comment 53603: reject invalid input, don't clamp
+  * NaN into something that silently passes) rather than storing it.
+  */
+ public static void setHandbrakeMagnitude(EntityVehicleF_Physics v, double magnitude) {
+  if (!Double.isFinite(magnitude)) return;
+  handbrakeMagnitude.put(v, Math.max(0.0, Math.min(1.0, magnitude)));
+  handbrakeLastUpdateTick.put(v, wheelAuxTickCounter);
+ }
+ /** Test/probe observability only (ticket comment: review on PR #13's own ask for "real
+  * handbrake/state observation", not an inference from the gear-shift latch) - {@link #stepGround}
+  * reads this same map directly for the actual physics composition; this is the SAME value,
+  * exposed read-only so a runtime probe can assert it directly instead of only inferring release
+  * via an unrelated gear change. Returns exactly 0.0 for a vehicle with no recorded (or already
+  * cleared/expired) handbrake entry, matching what an unloaded wheel actually gets at
+  * {@code stepGround} time. */
+ public static double currentHandbrakeMagnitudeForTesting(EntityVehicleF_Physics v) {
+  return handbrakeMagnitude.getOrDefault(v, 0.0);
+ }
+ /**
+  * Client → server: the physical H-pattern shifter's currently-read slot (see {@link
+  * HPatternShifter} for the sentinel values). Only RECORDS the target and its freshness here -
+  * actually applying it (one {@code PartEngine.shiftUp()}/{@code shiftDown()}/{@code
+  * shiftNeutral()} step per server tick, for as many ticks as climbing toward it takes) happens
+  * in {@link #advanceWheelAuxInputs}, not here, because a single network packet only arrives
+  * once per actual CHANGE (the caller dedupes unchanged values before sending) while climbing
+  * more than one gear - or retrying a step {@code PartEngine} safety-refused - needs repeated
+  * per-tick attempts against the SAME stored target (ticket comment 53603's first finding:
+  * applying only inside the packet handler stalls after one gear). Rejects any target outside
+  * {@link HPatternShifter}'s own valid sentinel/gear-number range (comment 53603: reject
+  * invalid/out-of-range input, don't silently store garbage).
+  */
+ public static void setHPatternTarget(EntityVehicleF_Physics v, int target) {
+  if (target != HPatternShifter.DISABLED && target != HPatternShifter.REVERSE_REQUEST && target != HPatternShifter.NEUTRAL_REQUEST
+    && (target < 1 || target > 9)) return;
+  for (var part : v.allParts) if (part instanceof PartEngine engine) {
+   hPatternTargetByEngine.put(engine, target);
+   hPatternLastUpdateTick.put(engine, wheelAuxTickCounter);
+  }
+ }
+ /**
+  * Client → server (via the packet handler, AFTER its own controller-seat check already
+  * passed): records who is currently authorized to drive this vehicle's wheel-aux state, so
+  * {@link #advanceWheelAuxInputs} can immediately revoke everything the instant that player
+  * stops controlling it (ticket comment 53617 - a plain "clear on dismount" packet cannot work,
+  * since by the time it would be sent the sender has already failed that same controller-seat
+  * check).
+  */
+ public static void recordWheelAuxOwner(EntityVehicleF_Physics v, java.util.UUID playerId) {
+  // Review (comment on PR #13, fd7fac1): an immediate A->B controller handoff - B's own packet
+  // arriving before the NEXT tick's ownership-loss sweep even runs - must not let B silently
+  // inherit A's still-latched H-pattern tracker/target/handbrake. Clear unconditionally on any
+  // actual owner CHANGE (never on a repeat packet from the same still-current owner, which must
+  // not reset an in-progress climb every tick) before recording the new owner, so B's own
+  // subsequent setHPatternTarget/setHandbrakeMagnitude calls (which the caller always issues
+  // right after this) start from a fresh Tracker - the ownership-loss sweep in
+  // advanceWheelAuxInputs remains the complementary path for a dismount/disconnect that happens
+  // WITHOUT a new owner ever taking over.
+  var previousOwner = wheelAuxOwner.get(v);
+  if (previousOwner != null && !previousOwner.equals(playerId)) clearWheelAuxState(v);
+  wheelAuxOwner.put(v, playerId);
+ }
+ /**
+  * Server-tick continuation (ticket comment 53603/53617) for both wheel-aux inputs above -
+  * called once per real server tick (see {@code DynamicImmersiveVehicles}'s own wiring),
+  * independent of whether any vehicle's physics step happens to run that same tick.
+  *
+  * <p>Order matters (comment 53617: "expire state BEFORE taking another H shift action"):
+  * ownership loss, then staleness, are both checked and cleared FIRST, so a revoked/expired
+  * engine never takes one more climb step on the same tick it is released; only entries that
+  * survive both checks get a climb step applied.
+  *
+  * <p>H-pattern: one climb step per engine per tick via its own {@link HPatternShifter.Tracker}
+  * - entirely independent of IV's own {@code useShifter} setting and its {@code
+  * shiftSelectionVar}, so native's own {@code useShifter=false} paddle handling (already
+  * shipped, unmodified) keeps working alongside this untouched; they only converge on {@code
+  * PartEngine}'s public shift methods. The tracker itself (see its own doc) detects and cancels
+  * an outstanding climb the instant something ELSE changes {@code currentGearVar} between this
+  * class's own ticks - a paddle (or native's {@code simpleThrottle} auto-reverse) intervening
+  * mid-climb always wins, matching the explicit "user expressly wants together" requirement
+  * rather than fighting back toward the superseded H-pattern target.
+  */
+ public static void advanceWheelAuxInputs() {
+  wheelAuxTickCounter++;
+  // Ownership-loss revocation (comment 53617) - checked first, before staleness, before
+  // applying any climb step this tick.
+  wheelAuxOwner.entrySet().removeIf(e -> {
+   var v = e.getKey();
+   if (v.isValid && isControllingRider(v, e.getValue())) return false;
+   clearWheelAuxState(v);
+   return true;
+  });
+  hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid || isWheelAuxStale(hPatternLastUpdateTick.getOrDefault(engine, 0L)));
+  handbrakeMagnitude.keySet().removeIf(v -> !v.isValid || isWheelAuxStale(handbrakeLastUpdateTick.getOrDefault(v, 0L)));
+  for (var entry : hPatternTargetByEngine.entrySet()) {
+   var engine = entry.getKey();
+   var tracker = hPatternTrackers.computeIfAbsent(engine, ignored -> new HPatternShifter.Tracker());
+   switch (tracker.nextAction((int)engine.currentGearVar.currentValue, entry.getValue())) {
+    case SHIFT_UP -> tracker.recordOutcome(engine.shiftUp());
+    case SHIFT_DOWN -> tracker.recordOutcome(engine.shiftDown());
+    case NEUTRAL -> { engine.shiftNeutral(); tracker.recordOutcome(true); }
+    case NONE -> {}
+   }
+  }
+  hPatternLastUpdateTick.keySet().removeIf(engine -> !hPatternTargetByEngine.containsKey(engine));
+  handbrakeLastUpdateTick.keySet().removeIf(v -> !handbrakeMagnitude.containsKey(v));
+  hPatternTrackers.keySet().removeIf(engine -> !engine.isValid || !hPatternTargetByEngine.containsKey(engine));
+ }
+ /** Removes every wheel-aux entry for one vehicle outright (not merely zeroing values) - used
+  * by both the ownership-loss and (indirectly, per-engine) staleness paths, and critically, this
+  * is what lets a NEW owner's H-pattern input start from a fresh {@link HPatternShifter.Tracker}
+  * instead of silently inheriting a stale "already achieved" latch for whatever slot the shifter
+  * happens to rest in (ticket comment 53617: "remount/swap can inherit achieved latch"). */
+ private static void clearWheelAuxState(EntityVehicleF_Physics v) {
+  handbrakeMagnitude.remove(v);
+  handbrakeLastUpdateTick.remove(v);
+  for (var part : v.allParts) if (part instanceof PartEngine engine) {
+   hPatternTargetByEngine.remove(engine);
+   hPatternLastUpdateTick.remove(engine);
+   hPatternTrackers.remove(engine);
+  }
+ }
+ private static boolean isWheelAuxStale(long lastUpdateTick) {
+  return WheelAuxStaleness.isStale(lastUpdateTick, wheelAuxTickCounter, WHEEL_AUX_STALE_TIMEOUT_TICKS);
+ }
+ /**
+  * Ticket MINECRAFT-504 comment 53603: the server had no driver/controller-seat authorization at
+  * all - any passenger's wheel-aux packet would have been accepted. A controller-seat occupant is
+  * {@code PartSeat.placementDefinition.isController} with {@code seat.rider} matching the given
+  * player's own ID (IV's {@code IWrapperEntity.getID()} mirrors the underlying Minecraft UUID).
+  */
+ public static boolean isControllingRider(EntityVehicleF_Physics v, java.util.UUID playerId) {
+  for (var part : v.allParts) if (part instanceof PartSeat seat && seat.placementDefinition.isController
+    && seat.rider != null && playerId.equals(seat.rider.getID())) return true;
+  return false;
+ }
  /**
   * Ticket 53385's concrete, confirmed defect: Body's own constructor always seeds BOTH halves'
   * angular velocity to exactly zero ({@code addLinearAndAngularVelocity(initialVelocity, new
@@ -620,6 +783,16 @@ public final class PhysicsBridge {
   // This sweep is independent of BodyRegistry, keyed only by pendingInheritedVelocity's own
   // staged entries, so it still finds and removes that exact orphan case.
   pendingInheritedVelocity.removeIf(v -> !v.isValid);
+  // Ticket MINECRAFT-504: same leak shape as pendingInheritedVelocity above, for the wheel
+  // handbrake/H-pattern state - independent of BodyRegistry, swept directly against validity
+  // (in addition to advanceWheelAuxInputs's own staleness-timeout sweep, which only covers a
+  // client that goes quiet, not an entity invalidated some other way).
+  handbrakeMagnitude.keySet().removeIf(v -> !v.isValid);
+  handbrakeLastUpdateTick.keySet().removeIf(v -> !v.isValid);
+  hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid);
+  hPatternLastUpdateTick.keySet().removeIf(engine -> !engine.isValid);
+  hPatternTrackers.keySet().removeIf(engine -> !engine.isValid);
+  wheelAuxOwner.keySet().removeIf(v -> !v.isValid);
  }
  public static void unload(Object level) {
   registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
@@ -628,6 +801,12 @@ public final class PhysicsBridge {
   // active()'s own lifecycle-refresh path already uses), not from any Body, so this needs no
   // BodyRegistry lookup at all.
   pendingInheritedVelocity.removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  handbrakeMagnitude.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  handbrakeLastUpdateTick.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  hPatternTargetByEngine.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
+  hPatternLastUpdateTick.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
+  hPatternTrackers.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
+  wheelAuxOwner.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**
@@ -1331,7 +1510,18 @@ public final class PhysicsBridge {
    // than contributing a magnitude. Clamped defensively since nothing upstream guarantees the
    // ComputedVariable stays within 0-1 (e.g. a modpack-side script writing it directly).
    double brakeMagnitude=v.parkingBrakeVar.isActive?1.0:Math.max(0.0,Math.min(1.0,v.brakeVar.currentValue));
-   boolean braking=brakeMagnitude>0.0;
+   // Analog handbrake (ticket MINECRAFT-504, comment 53572/53603) - a genuinely separate,
+   // independently calibrated input (own axis/deadzone/inversion, read and set via
+   // setHandbrakeMagnitude), not conflated with the service brake pedal above or the native
+   // digital parking-brake toggle, and applied PER-WHEEL below (rear/handbrake-capable wheels
+   // only), not folded uniformly into brakeMagnitude the way an earlier version of this ticket
+   // did - a real handbrake locks the rear wheels, it is not simply a second service-brake lever
+   // for every wheel. Defaults to 0.0 (no effect) for any vehicle never sent a handbrake
+   // magnitude at all - a missing channel is never treated as "fully applied".
+   double handbrakeMagnitudeThisTick=handbrakeMagnitude.getOrDefault(v,0.0);
+   // Still vehicle-wide for the throttle-ramp reset below, which only needs "is ANY brake
+   // engaged this tick" - the per-wheel split only matters to the friction solve itself.
+   boolean braking=brakeMagnitude>0.0||handbrakeMagnitudeThisTick>0.0;
    // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - bypassed
    // (drive==rawDrive) unless EXPERIMENTAL_THROTTLE_RAMP_TICKS>0. The rate is THIS vehicle's own
    // configured drive scale / the configured tick count, not a fixed newtons-per-tick constant,
@@ -1376,7 +1566,7 @@ public final class PhysicsBridge {
      +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+vfull(pose.position())+" orientation="+qfull(q)
      +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
      +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
-     +" brakeMagnitude="+brakeMagnitude+" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer
+     +" brakeMagnitude="+brakeMagnitude+" handbrakeMagnitude="+handbrakeMagnitudeThisTick+" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer
      // Raw vs shaped drive + ramp identity (ticket comment 53115) - driveRaw==drive and
      // throttleRampTicks=0 together prove the experimental candidate is bypassed on this build/
      // session; otherwise shows exactly which configured tick count shaped this tick's drive.
@@ -1655,11 +1845,19 @@ public final class PhysicsBridge {
     Vector3d torqueBody=inverse.transform(new Vector3d(predictorPoint).cross(verticalImpulse));
     workingAngular.add(q.transform(new Vector3d(torqueBody.x/aggregateInertiaBody.x,torqueBody.y/aggregateInertiaBody.y,torqueBody.z/aggregateInertiaBody.z)));
    }
-   var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
+   // PER-WHEEL brake magnitude (ticket MINECRAFT-504, comment 53603): the analog handbrake is
+   // explicit rear/handbrake-capable-wheel semantics, not just another service brake applied
+   // uniformly - a non-steering ("rear") wheel carries max(service,handbrake); a steering
+   // ("front") wheel carries only the service brake, same as before this ticket's handbrake
+   // addition. Parking brake keeps forcing brakeMagnitude (and so every wheel) to 1.0, unchanged.
+   var contacts=hits.stream().map(h->{
+    double wheelBrakeMagnitude = h.wheel().placementDefinition.turnsWithSteer ? brakeMagnitude : Math.max(brakeMagnitude,handbrakeMagnitudeThisTick);
+    return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
+     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude);
+   }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
-     brakeMagnitude,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
+     wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
      effectiveFrictionSolverIterations());
    // Phase 3 below returns to the OWNER-HALF basis (owner.ownerVelocity()/ownerAngular()/
    // leverArmCorrection()/handle()) deliberately - pure kinematics (contactVelocity) is

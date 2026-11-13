@@ -27,7 +27,7 @@ class FrictionSolverIterationCostBenchmark {
   double[] normals={878.36, 1035.55, 1235.91, 684.68};
   Vector3d[] points={new Vector3d(0.35,-0.15,-0.0625), new Vector3d(-0.375,-0.15,1.25), new Vector3d(0.375,-0.15,1.25), new Vector3d(-0.375,-0.15,-0.0625)};
   var contacts=new MultiContactFrictionSolver.FrictionContact[4];
-  for (int i=0;i<4;i++) contacts[i]=new MultiContactFrictionSolver.FrictionContact(points[i], new Vector3d(0,0,1), new Vector3d(1,0,0), normals[i], 1.0);
+  for (int i=0;i<4;i++) contacts[i]=new MultiContactFrictionSolver.FrictionContact(points[i], new Vector3d(0,0,1), new Vector3d(1,0,0), normals[i], 1.0,1.0);
   return contacts;
  }
  private static long measure(int iterations, int calls) {
@@ -38,8 +38,7 @@ class FrictionSolverIterationCostBenchmark {
    var contacts=representativeContacts();
    Vector3d velocity=new Vector3d(0.6,0,1.2), angular=new Vector3d(0.01,0,0.02);
    long start=System.nanoTime();
-   MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,velocity,angular,
-     1.0,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,iterations);
+   MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,velocity,angular,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,iterations);
    total += System.nanoTime()-start;
   }
   return total;
