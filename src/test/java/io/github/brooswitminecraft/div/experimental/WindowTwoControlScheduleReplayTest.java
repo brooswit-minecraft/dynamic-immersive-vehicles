@@ -112,7 +112,7 @@ class WindowTwoControlScheduleReplayTest {
    int activeCount=activeOrder.size();
    double driveForcePerWheel=activeCount==0?0:shapedDrive/4.0; // production divides by ALL wheels (wheels.size()), not just active ones
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,
-     braking,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,iterations);
+     (braking?1.0:0.0),BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,iterations);
    velocity.add(new Vector3d(solverVelocity).sub(bf));
    angular.add(new Vector3d(solverAngular).sub(ba));
    double frontNormal=wheels[1].hit()?wheels[1].normal():0;

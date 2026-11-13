@@ -105,7 +105,7 @@ class EffectiveMassDampingSeedSweepTest {
    Vector3d bf=new Vector3d(solverVelocity), ba=new Vector3d(solverAngular);
    double driveForcePerWheel=active.isEmpty()?0:shapedDrive/4.0;
    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,
-     false,0,driveForcePerWheel,FRICTION,1.0,DT,SOLVER_ITERATIONS);
+     0.0,0,driveForcePerWheel,FRICTION,1.0,DT,SOLVER_ITERATIONS);
    velocity.add(new Vector3d(solverVelocity).sub(bf));
    angular.add(new Vector3d(solverAngular).sub(ba));
    double totalNormalLoad=0; for (WheelState w : wheels) if (w.hit()) totalNormalLoad+=w.normal();

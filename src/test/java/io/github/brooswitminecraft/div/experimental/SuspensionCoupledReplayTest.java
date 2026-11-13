@@ -136,7 +136,7 @@ class SuspensionCoupledReplayTest {
     var contacts=new MultiContactFrictionSolver.FrictionContact[active.size()];
     for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0); }
     Vector3d beforeFrictionVelocity=new Vector3d(solverVelocity), beforeFrictionAngular=new Vector3d(solverAngular);
-    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,false,0,0,FRICTION,1.0,DT,iterations);
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,0.0,0,0,FRICTION,1.0,DT,iterations);
     // Fold the solved friction impulses' effect into the real (gravity-inclusive) tracked state.
     velocity.add(new Vector3d(solverVelocity).sub(beforeFrictionVelocity));
     angular.add(new Vector3d(solverAngular).sub(beforeFrictionAngular));

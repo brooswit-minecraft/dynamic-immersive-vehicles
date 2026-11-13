@@ -37,7 +37,7 @@ class LateralGripMultiplierTest {
   Vector3d velocity = new Vector3d(FORWARD).mul(5.0).add(new Vector3d(RIGHT).mul(initialSideSpeed));
   Vector3d angular = new Vector3d(0, 0, 0);
   MultiContactFrictionSolver.solveFriction(contacts(), MASS, INERTIA, IDENTITY, IDENTITY, velocity, angular,
-    false, 0, driveForcePerWheel, FRICTION, lateralGripMultiplier, DT, iterations);
+    0.0, 0, driveForcePerWheel, FRICTION, lateralGripMultiplier, DT, iterations);
   return velocity.dot(RIGHT);
  }
 
@@ -45,7 +45,7 @@ class LateralGripMultiplierTest {
   Vector3d velocity = new Vector3d(FORWARD).mul(5.0).add(new Vector3d(RIGHT).mul(initialSideSpeed));
   Vector3d angular = new Vector3d(0, 0, 0);
   MultiContactFrictionSolver.solveFriction(contacts(), MASS, INERTIA, IDENTITY, IDENTITY, velocity, angular,
-    false, 0, driveForcePerWheel, FRICTION, lateralGripMultiplier, DT, iterations);
+    0.0, 0, driveForcePerWheel, FRICTION, lateralGripMultiplier, DT, iterations);
   return velocity.dot(FORWARD);
  }
 
