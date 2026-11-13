@@ -125,6 +125,38 @@ public final class Overrides {
    // so it slides"), not for granting more lateral authority than the real friction circle.
    if (lateralGripMultiplier != null && !(Double.isFinite(lateralGripMultiplier) && lateralGripMultiplier > 0 && lateralGripMultiplier <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
+  /**
+   * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
+   * "narrow the accepted part schema/docs to only supported attributes" - a {@code parts} entry
+   * may ONLY set {@code driveForce} (plus {@code extends}, which is structural, not itself a
+   * tuning field) today, since {@code driveForce} is the one field
+   * {@link io.github.brooswitminecraft.div.PhysicsBridge#enginePartDriveForce} actually consumes.
+   * Every other field - {@code friction}/{@code brakeForce}/{@code maxSteerDegrees}/{@code
+   * lateralGripMultiplier}/{@code waterDrag}/{@code propellerForce}/{@code massKg}/{@code
+   * hullFillFactor}/{@code upperMassFraction}/every {@code selfRight*}/{@code enabled} - has no
+   * part-level consumer, so a part entry that sets one would silently do nothing; this fails
+   * loudly at load/reload instead, the same as an out-of-range value already does, rather than
+   * accepting a config an operator would reasonably expect to have an effect. Called on the
+   * MERGED (post-{@code extends}) entry, same as {@link #validate} already is for every {@code
+   * parts} entry in {@link Overrides#readAndValidate} - a part inheriting an unsupported field
+   * from a template is exactly as rejected as setting it directly.
+   */
+  void validateSupportedForPart() {
+   if (enabled != null) throw new IllegalArgumentException("part overrides do not support 'enabled' (vehicle-only concept)");
+   if (massKg != null) throw new IllegalArgumentException("part overrides do not support 'massKg' (no part-level consumer yet)");
+   if (suspensionTravel != null) throw new IllegalArgumentException("part overrides do not support 'suspensionTravel' (no part-level consumer yet)");
+   if (friction != null) throw new IllegalArgumentException("part overrides do not support 'friction' (no part-level consumer yet)");
+   if (brakeForce != null) throw new IllegalArgumentException("part overrides do not support 'brakeForce' (no part-level consumer yet)");
+   if (maxSteerDegrees != null) throw new IllegalArgumentException("part overrides do not support 'maxSteerDegrees' (no part-level consumer yet)");
+   if (hullFillFactor != null) throw new IllegalArgumentException("part overrides do not support 'hullFillFactor' (no part-level consumer yet)");
+   if (waterDrag != null) throw new IllegalArgumentException("part overrides do not support 'waterDrag' (no part-level consumer yet)");
+   if (propellerForce != null) throw new IllegalArgumentException("part overrides do not support 'propellerForce' (no part-level consumer yet)");
+   if (selfRightStrength != null || selfRightDamping != null || selfRightMaxTorque != null
+     || selfRightFadeStartDegrees != null || selfRightFadeEndDegrees != null)
+    throw new IllegalArgumentException("part overrides do not support selfRight* fields (no part-level consumer yet)");
+   if (upperMassFraction != null) throw new IllegalArgumentException("part overrides do not support 'upperMassFraction' (no part-level consumer yet)");
+   if (lateralGripMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'lateralGripMultiplier' (no part-level consumer yet)");
+  }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
   * override, pack DIV metadata, IV-adapted native value, physically-derived value) has nothing
@@ -415,7 +447,11 @@ public final class Overrides {
   // at load/reload time, not silently downstream.
   for (var t : templatesRead.values()) effective(t, templatesRead, new HashSet<>()).validate();
   for (var t : vehiclesRead.values()) effective(t, templatesRead, new HashSet<>()).validate();
-  for (var t : partsRead.values()) effective(t, templatesRead, new HashSet<>()).validate();
+  for (var t : partsRead.values()) {
+   var merged = effective(t, templatesRead, new HashSet<>());
+   merged.validate();
+   merged.validateSupportedForPart(); // review 53556: reject an inert (unsupported) part field loudly
+  }
   return new Config(templatesRead, vehiclesRead, partsRead);
  }
  static void load() {

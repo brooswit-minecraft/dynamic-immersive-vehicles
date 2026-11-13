@@ -421,6 +421,37 @@ class OverridesTest {
   assertEquals(8000.0, PhysicsBridge.enginePartDriveForce("packid:ordinary_engine_with_no_override", 8000.0));
  }
 
+ // Review finding (self-review 53556/PR comment 6854012663): "narrow the accepted part schema"
+ // - a parts entry may only set driveForce today; every other field is rejected at load/reload,
+ // including one reached only through extends, not silently accepted-but-ignored.
+
+ @Test void partEntrySettingOnlyDriveForcePassesTheSupportedFieldsCheck() {
+  var part = new Overrides.Tuning(); part.driveForce = 9500.0;
+  assertDoesNotThrow(part::validateSupportedForPart);
+ }
+
+ @Test void partEntrySettingAnUnsupportedFieldFailsTheSupportedFieldsCheck() {
+  var frictionOverride = new Overrides.Tuning(); frictionOverride.friction = 0.9;
+  assertThrows(IllegalArgumentException.class, frictionOverride::validateSupportedForPart);
+  var brakeOverride = new Overrides.Tuning(); brakeOverride.brakeForce = 1000.0;
+  assertThrows(IllegalArgumentException.class, brakeOverride::validateSupportedForPart);
+  var selfRightOverride = new Overrides.Tuning(); selfRightOverride.selfRightStrength = 1.0;
+  assertThrows(IllegalArgumentException.class, selfRightOverride::validateSupportedForPart);
+ }
+
+ @Test void partEntryInheritingAnUnsupportedFieldThroughExtendsStillFailsTheSupportedFieldsCheck() {
+  try {
+   var template = new Overrides.Tuning(); template.friction = 0.9; // not supported for a part
+   var part = new Overrides.Tuning(); part.extendsTemplate = "base"; part.driveForce = 9500.0;
+   Overrides.setForTest(java.util.Map.of("base", template), java.util.Map.of(), java.util.Map.of());
+   var merged = Overrides.effective(part);
+   assertThrows(IllegalArgumentException.class, merged::validateSupportedForPart,
+     "a part must not be able to smuggle an unsupported field in through extends");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  @Test void enginePartDriveForceFallsThroughWhenThePartEntryExistsButDoesNotSetDriveForce() {
   try {
    var part = new Overrides.Tuning(); part.friction = 0.9; // sets a different field, not driveForce

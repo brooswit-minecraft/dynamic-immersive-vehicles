@@ -242,15 +242,13 @@ Alongside `vehicles`, the config accepts two more top-level maps:
 - `parts`, keyed `partPackID:partSystemName` (the part definition's own
   identity, same shape as a vehicle's `packID:systemName`) - for tuning a
   part independently of any one vehicle it happens to be installed on.
-  Today, exactly one field is wired into real physics: an installed,
-  running engine part's own `driveForce`, if its part entry sets one,
-  completely replaces (not multiplies) the vehicle's own resolved
-  `driveForce` for that engine. Every other field on a `parts` entry
-  resolves (via `resolvedPart`, same precedence/`extends` rules as a
-  vehicle) but has no production consumer yet - set up for other systems
-  to plug into as they need per-part tuning, the same way `packMetadata`/
-  `ivAdapted`/`physicallyDerived` were already accepted parameters before
-  any caller supplied them.
+  Only `driveForce` is currently supported: an installed, running engine
+  part's own `driveForce`, if its part entry sets one, completely replaces
+  (not multiplies) the vehicle's own resolved `driveForce` for that
+  engine. Setting any other field on a `parts` entry - directly, or
+  inherited through `extends` - fails config load/reload loudly (the same
+  as an out-of-range value) rather than being silently accepted and
+  ignored; every other field has no part-level consumer yet.
 - `templates`, an arbitrary-named map of reusable tuning fragments. Any
   `vehicles` or `parts` entry (or another template) can set `"extends":
   "<template name>"` to inherit every field it leaves unset from that
