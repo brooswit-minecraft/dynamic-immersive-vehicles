@@ -537,13 +537,17 @@ not every installed propeller), and `angularWaterDrag` (an optional
 roll/pitch/yaw damping strength, 0 by default - no change from
 prior behavior unless configured) - are ignored by a ground/flight vehicle
 with no float device, and `suspensionTravel`/`friction`/`driveForce`/
-`brakeForce` are ignored by a float-only hull. `cyclicLimitDegrees` (0-45,
-default 20), `cyclicAuthorityScale`, and `yawAuthorityScale` (both strictly
-positive, capped at 5, default 1.0) only apply to a rotorcraft
+`brakeForce` are ignored by a float-only hull. `cyclicLimitDegrees` (strictly
+positive, capped at 45, default 20), `cyclicAuthorityScale`, and
+`yawAuthorityScale` (both strictly positive, capped at 5, default 1.0) only
+apply to a rotorcraft
 ([`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)):
 `cyclicLimitDegrees` bounds how far the rotor disk can be tilted by cyclic
 input (replacing the model's own fixed 20-degree clamp when set, but never
-past 45 - a disk cannot be tilted onto its edge), and
+past 45 - a disk cannot be tilted onto its edge - and never zero: a rotor
+with zero cyclic authority is not a configuration this ticket supports;
+disable the rotorcraft category itself via `enabled: false` if that's the
+intent), and
 `cyclicAuthorityScale`/`yawAuthorityScale` multiply the already thrust-gated
 cyclic attitude torque and yaw/anti-torque authority respectively - 1.0 is a
 no-op, and a zero-thrust rotor still produces zero torque regardless of
