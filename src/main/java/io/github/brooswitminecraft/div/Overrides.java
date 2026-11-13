@@ -59,10 +59,13 @@ public final class Overrides {
   public Double hullFillFactor;
   public Double waterDrag;
   public Double propellerForce;
-  // MINECRAFT-518: rotational (roll/pitch/yaw) water-drag torque coefficient for a floating
-  // hull - the rotational analogue of waterDrag, damping the hull's own angular velocity
-  // directly rather than only as a side effect of waterDrag applied at each float's off-center
-  // position. 0 (the documented FALLBACK) reproduces the exact prior behavior - no dedicated
+  // MINECRAFT-518: rotational (roll/pitch/yaw) water-drag strength for a floating hull - the
+  // rotational analogue of waterDrag, damping the hull's own angular velocity directly rather
+  // than only as a side effect of waterDrag applied at each float's off-center position. An
+  // inertia-normalized angular decay strength (review correction, comment 53689), not a torque/
+  // Nm coefficient - see Buoyancy.angularDragRetention's own doc for why no moment of inertia is
+  // involved anywhere in its formula. 0 (the documented FALLBACK) reproduces the exact prior
+  // behavior - no dedicated
   // rotational damping term at all. Like waterDrag/propellerForce, re-read live every tick by
   // BuoyantForces.apply - see PhysicsBridge.applyLiveSafeFields.
   public Double angularWaterDrag;

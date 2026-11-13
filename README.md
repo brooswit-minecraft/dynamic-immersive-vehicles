@@ -525,7 +525,7 @@ fully submerged, since a real hull is not a solid box), `waterDrag`,
 `propellerForce` (split evenly across the non-rotor propellers actually
 operational this tick - linked to a running engine, active, and turning -
 not every installed propeller), and `angularWaterDrag` (an optional
-roll/pitch/yaw damping torque coefficient, 0 by default - no change from
+roll/pitch/yaw damping strength, 0 by default - no change from
 prior behavior unless configured) - are ignored by a ground/flight vehicle
 with no float device, and `suspensionTravel`/`friction`/`driveForce`/
 `brakeForce` are ignored by a float-only hull. A copyable example is also

@@ -25,12 +25,14 @@ public final class Buoyancy {
  }
  /**
   * Per-tick retention fraction (always in (0,1]) for rotational water drag - the rotational
-  * analogue of {@link #drag} for roll/pitch/yaw, but solved as an IMPLICIT (backward-Euler) decay
-  * on angular velocity directly, not an explicit torque/impulse. MINECRAFT-518: today a floating
-  * hull gets a righting torque only as an emergent side effect of {@code drag} applied at each
-  * float device's own off-center position (see {@code BuoyantForces}'s class doc); nothing damps
-  * rotation itself, so a hull knocked into a spin (e.g. by a collision) has no hydrodynamic
-  * resistance arresting that spin beyond those per-float linear-drag side effects.
+  * analogue of {@link #drag} for roll/pitch/yaw, applied as a direct decay on angular velocity
+  * itself, never an explicit torque/impulse. MINECRAFT-518: today a floating hull gets a righting
+  * torque only as an emergent side effect of {@code drag} applied at each float device's own
+  * off-center position (see {@code BuoyantForces}'s class doc); nothing damps rotation itself, so
+  * a hull knocked into a spin (e.g. by a collision) has no hydrodynamic resistance arresting that
+  * spin beyond those per-float linear-drag side effects. {@code angularDragCoefficient} is an
+  * inertia-normalized angular decay strength (not a torque/Nm coefficient - see the review finding
+  * below for why no moment of inertia is involved anywhere in this formula or its caller).
   *
   * <p>Review finding (John, ticket comment 53679): an earlier version of this method returned an
   * explicit quadratic TORQUE magnitude, applied as an impulse via {@code RigidBodyHandle
@@ -43,21 +45,29 @@ public final class Buoyancy {
   * sign) - a genuine instability, not merely an approximation error.
   *
   * <p>Fixed by changing what this method computes and how its result is applied: instead of a
-  * torque converted through an unknown inertia, this returns the closed-form solution of the
-  * quadratic-drag ODE {@code d(omega)/dt = -coefficient*fraction*omega*|omega|} integrated
-  * IMPLICITLY (evaluating the right-hand side at the END-of-step omega, not the start) over one
-  * tick of {@code dt}: {@code omega(t+dt) = omega(t) / (1 + coefficient*fraction*|omega(t)|*dt)}.
-  * The retention fraction this returns, {@code 1 / (1 + coefficient*fraction*|omega(t)|*dt)}, is
-  * mathematically guaranteed to lie in {@code (0,1]} for every nonnegative {@code
-  * angularDragCoefficient}/{@code submergedFraction}/{@code angularSpeed}/{@code dt} - the
-  * denominator is always {@code >= 1} - so the caller (which multiplies the body's OWN current
-  * angular velocity by this fraction, a direct velocity scale via {@code
-  * RigidBodyHandle.addLinearAndAngularVelocity}, never an impulse) can never remove more than
-  * 100% of the existing spin, never reverse its sign, and never add rotational energy, for ANY
-  * configured coefficient - not just within some additionally-clamped "safe" range. This also
-  * sidesteps the missing-inertia problem entirely: no moment of inertia is needed anywhere in
-  * this formula or its caller. A zero coefficient (the documented fallback) still returns exactly
-  * 1 (no change at all), reproducing the exact prior behavior. */
+  * torque converted through an unknown inertia, this returns the EXACT analytic solution of the
+  * quadratic-drag ODE {@code d(omega)/dt = -coefficient*fraction*omega*|omega|} over one tick of
+  * {@code dt} - {@code omega(t+dt) = omega(t) / (1 + coefficient*fraction*|omega(t)|*dt)} is not
+  * merely a numerical-integration CHOICE (e.g. one particular implicit/semi-implicit Euler
+  * discretization among several reasonable ones) but the closed-form solution of that ODE itself
+  * (review correction, comment 53689, of an earlier "backward-Euler" characterization here - this
+  * formula is exact for this specific ODE, not an approximation scheme). The retention fraction
+  * this returns, {@code 1 / (1 + coefficient*fraction*|omega(t)|*dt)}, is mathematically
+  * guaranteed to lie in {@code (0,1]} for every nonnegative {@code angularDragCoefficient}/{@code
+  * submergedFraction}/{@code angularSpeed}/{@code dt} - the denominator is always {@code >= 1} -
+  * so the caller (which multiplies the body's OWN current angular velocity by this fraction, a
+  * direct velocity scale via {@code RigidBodyHandle.addLinearAndAngularVelocity}, never an
+  * impulse) can never remove more than 100% of the existing spin, never reverse its sign, and
+  * never add rotational energy, for ANY configured coefficient - not just within some
+  * additionally-clamped "safe" range. This also sidesteps the missing-inertia problem entirely: no
+  * moment of inertia is needed anywhere in this formula or its caller. A zero coefficient (the
+  * documented fallback) still returns exactly 1 (no change at all), reproducing the exact prior
+  * behavior.
+  *
+  * <p>Second review finding (John, comment 53689): the caller must apply this against the body's
+  * CURRENT (freshly-read) angular velocity, not a snapshot captured before this same tick's other
+  * impulses - see {@code BuoyantForces.apply}'s own doc for that fix; this method itself is a pure
+  * function and takes {@code angularSpeed} as a plain parameter either way. */
  public static double angularDragRetention(double angularSpeed, double submergedFraction, double angularDragCoefficient, double dt) {
   return 1.0 / (1.0 + submergedFraction * angularDragCoefficient * angularSpeed * dt);
  }

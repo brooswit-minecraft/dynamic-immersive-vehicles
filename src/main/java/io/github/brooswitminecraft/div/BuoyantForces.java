@@ -88,12 +88,26 @@ final class BuoyantForces {
   // addLinearAndAngularVelocity (a direct velocity add/scale, not a force/impulse) - world-frame,
   // like `angular` itself already is, so no inverse-orientation transform is needed here (unlike
   // the per-float impulses above, which are LOCAL-frame).
-  double angularSpeed = angular.length();
+  //
+  // Second review finding (John, comment 53689): `angular` is the CALLER's snapshot, taken
+  // before this method's own per-float impulses (and, for an amphibious Body, that domain's own
+  // ground/flight forces) were applied this same tick. If the underlying Sable/Rapier pipeline
+  // mutates the handle's stored velocity synchronously when an impulse is applied (not merely
+  // queuing it for the next physics step), scaling the STALE snapshot and adding that delta onto
+  // whatever the handle's velocity has already become this tick could still land on a result that
+  // over/under-damps relative to the body's actual current spin - a real staleness/ordering risk,
+  // independent of (and smaller in degree than) the magnitude-unboundedness defect comment 53679
+  // already fixed. Fixed by reading the handle's own angular velocity FRESH, immediately before
+  // this computation, rather than trusting the parameter captured at the top of this method -
+  // correct regardless of whether Sable applies impulses synchronously or defers them, and costs
+  // one extra getter call.
+  Vector3d currentAngular = handle.getAngularVelocity(new Vector3d());
+  double angularSpeed = currentAngular.length();
   if (!floats.isEmpty() && angularSpeed > 1e-6 && tuning.angularWaterDrag > 0) {
    double averageFraction = totalFraction / floats.size();
    if (averageFraction > 0) {
     double retention = Buoyancy.angularDragRetention(angularSpeed, averageFraction, tuning.angularWaterDrag, PhysicsBridge.DT);
-    Vector3d deltaAngular = new Vector3d(angular).mul(retention - 1.0);
+    Vector3d deltaAngular = new Vector3d(currentAngular).mul(retention - 1.0);
     handle.addLinearAndAngularVelocity(new Vector3d(), deltaAngular);
    }
   }

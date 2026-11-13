@@ -1129,18 +1129,42 @@ Fixed by changing both what the pure function computes and how its result
 is applied, rather than clamping the old impulse after the fact (which
 would still have needed the unavailable inertia to bound correctly):
 `Buoyancy.angularDragRetention(angularSpeed, submergedFraction,
-angularDragCoefficient, dt)` now returns the closed-form IMPLICIT
-(backward-Euler) solution of the same quadratic-drag ODE - `1 / (1 +
+angularDragCoefficient, dt)` now returns the EXACT analytic solution of
+the same quadratic-drag ODE over one tick - `1 / (1 +
 coefficient*fraction*|omega|*dt)` - which is mathematically guaranteed to
 lie in `(0,1]` for every nonnegative input, with no inertia anywhere in
-the formula. `BuoyantForces.apply` multiplies the hull's own CURRENT
-angular velocity by that fraction directly via `RigidBodyHandle
-.addLinearAndAngularVelocity` (a direct velocity scale, never a force or
-impulse) - world-frame, matching `angular`'s own existing frame, so no
-`inverse`-orientation transform is needed for this term (unlike the
-per-float impulses, which are local-frame). A retention of exactly 1 (zero
-coefficient, the documented fallback, or no submersion/rotation) is a
-true no-op, byte-identical to before this ticket.
+the formula. (A second review round, comment 53689, corrected an earlier
+"backward-Euler" characterization of this formula here: it is the exact
+closed-form solution of this specific ODE, not one numerical-integration
+scheme chosen among several - `angularWaterDrag` itself is accordingly an
+inertia-normalized angular decay strength, not a torque/Nm coefficient.)
+`BuoyantForces.apply` multiplies the hull's own CURRENT angular velocity
+by that fraction directly via `RigidBodyHandle.addLinearAndAngularVelocity`
+(a direct velocity scale, never a force or impulse) - world-frame,
+matching `angular`'s own existing frame, so no `inverse`-orientation
+transform is needed for this term (unlike the per-float impulses, which
+are local-frame). A retention of exactly 1 (zero coefficient, the
+documented fallback, or no submersion/rotation) is a true no-op,
+byte-identical to before this ticket.
+
+**Staleness/ordering finding, corrected after a second exact-head review
+round (John, comment 53689).** The revision above still read `angular` -
+the CALLER's velocity snapshot, taken before this method's own per-float
+impulses (and, for an amphibious `Body`, that domain's own ground/flight
+forces) were applied this same tick - rather than the handle's actual
+current velocity. If the underlying Sable/Rapier pipeline applies an
+impulse synchronously (mutating the handle's stored velocity immediately,
+not merely queuing it for the next physics step), scaling that stale
+snapshot and adding the resulting delta onto whatever the handle's
+velocity has already become this tick could still over- or under-damp
+relative to the body's real current spin - a genuine staleness/ordering
+risk, independent of (and smaller in degree than) the magnitude-
+unboundedness defect comment 53679 already fixed. Fixed by reading the
+handle's own angular velocity FRESH (`handle.getAngularVelocity(...)`)
+immediately before this computation, instead of trusting the parameter
+captured at the top of `BuoyantForces.apply` - correct regardless of
+whether Sable applies impulses synchronously or defers them to the next
+step, at the cost of one extra getter call.
 
 Preserves default behavior exactly: the documented `FALLBACK` for this
 field is `0.0`, so an unconfigured vehicle (or one explicitly setting
