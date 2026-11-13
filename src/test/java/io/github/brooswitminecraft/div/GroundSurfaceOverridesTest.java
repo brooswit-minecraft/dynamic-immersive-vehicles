@@ -63,4 +63,57 @@ class GroundSurfaceOverridesTest {
     @Test void bothFieldsNullIsAllowedAndValidates() {
         assertDoesNotThrow(new GroundSurfaceOverrides.Entry()::validate);
     }
+
+    /**
+     * Self-review finding (PR #12 head 5fdc49f): {@code load()}'s own original throwing catch
+     * block would abort DIV startup on a malformed/out-of-range config file, even though
+     * {@code reload()} already handled the same input safely. The fix routes both through the
+     * shared {@code apply(Supplier)} below - these tests exercise exactly that fallback for
+     * "malformed JSON" (simulated as the parse supplier throwing, standing in for a real
+     * {@code JsonSyntaxException} without needing Gson on the test classpath) and "out-of-range
+     * value" (a real {@code Entry} failing its own {@code validate()}), at the same freshly-
+     * defaulted state {@code load()} starts from - i.e. the specific gap the self-review found,
+     * not just {@code reload()}'s already-covered last-known-good path.
+     */
+    @Test void malformedParseAtFreshDefaultStateFallsBackWithoutThrowing() {
+        GroundSurfaceOverrides.setForTest(Map.of()); // the Map.of() state load() starts from
+        GroundSurfaceOverrides.ReloadResult result = assertDoesNotThrow(
+                () -> GroundSurfaceOverrides.apply(() -> { throw new RuntimeException("malformed json"); }));
+        assertFalse(result.success());
+        assertEquals(GroundSurface.ICE, GroundSurfaceOverrides.effective("ice", GroundSurface.ICE),
+                "a malformed parse must never apply partial/garbage state - defaults stay in effect");
+    }
+
+    @Test void outOfRangeValueAtFreshDefaultStateFallsBackWithoutThrowing() {
+        GroundSurfaceOverrides.setForTest(Map.of());
+        var outOfRange = new GroundSurfaceOverrides.Entry();
+        outOfRange.frictionMultiplier = -5.0;
+        GroundSurfaceOverrides.ReloadResult result = assertDoesNotThrow(
+                () -> GroundSurfaceOverrides.apply(() -> Map.of("ice", outOfRange)));
+        assertFalse(result.success());
+        assertEquals(GroundSurface.ICE, GroundSurfaceOverrides.effective("ice", GroundSurface.ICE),
+                "an out-of-range field must never apply partial/garbage state - defaults stay in effect");
+    }
+
+    @Test void validParseSucceedsAndIsApplied() {
+        var valid = new GroundSurfaceOverrides.Entry();
+        valid.frictionMultiplier = 0.3;
+        var result = GroundSurfaceOverrides.apply(() -> Map.of("ice", valid));
+        assertTrue(result.success());
+        assertEquals(0.3, GroundSurfaceOverrides.effective("ice", GroundSurface.ICE).frictionMultiplier());
+    }
+
+    /** A later malformed apply must preserve the earlier GOOD state, not reset to hardcoded
+     * defaults - last-known-good, exactly {@code reload()}'s documented contract. */
+    @Test void laterMalformedApplyKeepsThePriorGoodStateNotTheHardcodedDefault() {
+        var good = new GroundSurfaceOverrides.Entry();
+        good.frictionMultiplier = 0.77;
+        GroundSurfaceOverrides.apply(() -> Map.of("ice", good));
+
+        var badResult = GroundSurfaceOverrides.apply(() -> { throw new RuntimeException("malformed"); });
+
+        assertFalse(badResult.success());
+        assertEquals(0.77, GroundSurfaceOverrides.effective("ice", GroundSurface.ICE).frictionMultiplier(),
+                "a later malformed apply must not discard the earlier good state");
+    }
 }

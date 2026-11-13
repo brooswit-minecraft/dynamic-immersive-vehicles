@@ -2,26 +2,41 @@ package io.github.brooswitminecraft.div;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.mojang.logging.LogUtils;
 import net.neoforged.fml.loading.FMLPaths;
+import org.slf4j.Logger;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * MINECRAFT-508 review (John, asks #1/#4): configurable defaults for {@link GroundSurface}'s
  * five baseline multipliers - "configurable defaults," not a full override system, same spirit
  * as {@link Overrides}'s own per-vehicle tuning. Deliberately mirrors {@link Overrides}'s own
  * JSON-reload convention (MINECRAFT-505) rather than inventing a second, competing config-
- * loading mechanism in this repo: a lazily-constructed {@link Gson} (never a static field - see
- * {@link Overrides}'s own {@code gson()} doc for why: plain unit tests load classes in this
- * package without {@code com.google.gson} on their classpath at all, so an eager static field
- * would throw {@code NoClassDefFoundError} for every test that merely references this class),
- * the same {@code FMLPaths.CONFIGDIR}-relative file location, the same sparse-nullable-field
- * override shape, and the same non-throwing {@link #reload} contract: ANY failure (missing/
- * malformed file, an out-of-range field) leaves the previously-active overrides completely
- * untouched (last-known-good), returned as a {@link ReloadResult} instead of thrown.
+ * loading mechanism in this repo: a lazily-constructed {@link Gson}/{@link Logger} (never a
+ * static field - plain unit tests load classes in this package without {@code com.google.gson}
+ * or {@code com.mojang.logging}/NeoForge on their classpath at all, so an eager static field of
+ * either type would throw {@code NoClassDefFoundError} for every test that merely references
+ * this class), the same {@code FMLPaths.CONFIGDIR}-relative file location, the same sparse-
+ * nullable-field override shape.
+ *
+ * <p>Self-review finding (MINECRAFT-508, PR #12 head 5fdc49f): an earlier version of {@link #load}
+ * had its OWN throwing catch block, separate from {@link #reload}'s - so a malformed or out-of-
+ * range config file present at first server startup would throw {@code IllegalStateException} and
+ * abort DIV entirely, while the exact same bad file encountered via a LATER {@link #reload} call
+ * would correctly log and fall back. Fixed: both now funnel through the same non-throwing
+ * {@link #apply} - {@code load}'s only difference from {@code reload} is that it first best-
+ * effort writes a fresh default file when none exists yet (also non-throwing).  ANY failure in
+ * {@code apply} (a parse exception, or an {@link Entry#validate} range failure) leaves
+ * {@link #overrides} completely untouched - at startup that means the {@code Map.of()} this field
+ * already starts with (i.e. plain hardcoded {@link GroundSurface} defaults), at a later
+ * {@link #reload} it means last-known-good - and is reported via the returned {@link ReloadResult}
+ * plus a logged error, never thrown.
  */
 public final class GroundSurfaceOverrides {
     private GroundSurfaceOverrides() {}
@@ -61,26 +76,63 @@ public final class GroundSurfaceOverrides {
 
     static void setForTest(Map<String, Entry> overridesForTest) { overrides = overridesForTest; }
 
-    // Deliberately not a static field - see this class's own doc for why.
+    // Deliberately not static fields - see this class's own doc for why.
     private static Gson gson() { return new GsonBuilder().setPrettyPrinting().create(); }
+    private static Logger logger() { return LogUtils.getLogger(); }
     private static Path configPath() { return FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles-surfaces.json"); }
 
-    private static Map<String, Entry> readAndValidate(Path path) throws IOException {
-        Config config = gson().fromJson(Files.readString(path), Config.class);
-        Map<String, Entry> surfaces = (config != null && config.surfaces() != null) ? config.surfaces() : Map.of();
-        surfaces.values().forEach(Entry::validate);
-        return surfaces;
+    /** Reads and parses {@code path} into its raw surfaces map - validation happens once, inside
+     * {@link #apply} (which every caller of this method goes through), not here, so it isn't
+     * duplicated. */
+    private static Map<String, Entry> parseFile(Path path) {
+        Config config;
+        try {
+            config = gson().fromJson(Files.readString(path), Config.class);
+        } catch (IOException ex) {
+            throw new UncheckedIOException(ex);
+        }
+        return (config != null && config.surfaces() != null) ? config.surfaces() : Map.of();
     }
 
+    /**
+     * The shared all-or-nothing apply {@link #load} and {@link #reload} both use: runs
+     * {@code parse}, validates every entry, and only on full success swaps the result into
+     * {@link #overrides}. ANY failure (the parse throwing, or {@link Entry#validate} rejecting
+     * an entry) leaves {@link #overrides} completely untouched and returns a failed
+     * {@link ReloadResult} instead of throwing - package-visible specifically so
+     * {@code GroundSurfaceOverridesTest} can exercise this fallback directly for simulated
+     * malformed/out-of-range input, without needing real file I/O or Gson on the test classpath.
+     */
+    static ReloadResult apply(Supplier<Map<String, Entry>> parse) {
+        try {
+            Map<String, Entry> candidate = parse.get();
+            candidate.values().forEach(Entry::validate);
+            overrides = Map.copyOf(candidate);
+            return ReloadResult.ok(overrides.size());
+        } catch (RuntimeException ex) {
+            return ReloadResult.failed("Cannot apply surface overrides: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Never throws - a malformed/out-of-range config file at first startup logs and falls back
+     * to the hardcoded {@link GroundSurface} defaults (DIV must still start), exactly like a bad
+     * file encountered later via {@link #reload} falls back to last-known-good. See this class's
+     * own doc for the self-review finding this fixed.
+     */
     static void load() {
         Path path = configPath();
         try {
             if (!Files.exists(path)) {
                 Files.writeString(path, gson().toJson(new Config(Map.of())));
             }
-            overrides = Map.copyOf(readAndValidate(path));
-        } catch (IOException | RuntimeException ex) {
-            throw new IllegalStateException("Cannot load " + path + ": " + ex.getMessage(), ex);
+        } catch (IOException ex) {
+            logger().warn("[DIV] GroundSurfaceOverrides: could not write default config at " + path + ": " + ex.getMessage());
+        }
+        ReloadResult result = apply(() -> parseFile(path));
+        if (!result.success()) {
+            logger().error("[DIV] GroundSurfaceOverrides: " + result.message()
+                    + " - startup continues with default surface multipliers (no overrides applied)");
         }
     }
 
@@ -89,17 +141,16 @@ public final class GroundSurfaceOverrides {
      * failure is reported via the returned {@link ReloadResult} instead of thrown. */
     public static ReloadResult reload() {
         Path path = configPath();
-        try {
-            Map<String, Entry> read = readAndValidate(path);
-            overrides = Map.copyOf(read);
-            return ReloadResult.ok(overrides.size());
-        } catch (IOException | RuntimeException ex) {
-            return ReloadResult.failed("Cannot reload " + path + ": " + ex.getMessage());
+        ReloadResult result = apply(() -> parseFile(path));
+        if (!result.success()) {
+            logger().error("[DIV] GroundSurfaceOverrides: " + result.message() + " - keeping last-known-good surface overrides");
         }
+        return result;
     }
 
-    /** Outcome of a {@link #reload} call - {@code success} false means the previous overrides
-     * map is UNCHANGED (last-known-good), never partially applied. */
+    /** Outcome of a {@link #reload}/{@link #apply} call - {@code success} false means
+     * {@link #overrides} is UNCHANGED (last-known-good, or the startup default), never partially
+     * applied. */
     public record ReloadResult(boolean success, String message, int surfaceCount) {
         static ReloadResult ok(int surfaceCount) {
             return new ReloadResult(true, "reloaded " + surfaceCount + " surface override(s)", surfaceCount);
