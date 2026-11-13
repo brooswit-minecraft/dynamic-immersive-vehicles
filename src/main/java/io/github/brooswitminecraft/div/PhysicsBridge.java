@@ -107,6 +107,25 @@ public final class PhysicsBridge {
   return Overrides.resolved(definition.packID + ":" + definition.systemName);
  }
  /**
+  * Review finding (ticket 53518/MINECRAFT-505, self-review 53542 and John's comment 53539):
+  * {@code Overrides.resolvedPart} existed with no actual production consumer, so a configured
+  * {@code parts} entry never affected real physics. This wires exactly one documented, concrete
+  * field - an engine part's own drive force - into {@code stepGround}'s existing drive-force
+  * computation, as the deliberate vehicle/part precedence: an explicit part-level {@code
+  * driveForce} override, if this specific engine part has one, wins outright over the vehicle's
+  * own resolved {@code driveForce} (not stacked/multiplied with it - a part saying "my own drive
+  * force is X" is a complete replacement, not a modifier); otherwise the vehicle's already-
+  * resolved value is used completely unchanged, so an installation with no part overrides at all
+  * behaves byte-identically to before this ticket. {@code Overrides.effectivePartOverride}
+  * (unlike {@code resolvedPart}) returns {@code null} - never the flat fallback - for a field the
+  * part says nothing about, which is exactly the signal needed to tell "no override" apart from
+  * "override explicitly set it".
+  */
+ static double enginePartDriveForce(String partKey, double vehicleDriveForce) {
+  var partOverride = Overrides.effectivePartOverride(partKey);
+  return (partOverride != null && partOverride.driveForce != null) ? partOverride.driveForce : vehicleDriveForce;
+ }
+ /**
   * Which {@code Overrides.Tuning} fields a currently-active {@code Body}/{@code BuoyantBody}
   * already re-reads fresh from its own live {@code tuning} object every tick/call, rather than
   * caching into a separate field at construction time (ticket 53518/MINECRAFT-505) - confirmed
@@ -1302,7 +1321,8 @@ public final class PhysicsBridge {
   private boolean stepGround(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d angular, Vector3d velocity, Vector3d up) {
    double rawDrive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
-    rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
+    rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue
+      *enginePartDriveForce(engine.definition.packID+":"+engine.definition.systemName, tuning.driveForce);
    boolean braking=v.brakeVar.isActive || v.parkingBrakeVar.isActive;
    // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - bypassed
    // (drive==rawDrive) unless EXPERIMENTAL_THROTTLE_RAMP_TICKS>0. The rate is THIS vehicle's own

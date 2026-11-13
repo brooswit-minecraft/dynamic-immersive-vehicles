@@ -201,7 +201,10 @@ public final class Overrides {
   * every real {@link #resolved}/{@link #resolvedPart} call uses. {@link #readAndValidate} calls
   * the other overload directly against a CANDIDATE templates map instead, so a reload's
   * extends-chain validation never depends on (or mutates) the active one. */
- private static Tuning effective(Tuning entry) { return effective(entry, templates, new HashSet<>()); }
+ // Package-private, not private (ticket 53518 self-review) - lets OverridesTest directly exercise
+ // the extends-merge this class's own readAndValidate uses for its post-merge coupled-field
+ // validation, without needing a live FML config file to drive it through reload().
+ static Tuning effective(Tuning entry) { return effective(entry, templates, new HashSet<>()); }
  /** Builds a {@code SelfRightingAssist.Config} from a resolved Tuning (ticket comment 53182/
   * 53188) - ALL FIVE selfRight* fields must be present together, or this returns {@code
   * SelfRightingAssist.OFF}. Deliberately all-or-nothing: a partially-configured assist has no
@@ -233,11 +236,36 @@ public final class Overrides {
  private static Map<String,Tuning> vehicles = Map.of();
  private static Map<String,Tuning> parts = Map.of();
  public static Tuning get(String key) { return vehicles.get(key); }
- public static boolean isOptedOut(String key) { var t = vehicles.get(key); return t != null && Boolean.FALSE.equals(t.enabled); }
+ /**
+  * Review finding (ticket 53518/MINECRAFT-505, John's comment 53539): {@code enabled} must go
+  * through the SAME {@code extends} chain {@link #resolved} already does, via {@link #effective},
+  * not a raw {@code vehicles.get(key)} lookup - otherwise a vehicle entry that sets no fields of
+  * its own beyond {@code extends: "some-disabled-template"} would resolve as opted-out via
+  * {@link #resolved} but stay active via {@link #isOptedOut}, which is the one field whose
+  * correctness actually gates activation (see {@code PhysicsBridge.active}'s own {@code
+  * Overrides.isOptedOut(key)} call). {@code packMetadata}/{@code ivAdapted}/{@code
+  * physicallyDerived} are deliberately NOT consulted here, matching this method's pre-existing
+  * contract (operator config only) - only the {@code extends} resolution is new.
+  */
+ public static boolean isOptedOut(String key) { var t = effective(vehicles.get(key)); return t != null && Boolean.FALSE.equals(t.enabled); }
  /** The raw, unresolved (no {@code extends} applied) part override entry for {@code key}, if
   * any - mirrors {@link #get} for vehicles. See {@link #resolvedPart} for the key shape and the
   * actual precedence-resolved value callers should use instead of this raw entry. */
  public static Tuning getPart(String key) { return parts.get(key); }
+ /**
+  * Review finding (John's comment 53539/self-review 53542): {@link #resolvedPart} alone cannot
+  * tell a caller "this part explicitly overrides field X" apart from "no part entry exists, so
+  * this is the documented flat {@link #FALLBACK}" - both return the same non-null value for a
+  * field like {@code driveForce}, which has a flat fallback. A production caller that wants
+  * "part override wins over the vehicle's own resolved value, otherwise fall through to the
+  * vehicle's value" (the deliberate precedence {@code PhysicsBridge}'s engine-drive-force
+  * composition uses - see its own doc) needs the RAW, {@code extends}-resolved-but-NOT-fallback-
+  * filled entry instead, so a still-null field unambiguously means "this part says nothing about
+  * this field" - this is exactly that: {@code null} if {@code key} has no part entry at all,
+  * otherwise the entry with its own {@code extends} chain folded in (same as {@link #resolved}
+  * does for a vehicle), but with NO pack/native/physical/fallback layer applied.
+  */
+ public static Tuning effectivePartOverride(String key) { return effective(parts.get(key)); }
  private static Double firstNonNull(Double... values) { for (Double v : values) if (v != null) return v; return null; }
  private static Boolean firstNonNullBoolean(Boolean... values) { for (Boolean v : values) if (v != null) return v; return null; }
  /**
@@ -376,9 +404,18 @@ public final class Overrides {
   // must validate the new file entirely on its own terms before anything about it is trusted,
   // exactly like every other field check above. Nothing is swapped into the active statics
   // until this whole method returns successfully.
-  templatesRead.values().forEach(t -> effective(t, templatesRead, new HashSet<>()));
-  vehiclesRead.values().forEach(t -> effective(t, templatesRead, new HashSet<>()));
-  partsRead.values().forEach(t -> effective(t, templatesRead, new HashSet<>()));
+  //
+  // Review finding (John's comment 53539): validating only each entry's own RAW fields (just
+  // above) is not enough for a coupled check - selfRightFadeEndDegrees > selfRightFadeStartDegrees
+  // is the one example today - since a child and its template can each independently pass their
+  // own raw validate() while the MERGED (effective) combination is invalid (e.g. a child sets
+  // only a fadeEndDegrees that is smaller than a fadeStartDegrees it inherits from its template -
+  // each value is independently in-range, but the pairing isn't). So the merged result itself is
+  // validated too, immediately after resolving the chain - a merge that is invalid fails loudly
+  // at load/reload time, not silently downstream.
+  for (var t : templatesRead.values()) effective(t, templatesRead, new HashSet<>()).validate();
+  for (var t : vehiclesRead.values()) effective(t, templatesRead, new HashSet<>()).validate();
+  for (var t : partsRead.values()) effective(t, templatesRead, new HashSet<>()).validate();
   return new Config(templatesRead, vehiclesRead, partsRead);
  }
  static void load() {

@@ -337,6 +337,101 @@ class OverridesTest {
   assertEquals(8000.0, second.driveForce, "mutating one resolved() instance's own copy must never affect a separately resolved instance for the same key");
  }
 
+ // Review findings (John's comment 53539): isOptedOut must honor an `enabled:false` inherited
+ // through `extends`, and a merged (effective) Tuning - not just each raw entry - must itself be
+ // validated so a coupled check spanning a child/template boundary cannot slip through.
+
+ @Test void isOptedOutHonorsEnabledInheritedThroughExtends() {
+  try {
+   var disabledTemplate = new Overrides.Tuning(); disabledTemplate.enabled = false;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "disabled-template"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("disabled-template", disabledTemplate), java.util.Map.of("packid:inherited_opt_out", child), java.util.Map.of());
+   assertTrue(Overrides.isOptedOut("packid:inherited_opt_out"),
+     "enabled:false inherited from a template must opt this vehicle out, the same as resolved() already reports it");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void isOptedOutStillWorksForADirectEntryWithNoExtends() {
+  try {
+   var direct = new Overrides.Tuning(); direct.enabled = false;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of("packid:directly_opted_out", direct), java.util.Map.of());
+   assertTrue(Overrides.isOptedOut("packid:directly_opted_out"));
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void mergedEffectiveTuningCanBeInvalidEvenWhenEveryRawEntryValidatesOnItsOwn() {
+  // The exact gap readAndValidate's post-merge validate() (not just each raw entry's own
+  // validate()) now closes: a template sets ONLY fadeStartDegrees=40 (valid alone - fadeEndDegrees
+  // null means the coupled check's own null-guard passes trivially), a child extending it sets
+  // ONLY fadeEndDegrees=10 (also valid alone, compared against the raw child's own null
+  // fadeStartDegrees as "> 0"). Neither raw entry, validated alone, ever sees both fields
+  // together - but the MERGED result (fadeStartDegrees=40, fadeEndDegrees=10) violates
+  // "fadeEnd > fadeStart" and must fail once actually merged and validated.
+  try {
+   var template = new Overrides.Tuning(); template.selfRightFadeStartDegrees = 40.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "base"; child.selfRightFadeEndDegrees = 10.0;
+   Overrides.setForTest(java.util.Map.of("base", template), java.util.Map.of(), java.util.Map.of());
+   assertDoesNotThrow(template::validate, "the raw template alone is valid");
+   assertDoesNotThrow(child::validate, "the raw child alone is valid (its own fadeStartDegrees is null)");
+   assertThrows(IllegalArgumentException.class, () -> Overrides.effective(child).validate(),
+     "the MERGED combination is invalid and must be caught once both fields are actually together");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // Ticket 53518 self-review / John's comment 53539: a part override must actually reach a real
+ // physics consumer, not just resolve to a value nothing reads. PhysicsBridge.enginePartDriveForce
+ // is the literal decision stepGround's drive-force computation now uses.
+
+ @Test void effectivePartOverrideIsNullForAnUnconfiguredPartUnlikeResolvedPartsFallbackFilledValue() {
+  assertNull(Overrides.effectivePartOverride("packid:not_configured_part"),
+    "effectivePartOverride must distinguish \"no override\" from resolvedPart's own flat fallback");
+  assertEquals(8000.0, Overrides.resolvedPart("packid:not_configured_part").driveForce,
+    "resolvedPart itself is unaffected - still falls through to the same flat FALLBACK as a vehicle");
+ }
+
+ @Test void effectivePartOverrideAppliesExtendsTheSameWayVehicleResolutionDoes() {
+  try {
+   var template = new Overrides.Tuning(); template.driveForce = 7000.0;
+   var part = new Overrides.Tuning(); part.extendsTemplate = "engine-base";
+   Overrides.setForTest(java.util.Map.of("engine-base", template), java.util.Map.of(), java.util.Map.of("packid:inherited_engine", part));
+   assertEquals(7000.0, Overrides.effectivePartOverride("packid:inherited_engine").driveForce);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void enginePartDriveForceOverrideWinsOverTheVehicleResolvedValue() {
+  try {
+   var part = new Overrides.Tuning(); part.driveForce = 9500.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:high_output_engine", part));
+   assertEquals(9500.0, PhysicsBridge.enginePartDriveForce("examplepack:high_output_engine", 8000.0),
+     "an explicit part-level driveForce override must win outright over the vehicle's own resolved value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void enginePartDriveForceFallsThroughToTheVehicleResolvedValueWhenNoPartOverrideExists() {
+  assertEquals(8000.0, PhysicsBridge.enginePartDriveForce("packid:ordinary_engine_with_no_override", 8000.0));
+ }
+
+ @Test void enginePartDriveForceFallsThroughWhenThePartEntryExistsButDoesNotSetDriveForce() {
+  try {
+   var part = new Overrides.Tuning(); part.friction = 0.9; // sets a different field, not driveForce
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("packid:partially_configured_engine", part));
+   assertEquals(8000.0, PhysicsBridge.enginePartDriveForce("packid:partially_configured_engine", 8000.0),
+     "a part entry that never sets driveForce must not be mistaken for a zero/fallback override");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  // Overrides.reload(), like load(), needs a live FML config directory (and, for this ticket, a
  // full Gson on the runtime classpath, which a plain unit test's trimmed classpath does not
  // have either - confirmed directly: calling it here throws NoClassDefFoundError, an Error, not
