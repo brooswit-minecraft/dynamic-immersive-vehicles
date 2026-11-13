@@ -1,0 +1,24 @@
+{
+  "vehicles": {
+    "divtest:f0p5": {"massKg": 350.0, "upperMassFraction": 0.5},
+    "divtest:f0p4": {"massKg": 350.0, "upperMassFraction": 0.4},
+    "divtest:f0p5-s6": {"massKg": 350.0, "upperMassFraction": 0.5},
+    "divtest:f0p5-s8": {"massKg": 350.0, "upperMassFraction": 0.5},
+    "divtest:f0p5-s10": {"massKg": 350.0, "upperMassFraction": 0.5},
+    "divtest:f0p5-s12": {"massKg": 350.0, "upperMassFraction": 0.5},
+    "divtest:f0p4-s6": {"massKg": 350.0, "upperMassFraction": 0.4},
+    "divtest:f0p4-s8": {"massKg": 350.0, "upperMassFraction": 0.4},
+    "divtest:f0p4-s10": {"massKg": 350.0, "upperMassFraction": 0.4},
+    "divtest:f0p4-s12": {"massKg": 350.0, "upperMassFraction": 0.4},
+    "divtest:off-s6": {"massKg": 350.0},
+    "divtest:off-s8": {"massKg": 350.0},
+    "divtest:off-s10": {"massKg": 350.0},
+    "divtest:off-s12": {"massKg": 350.0},
+    "divtest:turncmp-baseline": {"massKg": 350.0, "upperMassFraction": 0.5, "selfRightStrength": 200.0, "selfRightDamping": 80.0, "selfRightMaxTorque": 600.0, "selfRightFadeStartDegrees": 10.0, "selfRightFadeEndDegrees": 50.0},
+    "divtest:turncmp-tuned": {"massKg": 350.0, "upperMassFraction": 0.1, "selfRightStrength": 400.0, "selfRightDamping": 160.0, "selfRightMaxTorque": 1000.0, "selfRightFadeStartDegrees": 10.0, "selfRightFadeEndDegrees": 50.0, "lateralGripMultiplier": 0.5},
+    "divtest:turncmp-griponly": {"massKg": 350.0, "upperMassFraction": 0.5, "selfRightStrength": 200.0, "selfRightDamping": 80.0, "selfRightMaxTorque": 600.0, "selfRightFadeStartDegrees": 10.0, "selfRightFadeEndDegrees": 50.0, "lateralGripMultiplier": 0.5},
+    "divtest:turncmp-tunedbrake8": {"massKg": 350.0, "upperMassFraction": 0.1, "selfRightStrength": 400.0, "selfRightDamping": 160.0, "selfRightMaxTorque": 1000.0, "selfRightFadeStartDegrees": 10.0, "selfRightFadeEndDegrees": 50.0, "lateralGripMultiplier": 0.5},
+    "divtest:turncmp-grip7": {"massKg": 350.0, "upperMassFraction": 0.1, "selfRightStrength": 400.0, "selfRightDamping": 160.0, "selfRightMaxTorque": 1000.0, "selfRightFadeStartDegrees": 10.0, "selfRightFadeEndDegrees": 50.0, "lateralGripMultiplier": 0.7},
+    "divtest:merc230drive": {"massKg": 1647.0}
+  }
+}
