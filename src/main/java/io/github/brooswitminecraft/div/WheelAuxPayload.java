@@ -25,14 +25,20 @@ public record WheelAuxPayload(int hPatternTarget, double handbrakeMagnitude) imp
  public static void handle(WheelAuxPayload payload, IPayloadContext context) {
   context.enqueueWork(() -> {
    var player = context.player();
+   if (player == null) return;
    // IV's own entities are business objects (AEntityB_Existing), not vanilla Entity
    // subclasses - mcinterface1211.WrapperPlayer.getWrapperFor is IV's own public factory for
    // going from a vanilla player to its wrapper, whose getEntityRiding() is the sanctioned
    // way to reach the IV entity a player is riding (same path IV's own packet handlers use).
-   if (player != null && mcinterface1211.WrapperPlayer.getWrapperFor(player).getEntityRiding() instanceof EntityVehicleF_Physics v) {
-    PhysicsBridge.applyHPatternTarget(v, payload.hPatternTarget());
-    PhysicsBridge.setHandbrakeMagnitude(v, payload.handbrakeMagnitude());
-   }
+   if (!(mcinterface1211.WrapperPlayer.getWrapperFor(player).getEntityRiding() instanceof EntityVehicleF_Physics v)) return;
+   // Ticket MINECRAFT-504 comment 53603: only the vehicle's own controlling (driver) seat
+   // occupant may command it - a passenger riding the same vehicle must be rejected outright,
+   // not merely ignored by coincidence of never sending a packet.
+   if (!PhysicsBridge.isControllingRider(v, player.getUUID())) return;
+   // setHandbrakeMagnitude/setHPatternTarget each independently reject non-finite/out-of-range
+   // input themselves - this handler does not need to duplicate that validation.
+   PhysicsBridge.setHPatternTarget(v, payload.hPatternTarget());
+   PhysicsBridge.setHandbrakeMagnitude(v, payload.handbrakeMagnitude());
   });
  }
 }

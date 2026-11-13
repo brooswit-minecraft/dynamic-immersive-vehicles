@@ -39,43 +39,105 @@ import java.util.function.Supplier;
 public final class PhysicsBridge {
  private static final BodyRegistry<EntityVehicleF_Physics, VehicleBody> registry = new BodyRegistry<>();
  // G29/wheel hybrid H-pattern + paddle shifting and analog handbrake (ticket MINECRAFT-504,
- // comments 53557/53572/53573). Keyed by entity identity (IdentityHashMap), matching this
- // class's existing per-vehicle-state pattern (brokenDefinitions/pendingInheritedVelocity
- // above) - cleaned up from the SAME cleanup()/unload() sweeps those use, so a vehicle that
- // despawns or whose level unloads can never leak an entry here either.
+ // comments 53557/53572/53573/53603). Keyed by entity/part identity (IdentityHashMap), matching
+ // this class's existing per-vehicle-state pattern (brokenDefinitions/pendingInheritedVelocity
+ // above) - cleaned up from the SAME cleanup()/unload() sweeps those use, PLUS a bounded staleness
+ // sweep in advanceWheelAuxInputs (comment 53603: a client that stops sending - dismount, logout,
+ // crash - must not leave a vehicle braking/stuck mid-shift forever).
  private static final java.util.Map<EntityVehicleF_Physics, Double> handbrakeMagnitude = new IdentityHashMap<>();
+ private static final java.util.Map<EntityVehicleF_Physics, Long> handbrakeLastUpdateTick = new IdentityHashMap<>();
+ private static final java.util.Map<PartEngine, Integer> hPatternTargetByEngine = new IdentityHashMap<>();
+ private static final java.util.Map<PartEngine, Long> hPatternLastUpdateTick = new IdentityHashMap<>();
  private static final java.util.Map<PartEngine, HPatternShifter.Tracker> hPatternTrackers = new IdentityHashMap<>();
+ private static long wheelAuxTickCounter = 0;
+ // 100 ticks = 5s at 20tps - generous enough that ordinary network jitter/lag never triggers it,
+ // short enough that a genuinely stuck/disconnected input releases promptly (comment 53603).
+ private static final long WHEEL_AUX_STALE_TIMEOUT_TICKS = 100;
  /**
   * Client → server: the live analog handbrake pedal/lever magnitude (0-1), read and calibrated
   * entirely client-side (own axis, own deadzone, own inversion - never the service-brake axis
   * or the native digital parking-brake toggle). Safe to call every tick; a missing/disabled
   * channel is simply 0.0 from the caller's own {@code WheelAxisCalibration}, never stale.
+  * Rejects a non-finite magnitude outright (comment 53603: reject invalid input, don't clamp
+  * NaN into something that silently passes) rather than storing it.
   */
  public static void setHandbrakeMagnitude(EntityVehicleF_Physics v, double magnitude) {
+  if (!Double.isFinite(magnitude)) return;
   handbrakeMagnitude.put(v, Math.max(0.0, Math.min(1.0, magnitude)));
+  handbrakeLastUpdateTick.put(v, wheelAuxTickCounter);
  }
  /**
   * Client → server: the physical H-pattern shifter's currently-read slot (see {@link
-  * HPatternShifter} for the sentinel values), applied directly via {@code PartEngine}'s public
-  * {@code shiftUp()}/{@code shiftDown()}/{@code shiftNeutral()} - entirely independent of IV's
-  * own {@code useShifter} setting and its {@code shiftSelectionVar}, so native's own
-  * {@code useShifter=false} paddle handling (already shipped, unmodified) keeps working
-  * alongside this untouched. One {@link HPatternShifter.Tracker} per engine part (a vehicle
-  * with multiple engines gets independent climb state for each, matching how IV already lets
-  * multi-engine vehicles shift independently) - looked up by the engine's own identity, not the
-  * vehicle's, so adding/removing engine parts never confuses one engine's climb state for
-  * another's.
+  * HPatternShifter} for the sentinel values). Only RECORDS the target and its freshness here -
+  * actually applying it (one {@code PartEngine.shiftUp()}/{@code shiftDown()}/{@code
+  * shiftNeutral()} step per server tick, for as many ticks as climbing toward it takes) happens
+  * in {@link #advanceWheelAuxInputs}, not here, because a single network packet only arrives
+  * once per actual CHANGE (the caller dedupes unchanged values before sending) while climbing
+  * more than one gear - or retrying a step {@code PartEngine} safety-refused - needs repeated
+  * per-tick attempts against the SAME stored target (ticket comment 53603's first finding:
+  * applying only inside the packet handler stalls after one gear). Rejects any target outside
+  * {@link HPatternShifter}'s own valid sentinel/gear-number range (comment 53603: reject
+  * invalid/out-of-range input, don't silently store garbage).
   */
- public static void applyHPatternTarget(EntityVehicleF_Physics v, int target) {
+ public static void setHPatternTarget(EntityVehicleF_Physics v, int target) {
+  if (target != HPatternShifter.DISABLED && target != HPatternShifter.REVERSE_REQUEST && target != HPatternShifter.NEUTRAL_REQUEST
+    && (target < 1 || target > 9)) return;
   for (var part : v.allParts) if (part instanceof PartEngine engine) {
+   hPatternTargetByEngine.put(engine, target);
+   hPatternLastUpdateTick.put(engine, wheelAuxTickCounter);
+  }
+ }
+ /**
+  * Server-tick continuation (ticket comment 53603) for both wheel-aux inputs above - called once
+  * per real server tick (see {@code DynamicImmersiveVehicles}'s own wiring), independent of
+  * whether any vehicle's physics step happens to run that same tick.
+  *
+  * <p>H-pattern: one climb step per engine per tick via its own {@link HPatternShifter.Tracker}
+  * - entirely independent of IV's own {@code useShifter} setting and its {@code
+  * shiftSelectionVar}, so native's own {@code useShifter=false} paddle handling (already
+  * shipped, unmodified) keeps working alongside this untouched; they only converge on {@code
+  * PartEngine}'s public shift methods, at most one caller's step per tick each, so a paddle and
+  * an H-pattern climb step landing in the same tick is a real but narrow edge case (both are
+  * single discrete actions; worst case is one extra gear change that tick, not a crash or stuck
+  * state) rather than a data race.
+  *
+  * <p>Staleness: any engine/vehicle whose last update is older than {@link
+  * #WHEEL_AUX_STALE_TIMEOUT_TICKS} is released outright (map entries removed, not merely zeroed)
+  * - covers dismount, disconnect, and vehicle change uniformly without needing a dedicated event
+  * hook for each.
+  */
+ public static void advanceWheelAuxInputs() {
+  wheelAuxTickCounter++;
+  for (var entry : hPatternTargetByEngine.entrySet()) {
+   var engine = entry.getKey();
+   if (!engine.isValid) continue;
    var tracker = hPatternTrackers.computeIfAbsent(engine, ignored -> new HPatternShifter.Tracker());
-   switch (tracker.nextAction((int)engine.currentGearVar.currentValue, target)) {
+   switch (tracker.nextAction((int)engine.currentGearVar.currentValue, entry.getValue())) {
     case SHIFT_UP -> engine.shiftUp();
     case SHIFT_DOWN -> engine.shiftDown();
     case NEUTRAL -> engine.shiftNeutral();
     case NONE -> {}
    }
   }
+  hPatternTargetByEngine.keySet().removeIf(engine -> isWheelAuxStale(hPatternLastUpdateTick.getOrDefault(engine, 0L)));
+  hPatternLastUpdateTick.keySet().removeIf(engine -> isWheelAuxStale(hPatternLastUpdateTick.getOrDefault(engine, 0L)));
+  hPatternTrackers.keySet().removeIf(engine -> !engine.isValid);
+  handbrakeMagnitude.keySet().removeIf(v -> isWheelAuxStale(handbrakeLastUpdateTick.getOrDefault(v, 0L)));
+  handbrakeLastUpdateTick.keySet().removeIf(v -> isWheelAuxStale(handbrakeLastUpdateTick.getOrDefault(v, 0L)));
+ }
+ private static boolean isWheelAuxStale(long lastUpdateTick) {
+  return WheelAuxStaleness.isStale(lastUpdateTick, wheelAuxTickCounter, WHEEL_AUX_STALE_TIMEOUT_TICKS);
+ }
+ /**
+  * Ticket MINECRAFT-504 comment 53603: the server had no driver/controller-seat authorization at
+  * all - any passenger's wheel-aux packet would have been accepted. A controller-seat occupant is
+  * {@code PartSeat.placementDefinition.isController} with {@code seat.rider} matching the given
+  * player's own ID (IV's {@code IWrapperEntity.getID()} mirrors the underlying Minecraft UUID).
+  */
+ public static boolean isControllingRider(EntityVehicleF_Physics v, java.util.UUID playerId) {
+  for (var part : v.allParts) if (part instanceof PartSeat seat && seat.placementDefinition.isController
+    && seat.rider != null && playerId.equals(seat.rider.getID())) return true;
+  return false;
  }
  /**
   * Ticket 53385's concrete, confirmed defect: Body's own constructor always seeds BOTH halves'
@@ -660,8 +722,13 @@ public final class PhysicsBridge {
   // staged entries, so it still finds and removes that exact orphan case.
   pendingInheritedVelocity.removeIf(v -> !v.isValid);
   // Ticket MINECRAFT-504: same leak shape as pendingInheritedVelocity above, for the wheel
-  // handbrake/H-pattern state - independent of BodyRegistry, swept directly against validity.
+  // handbrake/H-pattern state - independent of BodyRegistry, swept directly against validity
+  // (in addition to advanceWheelAuxInputs's own staleness-timeout sweep, which only covers a
+  // client that goes quiet, not an entity invalidated some other way).
   handbrakeMagnitude.keySet().removeIf(v -> !v.isValid);
+  handbrakeLastUpdateTick.keySet().removeIf(v -> !v.isValid);
+  hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid);
+  hPatternLastUpdateTick.keySet().removeIf(engine -> !engine.isValid);
   hPatternTrackers.keySet().removeIf(engine -> !engine.isValid);
  }
  public static void unload(Object level) {
@@ -672,6 +739,9 @@ public final class PhysicsBridge {
   // BodyRegistry lookup at all.
   pendingInheritedVelocity.removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
   handbrakeMagnitude.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  handbrakeLastUpdateTick.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  hPatternTargetByEngine.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
+  hPatternLastUpdateTick.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
   hPatternTrackers.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }

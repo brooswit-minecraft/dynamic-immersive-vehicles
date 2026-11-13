@@ -25,6 +25,10 @@ public final class DynamicImmersiveVehicles {
    registrar.playToServer(WheelAuxPayload.TYPE, WheelAuxPayload.STREAM_CODEC, WheelAuxPayload::handle);
   });
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
+  // Ticket MINECRAFT-504: per-server-tick continuation for the hybrid H-pattern climb and the
+  // analog handbrake's staleness timeout - see PhysicsBridge.advanceWheelAuxInputs's own doc for
+  // why this cannot just happen inside the packet handler.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.advanceWheelAuxInputs());
   // Ticket 53518 (MINECRAFT-505): bounded, periodic operator-config hot reload - see
   // OverridesHotReload's own doc for why mtime-polling, and PhysicsBridge.reloadOverrides for
   // what actually gets propagated into already-active vehicles vs. reported as needing respawn.

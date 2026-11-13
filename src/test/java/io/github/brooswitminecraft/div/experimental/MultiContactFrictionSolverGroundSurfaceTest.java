@@ -22,7 +22,7 @@ class MultiContactFrictionSolverGroundSurfaceTest {
   var contacts = new MultiContactFrictionSolver.FrictionContact[]{
     new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM, FORWARD, RIGHT, NORMAL, 1.0, frictionMultiplier, rollingResistanceMultiplier)};
   var results = MultiContactFrictionSolver.solveFriction(contacts, MASS, INERTIA, IDENTITY, IDENTITY, velocity, angular,
-    0.0, 0, DRIVE_FORCE, FRICTION, 1.0, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+    0, DRIVE_FORCE, FRICTION, 1.0, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   return results[0];
  }
 
@@ -39,8 +39,8 @@ class MultiContactFrictionSolverGroundSurfaceTest {
   Vector3d velocityB = new Vector3d(5, 0, 0), angularB = new Vector3d();
   var legacyContacts = new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM, FORWARD, RIGHT, NORMAL, 1.0)};
   var newContacts = new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM, FORWARD, RIGHT, NORMAL, 1.0, 1.0, 1.0)};
-  var legacy = MultiContactFrictionSolver.solveFriction(legacyContacts, MASS, INERTIA, IDENTITY, IDENTITY, velocityA, angularA, 0.0, 0, DRIVE_FORCE, FRICTION, 1.0, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
-  var withDefaults = MultiContactFrictionSolver.solveFriction(newContacts, MASS, INERTIA, IDENTITY, IDENTITY, velocityB, angularB, 0.0, 0, DRIVE_FORCE, FRICTION, 1.0, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  var legacy = MultiContactFrictionSolver.solveFriction(legacyContacts, MASS, INERTIA, IDENTITY, IDENTITY, velocityA, angularA, 0, DRIVE_FORCE, FRICTION, 1.0, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  var withDefaults = MultiContactFrictionSolver.solveFriction(newContacts, MASS, INERTIA, IDENTITY, IDENTITY, velocityB, angularB, 0, DRIVE_FORCE, FRICTION, 1.0, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   assertEquals(legacy[0].longitudinal(), withDefaults[0].longitudinal(), 0);
   assertEquals(legacy[0].lateral(), withDefaults[0].lateral(), 0);
   assertEquals(velocityA, velocityB);

@@ -259,8 +259,8 @@ IDs**, and do not treat this table as "already configured."
 | Throttle | `CAR_GAS` | Gas pedal axis |
 | Brake (analog, this ticket's fix) | `CAR_BRAKE` | Brake pedal axis |
 | Clutch | *(no native IV control)* | not mapped - IV has no clutch input to bind it to |
-| Gear up/down (**paddles - required**) | `CAR_SHIFT_U` / `CAR_SHIFT_D` | Left/right paddle buttons |
-| Gear select (H-pattern) | `CAR_SHIFT_1`-`CAR_SHIFT_9`/`CAR_SHIFT_R` | Shifter's own per-gear switches |
+| Gear up/down (**paddles - required**) | `CAR_SHIFT_U` / `CAR_SHIFT_D` (native, `useShifter=false`) | Left/right paddle buttons |
+| Gear select (H-pattern, works alongside paddles) | `CAR_SHIFT_1`-`CAR_SHIFT_9`/`CAR_SHIFT_R` (read directly by this project's `WheelAuxInput` - see below) | Shifter's own per-gear switches |
 | Parking brake (digital toggle) | `CAR_PARK` | A spare wheel/shifter button |
 | Horn | `CAR_HORN` | A spare wheel button |
 | Headlights | `CAR_LIGHTS` | A spare wheel button |
@@ -277,8 +277,11 @@ calls for one).
 
 ### Hybrid H-pattern + paddle shifting, and an analog handbrake (DIV additions)
 
-Two things native IV genuinely cannot do on its own (ticket comments
-53572/53573 - "they should work together", not merely pick one mode):
+Two things native IV genuinely cannot do on its own (ticket comment 53577,
+John explicit: "they should work together", not merely pick one mode).
+Both are small, targeted server+client additions - not a parallel full
+control stack - configured via a new `wheel` section in this mod's own
+CLIENT config.
 
 - **H-pattern direct-select and paddle sequential-shift simultaneously.**
   IV's own `useShifter` setting is a single exclusive toggle (reading
@@ -286,47 +289,85 @@ Two things native IV genuinely cannot do on its own (ticket comments
   the H-pattern `CAR_SHIFT_1`-`R` branch, `useShifter=false` runs only the
   paddle/sequential `CAR_SHIFT_U`/`CAR_SHIFT_D` branch - never both). Fixed
   with `useShifter=false` (so native's own paddle handling keeps working,
-  completely unmodified) plus a small DIV addition (`HPatternShifter`,
-  `WheelAuxInput`): this project reads the H-pattern's own `CAR_SHIFT_1`-`R`
-  bindings *directly*, independent of `useShifter`, and drives
-  `PartEngine`'s public `shiftUp()`/`shiftDown()`/`shiftNeutral()` itself.
-  Native's own `shiftSelectionVar` (which only `useShifter=true` touches) is
-  never written to, so there is nothing left to fight over. The one
-  deliberately-preserved native limitation: a direct-select request only
-  ever climbs *up* toward a higher-numbered gear, never down to a lower one
-  (confirmed in IV's own `shiftSelectionVar` branch) - this project matches
-  that exactly rather than "fixing" behavior outside its scope. The one
-  behavior this project does NOT inherit from native: a held H-pattern
-  slot never re-asserts itself once reached, so an independent paddle
-  downshift below that held slot is never silently reverted back up
-  (`HPatternShifter.Tracker` latches "already reached" per target value,
-  only resuming a climb when the shifter moves to a genuinely different
-  slot) - see `HPatternShifterTest` for the exact scenario.
+  completely unmodified) plus `HPatternShifter`/`WheelAuxInput`/
+  `PhysicsBridge.advanceWheelAuxInputs`: this project reads the H-pattern's
+  own `CAR_SHIFT_1`-`R` bindings *directly* (client-side), independent of
+  `useShifter`, and drives `PartEngine`'s public `shiftUp()`/`shiftDown()`/
+  `shiftNeutral()` itself, server-side, one step per server tick for as
+  long as a climb toward the received target is outstanding - not only
+  inside the packet handler, since a client only sends a NEW packet when
+  the target actually changes, and a multi-gear climb needs several ticks
+  against that same stored target (an earlier version of this stalled after
+  one gear for exactly that reason). Native's own `shiftSelectionVar`
+  (which only `useShifter=true` touches) is never written to, so there is
+  nothing left to fight over.
+  - Climbs in **both directions** (up and down) toward a forward gear, and
+    toward the single reverse slot via neutral, matching `PartEngine.
+    shiftUp()`/`shiftDown()`'s own signed-integer gear stepping exactly - no
+    separate direction logic.
+  - A held H-pattern slot never re-asserts itself once reached, so an
+    independent paddle shift that moves `currentGear` away from it is never
+    silently reverted back (`HPatternShifter.Tracker` latches "already
+    reached" per target value, only resuming a climb when the shifter moves
+    to a genuinely different slot) - this is also what keeps native's own
+    `simpleThrottle` auto-reverse from fighting a held slot. See
+    `HPatternShifterTest` for both scenarios directly.
+  - `currentHPatternTarget` distinguishes "no H-pattern device configured
+    or present at all" (→ disabled, no action) from "configured, present,
+    and genuinely reading released" (→ neutral) - the first case matters
+    because `hybridShiftEnabled` defaults on, and a keyboard-only player
+    (the common case) must never have their vehicle forced into neutral on
+    mount just because no shift button happens to be pressed.
+  - Server-side authorization/validation (ticket comment 53603): only the
+    vehicle's own controlling (driver) seat occupant's packets are accepted
+    (`PhysicsBridge.isControllingRider`) - a passenger is rejected outright.
+    An out-of-range/invalid target, or a non-finite handbrake magnitude, is
+    rejected rather than stored. Any engine/vehicle whose last update is
+    older than a bounded timeout (100 ticks / 5s) is released automatically
+    (`PhysicsBridge.advanceWheelAuxInputs`'s own staleness sweep), covering
+    dismount, disconnect, and vehicle change uniformly - a client also
+    sends one best-effort "clear" packet on an ordinary dismount so that
+    common case doesn't have to wait out the timeout, but the timeout is
+    what actually guarantees release, not that packet.
 - **An analog handbrake.** IV has no analog handbrake control at all -
   `CAR_PARK` is the only parking/handbrake-adjacent control, and it is a
-  plain digital toggle. This project adds one: configure
-  `wheel.handbrakeAxis` (client config) to a joystick axis on the SAME
-  device already configured for `CAR_TURN` in IV's controls GUI, with its
-  own `handbrakeAxisMin`/`Max`/`Invert`/`Deadzone` - genuinely independent
-  calibration from the service brake pedal and from `CAR_PARK`. Server-side,
-  its 0-1 magnitude is combined with the service-brake magnitude as
-  `max(serviceBrake, handbrake)` (`WheelAxisCalibration`,
-  `PhysicsBridge.setHandbrakeMagnitude`) - both ultimately ask the same
-  wheels to stop harder, so whichever is asking for more wins that tick,
-  with no double-counting past the existing brake-force cap. Missing/
-  disabled/disconnected always resolves to exactly 0.0, never a stale value.
+  plain digital toggle. This project adds one, as its own SEPARATELY
+  selectable device: `wheel.handbrakeJoystickName` (empty = reuse whatever
+  device is already configured for `CAR_TURN`; set it to bind a future
+  dedicated standalone handbrake device instead) and `wheel.handbrakeAxis`,
+  with its own `handbrakeAxisMin`/`Max`/`Invert`/`Deadzone` - genuinely
+  independent calibration from the service brake pedal and from `CAR_PARK`.
+  The configured axis index is validated against the resolved device's own
+  actual axis count before every read, not just checked for `>=0` - an
+  out-of-range index can otherwise return 0 from the underlying API, which
+  this project's own min/max mapping would silently normalize to a HALF
+  pull rather than "no reading."
+  - **Rear/handbrake-capable-wheel semantics, not just another service
+    brake** (`MultiContactFrictionSolver.FrictionContact.brakeMagnitude` is
+    now PER-WHEEL): a non-steering ("rear") wheel's own brake magnitude is
+    `max(serviceBrake, handbrake)`; a steering ("front") wheel's is the
+    service brake alone, same as before this addition. Parking brake still
+    forces every wheel's own magnitude to 1.0, unchanged. Missing/disabled/
+    disconnected always resolves to exactly 0.0, never a stale value.
 
-Both are small, targeted additions (two new small files plus the client
-input reader - not a parallel full control stack), configured via a new
-`wheel` section in this mod's own CLIENT config (`hybridShiftEnabled`,
-defaulting on; `handbrakeAxis`, defaulting to `-1`/disabled since no
-handbrake hardware is connected yet per Zippy's own device inventory -
-ticket comment 53557). `HPatternShifterTest`/`WheelAxisCalibrationTest`
-cover the pure logic directly; the actual client-side joystick reading and
-networking are not unit-testable without a live Minecraft/NeoForge runtime
-(same pre-existing boundary VERIFICATION.md already documents elsewhere in
-this project) and remain John's own device-level verification once the
-wheel/shifter/handbrake hardware is connected.
+`HPatternShifterTest`/`WheelAxisCalibrationTest`/`WheelAuxStalenessTest`/
+`HPatternShifterBidirectionalProductionGapTest` cover the pure logic above
+directly, including the server-tick-continuation and staleness-timeout
+behavior (driven the same way production drives it: one recorded input,
+many subsequent per-tick advances, no new packet). What those tests do
+NOT cover, and this project has no way to cover without a live Minecraft/
+NeoForge runtime (the same pre-existing boundary VERIFICATION.md already
+documents elsewhere in this project): the actual client-side GLFW-level
+joystick reading, the real network round-trip, and `PhysicsBridge`'s own
+glue code running against a real `EntityVehicleF_Physics`/`PartEngine`.
+That gap is a tooling limitation of this environment, not something to be
+treated as "needs a physical wheel" - no hardware is connected to Zippy at
+all right now (ticket comment 53557's device inventory), so feel/calibration
+against a real G29+shifter+handbrake remains John's own verification once
+hardware exists, but the correctness fixes above (authorization, staleness,
+bidirectional climb, per-wheel braking) are software-correctness concerns
+this project is responsible for testing as directly as this environment
+allows, not something to defer to his playtesting.
 
 ## Configuration
 

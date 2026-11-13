@@ -43,6 +43,12 @@ public final class WheelAuxInput {
     && minecrafttransportsimulator.mcinterface.InterfaceManager.clientInterface.getClientPlayer() != null
     && minecrafttransportsimulator.mcinterface.InterfaceManager.clientInterface.getClientPlayer().getEntityRiding() instanceof EntityVehicleF_Physics;
   if (!riding) {
+   if (wasRidingForAux) {
+    // Dismount: send one final "clear" packet so the server doesn't need to wait out the
+    // staleness timeout for an ordinary clean dismount (PhysicsBridge.advanceWheelAuxInputs's
+    // own timeout still covers a disconnect/crash that never gets to send this).
+    PacketDistributor.sendToServer(new WheelAuxPayload(HPatternShifter.DISABLED, 0.0));
+   }
    wasRidingForAux = false;
    return;
   }
@@ -63,30 +69,44 @@ public final class WheelAuxInput {
   }
  }
 
+ private static final ControlSystem.ControlsJoystick[] H_PATTERN_BUTTONS = {
+   ControlSystem.ControlsJoystick.CAR_SHIFT_1, ControlSystem.ControlsJoystick.CAR_SHIFT_2, ControlSystem.ControlsJoystick.CAR_SHIFT_3,
+   ControlSystem.ControlsJoystick.CAR_SHIFT_4, ControlSystem.ControlsJoystick.CAR_SHIFT_5, ControlSystem.ControlsJoystick.CAR_SHIFT_6,
+   ControlSystem.ControlsJoystick.CAR_SHIFT_7, ControlSystem.ControlsJoystick.CAR_SHIFT_8, ControlSystem.ControlsJoystick.CAR_SHIFT_9,
+   ControlSystem.ControlsJoystick.CAR_SHIFT_R};
  /** Mirrors IV's own gearNumber derivation in {@code ControlSystem.controlGroundVehicle} exactly
   * (same decompiled branch, same sentinel values) - reads the SAME bindings IV's GUI already
-  * lets the player configure, just independent of {@code useShifter}. */
+  * lets the player configure, just independent of {@code useShifter}.
+  *
+  * <p>Ticket comment 53603's explicit correction: "no button pressed" only means neutral if an
+  * H-pattern device is ACTUALLY configured and present - {@code isJoystickActive()} is false
+  * for every one of these buttons when none of them has a real joystick binding (e.g. a
+  * keyboard-only player, the overwhelming majority with {@code hybridShiftEnabled} defaulting
+  * to true), and treating that as "released, so neutral" would force every such player's
+  * vehicle into neutral the instant they mount one. {@link HPatternShifter#DISABLED} is the
+  * correct "no input at all" signal in that case. */
  private static int currentHPatternTarget() {
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_1.isPressed()) return 1;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_2.isPressed()) return 2;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_3.isPressed()) return 3;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_4.isPressed()) return 4;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_5.isPressed()) return 5;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_6.isPressed()) return 6;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_7.isPressed()) return 7;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_8.isPressed()) return 8;
-  if (ControlSystem.ControlsJoystick.CAR_SHIFT_9.isPressed()) return 9;
+  boolean anyConfiguredAndPresent = false;
+  for (var button : H_PATTERN_BUTTONS) if (button.isJoystickActive()) { anyConfiguredAndPresent = true; break; }
+  if (!anyConfiguredAndPresent) return HPatternShifter.DISABLED;
+  for (int i = 0; i < 9; i++) if (H_PATTERN_BUTTONS[i].isPressed()) return i + 1;
   if (ControlSystem.ControlsJoystick.CAR_SHIFT_R.isPressed()) return HPatternShifter.REVERSE_REQUEST;
   return HPatternShifter.NEUTRAL_REQUEST;
  }
 
+ /** Ticket comment 53603: a SEPARATE device, not necessarily the CAR_TURN wheel - empty name
+  * falls back to reusing CAR_TURN's own configured joystick. Also validates the configured axis
+  * index actually exists on the resolved device before reading it (an out-of-range index can
+  * return 0 from the underlying GLFW-style API, which would silently normalize to a HALF pull
+  * under this project's own min/max mapping - treated here as "disabled", not "half pulled"). */
  private static double currentHandbrakeMagnitude() {
   int axis = DivClientConfig.HANDBRAKE_AXIS.get();
   if (axis < 0) return 0.0;
-  // Reuse the SAME joystick the player already configured for steering in IV's own controls
-  // GUI, rather than a second device-selection config of our own.
-  String joystickName = ControlSystem.ControlsJoystick.CAR_TURN.config.joystickName;
+  String configuredName = DivClientConfig.HANDBRAKE_JOYSTICK_NAME.get();
+  String joystickName = (configuredName == null || configuredName.isEmpty())
+    ? ControlSystem.ControlsJoystick.CAR_TURN.config.joystickName : configuredName;
   if (joystickName == null || joystickName.isEmpty() || !InterfaceManager.inputInterface.isJoystickPresent(joystickName)) return 0.0;
+  if (axis >= InterfaceManager.inputInterface.getJoystickComponentCount(joystickName)) return 0.0;
   float raw = InterfaceManager.inputInterface.getJoystickAxisValue(joystickName, axis);
   return WheelAxisCalibration.magnitude(raw, DivClientConfig.HANDBRAKE_AXIS_MIN.get(), DivClientConfig.HANDBRAKE_AXIS_MAX.get(),
     DivClientConfig.HANDBRAKE_INVERT.get(), DivClientConfig.HANDBRAKE_DEADZONE.get());

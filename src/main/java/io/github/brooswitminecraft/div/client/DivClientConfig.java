@@ -12,6 +12,7 @@ import net.neoforged.neoforge.common.ModConfigSpec;
 public final class DivClientConfig {
  public static final ModConfigSpec SPEC;
  public static final ModConfigSpec.BooleanValue HYBRID_SHIFT_ENABLED;
+ public static final ModConfigSpec.ConfigValue<String> HANDBRAKE_JOYSTICK_NAME;
  public static final ModConfigSpec.IntValue HANDBRAKE_AXIS;
  public static final ModConfigSpec.DoubleValue HANDBRAKE_AXIS_MIN;
  public static final ModConfigSpec.DoubleValue HANDBRAKE_AXIS_MAX;
@@ -23,8 +24,11 @@ public final class DivClientConfig {
   HYBRID_SHIFT_ENABLED = builder
     .comment("Read IV's own H-pattern shift buttons (CAR_SHIFT_1-R, bound in IV's own controls GUI) directly, independent of IV's useShifter setting, so a physical H-pattern shifter and paddle up/down (bound to CAR_SHIFT_U/D with useShifter=false) can both work at once. Disable to fall back to plain native behavior only.")
     .define("hybridShiftEnabled", true);
+  HANDBRAKE_JOYSTICK_NAME = builder
+    .comment("Exact joystick name (see IV's own controls GUI, or the device list it logs at startup) for a SEPARATE dedicated handbrake device - e.g. a future standalone USB handbrake, not necessarily the same wheel used for steering. Empty = reuse whatever device is already configured for CAR_TURN in IV's own controls GUI.")
+    .define("handbrakeJoystickName", "");
   HANDBRAKE_AXIS = builder
-    .comment("Joystick axis index (on the SAME device configured for CAR_TURN in IV's own controls GUI) for an analog handbrake, or -1 to disable. No native IV control corresponds to this - it is this project's own addition, separate from the service brake and the parking-brake toggle.")
+    .comment("Joystick axis index on the device above for an analog handbrake, or -1 to disable. No native IV control corresponds to this - it is this project's own addition, separate from the service brake and the parking-brake toggle.")
     .defineInRange("handbrakeAxis", -1, -1, 31);
   HANDBRAKE_AXIS_MIN = builder.comment("Raw axis value at handbrake fully released.")
     .defineInRange("handbrakeAxisMin", -1.0, -1.0, 1.0);

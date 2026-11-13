@@ -79,6 +79,13 @@ public final class MultiContactFrictionSolver {
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier) {
    this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, 0.0);
   }
+  /** MINECRAFT-508's own 7-arg shape (explicit surface multipliers, no brake magnitude yet) -
+   * defaults brakeMagnitude to 0.0 (unbraked), kept so that ticket's own existing call sites
+   * need no changes. */
+  public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
+      double frictionMultiplier, double rollingResistanceMultiplier) {
+   this(point, forward, right, normal, skidSteerMultiplier, frictionMultiplier, rollingResistanceMultiplier, 0.0);
+  }
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier, double brakeMagnitude) {
    this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, brakeMagnitude);
   }
