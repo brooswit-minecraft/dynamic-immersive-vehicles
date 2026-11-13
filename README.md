@@ -184,6 +184,60 @@ has already destroyed; the towed vehicle itself keeps its own body and
 simply becomes an unjointed, free vehicle in its own category, the same as
 any other.
 
+## Wheel/joystick input (G29 and similar)
+
+Steering-wheel/pedal/shifter support (ticket MINECRAFT-504) is **entirely
+native to Immersive Vehicles** - this project adds no input-handling code,
+keybind GUI, or parallel binding system. Verified by decompiling the exact
+pinned installed artifact (`curse.maven:minecraft-transport-simulator-286703:7926606`,
+IV 24.0.0), not just upstream source (which can be ahead of what is actually
+pinned/installed):
+
+> **Current installed state (ticket comment 53549): capability confirmed,
+> binding/calibration still pending.** The running profile's
+> `controlsettings.json` has no joystick assignments and `useShifter=false` -
+> native support existing in the mod is a different fact from a G29 actually
+> being bound on this install. Treat the steps below as what to configure,
+> not as something already done.
+
+- **Bind it in IV's own controls GUI/`controlsettings.json`**, the same way
+  as any other joystick: per-axis min/max travel, inversion, and a global
+  deadzone for `CAR_TURN` (steering), `CAR_GAS` and `CAR_BRAKE` (separate
+  analog pedals - a combined pedal works too, just bind both to the same
+  axis), and digital shift buttons `CAR_SHIFT_1`-`CAR_SHIFT_R` (H-pattern,
+  gated by IV's own `useShifter` setting) or `CAR_SHIFT_U`/`CAR_SHIFT_D`
+  (sequential up/down - this is what wheel **paddles** should be bound to:
+  each is independently joystick-button-bindable and edge-triggered, exactly
+  the "paddle shifts one gear per press" behavior, not the old
+  `dynamic-vehicles` prototype's different test-time paddle actions, which
+  this project does not reuse).
+- **Keyboard/gamepad coexistence and reconnect are both automatic**: every
+  bound control falls back to keyboard when no matching joystick is present
+  and re-engages the joystick the instant `isJoystickPresent` sees it again
+  (polled fresh every tick - there is no persisted "was connected" state that
+  can go stale across a disconnect).
+- **The one real gap** (not an IV limitation - a loss internal to this
+  project): `PhysicsBridge.stepGround` used to collapse the brake pedal to a
+  boolean (`v.brakeVar.isActive`) before applying `brakeForce`, discarding
+  the real 0-1 analog pedal strength IV's own `brakeVar.currentValue` already
+  carries from the wheel's brake axis. Fixed: the full analog magnitude now
+  scales the brake force cap proportionally (full press and no press are
+  byte-identical to the old boolean behavior; partial presses now stop
+  proportionally less than a full press instead of clamping to on/off).
+  Parking brake has no pedal-strength axis of its own and forces full (1.0)
+  magnitude, same as before.
+
+**Device-tested vs. automated verification**: the native IV binding/
+deadzone/inversion/reconnect/sequential-shift behavior above is standard,
+widely-used IV functionality and is not re-tested by this project (nothing
+in this repository's code could regress it); the analog brake-magnitude fix
+has automated unit coverage (`MultiContactFrictionSolverBrakingTest`) proving
+proportional behavior and exact parity with the old boolean at both
+boundaries. Actually driving with a physical G29 - confirming the paddle
+bindings feel right and the wheel reconnects cleanly in practice - is
+John's own device-level verification; this project has no CI hardware to
+exercise a real wheel.
+
 ## Configuration
 
 JSON is now **optional per-car tuning**, never an activation prerequisite. A
@@ -234,6 +288,109 @@ with no float device, and `suspensionTravel`/`friction`/`driveForce`/
 `brakeForce` are ignored by a float-only hull. A copyable example is also
 available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
+
+### Part overrides, templates, and `extends`
+
+Alongside `vehicles`, the config accepts two more top-level maps:
+
+- `parts`, keyed `partPackID:partSystemName` (the part definition's own
+  identity, same shape as a vehicle's `packID:systemName`) - for tuning a
+  part independently of any one vehicle it happens to be installed on.
+  Only `driveForce` is currently supported: an installed, running engine
+  part's own `driveForce`, if its part entry sets one, completely replaces
+  (not multiplies) the vehicle's own resolved `driveForce` for that
+  engine. Setting any other field on a `parts` entry - directly, or
+  inherited through `extends` - fails config load/reload loudly (the same
+  as an out-of-range value) rather than being silently accepted and
+  ignored; every other field has no part-level consumer yet.
+- `templates`, an arbitrary-named map of reusable tuning fragments. Any
+  `vehicles` or `parts` entry (or another template) can set `"extends":
+  "<template name>"` to inherit every field it leaves unset from that
+  template (chained through multiple templates if needed); a field the
+  entry itself sets always wins over its template. An unknown `extends`
+  target or an extends cycle fails config load/reload loudly, the same as
+  an out-of-range field.
+
+```json
+{
+  "templates": {
+    "sporty-base": { "friction": 1.2, "driveForce": 10000.0 }
+  },
+  "vehicles": {
+    "examplepack:sporty_car": { "extends": "sporty-base", "massKg": 1250.0 }
+  },
+  "parts": {
+    "examplepack:high_output_engine": { "driveForce": 9500.0 }
+  }
+}
+```
+
+### Hot reload
+
+The server polls the config file's own last-modified time (every few
+seconds, not every tick) and, on a real change, re-reads and fully
+validates it. A clean reload reports how many vehicle/part overrides it
+picked up and is logged; a malformed file (bad JSON, an out-of-range
+field, an unknown `extends` target, a cycle) is also logged, as a failure,
+and changes **nothing** - the previously-loaded config stays in effect
+(last-known-good), so a bad edit while the server is live cannot itself
+break anything already running.
+
+A successful reload only live-updates fields every active vehicle already
+re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
+`brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
+`propellerForce`. Fields baked in at vehicle construction - `massKg`,
+`hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
+**not** applied to an already-spawned vehicle; re-enter (or otherwise
+respawn) the vehicle to pick up a changed value for one of those. The
+reload log names exactly which changed fields, if any, fell into this
+"needs respawn" set, rather than claiming everything applied.
+
+### Ground-surface tire response (MINECRAFT-508)
+
+Separate, optional config for the five baseline ground surfaces (pavement,
+dirt, grass, gravel, ice) a wheel's actual terrain contact resolves to (see
+`GroundSurfaces`/`GroundSurface` for how a block maps to one of these). On
+first start the mod writes `config/dynamic-immersive-vehicles-surfaces.json`
+with no entries (every surface uses its hardcoded default); add an entry
+only for a surface you want to retune:
+
+```json
+{
+  "surfaces": {
+    "ice": {
+      "frictionMultiplier": 0.05,
+      "rollingResistanceMultiplier": 0.5
+    },
+    "gravel": {
+      "frictionMultiplier": 0.75
+    }
+  }
+}
+```
+
+Both fields are optional per entry (sparse, same convention as the vehicle
+config above) - an omitted field keeps that surface's hardcoded default for
+that field alone. `frictionMultiplier` must be in `[0, 3]`;
+`rollingResistanceMultiplier` must be in `[0, 10]`; both are relative to dry
+pavement's own `1.0`/`1.0`. A missing, malformed, or out-of-range file is
+never fatal - startup logs a warning/error and continues with the hardcoded
+defaults (see `GroundSurfaceOverrides`'s own class doc for the self-review
+finding this guarantees).
+
+**Load timing - read this before assuming a live edit takes effect.**
+`GroundSurfaceOverrides.load()` runs once, at mod construction (same as
+`Overrides.load()`). `GroundSurfaceOverrides.reload()` already exists and is
+fully non-throwing/last-known-good, but **nothing currently calls it** - there
+is no live-reload command or trigger wired up for this file yet. Editing
+`dynamic-immersive-vehicles-surfaces.json` while the server is running has no
+effect until the next full restart. This is now DIFFERENT from the per-vehicle
+config above: MINECRAFT-505's periodic watcher (the "Hot reload" section just
+above) already calls `Overrides.reload()` on this branch, but nothing
+equivalent exists yet for this file. Wiring an actual trigger for THIS file is
+expected to piggyback on that same `OverridesHotReload` mechanism rather than
+add a second, separate one - that wiring is not part of this ticket's bounded
+scope.
 
 ## Build
 

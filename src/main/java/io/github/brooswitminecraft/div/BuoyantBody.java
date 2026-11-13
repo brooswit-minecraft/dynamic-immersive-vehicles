@@ -60,6 +60,7 @@ final class BuoyantBody implements VehicleBody {
 
  public Object level() { return level; }
  public void remove() { var c = SubLevelContainer.getContainer(level); if (c != null) c.physicsSystem().removeObject(box); }
+ public Overrides.Tuning tuning() { return tuning; }
 
  public void step(EntityVehicleF_Physics v) {
   box.updatePose();

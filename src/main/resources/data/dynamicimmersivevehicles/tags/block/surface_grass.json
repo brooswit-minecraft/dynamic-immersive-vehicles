@@ -1,0 +1,9 @@
+{
+  "values": [
+    "minecraft:grass_block",
+    "minecraft:mycelium",
+    "minecraft:podzol",
+    "minecraft:moss_block",
+    { "id": "dynamicterrain:layered_podzol", "required": false }
+  ]
+}

@@ -38,7 +38,89 @@ neoForge {
  runs {
   client { client() }
   // 'nogui': headless CI has no display/AWT; the vanilla dedicated-server GUI would throw.
-  server { server(); programArgument('nogui') }
+  server {
+   server()
+   programArgument('nogui')
+   // Opt-in anchor-frame probe (ticket comment 53243/53244) - OFF for every normal
+   // `gradle runServer` (including the existing runtime-smoke CI job); only a dedicated
+   // CI job that sets DIV_ANCHOR_FRAME_PROBE=true before invoking this task turns it on.
+   // Never affects a developer's own local runServer use.
+   if (System.getenv('DIV_ANCHOR_FRAME_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalAnchorFrameProbe=true')
+   }
+   // Opt-in two-body impulse-response probe (review comment 53280) - same gating pattern as
+   // the anchor-frame probe above; OFF for every normal `gradle runServer`.
+   if (System.getenv('DIV_TWO_BODY_IMPULSE_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalTwoBodyImpulseProbe=true')
+   }
+   // Opt-in real-vehicle ground-support fixture (review comment 53287) - also turns on the
+   // two-body chassis candidate itself (EXPERIMENTAL_TWO_BODY_CHASSIS), since the whole point of
+   // this fixture is exercising stepGround with it actually enabled, not merely present. Also
+   // enables the existing GroundContactDiagnostics (-Ddiv.debugGroundContact) and its per-wheel
+   // trace window (-Ddiv.debugGroundContactTicks) for review 53291's "require/record actual
+   // PhysicsBridge activation + twoBodyActive + resolved f/mass" and "positive wheel support" -
+   // both are this project's own pre-existing diagnostics, not new plumbing added for this
+   // fixture; the CI job's own shell script greps their log lines as an activation gate
+   // independent of this probe's own COMPLETE marker, so a native-physics fallback (which could
+   // still move the vehicle somewhat plausibly) cannot be mistaken for DIV actually engaging.
+   if (System.getenv('DIV_GROUND_SUPPORT_FIXTURE') == 'true') {
+    jvmArgument('-Ddiv.experimentalGroundSupportFixture=true')
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=400')
+   }
+   // Review 53305's "preserve comparable OFF/f=.5/f=.4 evidence": the SAME fixture, SAME
+   // activation/debug diagnostics, but WITHOUT the two-body candidate - a real, reusable
+   // single-body comparison baseline, not a throwaway local edit. Lets the exact same DRIVE-
+   // phase instability (or its absence) be checked against the shipped default path on demand.
+   if (System.getenv('DIV_GROUND_SUPPORT_FIXTURE_OFF') == 'true') {
+    jvmArgument('-Ddiv.experimentalGroundSupportFixture=true')
+    // Ticket 53310/53312: PhysicsBridge.EXPERIMENTAL_TWO_BODY_CHASSIS now defaults to true on
+    // this branch - this OFF baseline must keep explicitly disabling it (previously relied on
+    // the old default-false), or it would silently stop being a real single-body comparison.
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=false')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=400')
+   }
+   // Review 53327's brake-only speed sweep - same two-body/OFF split pattern as the ground-
+   // support fixture above (EXPERIMENTAL_TWO_BODY_CHASSIS is a per-JVM static flag, not
+   // per-vehicle, so OFF/.5/.4 cannot share one server run). debugGroundContactTicks is large
+   // enough to cover every scenario's own SETTLE+ACCELERATE+HOLD+BRAKE window (up to ~460
+   // ticks each) without truncating the per-wheel normal-force/impulse trace this sweep relies
+   // on for load-transfer evidence.
+   if (System.getenv('DIV_BRAKE_SWEEP_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalBrakeSweepProbe=true')
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=500')
+   }
+   if (System.getenv('DIV_BRAKE_SWEEP_PROBE_OFF') == 'true') {
+    jvmArgument('-Ddiv.experimentalBrakeSweepProbe=true')
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=false')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=500')
+   }
+   // Review 53331/53332/53339/53340's occupied baseline-vs-tuned turn comparison - both
+   // scenarios use the two-body chassis (baseline f=.5, tuned f=.1), so a single gate (no
+   // OFF variant needed, unlike the ground-support/brake-sweep probes above).
+   if (System.getenv('DIV_TURN_COMPARISON_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalTurnComparisonProbe=true')
+    jvmArgument('-Ddiv.experimentalTwoBodyChassis=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+    jvmArgument('-Ddiv.debugGroundContactTicks=600')
+    // Review 53341: match the REAL verified installed baseline's own runtime flags (53333 -
+    // "Effective-mass damping=true, friction solver64 iterations, ramp20"), not this probe's
+    // own local defaults, so the comparison is apples-to-apples with what's actually installed.
+    jvmArgument('-Ddiv.experimentalEffectiveMassDamping=true')
+    jvmArgument('-Ddiv.experimentalFrictionSolverIterations=64')
+    jvmArgument('-Ddiv.experimentalThrottleRampTicks=20')
+   }
+   // MINECRAFT-508 review (John): opt-in mod-load/tag-resolution smoke test - same gating
+   // pattern as every other probe above; OFF for every normal `gradle runServer`.
+   if (System.getenv('DIV_GROUND_SURFACE_TAG_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalGroundSurfaceTagProbe=true')
+   }
+  }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
 }
