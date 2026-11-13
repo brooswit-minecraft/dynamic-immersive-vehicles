@@ -370,7 +370,13 @@ public final class BuoyancyAngularDragProbe {
   var v = s.vehicle;
   v.orientation.convertToAngles(); // same call BuoyantBody.step already makes in production - just reading its own result here
   double rollNow = v.orientation.angles.z;
-  s.cumulativeAbsRollDelta += Math.abs(rollNow - s.lastRollDegrees);
+  // Review finding (John, comment 53717): roll is reported in (-180,180] (MTS's own
+  // convertToAngles range); a naive rollNow-lastRollDegrees difference miscounts crossing that
+  // boundary (e.g. 179 to -179) as 358 degrees of activity instead of the real 2-degree
+  // rotation - exactly the inflation the undamped `off` scenario's own near-180-degree
+  // oscillation triggered. AngleMath.shortestDeltaDegrees wraps correctly; see its own doc and
+  // AngleMathTest's boundary regression.
+  s.cumulativeAbsRollDelta += Math.abs(AngleMath.shortestDeltaDegrees(s.lastRollDegrees, rollNow));
   s.maxAbsRoll = Math.max(s.maxAbsRoll, Math.abs(rollNow));
   s.lastRollDegrees = rollNow;
   if (s.ticksInPhase % 20 == 0 || s.ticksInPhase == SETTLE_TICKS) {

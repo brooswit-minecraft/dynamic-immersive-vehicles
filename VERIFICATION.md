@@ -1244,27 +1244,52 @@ reason). Measured over 140 ticks (7s) at this exact head:
   `resolvedAngularWaterDrag=0.0`, `on`: `80.0`, `beached`: `80.0`,
   `beachedOff`: `0.0`. Exactly the configured values, confirmed through
   the real resolution chain, not merely asserted.
-- `off` (resolved `angularWaterDrag=0.0`): the pre-tilted hull did NOT
-  settle - it tumbled/oscillated past the tipping point, reaching roll
-  angles near 180 degrees (essentially inverted) and continuing to
-  oscillate there, for a cumulative absolute roll change of **3015
-  degrees** over the window. This is the EXISTING buoyancy/righting-torque
-  model's own real behavior for this specific two-float (left/right only,
-  no fore-aft spread), ~400kg synthetic test hull - not something this
-  ticket's own code path touches when the coefficient is exactly 0 (that
-  branch is skipped entirely by `tuning.angularWaterDrag > 0`, confirmed
-  by inspection) - disclosed here as an honest observation about the
+- **Measurement-correctness finding, fixed after a fourth review round
+  (John, comment 53717).** The first version of this run reported `off`'s
+  cumulative activity as 3015 degrees and a ~78x reduction against `on`.
+  Review correctly flagged an angle-wrap artifact: roll is reported in
+  `(-180,180]` (MTS's own `convertToAngles` range), and `measure()` summed
+  the NAIVE difference `rollNow - lastRollDegrees` with no wrapping - a
+  hull oscillating right at that boundary (e.g. 179 to -179, a real
+  2-degree rotation) was counted as 358 degrees of "activity" instead.
+  `off`'s own undamped tumble settles right around the inverted (180
+  degree) boundary, so its reported number was inflated by exactly this
+  artifact. Fixed by extracting `AngleMath.shortestDeltaDegrees` (a tiny,
+  dependency-free pure function - deliberately NOT inside
+  `BuoyancyAngularDragProbe` itself, which cannot be loaded in a plain
+  unit test for the same Mojang/SLF4J-on-classpath reason `OverridesTest`
+  documents for `Gson`) and using it in `measure()` instead of the naive
+  subtraction. `AngleMathTest` covers the exact boundary case review
+  named (179 to -179 is 2 degrees, not 358), both crossing directions, the
+  exactly-opposite-angles edge, a wide from/to sweep bounding every result
+  to at most 180 degrees, and a repeated-small-steps-across-the-boundary
+  case mirroring exactly what `measure()` now does.
+- `off` (resolved `angularWaterDrag=0.0`): with the corrected measurement,
+  the pre-tilted hull did NOT settle - it tumbled/oscillated past the
+  tipping point, reaching roll angles near 180 degrees (essentially
+  inverted) and continuing to oscillate there, for a cumulative absolute
+  roll change of **210.5 degrees** over the window (re-measured; the
+  wrap-inflated 3015-degree figure above is superseded and should not be
+  cited). This is the EXISTING buoyancy/righting-torque model's own real
+  behavior for this specific two-float (left/right only, no fore-aft
+  spread), ~400kg synthetic test hull - not something this ticket's own
+  code path touches when the coefficient is exactly 0 (that branch is
+  skipped entirely by `tuning.angularWaterDrag > 0`, confirmed by
+  inspection) - disclosed here as an honest observation about the
   baseline, not a defect this ticket is fixing.
 - `on` (resolved `angularWaterDrag=80.0`): the SAME pre-tilted starting
   condition instead settled smoothly - peaking at roll=29 degrees then
   decaying cleanly to roll approximately 0 degrees (final: -0.05 degrees)
   by the end of the window, for a cumulative absolute roll change of only
-  **38.9 degrees** - about 1/78th of `off`'s rotational activity. This is
-  real, substantial, measured evidence that `angularWaterDrag` actually
-  changes the hull's rotational behavior through the real production path
-  (Mixin -> `PhysicsBridge` -> `BuoyantBody` -> `BuoyantForces.apply` ->
-  Sable/Rapier), not just at the pure-function/unit-test level - review's
-  core ask.
+  **38.9 degrees** (unaffected by the wrap fix - `on` never approaches the
+  +-180 boundary) - about 1/5.4th of `off`'s CORRECTED rotational
+  activity, a real and substantial reduction, just a far more modest
+  (and now honest) ratio than the original wrap-inflated ~78x figure. This
+  is real, measured evidence that `angularWaterDrag` actually changes the
+  hull's rotational behavior through the real production path (Mixin ->
+  `PhysicsBridge` -> `BuoyantBody` -> `BuoyantForces.apply` -> Sable/
+  Rapier), not just at the pure-function/unit-test level - review's core
+  ask.
 - **off/on comparator, now an actual gate** (review follow-up: "do not
   report a pass solely because the server exits" - `maybeLogComparison`
   now fails loudly, flipping both scenarios to `FAILED`, unless BOTH hold:
