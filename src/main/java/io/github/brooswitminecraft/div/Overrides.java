@@ -116,6 +116,17 @@ public final class Overrides {
   public Double stallAngleDegrees;
   public Double liftSlope;
   public Double controlSurfaceSlope;
+  // MINECRAFT-520: configurable front/rear SERVICE-brake distribution - 0.0 sends the whole
+  // tuning.brakeForce budget to the geometric rear axle group, 1.0 sends it all to the front
+  // group, 0.5 is the neutral/even axle split. No FALLBACK entry (like selfRight*/massKg/
+  // enabled above, NOT like brakeForce/friction/etc.) - null/unset means "no operator bias
+  // configured at all", which PhysicsBridge/BrakeBiasDistribution treats as the exact pre-
+  // ticket behavior (plain brakeForce/wheelCount for every wheel), not merely a 0.5 default;
+  // see BrakeBiasDistribution's own doc for why an explicit 0.5 is a materially different claim
+  // from "unset" on an asymmetric axle-count vehicle. Deliberately independent of the parking
+  // brake and the separate analog handbrake - see PhysicsBridge.perWheelBrakeMagnitude's own doc
+  // for why those two never get redistributed by this bias.
+  public Double brakeBiasFront;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -153,6 +164,11 @@ public final class Overrides {
    // never so large it produces an absurd lift/control force from a tiny angle/deflection.
    if (liftSlope != null && !(Double.isFinite(liftSlope) && liftSlope > 0 && liftSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (controlSurfaceSlope != null && !(Double.isFinite(controlSurfaceSlope) && controlSurfaceSlope > 0 && controlSurfaceSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Inclusive at both ends (0.0 all-rear, 1.0 all-front are the documented, legitimate
+   // extremes - see BrakeBiasDistributionTest's own front/rear-extreme coverage), unlike
+   // lateralGripMultiplier's exclusive-zero: a brake bias of exactly 0 or 1 is a normal,
+   // physically sensible configuration (e.g. a rear-brakes-only trike), not a degenerate one.
+   if (brakeBiasFront != null && !(Double.isFinite(brakeBiasFront) && brakeBiasFront >= 0 && brakeBiasFront <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
@@ -189,6 +205,7 @@ public final class Overrides {
    if (stallAngleDegrees != null) throw new IllegalArgumentException("part overrides do not support 'stallAngleDegrees' (no part-level consumer yet)");
    if (liftSlope != null) throw new IllegalArgumentException("part overrides do not support 'liftSlope' (no part-level consumer yet)");
    if (controlSurfaceSlope != null) throw new IllegalArgumentException("part overrides do not support 'controlSurfaceSlope' (no part-level consumer yet)");
+   if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -223,6 +240,7 @@ public final class Overrides {
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   c.angularWaterDrag=t.angularWaterDrag;
   c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
+  c.brakeBiasFront=t.brakeBiasFront;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -251,6 +269,7 @@ public final class Overrides {
   m.stallAngleDegrees = child.stallAngleDegrees!=null?child.stallAngleDegrees:parent.stallAngleDegrees;
   m.liftSlope = child.liftSlope!=null?child.liftSlope:parent.liftSlope;
   m.controlSurfaceSlope = child.controlSurfaceSlope!=null?child.controlSurfaceSlope:parent.controlSurfaceSlope;
+  m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   return m;
  }
  /**
@@ -429,6 +448,10 @@ public final class Overrides {
   result.stallAngleDegrees = firstNonNull(override!=null?override.stallAngleDegrees:null, packMetadata!=null?packMetadata.stallAngleDegrees:null, ivAdapted!=null?ivAdapted.stallAngleDegrees:null, physicallyDerived!=null?physicallyDerived.stallAngleDegrees:null, FALLBACK.stallAngleDegrees);
   result.liftSlope = firstNonNull(override!=null?override.liftSlope:null, packMetadata!=null?packMetadata.liftSlope:null, ivAdapted!=null?ivAdapted.liftSlope:null, physicallyDerived!=null?physicallyDerived.liftSlope:null, FALLBACK.liftSlope);
   result.controlSurfaceSlope = firstNonNull(override!=null?override.controlSurfaceSlope:null, packMetadata!=null?packMetadata.controlSurfaceSlope:null, ivAdapted!=null?ivAdapted.controlSurfaceSlope:null, physicallyDerived!=null?physicallyDerived.controlSurfaceSlope:null, FALLBACK.controlSurfaceSlope);
+  // No FALLBACK entry (mirrors selfRight*/enabled/massKg above) - stays null unless some level
+  // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
+  // needs to reproduce the pre-ticket even split.
+  result.brakeBiasFront = firstNonNull(override!=null?override.brakeBiasFront:null, packMetadata!=null?packMetadata.brakeBiasFront:null, ivAdapted!=null?ivAdapted.brakeBiasFront:null, physicallyDerived!=null?physicallyDerived.brakeBiasFront:null);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

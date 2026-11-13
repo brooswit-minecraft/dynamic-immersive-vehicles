@@ -181,6 +181,46 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, control::validateSupportedForPart);
  }
 
+ @Test void brakeBiasFrontOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.brakeBiasFront = -0.01;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.brakeBiasFront = 1.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var allRear = new Overrides.Tuning(); allRear.brakeBiasFront = 0.0; // inclusive extreme, unlike lateralGripMultiplier
+  assertDoesNotThrow(allRear::validate);
+  var allFront = new Overrides.Tuning(); allFront.brakeBiasFront = 1.0;
+  assertDoesNotThrow(allFront::validate);
+  var inRange = new Overrides.Tuning(); inRange.brakeBiasFront = 0.65;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void brakeBiasFrontHasNoFallbackAndStaysNullWhenNeverConfigured() {
+  // Unlike brakeForce/friction/etc., brakeBiasFront must stay null when nothing at any
+  // precedence level sets it - PhysicsBridge/BrakeBiasDistribution rely on literal null (not a
+  // 0.5 fallback) to mean "no operator bias at all" (the exact pre-ticket behavior).
+  assertNull(Overrides.resolved("packid:not_configured").brakeBiasFront);
+  assertNull(Overrides.defaultTuning().brakeBiasFront);
+ }
+
+ @Test void brakeBiasFrontParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.brakeBiasFront = 0.65;
+   Overrides.setForTest(java.util.Map.of("packid:brake_bias_vehicle", override));
+   assertEquals(0.65, Overrides.resolved("packid:brake_bias_vehicle").brakeBiasFront,
+     "an explicit operator override must be used instead of staying null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+  var packMetadata = new Overrides.Tuning(); packMetadata.brakeBiasFront = 0.4;
+  assertEquals(0.4, Overrides.resolved("packid:not_configured", packMetadata, null, null).brakeBiasFront,
+    "with no operator override, pack DIV metadata must still be used over staying null");
+ }
+
+ @Test void brakeBiasFrontIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.brakeBiasFront = 0.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
  @Test void packMetadataFillsAGapBelowAMissingOperatorOverrideButAboveTheFallback() {
   var packMetadata = new Overrides.Tuning();
   packMetadata.suspensionTravel = 0.45;
