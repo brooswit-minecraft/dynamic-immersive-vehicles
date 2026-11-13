@@ -1385,13 +1385,31 @@ rejection at both bounds for all three fields, the full operator-override-
 over-fallback precedence chain, and part-override rejection.
 `PhysicsBridgeLiveOverrideApplicationTest` covers all three actually being
 mutated in place by `applyLiveSafeFields` and reported in its applied-field
-set. No fixture in this repository can construct a live
-`EntityVehicleF_Physics`/Sable body (see `PhysicsBridgeStepperTest`'s own
-doc), so `stepFlight`'s force/torque application itself - like `stepFlight`
-and `stepRotor` generally - remains exercised only at this pure-function/
-wiring level, never by a live runtime tick; this is the same disclosed limit
-every prior flight/rotor ticket here has stood on, not a new gap introduced
-by this one.
+set.
+
+**Correction (John's comment 53756): the prior wording here overstated the
+limitation.** `GroundSupportFixtureProbe`/`BuoyancyAngularDragProbe` (and
+others in `io.github.brooswitminecraft.div.experimental`) already prove a
+live `EntityVehicleF_Physics`/Sable body CAN be constructed and driven
+through the real Mixin-intercepted tick loop in this repository, for the
+ground and float-only (boat) domains - that pattern is proven, not absent.
+The actual, narrower gap this ticket leaves open is that no FIXED-WING
+runtime probe exists yet to apply that same pattern to `stepFlight`
+specifically: `stallAngleDegrees`/`liftSlope`/`controlSurfaceSlope` and
+`stepFlight`'s force/torque application remain exercised only at the
+pure-function/wiring level above, not by a live runtime tick driving a real
+`isAircraft`/`isBlimp` vehicle. Building that dedicated flight probe (the
+same `JSONVehicle`/`ItemVehicle`/real-spawn/env-var-gated `gradle runServer`
+shape as `BuoyancyAngularDragProbe`, sized for a wing/control-surface
+vehicle instead of a float hull) was assessed as a legitimate "if practical"
+enhancement (the review's own framing) rather than a requirement for this
+bounded ticket's scope, and is not attempted here - this is the exact
+untested flight path, disclosed plainly rather than concealed, not a
+broader claim that no production-path flight evidence could ever exist.
+Every prior flight/rotor ticket in this repository has stood on the same
+disclosed limit for `stepFlight`/`stepRotor` specifically; this ticket does
+not newly introduce it, and does not claim the broader "no fixture at all"
+limitation the prior wording incorrectly implied.
 
 **Self-review finding (own re-review, PR #19 head `0a05015`): invalid-reload-
 retains-last-known-good was undertested.** The first revision's tests
@@ -1435,3 +1453,20 @@ under a manually assembled JUnit Platform launcher (JUnit 5.11.4/platform
 1.11.4) - the same full suite as every prior local check here, not merely
 the new/changed tests - confirming this change introduces no regression
 anywhere else in the suite.
+
+**Actual repository Gradle build/test (John's comment 53748, serialized with
+MINECRAFT-519 via a local slot-lock file on this host so the two tickets'
+heavy builds never ran concurrently): `gradle --offline clean build test`,
+Gradle 8.14 / JDK 21 (Temurin), on Servy at PR #19 head
+`bee29073dbbc72c8b2d2caee6c0ba1fcf10695a0` - `BUILD SUCCESSFUL`, 8 tasks (7
+executed, 1 up-to-date), `:test`/`:check`/`:build` all green. The actual
+repository JUnit XML test reports (`build/test-results/test/*.xml`, the real
+Gradle-driven run, not the manually assembled launcher above) total 542
+tests, 0 skipped, 0 failures, 0 errors - matching the manual run exactly, as
+expected since both exercise the identical test classes against the
+identical pinned dependency set. `build/libs/dynamic-immersive-vehicles-
+0.1.0-SNAPSHOT.jar` was produced. This is the actual Gradle pipeline
+peers (MINECRAFT-519 et al.) used, not merely the manual javac/JUnit
+substitute above - that manual run remains useful as the faster, narrower
+confirmation during iteration, but this Gradle run is the evidence John's
+comment asked for.**

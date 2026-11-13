@@ -27,6 +27,12 @@
     "examplepack:known_bad_car": {
       "enabled": false
     },
+    "examplepack:ordinary_plane": {
+      "driveForce": 9000.0,
+      "stallAngleDegrees": 15.0,
+      "liftSlope": 6.283185307179586,
+      "controlSurfaceSlope": 6.283185307179586
+    },
     "examplepack:sporty_car": {
       "extends": "sporty-base",
       "massKg": 1250.0,
