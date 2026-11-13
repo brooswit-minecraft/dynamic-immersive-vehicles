@@ -1376,17 +1376,18 @@ public final class PhysicsBridge {
    // than contributing a magnitude. Clamped defensively since nothing upstream guarantees the
    // ComputedVariable stays within 0-1 (e.g. a modpack-side script writing it directly).
    double brakeMagnitude=v.parkingBrakeVar.isActive?1.0:Math.max(0.0,Math.min(1.0,v.brakeVar.currentValue));
-   // Analog handbrake (ticket MINECRAFT-504, comment 53572) - a genuinely separate, independently
-   // calibrated input (own axis/deadzone/inversion, read and set via setHandbrakeMagnitude), not
-   // conflated with the service brake pedal above or the native digital parking-brake toggle.
-   // Composed as the larger of the two magnitudes rather than summed/clamped-separately: a real
-   // handbrake and a real brake pedal both ultimately ask the same wheels to stop harder, so
-   // whichever input is asking for more braking this tick wins, with no double-counting past
-   // tuning.brakeForce's own single cap. Defaults to 0.0 (no effect) for any vehicle never sent a
-   // handbrake magnitude at all - a missing channel is never treated as "fully applied".
+   // Analog handbrake (ticket MINECRAFT-504, comment 53572/53603) - a genuinely separate,
+   // independently calibrated input (own axis/deadzone/inversion, read and set via
+   // setHandbrakeMagnitude), not conflated with the service brake pedal above or the native
+   // digital parking-brake toggle, and applied PER-WHEEL below (rear/handbrake-capable wheels
+   // only), not folded uniformly into brakeMagnitude the way an earlier version of this ticket
+   // did - a real handbrake locks the rear wheels, it is not simply a second service-brake lever
+   // for every wheel. Defaults to 0.0 (no effect) for any vehicle never sent a handbrake
+   // magnitude at all - a missing channel is never treated as "fully applied".
    double handbrakeMagnitudeThisTick=handbrakeMagnitude.getOrDefault(v,0.0);
-   brakeMagnitude=Math.max(brakeMagnitude,handbrakeMagnitudeThisTick);
-   boolean braking=brakeMagnitude>0.0;
+   // Still vehicle-wide for the throttle-ramp reset below, which only needs "is ANY brake
+   // engaged this tick" - the per-wheel split only matters to the friction solve itself.
+   boolean braking=brakeMagnitude>0.0||handbrakeMagnitudeThisTick>0.0;
    // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - bypassed
    // (drive==rawDrive) unless EXPERIMENTAL_THROTTLE_RAMP_TICKS>0. The rate is THIS vehicle's own
    // configured drive scale / the configured tick count, not a fixed newtons-per-tick constant,
@@ -1431,7 +1432,7 @@ public final class PhysicsBridge {
      +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+vfull(pose.position())+" orientation="+qfull(q)
      +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
      +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
-     +" brakeMagnitude="+brakeMagnitude+" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer
+     +" brakeMagnitude="+brakeMagnitude+" handbrakeMagnitude="+handbrakeMagnitudeThisTick+" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer
      // Raw vs shaped drive + ramp identity (ticket comment 53115) - driveRaw==drive and
      // throttleRampTicks=0 together prove the experimental candidate is bypassed on this build/
      // session; otherwise shows exactly which configured tick count shaped this tick's drive.
@@ -1710,11 +1711,19 @@ public final class PhysicsBridge {
     Vector3d torqueBody=inverse.transform(new Vector3d(predictorPoint).cross(verticalImpulse));
     workingAngular.add(q.transform(new Vector3d(torqueBody.x/aggregateInertiaBody.x,torqueBody.y/aggregateInertiaBody.y,torqueBody.z/aggregateInertiaBody.z)));
    }
-   var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
+   // PER-WHEEL brake magnitude (ticket MINECRAFT-504, comment 53603): the analog handbrake is
+   // explicit rear/handbrake-capable-wheel semantics, not just another service brake applied
+   // uniformly - a non-steering ("rear") wheel carries max(service,handbrake); a steering
+   // ("front") wheel carries only the service brake, same as before this ticket's handbrake
+   // addition. Parking brake keeps forcing brakeMagnitude (and so every wheel) to 1.0, unchanged.
+   var contacts=hits.stream().map(h->{
+    double wheelBrakeMagnitude = h.wheel().placementDefinition.turnsWithSteer ? brakeMagnitude : Math.max(brakeMagnitude,handbrakeMagnitudeThisTick);
+    return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
+     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude);
+   }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
-     brakeMagnitude,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
+     wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
      effectiveFrictionSolverIterations());
    // Phase 3 below returns to the OWNER-HALF basis (owner.ownerVelocity()/ownerAngular()/
    // leverArmCorrection()/handle()) deliberately - pure kinematics (contactVelocity) is

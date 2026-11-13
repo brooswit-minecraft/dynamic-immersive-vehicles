@@ -46,8 +46,8 @@ class MultiContactFrictionSolverConvergenceTest {
  private static double fixedFinalSideSpeed(int iterations, double initialSideSpeed) {
   Vector3d velocity=new Vector3d(RIGHT).mul(initialSideSpeed);
   Vector3d angular=new Vector3d(0,0,0);
-  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,0.0,0,0,FRICTION,1.0,DT,iterations);
+  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0,0.0)};
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,0,0,FRICTION,1.0,DT,iterations);
   return velocity.dot(RIGHT);
  }
 
@@ -73,10 +73,10 @@ class MultiContactFrictionSolverConvergenceTest {
  @Test void convergedStateIsIdempotentUnderFurtherSolves() {
   Vector3d velocity=new Vector3d(RIGHT).mul(1.0);
   Vector3d angular=new Vector3d(0,0,0);
-  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,0.0,0,0,FRICTION,1.0,DT,4);
+  var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0,0.0)};
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,0,0,FRICTION,1.0,DT,4);
   double afterFirst=velocity.dot(RIGHT);
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,0.0,0,0,FRICTION,1.0,DT,4);
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,0,0,FRICTION,1.0,DT,4);
   double afterSecond=velocity.dot(RIGHT);
   assertEquals(afterFirst, afterSecond, 1e-9, "re-solving an already-at-rest contact must not reintroduce slip");
  }

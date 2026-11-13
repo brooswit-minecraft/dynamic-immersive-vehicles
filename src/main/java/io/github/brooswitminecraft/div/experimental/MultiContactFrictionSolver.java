@@ -66,12 +66,21 @@ public final class MultiContactFrictionSolver {
  }
  /** One wheel's world-frame contact geometry/inputs for {@link #solveFriction}.
   * {@code frictionMultiplier}/{@code rollingResistanceMultiplier} (MINECRAFT-508) scale this
-  * contact's own ground-surface response relative to dry pavement; the 5-arg constructor below
-  * defaults both to 1.0, reproducing today's exact (pre-surface) values byte-identically. */
+  * contact's own ground-surface response relative to dry pavement. {@code brakeMagnitude}
+  * (MINECRAFT-504, comment 53603) is PER-WHEEL, not a single vehicle-wide scalar - a
+  * front/steering wheel typically only ever carries the service-brake magnitude, while a rear
+  * wheel can additionally carry the analog handbrake's own magnitude, composed by the CALLER
+  * (PhysicsBridge) before constructing this record, not by this solver. The two shorter
+  * constructors below default frictionMultiplier/rollingResistanceMultiplier to 1.0 (reproducing
+  * today's exact pre-surface values byte-identically) and, for the 5-arg form, brakeMagnitude to
+  * 0.0 (unbraked). */
  public record FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
-     double frictionMultiplier, double rollingResistanceMultiplier) {
+     double frictionMultiplier, double rollingResistanceMultiplier, double brakeMagnitude) {
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier) {
-   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0);
+   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, 0.0);
+  }
+  public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier, double brakeMagnitude) {
+   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, brakeMagnitude);
   }
  }
  /** One wheel's accumulated longitudinal/lateral tire force after the bounded solve. */
@@ -104,14 +113,7 @@ public final class MultiContactFrictionSolver {
  public static FrictionResult[] solveFriction(FrictionContact[] contacts, double mass, Vector3dc inertiaBody,
      Quaterniondc orientation, Quaterniondc inverseOrientation,
      Vector3d workingVelocity, Vector3d workingAngular,
-     double brakeMagnitude, double brakeForcePerWheel, double driveForcePerWheel, double friction, double lateralGripMultiplier, double dt, int iterations) {
-  // G29/wheel analog brake pedal (ticket MINECRAFT-504) - brakeMagnitude is a 0-1 pedal strength,
-  // not a boolean. braking at 0.0 takes the exact same (prescribedLongitudinal=drive) branch as
-  // the old `false`; scaling the CAP (not the prescribed target) by magnitude means 1.0 is
-  // byte-identical to the old `true`/full brakeForcePerWheel, with real values interpolating the
-  // CONSTRAINT the solve is allowed to apply, not the physical formula computing it.
-  boolean braking=brakeMagnitude>0.0;
-  double scaledBrakeForcePerWheel=brakeForcePerWheel*brakeMagnitude;
+     double brakeForcePerWheel, double driveForcePerWheel, double friction, double lateralGripMultiplier, double dt, int iterations) {
   int n=contacts.length;
   // accLong/accLat track the TOTAL applied-so-far longitudinal/lateral force (post friction-
   // circle clamp) purely so each pass's impulse delta is correct - same role for both.
@@ -143,6 +145,11 @@ public final class MultiContactFrictionSolver {
     // speed the first pass already saturates the cap and stays pinned there (stable, no
     // overshoot/growth); at low speed the increment shrinks with speed and accumulates smoothly
     // toward full cancellation instead of oscillating like the old single-shot lateral code did.
+    // PER-CONTACT brake magnitude (ticket MINECRAFT-504, comment 53603) - each wheel's own
+    // c.brakeMagnitude(), not a single vehicle-wide scalar, so a rear/handbrake-capable wheel
+    // can brake while a front wheel does not (or vice versa for an asymmetric vehicle).
+    boolean braking=c.brakeMagnitude()>0.0;
+    double scaledBrakeForcePerWheel=brakeForcePerWheel*c.brakeMagnitude();
     double prescribedLongitudinal; double brakeIncrement;
     if (braking) {
      prescribedLongitudinal=0;

@@ -25,10 +25,10 @@ class FrictionSolverCandidateIterationRegressionTest {
   * subtracts CENTER and adds half the suspension travel). Fine for these invariant checks
   * (finiteness, friction bounds, accumulation), which don't depend on exact anchor geometry -
   * NOT a claim that these are the real contact points. */
- private static MultiContactFrictionSolver.FrictionContact[] fourWheelContacts(double normalEach) {
+ private static MultiContactFrictionSolver.FrictionContact[] fourWheelContacts(double normalEach, double brakeMagnitude) {
   Vector3d[] points={new Vector3d(0.35,-0.15,-0.0625), new Vector3d(-0.375,-0.15,1.25), new Vector3d(0.375,-0.15,1.25), new Vector3d(-0.375,-0.15,-0.0625)};
   var contacts=new MultiContactFrictionSolver.FrictionContact[4];
-  for (int i=0;i<4;i++) contacts[i]=new MultiContactFrictionSolver.FrictionContact(points[i], new Vector3d(0,0,1), new Vector3d(1,0,0), normalEach, 1.0);
+  for (int i=0;i<4;i++) contacts[i]=new MultiContactFrictionSolver.FrictionContact(points[i], new Vector3d(0,0,1), new Vector3d(1,0,0), normalEach, 1.0, brakeMagnitude);
   return contacts;
  }
 
@@ -37,10 +37,10 @@ class FrictionSolverCandidateIterationRegressionTest {
   double[] drives={-8000, -500, 0, 500, 8000};
   boolean[] brakings={false, true};
   for (double normal : normals) for (double drive : drives) for (boolean braking : brakings) {
-   var contacts=fourWheelContacts(normal);
+   var contacts=fourWheelContacts(normal,braking?1.0:0.0);
    Vector3d velocity=new Vector3d(0.6,0,1.2), angular=new Vector3d(0.01,0,0.02);
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,new Quaterniond(),new Quaterniond(),velocity,angular,
-     (braking?1.0:0.0),BRAKE_FORCE/4.0,drive,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+     BRAKE_FORCE/4.0,drive,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
    for (var r : results) assertTrue(Double.isFinite(r.longitudinal()) && Double.isFinite(r.lateral()),
      "normal="+normal+" drive="+drive+" braking="+braking+" must produce finite output at "+CANDIDATE_ITERATIONS+" iterations");
    assertTrue(Double.isFinite(velocity.x) && Double.isFinite(velocity.y) && Double.isFinite(velocity.z), "velocity must stay finite");
@@ -52,10 +52,10 @@ class FrictionSolverCandidateIterationRegressionTest {
   double[] normals={1, 500, 962.5, 5000};
   double[] drives={-8000, 0, 8000};
   for (double normal : normals) for (double drive : drives) {
-   var contacts=fourWheelContacts(normal);
+   var contacts=fourWheelContacts(normal,0.0);
    Vector3d velocity=new Vector3d(0.6,0,1.2), angular=new Vector3d(0.01,0,0.02);
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,new Quaterniond(),new Quaterniond(),velocity,angular,
-     0.0,BRAKE_FORCE/4.0,drive,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+     BRAKE_FORCE/4.0,drive,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
    for (var r : results) {
     double mag=Math.hypot(r.longitudinal(), r.lateral());
     assertTrue(mag <= FRICTION*normal + 1e-6, "normal="+normal+" drive="+drive+" must respect the friction-circle bound at "+CANDIDATE_ITERATIONS+" iterations - mag="+mag+" bound="+(FRICTION*normal));
@@ -74,10 +74,10 @@ class FrictionSolverCandidateIterationRegressionTest {
   * not that either equals the naive commanded/wheelCount value. */
  @Test void noRepeatedLongitudinalAccumulationAtCandidateIterations() {
   double driveForcePerWheel=500; // well within the friction budget at normal=5000, mu=1
-  var results4=MultiContactFrictionSolver.solveFriction(fourWheelContacts(5000),MASS,INERTIA,new Quaterniond(),new Quaterniond(),new Vector3d(),new Vector3d(),
-    0.0,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,4);
-  var results64=MultiContactFrictionSolver.solveFriction(fourWheelContacts(5000),MASS,INERTIA,new Quaterniond(),new Quaterniond(),new Vector3d(),new Vector3d(),
-    0.0,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+  var results4=MultiContactFrictionSolver.solveFriction(fourWheelContacts(5000,0.0),MASS,INERTIA,new Quaterniond(),new Quaterniond(),new Vector3d(),new Vector3d(),
+    BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,4);
+  var results64=MultiContactFrictionSolver.solveFriction(fourWheelContacts(5000,0.0),MASS,INERTIA,new Quaterniond(),new Quaterniond(),new Vector3d(),new Vector3d(),
+    BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
   for (int i=0;i<4;i++) {
    double diff=Math.abs(results64[i].longitudinal()-results4[i].longitudinal());
    assertTrue(diff <= driveForcePerWheel*0.1,
@@ -91,10 +91,10 @@ class FrictionSolverCandidateIterationRegressionTest {
   * 4-iteration MultiContactFrictionSolverBrakingTest, re-checked here at CANDIDATE_ITERATIONS. */
  @Test void brakingOpposesMotionSymmetricallyInBothDirectionsAtCandidateIterations() {
   for (double sign : new double[]{1.0,-1.0}) {
-   var contacts=fourWheelContacts(962.5);
+   var contacts=fourWheelContacts(962.5,1.0);
    Vector3d velocity=new Vector3d(0,0,sign*2.0), angular=new Vector3d(0,0,0);
    var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,new Quaterniond(),new Quaterniond(),velocity,angular,
-     1.0,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+     BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
    for (var r : results) assertTrue(Math.signum(r.longitudinal())==-Math.signum(sign) || r.longitudinal()==0,
      "braking must oppose motion (sign="+sign+") at "+CANDIDATE_ITERATIONS+" iterations - got longitudinal="+r.longitudinal());
   }
@@ -104,10 +104,10 @@ class FrictionSolverCandidateIterationRegressionTest {
   * no-wobble case this whole investigation shipped a fix for. Confirms the higher iteration
   * count doesn't itself introduce instability into the already-solved case. */
  @Test void passiveSettlingStaysQuietAtCandidateIterations() {
-  var contacts=fourWheelContacts(962.5);
+  var contacts=fourWheelContacts(962.5,0.0);
   Vector3d velocity=new Vector3d(0,0,0), angular=new Vector3d(0,0,0);
   var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,new Quaterniond(),new Quaterniond(),velocity,angular,
-    0.0,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
+    BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,CANDIDATE_ITERATIONS);
   for (var r : results) assertEquals(0, r.longitudinal(), 1e-9, "zero drive, zero velocity, symmetric load must realize zero longitudinal force at "+CANDIDATE_ITERATIONS+" iterations");
   assertEquals(0, angular.length(), 1e-9, "symmetric quiet load must not introduce any angular velocity at "+CANDIDATE_ITERATIONS+" iterations");
  }

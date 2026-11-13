@@ -105,11 +105,10 @@ class EffectiveMassDampingCandidateTest {
    java.util.List<WheelState> active=new java.util.ArrayList<>();
    for (WheelState w : wheels) if (w.hit()) active.add(w);
    var contacts=new MultiContactFrictionSolver.FrictionContact[active.size()];
-   for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0); }
+   for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0,0.0); }
    Vector3d bf=new Vector3d(solverVelocity), ba=new Vector3d(solverAngular);
    double driveForcePerWheel=active.isEmpty()?0:shapedDrive/4.0;
-   MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,
-     0.0,0,driveForcePerWheel,FRICTION,1.0,DT,SOLVER_ITERATIONS);
+   MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,0,driveForcePerWheel,FRICTION,1.0,DT,SOLVER_ITERATIONS);
    velocity.add(new Vector3d(solverVelocity).sub(bf));
    angular.add(new Vector3d(solverAngular).sub(ba));
    double totalNormalLoad=0; for (WheelState w : wheels) if (w.hit()) totalNormalLoad+=w.normal();

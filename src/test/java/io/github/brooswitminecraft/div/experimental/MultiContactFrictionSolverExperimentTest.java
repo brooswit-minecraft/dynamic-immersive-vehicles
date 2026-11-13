@@ -93,9 +93,8 @@ class MultiContactFrictionSolverExperimentTest {
    for (int i=0;i<4;i++) applyImpulse(worldPoints[i], new Vector3d(up).mul(NORMAL_PER_WHEEL*DT), velocity, angular, orientation, inverse, inertiaBody);
    if (useNewSolver) {
     var contacts=new MultiContactFrictionSolver.FrictionContact[4];
-    for (int i=0;i<4;i++) contacts[i]=new MultiContactFrictionSolver.FrictionContact(worldPoints[i],forwards[i],rights[i],NORMAL_PER_WHEEL,1.0);
-    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,velocity,angular,
-      0.0,0,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+    for (int i=0;i<4;i++) contacts[i]=new MultiContactFrictionSolver.FrictionContact(worldPoints[i],forwards[i],rights[i],NORMAL_PER_WHEEL,1.0,0.0);
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,velocity,angular,0,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
     // solveFriction folds the resulting impulses into velocity/angular in place.
    } else {
     double[] targets=oldIndependentLateralTargets(worldPoints,rights,velocity,angular);

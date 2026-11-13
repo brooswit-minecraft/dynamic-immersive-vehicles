@@ -136,11 +136,10 @@ class DriveOnOffPitchCounterfactualTest {
    java.util.List<WheelState> active=new java.util.ArrayList<>();
    for (WheelState w : wheels) if (w.hit()) active.add(w);
    var contacts=new MultiContactFrictionSolver.FrictionContact[active.size()];
-   for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0); }
+   for (int k=0;k<active.size();k++) { WheelState w=active.get(k); contacts[k]=new MultiContactFrictionSolver.FrictionContact(w.point(),w.forward(),w.right(),w.normal(),1.0,0.0); }
    Vector3d bf=new Vector3d(solverVelocity), ba=new Vector3d(solverAngular);
    double driveForcePerWheel=active.isEmpty()?0:drive/4.0; // production divides by total configured wheel count, not active.size()
-   var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,
-     0.0,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+   var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,solverVelocity,solverAngular,BRAKE_FORCE/4.0,driveForcePerWheel,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
    velocity.add(new Vector3d(solverVelocity).sub(bf));
    angular.add(new Vector3d(solverAngular).sub(ba));
    double realizedLongitudinalForce=0; for (var r : results) realizedLongitudinalForce+=r.longitudinal();
