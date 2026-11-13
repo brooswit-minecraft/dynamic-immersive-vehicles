@@ -37,13 +37,15 @@ import org.slf4j.Logger;
  * {@code gradle runServer} does) - a real failure of the claim this probe exists to check, not a
  * tolerated "optional content absent" case the way {@code GroundSurfaceTagProbe}'s MISSING is.
  *
- * <p>Non-mutating (review finding): this placed an {@code oak_log} at {@link #POS} and never
- * restored whatever was there before, a permanent world write that violates this ticket's own
- * "No erosion/world mutation" boundary - exactly the kind of defect a snapshot/restore makes
- * impossible rather than merely unlikely. {@link #maybeRun} now snapshots the ORIGINAL block at
- * {@link #POS} before touching it and restores that exact state in a {@code finally} block, so
- * the restore runs even if a case throws - the world is left exactly as found regardless of
- * outcome.
+ * <p>Non-mutating (review finding, John's follow-up comment 53706): this placed an {@code oak_log}
+ * at {@link #POS} and never restored whatever was there before, a permanent world write that
+ * violates this ticket's own "No erosion/world mutation" boundary. {@link #maybeRun} now
+ * snapshots the ORIGINAL {@link BlockState} at {@link #POS} before touching it and restores it in
+ * a {@code finally} block, so the restore runs even if a case throws. {@code BlockState} alone
+ * does NOT capture a block entity's inventory/NBT (John's explicit warning), so rather than
+ * attempt an unreliable partial restore, this conservatively REFUSES to run at all when
+ * {@link #POS} already holds a block entity - the one case a plain state snapshot cannot make
+ * whole again - leaving that position completely untouched instead of risking real data loss.
  */
 public final class DirectionalGroundSurfaceProbe {
     private DirectionalGroundSurfaceProbe() {}
@@ -85,6 +87,16 @@ public final class DirectionalGroundSurfaceProbe {
         // Snapshot whatever was really at POS before this probe touches it at all, so it can be
         // restored exactly - including the case where POS was air, or some other block entirely.
         BlockState original = overworld.getBlockState(POS);
+        if (overworld.getBlockEntity(POS) != null) {
+            // A BlockState snapshot does not capture a block entity's inventory/NBT (John's
+            // explicit warning, comment 53706) - restoring state alone would silently lose real
+            // data. Refuse entirely rather than attempt an unreliable partial restore; POS is a
+            // fixed, designated-safe probe location and is never expected to hold one in normal
+            // use, so this should only ever fire if something else has placed content there.
+            LOGGER.error("[DIV directionalGroundSurfaceProbe] FAIL " + POS
+                    + " already holds a block entity - refusing to run rather than risk losing its data on restore");
+            return;
+        }
         int pass = 0, fail = 0;
         try {
             for (AxisCase c : CASES) {
