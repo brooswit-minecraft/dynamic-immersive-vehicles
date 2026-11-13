@@ -45,4 +45,12 @@ final class BodyRegistry<K, B> {
    return true;
   });
  }
+ /**
+  * Read-only visit of every currently-active (key, body) pair (ticket 53518/MINECRAFT-505's
+  * hot-reload propagation: live-updating every already-active body's tuning needs every one of
+  * them, not just one key). {@code consumer} must not itself activate/deactivate/remove an
+  * entry - this iterates {@code active} directly (no defensive copy), the same assumption
+  * {@code removeIf} above already makes about its own callbacks.
+  */
+ void forEachActive(BiConsumer<K, B> consumer) { active.forEach(consumer); }
 }

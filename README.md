@@ -235,6 +235,56 @@ with no float device, and `suspensionTravel`/`friction`/`driveForce`/
 available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
 
+### Part overrides, templates, and `extends`
+
+Alongside `vehicles`, the config accepts two more top-level maps:
+
+- `parts`, keyed `partPackID:partSystemName` (the part definition's own
+  identity, same shape as a vehicle's `packID:systemName`) - for tuning a
+  part independently of any one vehicle it happens to be installed on.
+- `templates`, an arbitrary-named map of reusable tuning fragments. Any
+  `vehicles` or `parts` entry (or another template) can set `"extends":
+  "<template name>"` to inherit every field it leaves unset from that
+  template (chained through multiple templates if needed); a field the
+  entry itself sets always wins over its template. An unknown `extends`
+  target or an extends cycle fails config load/reload loudly, the same as
+  an out-of-range field.
+
+```json
+{
+  "templates": {
+    "sporty-base": { "friction": 1.2, "driveForce": 10000.0 }
+  },
+  "vehicles": {
+    "examplepack:sporty_car": { "extends": "sporty-base", "massKg": 1250.0 }
+  },
+  "parts": {
+    "examplepack:high_output_engine": { "driveForce": 9500.0 }
+  }
+}
+```
+
+### Hot reload
+
+The server polls the config file's own last-modified time (every few
+seconds, not every tick) and, on a real change, re-reads and fully
+validates it. A clean reload reports how many vehicle/part overrides it
+picked up and is logged; a malformed file (bad JSON, an out-of-range
+field, an unknown `extends` target, a cycle) is also logged, as a failure,
+and changes **nothing** - the previously-loaded config stays in effect
+(last-known-good), so a bad edit while the server is live cannot itself
+break anything already running.
+
+A successful reload only live-updates fields every active vehicle already
+re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
+`brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
+`propellerForce`. Fields baked in at vehicle construction - `massKg`,
+`hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
+**not** applied to an already-spawned vehicle; re-enter (or otherwise
+respawn) the vehicle to pick up a changed value for one of those. The
+reload log names exactly which changed fields, if any, fell into this
+"needs respawn" set, rather than claiming everything applied.
+
 ## Build
 
 CI uses Java 21 and Gradle 8.8. It resolves the exact official dependency

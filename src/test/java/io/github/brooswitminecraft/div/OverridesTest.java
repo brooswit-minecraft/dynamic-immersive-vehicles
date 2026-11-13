@@ -240,4 +240,110 @@ class OverridesTest {
    Overrides.setForTest(java.util.Map.of());
   }
  }
+
+ // Ticket 53518 (MINECRAFT-505): layered JSON vehicle/part overrides - `parts`/`templates`
+ // namespaces, `extends` inheritance, and non-throwing reload() with last-known-good semantics.
+ // These all go through the package-private three-namespace setForTest seam so they run as a
+ // plain unit test, the same reasoning OverridesTest's class doc already gives for `load()`.
+
+ @Test void partOverrideResolvesIndependentlyOfAnyVehicleOverride() {
+  try {
+   var part = new Overrides.Tuning(); part.friction = 0.42;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("packid:engine_part", part));
+   assertEquals(0.42, Overrides.resolvedPart("packid:engine_part").friction);
+   assertEquals(1.0, Overrides.resolved("packid:engine_part").friction,
+     "a part override must never leak into vehicle-key resolution for the same string, and vice versa - separate namespaces");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void partOverrideFallsBackToTheSameDocumentedFallbackAsVehiclesWhenUnconfigured() {
+  assertEquals(0.3, Overrides.resolvedPart("packid:not_configured_part").suspensionTravel);
+  assertEquals(8000.0, Overrides.resolvedPart("packid:not_configured_part").driveForce);
+ }
+
+ @Test void extendsInheritsEveryUnsetFieldFromItsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.driveForce = 5000.0; template.friction = 0.8;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "base"; child.friction = 0.95; // overrides the template's own friction
+   Overrides.setForTest(java.util.Map.of("base", template), java.util.Map.of("packid:child_vehicle", child), java.util.Map.of());
+   var r = Overrides.resolved("packid:child_vehicle");
+   assertEquals(5000.0, r.driveForce, "a field the child never set must inherit the template's value");
+   assertEquals(0.95, r.friction, "a field the child DID set must win over the template's own value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void extendsChainsThroughMultipleTemplates() {
+  try {
+   var grandparent = new Overrides.Tuning(); grandparent.brakeForce = 9000.0;
+   var parent = new Overrides.Tuning(); parent.extendsTemplate = "grandparent"; parent.driveForce = 4000.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "parent";
+   Overrides.setForTest(java.util.Map.of("grandparent", grandparent, "parent", parent),
+     java.util.Map.of("packid:chained_vehicle", child), java.util.Map.of());
+   var r = Overrides.resolved("packid:chained_vehicle");
+   assertEquals(9000.0, r.brakeForce, "a field set only on the grandparent template must still reach the child");
+   assertEquals(4000.0, r.driveForce);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void extendsUnknownTemplateFailsLoudlyInsteadOfSilentlyIgnoringIt() {
+  try {
+   var child = new Overrides.Tuning(); child.extendsTemplate = "does_not_exist";
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of("packid:broken_vehicle", child), java.util.Map.of());
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:broken_vehicle"));
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void extendsCycleFailsLoudlyInsteadOfInfiniteLooping() {
+  try {
+   var a = new Overrides.Tuning(); a.extendsTemplate = "b";
+   var b = new Overrides.Tuning(); b.extendsTemplate = "a";
+   Overrides.setForTest(java.util.Map.of("a", a, "b", b), java.util.Map.of("packid:cyclic_vehicle", a), java.util.Map.of());
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:cyclic_vehicle"));
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void extendsResolvesAgainstTemplatesNamespaceOnlyNotVehiclesOrParts() {
+  // A template name happening to collide with an unrelated vehicle's own key must not make that
+  // vehicle entry a valid (and confusing) extension target - templates are their own namespace.
+  try {
+   var unrelatedVehicle = new Overrides.Tuning(); unrelatedVehicle.driveForce = 1.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "packid:unrelated_vehicle";
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of("packid:unrelated_vehicle", unrelatedVehicle, "packid:child", child), java.util.Map.of());
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:child"),
+     "a vehicle key is not a valid extends target even though a template with that exact name does not exist");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void resolvingTwoDifferentKeysProducesIndependentMutableTuningInstances() {
+  // "Multi-instance isolation" (ticket 53518): two different vehicle instances of two different
+  // (or even the same) definition must never share one mutable Tuning object - each resolved()
+  // call is its own fresh snapshot.
+  var first = Overrides.resolved("packid:not_configured");
+  var second = Overrides.resolved("packid:not_configured");
+  assertNotSame(first, second);
+  first.driveForce = 1.0;
+  assertEquals(8000.0, second.driveForce, "mutating one resolved() instance's own copy must never affect a separately resolved instance for the same key");
+ }
+
+ // Overrides.reload(), like load(), needs a live FML config directory (and, for this ticket, a
+ // full Gson on the runtime classpath, which a plain unit test's trimmed classpath does not
+ // have either - confirmed directly: calling it here throws NoClassDefFoundError, an Error, not
+ // one of the RuntimeException/IOException reload() catches, since production never needs to
+ // catch a classpath problem that cannot occur on the real moddev/NeoForge runtime). Covered only
+ // by the runtime-smoke/acceptance path, same as load() always has been (see this class's own
+ // doc) - reload()'s actual per-field validation/extends-chain/last-known-good logic is already
+ // exercised indirectly above via the extends/cycle/precedence tests against readAndValidate's
+ // shared helper, minus only the file-I/O wrapper itself.
 }

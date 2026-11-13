@@ -1,11 +1,14 @@
 package io.github.brooswitminecraft.div;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.annotations.SerializedName;
 import net.neoforged.fml.loading.FMLPaths;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 /**
  * Optional per-car tuning/override, keyed by packID:systemName. Physics now applies to every
  * eligible vehicle by default (see PhysicsBridge); a car needs no entry here at all. An entry's
@@ -30,6 +33,18 @@ public final class Overrides {
   * breaking change to this class.
   */
  public static final class Tuning {
+  /**
+   * Ticket 53518 (MINECRAFT-505): names a {@link #templates} entry this Tuning inherits from -
+   * every field THIS entry leaves {@code null} falls through to that template's own resolved
+   * value (which may itself extend another template, chained) before the existing operator-
+   * override-vs-pack/native/fallback precedence in {@link #resolved}/{@link #resolvedPart} ever
+   * runs. {@code null}/absent means no inheritance at all - today's exact prior behavior for
+   * every entry already in a loaded config. See {@link #effective} for the resolution/cycle-
+   * detection logic; {@link #load}/{@link #reload} both eagerly resolve every entry's chain once
+   * at load time so a bad target or a cycle fails loudly then, not on some later vehicle's first
+   * tick.
+   */
+  @SerializedName("extends") public String extendsTemplate;
   public Boolean enabled;
   public Double massKg;
   public Double suspensionTravel;
@@ -127,6 +142,7 @@ public final class Overrides {
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
+  c.extendsTemplate=t.extendsTemplate;
   c.enabled=t.enabled; c.massKg=t.massKg; c.suspensionTravel=t.suspensionTravel; c.friction=t.friction;
   c.driveForce=t.driveForce; c.brakeForce=t.brakeForce; c.maxSteerDegrees=t.maxSteerDegrees;
   c.hullFillFactor=t.hullFillFactor; c.waterDrag=t.waterDrag; c.propellerForce=t.propellerForce;
@@ -135,6 +151,57 @@ public final class Overrides {
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   return c;
  }
+ /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
+  * (already-resolved) value - {@code child}'s own non-null fields always win. Used only to
+  * fold one step of an {@code extends} chain; {@link #effective} is what walks the whole chain. */
+ private static Tuning mergeOntoParent(Tuning child, Tuning parent) {
+  Tuning m = new Tuning();
+  m.enabled = child.enabled!=null?child.enabled:parent.enabled;
+  m.massKg = child.massKg!=null?child.massKg:parent.massKg;
+  m.suspensionTravel = child.suspensionTravel!=null?child.suspensionTravel:parent.suspensionTravel;
+  m.friction = child.friction!=null?child.friction:parent.friction;
+  m.driveForce = child.driveForce!=null?child.driveForce:parent.driveForce;
+  m.brakeForce = child.brakeForce!=null?child.brakeForce:parent.brakeForce;
+  m.maxSteerDegrees = child.maxSteerDegrees!=null?child.maxSteerDegrees:parent.maxSteerDegrees;
+  m.hullFillFactor = child.hullFillFactor!=null?child.hullFillFactor:parent.hullFillFactor;
+  m.waterDrag = child.waterDrag!=null?child.waterDrag:parent.waterDrag;
+  m.propellerForce = child.propellerForce!=null?child.propellerForce:parent.propellerForce;
+  m.selfRightStrength = child.selfRightStrength!=null?child.selfRightStrength:parent.selfRightStrength;
+  m.selfRightDamping = child.selfRightDamping!=null?child.selfRightDamping:parent.selfRightDamping;
+  m.selfRightMaxTorque = child.selfRightMaxTorque!=null?child.selfRightMaxTorque:parent.selfRightMaxTorque;
+  m.selfRightFadeStartDegrees = child.selfRightFadeStartDegrees!=null?child.selfRightFadeStartDegrees:parent.selfRightFadeStartDegrees;
+  m.selfRightFadeEndDegrees = child.selfRightFadeEndDegrees!=null?child.selfRightFadeEndDegrees:parent.selfRightFadeEndDegrees;
+  m.upperMassFraction = child.upperMassFraction!=null?child.upperMassFraction:parent.upperMassFraction;
+  m.lateralGripMultiplier = child.lateralGripMultiplier!=null?child.lateralGripMultiplier:parent.lateralGripMultiplier;
+  return m;
+ }
+ /**
+  * Resolves {@code entry}'s {@code extends} chain (ticket 53518/MINECRAFT-505), walking
+  * {@link #templates} until a link with no {@code extends} is reached, folding each step with
+  * {@link #mergeOntoParent} (closest entry always wins per field). {@code visiting} detects a
+  * cycle (A extends B extends A) - thrown as {@link IllegalArgumentException}, the same failure
+  * type every other malformed-config case in this class already uses, so {@link #load}/
+  * {@link #reload} fail exactly the same way for a bad chain as for an out-of-range field.
+  * {@code entry} itself is never looked up in {@link #templates} by this method - only names
+  * {@code entry.extendsTemplate} may reference are; a template extending a vehicle/part key
+  * (rather than another template) is therefore an "unknown extends template" failure, not
+  * silently resolved - templates are their own namespace, deliberately not unioned with
+  * {@link #vehicles}/{@link #parts} to avoid a vehicle entry accidentally becoming a valid
+  * (and confusing) extension target for an unrelated vehicle or part. */
+ private static Tuning effective(Tuning entry, Map<String,Tuning> templatesMap, Set<String> visiting) {
+  if (entry == null || entry.extendsTemplate == null) return entry;
+  String key = entry.extendsTemplate;
+  if (!visiting.add(key)) throw new IllegalArgumentException("override 'extends' cycle detected at '"+key+"'");
+  Tuning parent = templatesMap.get(key);
+  if (parent == null) throw new IllegalArgumentException("unknown extends template '"+key+"'");
+  Tuning resolvedParent = effective(parent, templatesMap, visiting);
+  return mergeOntoParent(entry, resolvedParent);
+ }
+ /** {@link #effective(Tuning,Map,Set)} against the currently-ACTIVE {@link #templates} - what
+  * every real {@link #resolved}/{@link #resolvedPart} call uses. {@link #readAndValidate} calls
+  * the other overload directly against a CANDIDATE templates map instead, so a reload's
+  * extends-chain validation never depends on (or mutates) the active one. */
+ private static Tuning effective(Tuning entry) { return effective(entry, templates, new HashSet<>()); }
  /** Builds a {@code SelfRightingAssist.Config} from a resolved Tuning (ticket comment 53182/
   * 53188) - ALL FIVE selfRight* fields must be present together, or this returns {@code
   * SelfRightingAssist.OFF}. Deliberately all-or-nothing: a partially-configured assist has no
@@ -157,10 +224,20 @@ public final class Overrides {
   * {@link #resolved} for any new call site - this is just its zero-override, zero-metadata,
   * zero-native-value case. */
  public static Tuning defaultTuning() { return copy(FALLBACK); }
- private record Config(Map<String,Tuning> vehicles) {}
+ /** Ticket 53518 (MINECRAFT-505): {@code templates} is a third, separate namespace only {@code
+  * extends} may reference (see {@link #effective}); {@code vehicles} is unchanged from before
+  * this ticket; {@code parts} is new, keyed identically to {@code vehicles} but for a PART's own
+  * identity (see {@link #resolvedPart}'s doc for the exact key shape) rather than a vehicle's. */
+ private record Config(Map<String,Tuning> templates, Map<String,Tuning> vehicles, Map<String,Tuning> parts) {}
+ private static Map<String,Tuning> templates = Map.of();
  private static Map<String,Tuning> vehicles = Map.of();
+ private static Map<String,Tuning> parts = Map.of();
  public static Tuning get(String key) { return vehicles.get(key); }
  public static boolean isOptedOut(String key) { var t = vehicles.get(key); return t != null && Boolean.FALSE.equals(t.enabled); }
+ /** The raw, unresolved (no {@code extends} applied) part override entry for {@code key}, if
+  * any - mirrors {@link #get} for vehicles. See {@link #resolvedPart} for the key shape and the
+  * actual precedence-resolved value callers should use instead of this raw entry. */
+ public static Tuning getPart(String key) { return parts.get(key); }
  private static Double firstNonNull(Double... values) { for (Double v : values) if (v != null) return v; return null; }
  private static Boolean firstNonNullBoolean(Boolean... values) { for (Boolean v : values) if (v != null) return v; return null; }
  /**
@@ -186,10 +263,38 @@ public final class Overrides {
   * malformed operator-override entry already does in {@link #load}, not be silently trusted.
   */
  public static Tuning resolved(String key, Tuning packMetadata, Tuning ivAdapted, Tuning physicallyDerived) {
+  return resolveFields(effective(vehicles.get(key)), packMetadata, ivAdapted, physicallyDerived);
+ }
+ /**
+  * The part-level counterpart to {@link #resolved} (ticket 53518/MINECRAFT-505's "vehicle AND
+  * part attributes" ask), same 4-level precedence chain and {@code extends} inheritance, over
+  * {@link #parts} instead of {@link #vehicles}. {@code partKey} is this part's own identity,
+  * deliberately NOT scoped to any one vehicle - {@code JSONPart}'s own {@code packID}/{@code
+  * systemName} already uniquely identify a part DEFINITION the same way a vehicle's packID/
+  * systemName do (see {@code PhysicsBridge.tuning}'s existing {@code packID+":"+systemName} key
+  * shape, mirrored here): {@code partPackID+":"+partSystemName}. A part installed on several
+  * different vehicles shares one override entry, same as a vehicle definition reused across
+  * multiple spawned instances already shares one {@link #vehicles} entry - this is "vehicle
+  * AND part attributes" alongside, not instead of, the existing vehicle-level resolution; a
+  * caller wanting both layered together resolves each key independently and composes the two
+  * results itself (no implicit vehicle-then-part stacking here, since not every part attribute
+  * makes sense layered under its vehicle's - e.g. a part's own {@code driveForce} for an engine
+  * part is a different physical quantity than a vehicle's overall {@code driveForce}).
+  */
+ public static Tuning resolvedPart(String partKey, Tuning packMetadata, Tuning ivAdapted, Tuning physicallyDerived) {
+  return resolveFields(effective(parts.get(partKey)), packMetadata, ivAdapted, physicallyDerived);
+ }
+ /** {@link #resolvedPart} with no pack-metadata/IV-adapted/physically-derived source yet
+  * available - mirrors {@link #resolved(String)}. */
+ public static Tuning resolvedPart(String partKey) { return resolvedPart(partKey, null, null, null); }
+ /** The actual per-field precedence chain (ticket comment 53181/53184), shared verbatim by
+  * {@link #resolved} and {@link #resolvedPart} - {@code override} is whichever already-{@code
+  * extends}-resolved entry the caller looked up (a vehicle's or a part's), never a raw map
+  * lookup itself. */
+ private static Tuning resolveFields(Tuning override, Tuning packMetadata, Tuning ivAdapted, Tuning physicallyDerived) {
   if (packMetadata != null) packMetadata.validate();
   if (ivAdapted != null) ivAdapted.validate();
   if (physicallyDerived != null) physicallyDerived.validate();
-  Tuning override = vehicles.get(key);
   Tuning result = new Tuning();
   result.enabled = firstNonNullBoolean(override!=null?override.enabled:null, packMetadata!=null?packMetadata.enabled:null, ivAdapted!=null?ivAdapted.enabled:null, physicallyDerived!=null?physicallyDerived.enabled:null);
   result.massKg = firstNonNull(override!=null?override.massKg:null, packMetadata!=null?packMetadata.massKg:null, ivAdapted!=null?ivAdapted.massKg:null, physicallyDerived!=null?physicallyDerived.massKg:null);
@@ -231,11 +336,53 @@ public final class Overrides {
  /** Test-only seam (ticket comment 53184: tests must exercise an actual explicit operator entry,
   * not only the unconfigured-key case) - {@link #load} is the only other writer, and it needs a
   * live FML config directory a plain unit test cannot provide. Package-private: only this
-  * package's own tests may call it. */
+  * package's own tests may call it. Leaves {@link #templates}/{@link #parts} untouched - use
+  * {@link #setForTest(Map,Map,Map)} to control all three at once (e.g. to test {@code extends}
+  * or part resolution in isolation). */
  static void setForTest(Map<String,Tuning> v) { vehicles = v; }
+ /** Full three-namespace test seam (ticket 53518/MINECRAFT-505) - see {@link #setForTest(Map)}. */
+ static void setForTest(Map<String,Tuning> templatesForTest, Map<String,Tuning> vehiclesForTest, Map<String,Tuning> partsForTest) {
+  templates = templatesForTest; vehicles = vehiclesForTest; parts = partsForTest;
+ }
+ // Deliberately NOT a static field (ticket 53518 self-review): Gson is only ever needed inside
+ // load()/readAndValidate()'s own file I/O, and plain unit tests load this class without
+ // com.google.gson on their classpath at all (the full Gson dependency is only present on the
+ // real moddev/NeoForge runtime classpath) - a static field initializer runs eagerly the moment
+ // ANY test merely references Overrides at all (even one that never touches JSON), which would
+ // throw NoClassDefFoundError for every single plain-unit-test call site, not just load()'s own.
+ private static Gson gson() { return new GsonBuilder().setPrettyPrinting().create(); }
+ private static Path configPath() { return FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json"); }
+ /**
+  * Parses and fully validates {@code path} into a {@link Config} - every entry in {@code
+  * templates}/{@code vehicles}/{@code parts} (field-range validation via {@link Tuning#validate})
+  * AND every entry's own {@code extends} chain (unknown target / cycle, via {@link #effective},
+  * eagerly resolved once per entry here so a bad chain fails at load/reload time, not on some
+  * later vehicle's first tick - ticket 53518's "invalid/unknown values" requirement). Never
+  * mutates {@link #templates}/{@link #vehicles}/{@link #parts} itself - {@link #load} and
+  * {@link #reload} each decide separately what to do with a successful parse, and specifically
+  * how to react to a failure (throw vs. keep the last-known-good maps and report it).
+  */
+ private static Config readAndValidate(Path path) throws IOException {
+  Config config = gson().fromJson(Files.readString(path), Config.class);
+  if (config == null || config.vehicles() == null) throw new IllegalArgumentException("missing vehicles map");
+  Map<String,Tuning> templatesRead = config.templates() != null ? config.templates() : Map.of();
+  Map<String,Tuning> vehiclesRead = config.vehicles();
+  Map<String,Tuning> partsRead = config.parts() != null ? config.parts() : Map.of();
+  templatesRead.values().forEach(Tuning::validate);
+  vehiclesRead.values().forEach(Tuning::validate);
+  partsRead.values().forEach(Tuning::validate);
+  // Resolve every entry's extends chain now, against THIS candidate's own templatesRead (never
+  // the currently-active static `templates` - the other effective(Tuning) overload) - a reload
+  // must validate the new file entirely on its own terms before anything about it is trusted,
+  // exactly like every other field check above. Nothing is swapped into the active statics
+  // until this whole method returns successfully.
+  templatesRead.values().forEach(t -> effective(t, templatesRead, new HashSet<>()));
+  vehiclesRead.values().forEach(t -> effective(t, templatesRead, new HashSet<>()));
+  partsRead.values().forEach(t -> effective(t, templatesRead, new HashSet<>()));
+  return new Config(templatesRead, vehiclesRead, partsRead);
+ }
  static void load() {
-  Path path = FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json");
-  Gson gson = new GsonBuilder().setPrettyPrinting().create();
+  Path path = configPath();
   try {
    if (!Files.exists(path)) {
     // mtsofficialpack:quad gets a real, ACTIVE self-right entry on a fresh install (ticket
@@ -254,14 +401,49 @@ public final class Overrides {
     var quadExample = new Tuning();
     quadExample.selfRightStrength=200.0; quadExample.selfRightDamping=80.0; quadExample.selfRightMaxTorque=600.0;
     quadExample.selfRightFadeStartDegrees=10.0; quadExample.selfRightFadeEndDegrees=50.0;
-    Files.writeString(path, gson.toJson(new Config(Map.of("packid:vehicle", new Tuning(), "mtsofficialpack:quad", quadExample))));
+    Files.writeString(path, gson().toJson(new Config(Map.of(), Map.of("packid:vehicle", new Tuning(), "mtsofficialpack:quad", quadExample), Map.of())));
    }
-   Config config = gson.fromJson(Files.readString(path), Config.class);
-   if (config == null || config.vehicles == null) throw new IllegalArgumentException("missing vehicles map");
-   config.vehicles.values().forEach(Tuning::validate);
-   vehicles = Map.copyOf(config.vehicles);
+   Config config = readAndValidate(path);
+   templates = Map.copyOf(config.templates());
+   vehicles = Map.copyOf(config.vehicles());
+   parts = Map.copyOf(config.parts());
   } catch (IOException | RuntimeException ex) {
    throw new IllegalStateException("Cannot load " + path + ": " + ex.getMessage(), ex);
   }
+ }
+ /**
+  * Non-throwing hot-reload (ticket 53518/MINECRAFT-505's core ask) - re-reads and fully
+  * validates {@link #configPath}'s current contents via the SAME {@link #readAndValidate} path
+  * {@link #load} uses, but on ANY failure (missing/malformed JSON, an out-of-range field, an
+  * unknown {@code extends} target, a cycle) leaves {@link #templates}/{@link #vehicles}/
+  * {@link #parts} completely untouched - last-known-good, per the ticket's explicit "retain
+  * last-known-good on errors" requirement - and returns a {@link ReloadResult} describing the
+  * failure instead of throwing, so a bad edit while the server is live cannot itself crash or
+  * destabilize anything already running. Only ever SWAPS the three map references on success
+  * (never mutates an existing map in place) - any {@code Tuning} object a caller is already
+  * holding from a previous {@link #resolved}/{@link #resolvedPart} call is a value snapshot
+  * unaffected by this swap either way; propagating a successful reload into already-active
+  * vehicle instances is {@code PhysicsBridge.reloadOverrides}'s job, not this method's - this
+  * method only ever changes what a FUTURE {@link #resolved}/{@link #resolvedPart} call sees.
+  */
+ public static ReloadResult reload() {
+  Path path = configPath();
+  try {
+   Config config = readAndValidate(path);
+   templates = Map.copyOf(config.templates());
+   vehicles = Map.copyOf(config.vehicles());
+   parts = Map.copyOf(config.parts());
+   return ReloadResult.ok(vehicles.size(), parts.size());
+  } catch (IOException | RuntimeException ex) {
+   return ReloadResult.failed("Cannot reload " + path + ": " + ex.getMessage());
+  }
+ }
+ /** Outcome of a {@link #reload} call - {@code success} false means the previous
+  * templates/vehicles/parts maps are UNCHANGED (last-known-good), never partially applied. */
+ public record ReloadResult(boolean success, String message, int vehicleCount, int partCount) {
+  static ReloadResult ok(int vehicleCount, int partCount) {
+   return new ReloadResult(true, "reloaded "+vehicleCount+" vehicle override(s), "+partCount+" part override(s)", vehicleCount, partCount);
+  }
+  static ReloadResult failed(String message) { return new ReloadResult(false, message, -1, -1); }
  }
 }
