@@ -244,8 +244,7 @@ public final class Overrides {
   * (solver-internal units), propellerForce 6000N. MINECRAFT-521: stallAngleDegrees/liftSlope/
   * controlSurfaceSlope fall back to {@link FlightForces}'s own DEFAULT_* constants - the exact
   * values that class previously hardcoded, so an unconfigured fixed-wing vehicle flies
-  * byte-identically to before this ticket. */
-  * (solver-internal units), propellerForce 6000N. MINECRAFT-522: cyclicLimitDegrees 20deg and
+  * byte-identically to before this ticket. MINECRAFT-522: cyclicLimitDegrees 20deg and
   * cyclicAuthorityScale/yawAuthorityScale 1.0 (unit scaling) reproduce RotorForces' own prior
   * hardcoded constant/behavior exactly - see that class's doc. */
  private static final Tuning FALLBACK = new Tuning();
