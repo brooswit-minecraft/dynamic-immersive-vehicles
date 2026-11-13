@@ -167,9 +167,15 @@ public final class WheelAuxProbe {
  }
 
  /**
-  * Sequential, numbered steps - each one ticks {@code PhysicsBridge.advanceWheelAuxInputs()}
-  * (the SAME global per-server-tick hook production uses, not a private copy) some number of
-  * times before checking the real engine's own {@code currentGearVar}.
+  * Sequential, numbered steps, each spanning some number of real server ticks before checking
+  * the real engine's own {@code currentGearVar} (or handbrake magnitude). This method never
+  * calls {@code PhysicsBridge.advanceWheelAuxInputs()} itself - {@code
+  * DynamicImmersiveVehicles} already registers that exact call on {@code ServerTickEvent.Post}
+  * BEFORE the listener that drives this probe, so it has already run once per real tick by the
+  * time this method executes. Review: an earlier version of this probe called it a second time
+  * directly from here, which invoked it TWICE per real tick - contradicting this class's own
+  * claim of relying purely on the real hook, and silently halving how many real ticks a given
+  * {@code ticksInStep} count actually represented.
   */
  // Mirrors WheelAuxInput.HEARTBEAT_TICKS - deliberately duplicated rather than imported, since
  // this probe exists to independently verify the real behavior, not share a constant that could
@@ -189,7 +195,11 @@ public final class WheelAuxProbe {
      PhysicsBridge.recordWheelAuxOwner(vehicle, TEST_PLAYER_ID);
      PhysicsBridge.setHPatternTarget(vehicle, 3);
     }
-    PhysicsBridge.advanceWheelAuxInputs();
+    // No direct advanceWheelAuxInputs() call here - DynamicImmersiveVehicles already registers
+    // it on ServerTickEvent.Post BEFORE this probe's own listener, so it has already run once
+    // for this real tick by the time this method executes (review: a manual call here as well
+    // would invoke it TWICE per real tick, contradicting the "relies purely on the real hook"
+    // claim and silently halving how many real ticks a given tick-count actually represents).
     if (ticksInStep >= 6) {
      check("step1-productionTickContinuation", engine.currentGearVar.currentValue == 3.0,
        "expected real PartEngine.currentGearVar to reach 3 from a SINGLE recorded target (set once, at tick 1) over 6 real ticks of the actual per-tick hook - got " + engine.currentGearVar.currentValue);
@@ -203,7 +213,11 @@ public final class WheelAuxProbe {
      seat.rider = null; // simulated dismount, same public field this project's own isControllingRider reads
      PhysicsBridge.setHPatternTarget(vehicle, 9); // requested AFTER losing control - must never apply
     }
-    PhysicsBridge.advanceWheelAuxInputs();
+    // No direct advanceWheelAuxInputs() call here - DynamicImmersiveVehicles already registers
+    // it on ServerTickEvent.Post BEFORE this probe's own listener, so it has already run once
+    // for this real tick by the time this method executes (review: a manual call here as well
+    // would invoke it TWICE per real tick, contradicting the "relies purely on the real hook"
+    // claim and silently halving how many real ticks a given tick-count actually represents).
     if (ticksInStep >= 6) {
      check("step2-ownershipLossRevocation", engine.currentGearVar.currentValue == gearBeforeRevocation,
        "expected gear to stay at " + gearBeforeRevocation + " (dismounted before the new target could apply) - got " + engine.currentGearVar.currentValue);
@@ -220,7 +234,11 @@ public final class WheelAuxProbe {
      // Force the gear away first so reaching it again is an observable climb, not a no-op.
      if (gearBeforeRevocation <= 0) engine.shiftUp(); else engine.shiftDown();
     }
-    PhysicsBridge.advanceWheelAuxInputs();
+    // No direct advanceWheelAuxInputs() call here - DynamicImmersiveVehicles already registers
+    // it on ServerTickEvent.Post BEFORE this probe's own listener, so it has already run once
+    // for this real tick by the time this method executes (review: a manual call here as well
+    // would invoke it TWICE per real tick, contradicting the "relies purely on the real hook"
+    // claim and silently halving how many real ticks a given tick-count actually represents).
     if (ticksInStep >= 6) {
      check("step3-remountSameSlotResumes", engine.currentGearVar.currentValue == gearBeforeRevocation,
        "expected a fresh owner's request for slot " + gearBeforeRevocation + " to actually climb back to it (not be silently latched-ignored) - got " + engine.currentGearVar.currentValue);
@@ -241,7 +259,11 @@ public final class WheelAuxProbe {
      if (gearBeforeRevocation <= 0) engine.shiftUp(); else engine.shiftDown(); // move away so re-reaching it is observable
      seat.rider = new FakeRider(TEST_PLAYER_ID_B); // B is now the controlling rider
     }
-    PhysicsBridge.advanceWheelAuxInputs();
+    // No direct advanceWheelAuxInputs() call here - DynamicImmersiveVehicles already registers
+    // it on ServerTickEvent.Post BEFORE this probe's own listener, so it has already run once
+    // for this real tick by the time this method executes (review: a manual call here as well
+    // would invoke it TWICE per real tick, contradicting the "relies purely on the real hook"
+    // claim and silently halving how many real ticks a given tick-count actually represents).
     if (ticksInStep >= 6) {
      check("step4-immediateHandoffNoInterveningSweepResumesForNewOwner", engine.currentGearVar.currentValue == gearBeforeRevocation,
        "expected B's immediate takeover (no intervening ownership-loss sweep) requesting the SAME slot A had already achieved to actually climb to it fresh, not be silently latched-ignored from A's stale tracker - got " + engine.currentGearVar.currentValue);
@@ -260,7 +282,8 @@ public final class WheelAuxProbe {
     } else if ((ticksInStep - 1) % HEARTBEAT_TICKS == 0) {
      PhysicsBridge.setHandbrakeMagnitude(vehicle, 1.0); // the heartbeat resend itself
     }
-    PhysicsBridge.advanceWheelAuxInputs();
+    // No direct advanceWheelAuxInputs() call - relies purely on the real per-tick hook, same as
+    // every other step above.
     if (ticksInStep >= STALE_TIMEOUT_TICKS + 20) { // well past one timeout window, several heartbeats in
      check("step5-heartbeatSurvivesStaleTimeout", PhysicsBridge.currentHandbrakeMagnitudeForTesting(vehicle) == 1.0,
        "expected a repeatedly-resent (heartbeat) handbrake to remain fully applied well past the " + STALE_TIMEOUT_TICKS + "-tick staleness timeout - got " + PhysicsBridge.currentHandbrakeMagnitudeForTesting(vehicle));
@@ -271,7 +294,8 @@ public final class WheelAuxProbe {
                // true silence clears it") must let the SAME staleness timeout actually release
                // the handbrake back to 0.0 - the genuine expiry path, not the achieved-latch
                // side effect the old step4's gear assertion actually exercised.
-    PhysicsBridge.advanceWheelAuxInputs(); // no further setHandbrakeMagnitude calls at all
+    // No direct advanceWheelAuxInputs() call, and no further setHandbrakeMagnitude calls at all -
+    // the real per-tick hook alone must release this.
     if (ticksInStep >= STALE_TIMEOUT_TICKS + 20) {
      check("step6-trueSilenceExpiresHandbrake", PhysicsBridge.currentHandbrakeMagnitudeForTesting(vehicle) == 0.0,
        "expected the handbrake to actually expire back to 0.0 once resends genuinely stop for over " + STALE_TIMEOUT_TICKS + " ticks - got " + PhysicsBridge.currentHandbrakeMagnitudeForTesting(vehicle));
