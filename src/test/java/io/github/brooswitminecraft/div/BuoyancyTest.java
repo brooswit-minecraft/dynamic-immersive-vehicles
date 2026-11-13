@@ -30,6 +30,24 @@ class BuoyancyTest {
   double at1 = Buoyancy.drag(1, 1, 3), at2 = Buoyancy.drag(2, 1, 3);
   assertEquals(4 * at1, at2, 1e-9);
  }
+ @Test void angularDragIsZeroWhenNotSubmergedOrNotRotating() {
+  assertEquals(0, Buoyancy.angularDrag(10, 0, 5));
+  assertEquals(0, Buoyancy.angularDrag(0, 1, 5));
+ }
+ @Test void angularDragGrowsQuadraticallyWithAngularSpeed() {
+  double at1 = Buoyancy.angularDrag(1, 1, 3), at2 = Buoyancy.angularDrag(2, 1, 3);
+  assertEquals(4 * at1, at2, 1e-9);
+ }
+ @Test void angularDragScalesWithSubmergedFraction() {
+  assertEquals(Buoyancy.angularDrag(2, 1, 3) / 2, Buoyancy.angularDrag(2, .5, 3), 1e-9);
+ }
+ @Test void zeroAngularDragCoefficientReproducesNoRotationalDampingAtAll() {
+  // The documented fallback (MINECRAFT-518): an unconfigured vehicle must get exactly zero
+  // rotational damping from this term, regardless of how fast it is spinning or how submerged
+  // it is - preserving the exact prior behavior (righting torque only as a per-float side
+  // effect, nothing damping rotation itself).
+  assertEquals(0, Buoyancy.angularDrag(50, 1, 0));
+ }
  @Test void propellerAboveWaterProducesNoThrustRegardlessOfThrottle() {
   assertEquals(0, Buoyancy.propellerThrust(1, 5000, false, true));
   assertEquals(0, Buoyancy.propellerThrust(-1, 5000, false, true));

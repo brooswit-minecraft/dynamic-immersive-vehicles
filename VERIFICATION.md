@@ -1094,6 +1094,77 @@ content pack. Record the exact pack and car IDs. The acceptance run must show:
   rotor-towed trailer is not double-compensated, on the same terms as a
   jointed ground trailer.
 
+## Configurable boat angular water drag (MINECRAFT-518, added 2026-11-13)
+
+Inspected the already-released boat buoyancy work (MINECRAFT-494/497/505)
+before adding anything: `hullFillFactor`, `waterDrag`, and `propellerForce`
+were already exposed through `Overrides.Tuning`, validated, and either
+live-reloadable (`waterDrag`/`propellerForce`) or respawn-gated
+(`hullFillFactor`), per `PhysicsBridge.applyLiveSafeFields`/
+`reportFieldsNeedingRespawn`'s own documented split. The one genuinely
+missing piece in the buoyancy/drag/stability space: nothing damped a
+floating hull's own rotation directly - `BuoyantForces.apply`'s righting
+torque is only an emergent side effect of `waterDrag` applied at each
+float device's own off-center position (see its class doc), so a hull
+knocked into a spin (e.g. by a collision) had no hydrodynamic resistance
+arresting that spin on its own.
+
+Added `angularWaterDrag` (`Overrides.Tuning`): a rotational-drag-torque
+coefficient, the direct rotational analogue of the existing `waterDrag`.
+`Buoyancy.angularDrag(angularSpeed, submergedFraction, coefficient)` is a
+new pure function mirroring `Buoyancy.drag`'s own quadratic shape (torque
+grows with the square of angular speed, scales with how submerged the
+hull is - averaged across every installed float device's own submerged
+fraction this tick, zero with no floats at all). `BuoyantForces.apply`
+applies it as a damping torque impulse opposing the hull's live angular
+velocity, in the same world-to-local frame conversion the existing
+per-float force application already uses, and only when the computed
+torque is actually nonzero.
+
+Preserves default behavior exactly: the documented `FALLBACK` for this
+field is `0.0`, so an unconfigured vehicle (or one explicitly setting
+`angularWaterDrag: 0`) gets precisely the prior behavior - no dedicated
+rotational damping term, only the pre-existing per-float righting torque.
+Bounded the same way `waterDrag`/`propellerForce` already are (`0..100000`,
+via `Tuning.validate`), rejected on a `parts` entry (no part-level
+consumer, same as every other physics field but `driveForce`, via
+`validateSupportedForPart`), participates in the same operator-override >
+pack-metadata > IV-adapted > physically-derived > fallback precedence
+chain (`Overrides.resolveFields`) and the same `extends`/template
+inheritance (`mergeOntoParent`) as every other field, and is live-safe -
+`BuoyantForces.apply` re-reads it fresh from the same live `Tuning` object
+every tick, so `PhysicsBridge.applyLiveSafeFields` mutates it in place on
+a config reload with no respawn needed (added to its own doc comment's
+confirmed-by-inspection list and to `reloadOverrides`'s live-safe set,
+verified by `PhysicsBridgeLiveOverrideApplicationTest`).
+
+`BuoyancyTest` covers `Buoyancy.angularDrag` at the pure-function level:
+zero when not submerged or not rotating, quadratic growth with angular
+speed, linear scaling with submerged fraction, and that a zero coefficient
+(the documented fallback) reproduces exactly zero rotational damping
+regardless of angular speed or submersion. `OverridesTest` covers
+`angularWaterDrag`'s range validation (negative/over-100000 rejected, an
+explicit `0.0` and an in-range value both accepted), its fallback value in
+`resolved()`'s full-fallback and never-null assertions, its place in the
+operator-override precedence chain, and its rejection on a `parts` entry.
+`PhysicsBridgeLiveOverrideApplicationTest` covers it as one of the
+live-safe fields `applyLiveSafeFields` mutates in place (and confirms it
+is absent from `reportFieldsNeedingRespawn`'s construction-cached set,
+unchanged from before this ticket).
+
+`BuoyantForces.apply`'s actual torque-impulse application against a live
+rigid body remains in the same live-entity/`ServerLevel`/Sable-runtime
+testing gap as the rest of this file (documented above under "Buoyancy
+tests") - exercised only by an in-game run, not by any unit test in this
+repository. No compatible vehicle pack or in-game run is recorded for this
+ticket either, so this specific addition (a boat resisting an induced spin
+differently with `angularWaterDrag` configured than with it left at the
+0.0 default) is not yet confirmed to look/feel right at runtime, only to
+compile, validate its bounds, and preserve exact default behavior at the
+pure-function/unit-test level above. `gradle test` passing locally (same
+CI billing-blocked situation as every other ticket in this file) is the
+evidence offered for that.
+
 No compatible vehicle pack or in-game run is currently recorded, so there is no
 playable-MVP claim for any category above - ground, flight, or boat. The
 flight force model in particular (`FlightForces`/`PhysicsBridge.stepFlight`)

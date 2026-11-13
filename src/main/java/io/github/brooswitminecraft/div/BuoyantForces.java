@@ -32,7 +32,11 @@ import java.util.Map;
  * {@link PartPropellerAccessor}) rather than one vehicle-wide signal applied to every installed
  * propeller; an installed rotor propeller is excluded here deliberately - its thrust is already
  * supplied by {@code PhysicsBridge.Body.stepRotor}'s own collective/cyclic model regardless of
- * water, so counting it again here would double-apply the same propulsive force.
+ * water, so counting it again here would double-apply the same propulsive force. MINECRAFT-518
+ * additionally applies an optional rotational (roll/pitch/yaw) water-drag torque, averaged across
+ * every float's own submerged fraction - a dedicated damping term for rotation itself, on top of
+ * (never a replacement for) the per-float righting torque above; its tuning.angularWaterDrag
+ * coefficient defaults to 0 (no change from prior behavior) unless an operator configures it.
  */
 final class BuoyantForces {
  private BuoyantForces() {}
@@ -45,6 +49,7 @@ final class BuoyantForces {
   var floats = floats(v);
   double volumePerFloat = floats.isEmpty() ? 0 : hullVolume / floats.size();
   boolean awake = false;
+  double totalFraction = 0;
   for (var flt : floats) {
    double radius = Math.max(.1, flt.getHeight() / 2);
    Vector3d anchor = new Vector3d(flt.localOffset.x, flt.localOffset.y, flt.localOffset.z).sub(center);
@@ -53,6 +58,7 @@ final class BuoyantForces {
    double waterSurface = waterSurfaceAt(level, point.x, point.z, point.y + radius + 1);
    double fraction = Buoyancy.submergedFraction(point.y - radius, point.y + radius, waterSurface);
    flt.contactThisTick = fraction > 0;
+   totalFraction += fraction;
    if (fraction <= 0) continue;
    flt.animateAsOnGround = true;
    awake = true;
@@ -62,6 +68,21 @@ final class BuoyantForces {
    Vector3d force = new Vector3d(0, Buoyancy.buoyantForce(fraction, volumePerFloat), 0);
    if (speed > 1e-6) force.fma(-dragMagnitude / speed, localVelocity);
    handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(force).mul(PhysicsBridge.DT)));
+  }
+  // MINECRAFT-518: rotational (roll/pitch/yaw) water drag, opposing the hull's own angular
+  // velocity - the rotational analogue of each float's own linear drag term above, averaged
+  // across every float's submerged fraction (0 with no floats at all, matching the untouched
+  // volumePerFloat/awake behavior for that case). tuning.angularWaterDrag defaults to 0 (see
+  // Overrides.FALLBACK), which reproduces the exact prior behavior of no dedicated rotational
+  // damping term - this augments, never replaces, the per-float righting torque above.
+  double angularSpeed = angular.length();
+  if (!floats.isEmpty() && angularSpeed > 1e-6) {
+   double averageFraction = totalFraction / floats.size();
+   double torqueMagnitude = Buoyancy.angularDrag(angularSpeed, averageFraction, tuning.angularWaterDrag);
+   if (torqueMagnitude > 0) {
+    Vector3d torque = new Vector3d(angular).normalize().mul(-torqueMagnitude);
+    handle.applyAngularImpulse(inverse.transform(new Vector3d(torque).mul(PhysicsBridge.DT)));
+   }
   }
   // Per-propeller drive, keyed by actual engine linkage (PartEngineAccessor.linkedPropellers -
   // IV's own private field, not reachable through any public API) rather than one vehicle-wide

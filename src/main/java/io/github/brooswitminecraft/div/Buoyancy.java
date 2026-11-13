@@ -23,6 +23,18 @@ public final class Buoyancy {
  public static double drag(double speed, double submergedFraction, double dragCoefficient) {
   return submergedFraction * dragCoefficient * speed * speed;
  }
+ /** Quadratic rotational water drag torque magnitude (N*m), opposing the hull's own angular
+  * velocity and scaled by how submerged it is - the rotational analogue of {@link #drag} for
+  * roll/pitch/yaw. MINECRAFT-518: today a floating hull gets a righting torque only as an
+  * emergent side effect of {@code drag} applied at each float device's own off-center position
+  * (see {@code BuoyantForces}'s class doc); nothing damps rotation itself, so a hull knocked
+  * into a spin (e.g. by a collision) has no hydrodynamic resistance arresting that spin beyond
+  * those per-float linear-drag side effects. Zero {@code angularDragCoefficient} (the documented
+  * fallback) reproduces that exact prior behavior - this is an additive stability knob, not a
+  * replacement for the existing per-float righting torque. */
+ public static double angularDrag(double angularSpeed, double submergedFraction, double angularDragCoefficient) {
+  return submergedFraction * angularDragCoefficient * angularSpeed * angularSpeed;
+ }
  /** Propeller thrust (N); a propeller produces no thrust at all unless it is both underwater
   * and itself active (IV's own isActiveVar - not destroyed/removed) - an inactive or damaged
   * propeller stays silent regardless of throttle or submersion. */
