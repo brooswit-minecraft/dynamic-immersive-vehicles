@@ -22,10 +22,13 @@ class MultiContactFrictionSolverBrakingTest {
  private static final Quaterniond IDENTITY = new Quaterniond();
 
  private static double finalSpeed(double initialSpeed, boolean braking, double driveForcePerWheel, int iterations) {
+  return finalSpeedAtMagnitude(initialSpeed, braking?1.0:0.0, driveForcePerWheel, iterations);
+ }
+ private static double finalSpeedAtMagnitude(double initialSpeed, double brakeMagnitude, double driveForcePerWheel, int iterations) {
   Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
   Vector3d angular=new Vector3d(0,0,0);
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,braking,BRAKE_FORCE,driveForcePerWheel,FRICTION,1.0,DT,iterations);
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,brakeMagnitude,BRAKE_FORCE,driveForcePerWheel,FRICTION,1.0,DT,iterations);
   return velocity.dot(FORWARD);
  }
 
@@ -80,7 +83,7 @@ class MultiContactFrictionSolverBrakingTest {
     Vector3d velocity=new Vector3d(FORWARD).mul(initialSpeed);
     Vector3d angular=new Vector3d(0,0,0);
     var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(offCenterPoint,FORWARD,RIGHT,NORMAL,1.0)};
-    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,1.0,DT,n);
+    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertia,IDENTITY,IDENTITY,velocity,angular,1.0,BRAKE_FORCE,0,FRICTION,1.0,DT,n);
     assertTrue(Double.isFinite(angular.length()), "off-center braking must not produce a non-finite induced angular velocity");
     double contactSlip=new Vector3d(angular).cross(offCenterPoint).add(velocity).dot(FORWARD);
     assertTrue(Math.abs(contactSlip) < Math.abs(initialSpeed)*0.05,
@@ -128,7 +131,7 @@ class MultiContactFrictionSolverBrakingTest {
   Vector3d velocity=new Vector3d(FORWARD).mul(50).add(new Vector3d(RIGHT).mul(50)); // large demand, well over budget
   Vector3d angular=new Vector3d(0,0,0);
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,NORMAL,1.0)};
-  var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  var results=MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,1.0,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   double magnitude=Math.hypot(results[0].longitudinal(),results[0].lateral());
   double budget=NORMAL*FRICTION;
   assertTrue(magnitude <= budget+1e-6,
@@ -140,7 +143,7 @@ class MultiContactFrictionSolverBrakingTest {
   var contacts=new MultiContactFrictionSolver.FrictionContact[]{new MultiContactFrictionSolver.FrictionContact(POINT_AT_COM,FORWARD,RIGHT,0.0,1.0)};
   Vector3d velocity=new Vector3d(FORWARD).mul(5.0);
   Vector3d angular=new Vector3d(0,0,0);
-  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,1.0,BRAKE_FORCE,0,FRICTION,1.0,DT,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   assertEquals(5.0, velocity.z, 1e-9, "zero normal load means zero friction budget - an airborne/unloaded wheel must not brake or steer at all");
   assertTrue(Double.isFinite(velocity.x) && Double.isFinite(velocity.y) && Double.isFinite(velocity.z));
  }
@@ -161,8 +164,63 @@ class MultiContactFrictionSolverBrakingTest {
     new MultiContactFrictionSolver.FrictionContact(p1,FORWARD,RIGHT,NORMAL,1.0),
     new MultiContactFrictionSolver.FrictionContact(p2,FORWARD,RIGHT,NORMAL,1.0)};
   for (int tick=0; tick<30; tick++)
-   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,true,BRAKE_FORCE,0,FRICTION,1.0,DT,iterations);
+   MultiContactFrictionSolver.solveFriction(contacts,MASS,INERTIA,IDENTITY,IDENTITY,velocity,angular,1.0,BRAKE_FORCE,0,FRICTION,1.0,DT,iterations);
   assertTrue(Double.isFinite(velocity.z) && Math.abs(velocity.z) <= 2.0 && Math.abs(angular.length()) < 1.0,
     "two coupled contacts braking together for 30 ticks at "+iterations+" iterations should settle, not diverge - velocity.z="+velocity.z+" |angular|="+angular.length());
+ }
+
+ /**
+  * G29/wheel analog brake pedal (ticket MINECRAFT-504, comment 52840/53522): brakeMagnitude is a
+  * real 0-1 pedal strength, not a boolean, and must land at the documented boundary values
+  * exactly as today's shipped boolean behavior does - full magnitude (1.0) identical to the old
+  * `true`, zero magnitude (0.0) identical to the old `false` - so this (plus the full existing
+  * suite above, unmodified and still passing at 1.0/0.0) is the parity half of the regression.
+  */
+ @Test void brakeMagnitudeOneAndZeroAreByteIdenticalToTheOldBooleanBehavior() {
+  for (double initialSpeed : new double[]{0.01,-0.01,0.1,-0.1,10.0}) {
+   for (int n : new int[]{1,4,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS,64}) {
+    assertEquals(finalSpeed(initialSpeed,true,0,n), finalSpeedAtMagnitude(initialSpeed,1.0,0,n), 0.0,
+      "brakeMagnitude=1.0 must be byte-identical to the old braking=true at speed="+initialSpeed+" n="+n);
+    assertEquals(finalSpeed(initialSpeed,false,200,n), finalSpeedAtMagnitude(initialSpeed,0.0,200,n), 0.0,
+      "brakeMagnitude=0.0 must be byte-identical to the old braking=false at speed="+initialSpeed+" n="+n);
+   }
+  }
+ }
+
+ /**
+  * The actual new behavior this ticket adds: a partial pedal press must stop LESS than a full
+  * press over the same tick (not clamp to the same full-brake outcome), and progressively
+  * stronger presses must monotonically remove more speed - real G29 brake-axis strength finally
+  * reaching the physics instead of being collapsed to on/off.
+  */
+ @Test void partialBrakeMagnitudeRemovesProportionallyLessSpeedThanFullBraking() {
+  double initialSpeed=10.0;
+  double priorSpeed=initialSpeed;
+  for (double magnitude : new double[]{0.0,0.25,0.5,0.75,1.0}) {
+   double speed=finalSpeedAtMagnitude(initialSpeed,magnitude,0,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+   assertTrue(speed <= priorSpeed,
+     "a stronger brake pedal press must never leave MORE speed than a weaker one - magnitude="+magnitude+" speed="+speed+" prior="+priorSpeed);
+   priorSpeed=speed;
+  }
+  double halfBrakeSpeed=finalSpeedAtMagnitude(initialSpeed,0.5,0,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  double fullBrakeSpeed=finalSpeedAtMagnitude(initialSpeed,1.0,0,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  assertTrue(halfBrakeSpeed > fullBrakeSpeed + 1e-6,
+    "a half-pressed pedal must stop strictly less than a fully-pressed one in the force-limited regime - half="+halfBrakeSpeed+" full="+fullBrakeSpeed);
+ }
+
+ /**
+  * Parking brake (a plain toggle with no pedal-strength axis of its own - ticket MINECRAFT-504)
+  * must still force the full 1.0 magnitude at the PhysicsBridge call site, not merely braking=true
+  * as a boolean; this documents the solver-level half of that contract (full force available),
+  * the PhysicsBridge-level wiring itself is inspected directly, not re-derivable from this class.
+  */
+ @Test void fullMagnitudeStopsAtLeastAsMuchAsAnyPartialMagnitudeForParkingBrakeParity() {
+  double initialSpeed=10.0;
+  double fullBrakeSpeed=finalSpeedAtMagnitude(initialSpeed,1.0,0,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+  for (double magnitude : new double[]{0.1,0.3,0.6,0.9}) {
+   double partial=finalSpeedAtMagnitude(initialSpeed,magnitude,0,MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
+   assertTrue(fullBrakeSpeed <= partial,
+     "parking brake's forced full magnitude must stop at least as much as any lesser pedal press - magnitude="+magnitude+" partial="+partial+" full="+fullBrakeSpeed);
+  }
  }
 }

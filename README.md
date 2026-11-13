@@ -184,6 +184,60 @@ has already destroyed; the towed vehicle itself keeps its own body and
 simply becomes an unjointed, free vehicle in its own category, the same as
 any other.
 
+## Wheel/joystick input (G29 and similar)
+
+Steering-wheel/pedal/shifter support (ticket MINECRAFT-504) is **entirely
+native to Immersive Vehicles** - this project adds no input-handling code,
+keybind GUI, or parallel binding system. Verified by decompiling the exact
+pinned installed artifact (`curse.maven:minecraft-transport-simulator-286703:7926606`,
+IV 24.0.0), not just upstream source (which can be ahead of what is actually
+pinned/installed):
+
+> **Current installed state (ticket comment 53549): capability confirmed,
+> binding/calibration still pending.** The running profile's
+> `controlsettings.json` has no joystick assignments and `useShifter=false` -
+> native support existing in the mod is a different fact from a G29 actually
+> being bound on this install. Treat the steps below as what to configure,
+> not as something already done.
+
+- **Bind it in IV's own controls GUI/`controlsettings.json`**, the same way
+  as any other joystick: per-axis min/max travel, inversion, and a global
+  deadzone for `CAR_TURN` (steering), `CAR_GAS` and `CAR_BRAKE` (separate
+  analog pedals - a combined pedal works too, just bind both to the same
+  axis), and digital shift buttons `CAR_SHIFT_1`-`CAR_SHIFT_R` (H-pattern,
+  gated by IV's own `useShifter` setting) or `CAR_SHIFT_U`/`CAR_SHIFT_D`
+  (sequential up/down - this is what wheel **paddles** should be bound to:
+  each is independently joystick-button-bindable and edge-triggered, exactly
+  the "paddle shifts one gear per press" behavior, not the old
+  `dynamic-vehicles` prototype's different test-time paddle actions, which
+  this project does not reuse).
+- **Keyboard/gamepad coexistence and reconnect are both automatic**: every
+  bound control falls back to keyboard when no matching joystick is present
+  and re-engages the joystick the instant `isJoystickPresent` sees it again
+  (polled fresh every tick - there is no persisted "was connected" state that
+  can go stale across a disconnect).
+- **The one real gap** (not an IV limitation - a loss internal to this
+  project): `PhysicsBridge.stepGround` used to collapse the brake pedal to a
+  boolean (`v.brakeVar.isActive`) before applying `brakeForce`, discarding
+  the real 0-1 analog pedal strength IV's own `brakeVar.currentValue` already
+  carries from the wheel's brake axis. Fixed: the full analog magnitude now
+  scales the brake force cap proportionally (full press and no press are
+  byte-identical to the old boolean behavior; partial presses now stop
+  proportionally less than a full press instead of clamping to on/off).
+  Parking brake has no pedal-strength axis of its own and forces full (1.0)
+  magnitude, same as before.
+
+**Device-tested vs. automated verification**: the native IV binding/
+deadzone/inversion/reconnect/sequential-shift behavior above is standard,
+widely-used IV functionality and is not re-tested by this project (nothing
+in this repository's code could regress it); the analog brake-magnitude fix
+has automated unit coverage (`MultiContactFrictionSolverBrakingTest`) proving
+proportional behavior and exact parity with the old boolean at both
+boundaries. Actually driving with a physical G29 - confirming the paddle
+bindings feel right and the wheel reconnects cleanly in practice - is
+John's own device-level verification; this project has no CI hardware to
+exercise a real wheel.
+
 ## Configuration
 
 JSON is now **optional per-car tuning**, never an activation prerequisite. A

@@ -1215,7 +1215,15 @@ public final class PhysicsBridge {
    double rawDrive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
     rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue*tuning.driveForce;
-   boolean braking=v.brakeVar.isActive || v.parkingBrakeVar.isActive;
+   // G29/wheel analog brake pedal strength (ticket MINECRAFT-504, comment 52840/53522) - IV's own
+   // brakeVar.currentValue (ComputedVariable) already carries the real 0-1 pedal magnitude from
+   // its ControlsJoystick.CAR_BRAKE axis (isActive is merely currentValue>0 - see that class's own
+   // doc); collapsing straight to isActive here silently threw that magnitude away. Parking brake
+   // is a plain toggle with no analog magnitude of its own, so it forces full (1.0) braking rather
+   // than contributing a magnitude. Clamped defensively since nothing upstream guarantees the
+   // ComputedVariable stays within 0-1 (e.g. a modpack-side script writing it directly).
+   double brakeMagnitude=v.parkingBrakeVar.isActive?1.0:Math.max(0.0,Math.min(1.0,v.brakeVar.currentValue));
+   boolean braking=brakeMagnitude>0.0;
    // Opt-in experimental throttle-rate-rise candidate (ticket comment 53115) - bypassed
    // (drive==rawDrive) unless EXPERIMENTAL_THROTTLE_RAMP_TICKS>0. The rate is THIS vehicle's own
    // configured drive scale / the configured tick count, not a fixed newtons-per-tick constant,
@@ -1260,7 +1268,7 @@ public final class PhysicsBridge {
      +" wheels="+wheels.size()+" spring="+spring+" damper="+damper+" pose.position="+vfull(pose.position())+" orientation="+qfull(q)
      +" up="+vfull(up)+" linearVelocity="+vfull(velocity)+" angularVelocity="+vfull(angular)
      +" drive="+drive+" braking="+braking+" throttle="+v.throttleVar.currentValue+" rudder="+v.rudderInputVar.currentValue
-     +" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer
+     +" brakeMagnitude="+brakeMagnitude+" brakeActive="+v.brakeVar.isActive+" parkingBrakeActive="+v.parkingBrakeVar.isActive+" skidSteer="+skidSteer
      // Raw vs shaped drive + ramp identity (ticket comment 53115) - driveRaw==drive and
      // throttleRampTicks=0 together prove the experimental candidate is bypassed on this build/
      // session; otherwise shows exactly which configured tick count shaped this tick's drive.
@@ -1538,7 +1546,7 @@ public final class PhysicsBridge {
    var contacts=hits.stream().map(h->new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier())).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
-     braking,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
+     brakeMagnitude,wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
      effectiveFrictionSolverIterations());
    // Phase 3 below returns to the OWNER-HALF basis (owner.ownerVelocity()/ownerAngular()/
    // leverArmCorrection()/handle()) deliberately - pure kinematics (contactVelocity) is

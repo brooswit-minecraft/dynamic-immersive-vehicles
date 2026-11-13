@@ -96,7 +96,14 @@ public final class MultiContactFrictionSolver {
  public static FrictionResult[] solveFriction(FrictionContact[] contacts, double mass, Vector3dc inertiaBody,
      Quaterniondc orientation, Quaterniondc inverseOrientation,
      Vector3d workingVelocity, Vector3d workingAngular,
-     boolean braking, double brakeForcePerWheel, double driveForcePerWheel, double friction, double lateralGripMultiplier, double dt, int iterations) {
+     double brakeMagnitude, double brakeForcePerWheel, double driveForcePerWheel, double friction, double lateralGripMultiplier, double dt, int iterations) {
+  // G29/wheel analog brake pedal (ticket MINECRAFT-504) - brakeMagnitude is a 0-1 pedal strength,
+  // not a boolean. braking at 0.0 takes the exact same (prescribedLongitudinal=drive) branch as
+  // the old `false`; scaling the CAP (not the prescribed target) by magnitude means 1.0 is
+  // byte-identical to the old `true`/full brakeForcePerWheel, with real values interpolating the
+  // CONSTRAINT the solve is allowed to apply, not the physical formula computing it.
+  boolean braking=brakeMagnitude>0.0;
+  double scaledBrakeForcePerWheel=brakeForcePerWheel*brakeMagnitude;
   int n=contacts.length;
   // accLong/accLat track the TOTAL applied-so-far longitudinal/lateral force (post friction-
   // circle clamp) purely so each pass's impulse delta is correct - same role for both.
@@ -135,7 +142,7 @@ public final class MultiContactFrictionSolver {
      double longitudinalEffectiveMass=contactEffectiveMass(mass,c.point(),c.forward(),inverseOrientation,inertiaBody);
      brakeIncrement=-Math.signum(speed)*Math.abs(speed)*longitudinalEffectiveMass/dt*c.skidSteerMultiplier();
     } else { prescribedLongitudinal=driveForcePerWheel*c.skidSteerMultiplier(); brakeIncrement=0; }
-    double candidateBrakeConstraint=Math.max(-brakeForcePerWheel,Math.min(brakeForcePerWheel,accBrakeConstraint[i]+brakeIncrement));
+    double candidateBrakeConstraint=Math.max(-scaledBrakeForcePerWheel,Math.min(scaledBrakeForcePerWheel,accBrakeConstraint[i]+brakeIncrement));
     accBrakeConstraint[i]=candidateBrakeConstraint;
     double longitudinalTarget=prescribedLongitudinal+rollingResistance+candidateBrakeConstraint;
     // Lateral is an ACCUMULATED CONSTRAINT CORRECTION, not a prescribed target (review comment

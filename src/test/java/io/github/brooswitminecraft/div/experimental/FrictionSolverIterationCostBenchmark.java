@@ -39,7 +39,7 @@ class FrictionSolverIterationCostBenchmark {
    Vector3d velocity=new Vector3d(0.6,0,1.2), angular=new Vector3d(0.01,0,0.02);
    long start=System.nanoTime();
    MultiContactFrictionSolver.solveFriction(contacts,MASS,inertiaBody,orientation,inverse,velocity,angular,
-     true,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,iterations);
+     1.0,BRAKE_FORCE/4.0,0,FRICTION,1.0,DT,iterations);
    total += System.nanoTime()-start;
   }
   return total;
