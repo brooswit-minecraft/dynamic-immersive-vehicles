@@ -67,11 +67,19 @@ public final class EngineSoundDiagnostics {
  }
  /** Called from {@code DefinableSoundMixin} at the TAIL of {@code updateSounds(float)}, after
   * its own per-tick switchbox update loop has already run for every currently-playing sound
-  * belonging to that entity - these are the REAL final gain/pitch a listening player would
-  * actually hear, not the placeholder construction defaults. */
- public static void logFinalGainPitch(String soundPlayingName, float finalVolume, float finalPitch) {
+  * belonging to that entity - {@code finalVolume}/{@code finalPitch} are the real values a
+  * listening player would actually hear, not the placeholder construction defaults.
+  * {@code configuredSoundVolume} is IV's own separate in-game sound-volume config setting (NOT
+  * Minecraft's master/category volume - IV deliberately bypasses that), multiplied into the
+  * REAL final AL_GAIN one further step downstream, in {@code InterfaceSound.update()}'s own
+  * per-tick loop, which neither this hook nor {@link #logPlaybackOutcome} otherwise observes -
+  * {@code effectiveGain} is that real product, computed here (not mutated/sent anywhere) purely
+  * so a low/zero in-mod volume setting shows up directly instead of looking identical to a
+  * healthy finalVolume. */
+ public static void logFinalGainPitch(String soundPlayingName, float finalVolume, float finalPitch, float configuredSoundVolume) {
   if (ENABLED && isEngineSound(soundPlayingName) && shouldLogThisCall("final:" + soundPlayingName))
    LOGGER.info("[DIV debugEngineSound] finalGainPitch soundPlayingName=\"" + soundPlayingName
-     + "\" finalVolume=" + finalVolume + " finalPitch=" + finalPitch);
+     + "\" finalVolume=" + finalVolume + " finalPitch=" + finalPitch
+     + " configuredSoundVolume=" + configuredSoundVolume + " effectiveGain=" + (finalVolume * configuredSoundVolume));
  }
 }
