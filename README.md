@@ -72,10 +72,13 @@ each vehicle from IV's own definition at the moment it is needed:
   local Minecraft water surface; a hull resting unevenly in the water is
   righted by that per-device force distribution rather than a separate
   stability calculation. An optional, configurable rotational water-drag
-  torque (`angularWaterDrag`, MINECRAFT-518) additionally damps the hull's
-  own roll/pitch/yaw directly - a dedicated stability knob on top of (never
-  a replacement for) that per-float righting torque, defaulting to 0 (no
-  change from prior behavior) unless configured. Installed non-rotor `PartPropeller`s add forward/
+  coefficient (`angularWaterDrag`, MINECRAFT-518) additionally damps the
+  hull's own roll/pitch/yaw directly - a dedicated stability knob on top
+  of (never a replacement for) that per-float righting torque, applied as
+  a direct, implicit (unconditionally stable - never overshoots or
+  reverses the hull's spin, regardless of the configured value) velocity
+  retention rather than a force, defaulting to 0 (no change from prior
+  behavior) unless configured. Installed non-rotor `PartPropeller`s add forward/
   reverse thrust, steered by the rudder input, allocated per actual
   engine-to-propeller linkage rather than one vehicle-wide signal applied to
   every installed propeller. IV exposes neither that linkage nor a

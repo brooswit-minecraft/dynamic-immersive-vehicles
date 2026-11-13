@@ -23,17 +23,43 @@ public final class Buoyancy {
  public static double drag(double speed, double submergedFraction, double dragCoefficient) {
   return submergedFraction * dragCoefficient * speed * speed;
  }
- /** Quadratic rotational water drag torque magnitude (N*m), opposing the hull's own angular
-  * velocity and scaled by how submerged it is - the rotational analogue of {@link #drag} for
-  * roll/pitch/yaw. MINECRAFT-518: today a floating hull gets a righting torque only as an
-  * emergent side effect of {@code drag} applied at each float device's own off-center position
-  * (see {@code BuoyantForces}'s class doc); nothing damps rotation itself, so a hull knocked
-  * into a spin (e.g. by a collision) has no hydrodynamic resistance arresting that spin beyond
-  * those per-float linear-drag side effects. Zero {@code angularDragCoefficient} (the documented
-  * fallback) reproduces that exact prior behavior - this is an additive stability knob, not a
-  * replacement for the existing per-float righting torque. */
- public static double angularDrag(double angularSpeed, double submergedFraction, double angularDragCoefficient) {
-  return submergedFraction * angularDragCoefficient * angularSpeed * angularSpeed;
+ /**
+  * Per-tick retention fraction (always in (0,1]) for rotational water drag - the rotational
+  * analogue of {@link #drag} for roll/pitch/yaw, but solved as an IMPLICIT (backward-Euler) decay
+  * on angular velocity directly, not an explicit torque/impulse. MINECRAFT-518: today a floating
+  * hull gets a righting torque only as an emergent side effect of {@code drag} applied at each
+  * float device's own off-center position (see {@code BuoyantForces}'s class doc); nothing damps
+  * rotation itself, so a hull knocked into a spin (e.g. by a collision) has no hydrodynamic
+  * resistance arresting that spin beyond those per-float linear-drag side effects.
+  *
+  * <p>Review finding (John, ticket comment 53679): an earlier version of this method returned an
+  * explicit quadratic TORQUE magnitude, applied as an impulse via {@code RigidBodyHandle
+  * .applyAngularImpulse}. Converting that impulse to a velocity change divides by the body's own
+  * moment of inertia - a quantity {@code RigidBodyHandle} exposes no way to read, so the
+  * resulting delta-omega was inertia-UNAWARE. For a light/low-inertia hull and a coefficient
+  * anywhere in this field's own documented valid range, that explicit update can overshoot past
+  * zero and reverse the hull's spin while ADDING rotational energy (review's own worked example:
+  * c=100000, fraction=1, I=1000 kg*m^2, omega=1 rad/s yields omega'=-4 rad/s - 4x the speed, flipped
+  * sign) - a genuine instability, not merely an approximation error.
+  *
+  * <p>Fixed by changing what this method computes and how its result is applied: instead of a
+  * torque converted through an unknown inertia, this returns the closed-form solution of the
+  * quadratic-drag ODE {@code d(omega)/dt = -coefficient*fraction*omega*|omega|} integrated
+  * IMPLICITLY (evaluating the right-hand side at the END-of-step omega, not the start) over one
+  * tick of {@code dt}: {@code omega(t+dt) = omega(t) / (1 + coefficient*fraction*|omega(t)|*dt)}.
+  * The retention fraction this returns, {@code 1 / (1 + coefficient*fraction*|omega(t)|*dt)}, is
+  * mathematically guaranteed to lie in {@code (0,1]} for every nonnegative {@code
+  * angularDragCoefficient}/{@code submergedFraction}/{@code angularSpeed}/{@code dt} - the
+  * denominator is always {@code >= 1} - so the caller (which multiplies the body's OWN current
+  * angular velocity by this fraction, a direct velocity scale via {@code
+  * RigidBodyHandle.addLinearAndAngularVelocity}, never an impulse) can never remove more than
+  * 100% of the existing spin, never reverse its sign, and never add rotational energy, for ANY
+  * configured coefficient - not just within some additionally-clamped "safe" range. This also
+  * sidesteps the missing-inertia problem entirely: no moment of inertia is needed anywhere in
+  * this formula or its caller. A zero coefficient (the documented fallback) still returns exactly
+  * 1 (no change at all), reproducing the exact prior behavior. */
+ public static double angularDragRetention(double angularSpeed, double submergedFraction, double angularDragCoefficient, double dt) {
+  return 1.0 / (1.0 + submergedFraction * angularDragCoefficient * angularSpeed * dt);
  }
  /** Propeller thrust (N); a propeller produces no thrust at all unless it is both underwater
   * and itself active (IV's own isActiveVar - not destroyed/removed) - an inactive or damaged

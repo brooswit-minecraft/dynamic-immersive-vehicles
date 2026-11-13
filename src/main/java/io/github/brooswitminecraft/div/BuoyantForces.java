@@ -33,10 +33,13 @@ import java.util.Map;
  * propeller; an installed rotor propeller is excluded here deliberately - its thrust is already
  * supplied by {@code PhysicsBridge.Body.stepRotor}'s own collective/cyclic model regardless of
  * water, so counting it again here would double-apply the same propulsive force. MINECRAFT-518
- * additionally applies an optional rotational (roll/pitch/yaw) water-drag torque, averaged across
- * every float's own submerged fraction - a dedicated damping term for rotation itself, on top of
- * (never a replacement for) the per-float righting torque above; its tuning.angularWaterDrag
+ * additionally applies an optional rotational (roll/pitch/yaw) water-drag damping, averaged
+ * across every float's own submerged fraction - a dedicated damping term for rotation itself, on
+ * top of (never a replacement for) the per-float righting torque above; its tuning.angularWaterDrag
  * coefficient defaults to 0 (no change from prior behavior) unless an operator configures it.
+ * Applied as a direct, implicit (unconditionally stable) velocity retention via {@link
+ * Buoyancy#angularDragRetention} - never as an inertia-converted impulse - per review finding
+ * 53679 (see that method's own doc for why an impulse-based approach was unsafe).
  */
 final class BuoyantForces {
  private BuoyantForces() {}
@@ -75,13 +78,23 @@ final class BuoyantForces {
   // volumePerFloat/awake behavior for that case). tuning.angularWaterDrag defaults to 0 (see
   // Overrides.FALLBACK), which reproduces the exact prior behavior of no dedicated rotational
   // damping term - this augments, never replaces, the per-float righting torque above.
+  //
+  // Review finding (John, comment 53679): applying this as an inertia-converted IMPULSE could
+  // overshoot past zero and reverse/amplify the hull's spin for a light hull and a coefficient
+  // within this field's own valid range - see Buoyancy.angularDragRetention's own doc for the
+  // worked example and the fix. Fixed by scaling the hull's own CURRENT angular velocity
+  // directly by a retention fraction mathematically guaranteed to stay in (0,1] (never an
+  // impulse divided by an inertia this bridge cannot read at all via RigidBodyHandle), via
+  // addLinearAndAngularVelocity (a direct velocity add/scale, not a force/impulse) - world-frame,
+  // like `angular` itself already is, so no inverse-orientation transform is needed here (unlike
+  // the per-float impulses above, which are LOCAL-frame).
   double angularSpeed = angular.length();
-  if (!floats.isEmpty() && angularSpeed > 1e-6) {
+  if (!floats.isEmpty() && angularSpeed > 1e-6 && tuning.angularWaterDrag > 0) {
    double averageFraction = totalFraction / floats.size();
-   double torqueMagnitude = Buoyancy.angularDrag(angularSpeed, averageFraction, tuning.angularWaterDrag);
-   if (torqueMagnitude > 0) {
-    Vector3d torque = new Vector3d(angular).normalize().mul(-torqueMagnitude);
-    handle.applyAngularImpulse(inverse.transform(new Vector3d(torque).mul(PhysicsBridge.DT)));
+   if (averageFraction > 0) {
+    double retention = Buoyancy.angularDragRetention(angularSpeed, averageFraction, tuning.angularWaterDrag, PhysicsBridge.DT);
+    Vector3d deltaAngular = new Vector3d(angular).mul(retention - 1.0);
+    handle.addLinearAndAngularVelocity(new Vector3d(), deltaAngular);
    }
   }
   // Per-propeller drive, keyed by actual engine linkage (PartEngineAccessor.linkedPropellers -

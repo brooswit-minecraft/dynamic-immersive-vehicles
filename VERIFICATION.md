@@ -1109,17 +1109,38 @@ float device's own off-center position (see its class doc), so a hull
 knocked into a spin (e.g. by a collision) had no hydrodynamic resistance
 arresting that spin on its own.
 
-Added `angularWaterDrag` (`Overrides.Tuning`): a rotational-drag-torque
-coefficient, the direct rotational analogue of the existing `waterDrag`.
-`Buoyancy.angularDrag(angularSpeed, submergedFraction, coefficient)` is a
-new pure function mirroring `Buoyancy.drag`'s own quadratic shape (torque
-grows with the square of angular speed, scales with how submerged the
-hull is - averaged across every installed float device's own submerged
-fraction this tick, zero with no floats at all). `BuoyantForces.apply`
-applies it as a damping torque impulse opposing the hull's live angular
-velocity, in the same world-to-local frame conversion the existing
-per-float force application already uses, and only when the computed
-torque is actually nonzero.
+Added `angularWaterDrag` (`Overrides.Tuning`): a rotational-drag
+coefficient, the rotational analogue of the existing `waterDrag`.
+
+**Damping-stability finding, corrected after exact-head review (John,
+ticket comment 53679).** The first revision computed an explicit quadratic
+TORQUE magnitude and applied it as an impulse via `RigidBodyHandle
+.applyAngularImpulse`. Converting that impulse into a velocity change
+divides by the body's own moment of inertia - a quantity `RigidBodyHandle`
+exposes no way to read at all. Review's own worked example (coefficient
+100000, fraction 1, inertia 1000 kg*m^2, starting angular speed 1 rad/s)
+showed this explicit update overshoots past zero and reverses the hull's
+spin while ADDING rotational energy (`omega' = -4 rad/s`, 4x the starting
+speed and flipped sign) - a genuine instability reachable from values
+already inside this field's own documented valid range, not merely an
+approximation error at some extreme edge.
+
+Fixed by changing both what the pure function computes and how its result
+is applied, rather than clamping the old impulse after the fact (which
+would still have needed the unavailable inertia to bound correctly):
+`Buoyancy.angularDragRetention(angularSpeed, submergedFraction,
+angularDragCoefficient, dt)` now returns the closed-form IMPLICIT
+(backward-Euler) solution of the same quadratic-drag ODE - `1 / (1 +
+coefficient*fraction*|omega|*dt)` - which is mathematically guaranteed to
+lie in `(0,1]` for every nonnegative input, with no inertia anywhere in
+the formula. `BuoyantForces.apply` multiplies the hull's own CURRENT
+angular velocity by that fraction directly via `RigidBodyHandle
+.addLinearAndAngularVelocity` (a direct velocity scale, never a force or
+impulse) - world-frame, matching `angular`'s own existing frame, so no
+`inverse`-orientation transform is needed for this term (unlike the
+per-float impulses, which are local-frame). A retention of exactly 1 (zero
+coefficient, the documented fallback, or no submersion/rotation) is a
+true no-op, byte-identical to before this ticket.
 
 Preserves default behavior exactly: the documented `FALLBACK` for this
 field is `0.0`, so an unconfigured vehicle (or one explicitly setting
@@ -1138,11 +1159,14 @@ a config reload with no respawn needed (added to its own doc comment's
 confirmed-by-inspection list and to `reloadOverrides`'s live-safe set,
 verified by `PhysicsBridgeLiveOverrideApplicationTest`).
 
-`BuoyancyTest` covers `Buoyancy.angularDrag` at the pure-function level:
-zero when not submerged or not rotating, quadratic growth with angular
-speed, linear scaling with submerged fraction, and that a zero coefficient
-(the documented fallback) reproduces exactly zero rotational damping
-regardless of angular speed or submersion. `OverridesTest` covers
+`BuoyancyTest` covers `Buoyancy.angularDragRetention` at the pure-function
+level: retention is exactly 1 (no-op) when not submerged, not rotating, or
+the coefficient is zero; retention stays strictly within `(0,1]` across a
+wide sweep of coefficient/speed/fraction combinations including review's
+own exact worked numbers (coefficient 100000, fraction 1, speed 1 rad/s -
+the regression case for the fixed instability); and retention decreases
+monotonically as coefficient, speed, or submerged fraction grows (more
+damping), never crossing zero or reversing. `OverridesTest` covers
 `angularWaterDrag`'s range validation (negative/over-100000 rejected, an
 explicit `0.0` and an in-range value both accepted), its fallback value in
 `resolved()`'s full-fallback and never-null assertions, its place in the
@@ -1152,7 +1176,7 @@ live-safe fields `applyLiveSafeFields` mutates in place (and confirms it
 is absent from `reportFieldsNeedingRespawn`'s construction-cached set,
 unchanged from before this ticket).
 
-`BuoyantForces.apply`'s actual torque-impulse application against a live
+`BuoyantForces.apply`'s actual velocity-retention application against a live
 rigid body remains in the same live-entity/`ServerLevel`/Sable-runtime
 testing gap as the rest of this file (documented above under "Buoyancy
 tests") - exercised only by an in-game run, not by any unit test in this
