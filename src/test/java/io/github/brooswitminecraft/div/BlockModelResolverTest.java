@@ -1,0 +1,259 @@
+package io.github.brooswitminecraft.div;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+
+import org.junit.jupiter.api.Test;
+
+/**
+ * Exercises the resolver with injected JSON fixtures shaped like a real log's blockstate/model
+ * (vertical vs horizontal axis), rather than real game assets - a pure Java test even though the
+ * classpath here has neither live Minecraft registries nor gson. Adapted from Dynamic Terrain's
+ * own {@code BlockModelResolverTest} (see {@code GroundSurface}'s class doc), with the key
+ * difference this ticket owns: a horizontal (rotated) log axis now RESOLVES to the correct
+ * world-face mapping instead of being refused - see {@link #axisZLogResolvesEndGrainOnNorthSouth}
+ * and {@link #axisXLogResolvesEndGrainOnEastWest}.
+ */
+class BlockModelResolverTest {
+    /** A cube_column-shaped log: vertical (axis=y) is unrotated; horizontal axes rotate the model.
+     * Values taken verbatim from vanilla's real oak_log blockstate. */
+    private static BlockModelResolver.JsonLoader logFixture() {
+        Map<String, Object> documents = new HashMap<>();
+        documents.put("minecraft:blockstates/oak_log", MiniJson.parse("""
+                {"variants": {
+                    "axis=x": {"model": "minecraft:block/oak_log_horizontal", "x": 90, "y": 90},
+                    "axis=y": {"model": "minecraft:block/oak_log"},
+                    "axis=z": {"model": "minecraft:block/oak_log_horizontal", "x": 90}
+                }}
+                """));
+        documents.put("minecraft:models/block/oak_log", MiniJson.parse("""
+                {"parent": "minecraft:block/cube_column",
+                 "textures": {"end": "minecraft:block/oak_log_top", "side": "minecraft:block/oak_log"}}
+                """));
+        documents.put("minecraft:models/block/cube_column", MiniJson.parse("""
+                {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                    "down": {"texture": "#end"}, "up": {"texture": "#end"},
+                    "north": {"texture": "#side"}, "south": {"texture": "#side"},
+                    "east": {"texture": "#side"}, "west": {"texture": "#side"}
+                }}]}
+                """));
+        documents.put("minecraft:models/block/oak_log_horizontal", MiniJson.parse("""
+                {"parent": "minecraft:block/cube_column",
+                 "textures": {"end": "minecraft:block/oak_log_top", "side": "minecraft:block/oak_log"}}
+                """));
+        return (namespace, path) -> documents.get(namespace + ":" + path);
+    }
+
+    private static String textureOf(Map<Face, BlockModelResolver.FaceTexture> faces, Face worldFace) {
+        return faces.get(worldFace).textureId();
+    }
+
+    @Test void verticalAxisResolvesEndAndSideFacesCorrectly() {
+        Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver
+                .resolve("minecraft", "oak_log", Map.of("axis", "y"), logFixture())
+                .orElseThrow();
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.UP));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.DOWN));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.NORTH));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.EAST));
+        // Identity rotation: the resolved model face equals the world face it's keyed by.
+        assertEquals(Face.UP, faces.get(Face.UP).modelFace());
+        assertEquals(0, faces.get(Face.UP).rotationXDegrees());
+        assertEquals(0, faces.get(Face.UP).rotationYDegrees());
+    }
+
+    /** MINECRAFT-517's own "laid logs" requirement: a log lying north-south shows its end-grain
+     * texture on the north/south faces (and bark everywhere else), matching the real in-game look. */
+    @Test void axisZLogResolvesEndGrainOnNorthSouth() {
+        Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver
+                .resolve("minecraft", "oak_log", Map.of("axis", "z"), logFixture())
+                .orElseThrow();
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.NORTH));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.SOUTH));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.UP));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.DOWN));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.EAST));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.WEST));
+        // World NORTH came from the model's own UP (end) face, rotated x=90,y=0 (verified via
+        // Face.rotate(UP,90,0)==NORTH, and against real vanilla furnace/dispenser ground truth in
+        // FaceTest) - the rotation a UV-basis consumer (DirectionalGroundSurface) needs is carried
+        // alongside the texture.
+        assertEquals(Face.UP, faces.get(Face.NORTH).modelFace());
+        assertEquals(90, faces.get(Face.NORTH).rotationXDegrees());
+        assertEquals(0, faces.get(Face.NORTH).rotationYDegrees());
+    }
+
+    /** A log lying east-west shows its end-grain on the east/west faces instead. */
+    @Test void axisXLogResolvesEndGrainOnEastWest() {
+        Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver
+                .resolve("minecraft", "oak_log", Map.of("axis", "x"), logFixture())
+                .orElseThrow();
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.EAST));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.WEST));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.UP));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.DOWN));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.NORTH));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.SOUTH));
+        // World EAST came from the model's own UP (end) face, rotated x=90,y=90 this time -
+        // different rotation than the axis=z case even though both still land on a side face.
+        assertEquals(Face.UP, faces.get(Face.EAST).modelFace());
+        assertEquals(90, faces.get(Face.EAST).rotationXDegrees());
+        assertEquals(90, faces.get(Face.EAST).rotationYDegrees());
+    }
+
+    @Test void nonRightAngleRotationReturnsNoEvidenceRatherThanGuessing() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/tilted_log", """
+                        {"variants": {"": {"model": "minecraft:block/cube", "x": 45}}}""",
+                "minecraft:models/block/cube", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                            "up": {"texture": "minecraft:block/top"}}}]}"""));
+        assertFalse(BlockModelResolver.resolve("minecraft", "tilted_log", Map.of(), loader).isPresent());
+    }
+
+    @Test void unmatchedStateValueReturnsNoEvidence() {
+        Optional<Map<Face, BlockModelResolver.FaceTexture>> faces =
+                BlockModelResolver.resolve("minecraft", "oak_log", Map.of("axis", "diagonal"), logFixture());
+        assertFalse(faces.isPresent());
+    }
+
+    @Test void missingBlockstateReturnsNoEvidence() {
+        Optional<Map<Face, BlockModelResolver.FaceTexture>> faces =
+                BlockModelResolver.resolve("minecraft", "nonexistent_block", Map.of(), logFixture());
+        assertFalse(faces.isPresent());
+    }
+
+    @Test void cacheKeyDiffersForDifferentStateValuesOfTheSameBlock() {
+        String vertical = BlockModelResolver.cacheKey("minecraft:oak_log", Map.of("axis", "y"));
+        String horizontalZ = BlockModelResolver.cacheKey("minecraft:oak_log", Map.of("axis", "z"));
+        String horizontalX = BlockModelResolver.cacheKey("minecraft:oak_log", Map.of("axis", "x"));
+        assertNotEquals(vertical, horizontalZ);
+        assertNotEquals(vertical, horizontalX);
+        assertNotEquals(horizontalZ, horizontalX);
+    }
+
+    @Test void cacheKeyIsStableForTheSameStateValuesRegardlessOfMapOrdering() {
+        Map<String, String> a = new HashMap<>();
+        a.put("axis", "y");
+        a.put("waterlogged", "false");
+        Map<String, String> b = new HashMap<>();
+        b.put("waterlogged", "false");
+        b.put("axis", "y");
+        assertEquals(BlockModelResolver.cacheKey("minecraft:oak_log", a), BlockModelResolver.cacheKey("minecraft:oak_log", b));
+    }
+
+    @Test void cacheKeyDiffersForDifferentBlocksWithTheSameStateValues() {
+        String oak = BlockModelResolver.cacheKey("minecraft:oak_log", Map.of("axis", "y"));
+        String spruce = BlockModelResolver.cacheKey("minecraft:spruce_log", Map.of("axis", "y"));
+        assertTrue(!oak.equals(spruce));
+    }
+
+    private static BlockModelResolver.JsonLoader fixtureOf(Map<String, String> documents) {
+        Map<String, Object> parsed = new HashMap<>();
+        documents.forEach((key, json) -> parsed.put(key, MiniJson.parse(json)));
+        return (namespace, path) -> parsed.get(namespace + ":" + path);
+    }
+
+    @Test void partialExtentElementReturnsNoEvidence() {
+        // A bottom slab: one element, but it only fills the bottom half of the block (to.y = 8, not
+        // 16). The sampler assumes a face spans the full block; a half-height element doesn't.
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/stone_slab", """
+                        {"variants": {"type=bottom": {"model": "minecraft:block/stone_slab"}}}""",
+                "minecraft:models/block/stone_slab", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 8, 16], "faces": {
+                            "down": {"texture": "#bottom"}, "up": {"texture": "#top"}}}]}"""));
+        assertFalse(BlockModelResolver.resolve("minecraft", "stone_slab", Map.of("type", "bottom"), loader).isPresent());
+    }
+
+    @Test void multiElementModelReturnsNoEvidence() {
+        // A stair-shaped model: two cuboids. Which one a tire touches on a given world face
+        // depends on exactly where it lands, which this doesn't model.
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/stone_stairs", """
+                        {"variants": {"": {"model": "minecraft:block/stone_stairs"}}}""",
+                "minecraft:models/block/stone_stairs", """
+                        {"elements": [
+                            {"from": [0, 0, 0], "to": [16, 8, 16], "faces": {"up": {"texture": "#top"}}},
+                            {"from": [8, 8, 0], "to": [16, 16, 16], "faces": {"up": {"texture": "#top"}}}
+                        ]}"""));
+        assertFalse(BlockModelResolver.resolve("minecraft", "stone_stairs", Map.of(), loader).isPresent());
+    }
+
+    @Test void elementLevelRotationReturnsNoEvidence() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/tilted_block", """
+                        {"variants": {"": {"model": "minecraft:block/tilted_block"}}}""",
+                "minecraft:models/block/tilted_block", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16],
+                            "rotation": {"origin": [8, 8, 8], "axis": "y", "angle": 45},
+                            "faces": {"up": {"texture": "#top"}}}]}"""));
+        assertFalse(BlockModelResolver.resolve("minecraft", "tilted_block", Map.of(), loader).isPresent());
+    }
+
+    @Test void croppedFaceUvIsOmittedButOtherFacesStillResolve() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/cropped_block", """
+                        {"variants": {"": {"model": "minecraft:block/cropped_block"}}}""",
+                "minecraft:models/block/cropped_block", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                            "up": {"texture": "minecraft:block/cropped_top", "uv": [0, 0, 8, 8]},
+                            "down": {"texture": "minecraft:block/cropped_bottom"}}}]}"""));
+        Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver.resolve("minecraft", "cropped_block", Map.of(), loader).orElseThrow();
+        assertFalse(faces.containsKey(Face.UP), "cropped face UV should be omitted, not guessed");
+        assertTrue(faces.containsKey(Face.DOWN), "an uncropped face on the same element should still resolve");
+    }
+
+    /** Review finding: {@code uvlock} keeps the texture screen/world-aligned instead of rotating
+     * with the model - a different remapping this resolver does not implement. Must refuse, not
+     * silently apply the plain (unlocked) inverse rotation as if {@code uvlock} weren't set. */
+    @Test void uvlockVariantReturnsNoEvidence() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/uvlocked_log", """
+                        {"variants": {"axis=x": {"model": "minecraft:block/cube_column", "x": 90, "y": 90, "uvlock": true}}}""",
+                "minecraft:models/block/cube_column", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                            "up": {"texture": "minecraft:block/end"}, "down": {"texture": "minecraft:block/end"},
+                            "north": {"texture": "minecraft:block/side"}, "south": {"texture": "minecraft:block/side"},
+                            "east": {"texture": "minecraft:block/side"}, "west": {"texture": "minecraft:block/side"}}}]}"""));
+        assertFalse(BlockModelResolver.resolve("minecraft", "uvlocked_log", Map.of("axis", "x"), loader).isPresent());
+    }
+
+    /** A weighted-random variant list whose entries agree on model/x/y/uvlock (only "weight"
+     * differs, the normal case for a cosmetic random-rotation list) is a safe, deterministic
+     * resolve - any entry is representative. */
+    @Test void variantArrayWithEquivalentEntriesResolves() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/random_stone", """
+                        {"variants": {"": [
+                            {"model": "minecraft:block/stone", "weight": 1},
+                            {"model": "minecraft:block/stone", "weight": 1}
+                        ]}}""",
+                "minecraft:models/block/stone", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                            "up": {"texture": "minecraft:block/stone"}}}]}"""));
+        assertTrue(BlockModelResolver.resolve("minecraft", "random_stone", Map.of(), loader).isPresent());
+    }
+
+    /** A weighted-random variant list whose entries genuinely disagree (different model or
+     * rotation) can't be resolved by this stateless resolver (it can't reproduce vanilla's
+     * position-seeded random pick) - refuse rather than arbitrarily commit to the first entry. */
+    @Test void variantArrayWithDifferingEntriesReturnsNoEvidence() {
+        BlockModelResolver.JsonLoader loader = fixtureOf(Map.of(
+                "minecraft:blockstates/random_rotated_stone", """
+                        {"variants": {"": [
+                            {"model": "minecraft:block/stone", "weight": 1},
+                            {"model": "minecraft:block/stone", "y": 90, "weight": 1}
+                        ]}}""",
+                "minecraft:models/block/stone", """
+                        {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
+                            "up": {"texture": "minecraft:block/stone"}}}]}"""));
+        assertFalse(BlockModelResolver.resolve("minecraft", "random_rotated_stone", Map.of(), loader).isPresent());
+    }
+}

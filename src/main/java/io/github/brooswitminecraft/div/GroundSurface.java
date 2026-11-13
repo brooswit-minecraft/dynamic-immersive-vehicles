@@ -10,9 +10,11 @@ package io.github.brooswitminecraft.div;
  * {@code PhysicsBridge} already uses elsewhere (see {@code PhysicsBridge#hasFloatDevice}/
  * {@code #selectStepper}). Numeric baselines are adapted (not imported as a dependency) from
  * Dynamic Terrain's reference {@code SurfaceProperties}; this mod has no build/runtime dependency
- * on Dynamic Terrain or Dynamic Vehicles. Per-pixel textures, directional 16x16-per-face response
- * and rotated-log orientation remain deferred to a later sprint; this only gives every solid
- * block ONE isotropic pair of multipliers.
+ * on Dynamic Terrain or Dynamic Vehicles. This record itself still only carries ONE isotropic pair
+ * of multipliers - the directional, per-face, canonical-texture response (including rotated-log
+ * orientation) MINECRAFT-517 adds lives in {@link DirectionalGroundSurface}, which wraps an
+ * instance of this baseline rather than replacing it: every instance below remains the safe,
+ * always-available fallback whenever that directional resolution can't succeed.
  *
  * @param frictionMultiplier tire grip relative to dry pavement (1.0 = pavement baseline)
  * @param rollingResistanceMultiplier rolling drag relative to dry pavement (1.0 = pavement baseline)
