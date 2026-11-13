@@ -608,14 +608,20 @@ reload log names exactly which changed fields, if any, fell into this
 
 Optional, per-vehicle `antiRollStiffness` - a dimensionless `0.0` (the
 default/fallback, no coupling at all - byte-identical to every vehicle's
-behavior before this feature existed) to `1.0` (a fully rigid anti-roll bar)
-coupling strength between a left/right pair of wheels on the SAME axle. It
-runs after each wheel's own independently-computed suspension load (static
-load share, spring, damper, compression, the existing per-wheel ground
-solve - see [`WheelLoadDistribution`](src/main/java/io/github/brooswitminecraft/div/WheelLoadDistribution.java))
-and simply blends a paired wheel's own load partway toward the pair's shared
-average, the rest of the solve (friction budget, drive/brake, native sync)
-then sees that already-redistributed load like any other.
+behavior before this feature existed) coupling strength for a genuinely
+RESTORING anti-roll bar between a left/right pair of wheels on the SAME
+axle: it amplifies the pair's roll-induced load difference (the same
+direction a stiffer real anti-roll bar does), it does not equalize their
+raw loads. It runs after each wheel's own independently-computed suspension
+load (static load share, spring, damper, compression, the existing
+per-wheel ground solve - see [`WheelLoadDistribution`](src/main/java/io/github/brooswitminecraft/div/WheelLoadDistribution.java)),
+and compares each side's load against ITS OWN static-equilibrium baseline
+(`mass*gravity*loadShare`) rather than against the pair's raw average - an
+asymmetric axle (COM off-center between the pair) legitimately carries
+unequal static loads with zero actual roll, and comparing against the raw
+average would manufacture a roll torque that was never really there. The
+rest of the solve (friction budget, drive/brake, native sync) then sees
+that already-redistributed load like any other.
 
 Axle/side pairing is purely geometric - two wheels pair iff they share the
 same longitudinal anchor and sit on strictly opposite sides of the chassis
@@ -625,10 +631,10 @@ axle (a single wheel, three or more sharing it, a centered skid-steer wheel,
 two wheels on the same side) is left completely uncoupled. A wheel whose
 paired partner is airborne (or otherwise has no contact) this tick is also
 left untouched - there is no real partner load to redistribute with. The
-blend is always an exact convex combination of the pair's own two loads, so
-it can never go negative, never exceed either side's own original load, and
-always conserves the pair's total load exactly - no separate per-side clamp
-is ever needed.
+one equal-and-opposite transfer is always bounded against whichever side is
+actually donating load this tick (never an independent per-side clamp), so
+neither side can go negative, and the pair's total load is always exactly
+conserved.
 
 ```json
 {

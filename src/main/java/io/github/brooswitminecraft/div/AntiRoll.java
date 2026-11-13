@@ -1,11 +1,33 @@
 package io.github.brooswitminecraft.div;
 /**
  * MINECRAFT-519: optional, bounded axle anti-roll coupling between a paired left/right wheel on
- * the SAME axle, partially equalizing their already-computed suspension normal forces (see
- * {@code PhysicsBridge.stepGround}'s own per-wheel {@code normal}, AFTER {@link
- * WheelLoadDistribution}'s static load-share calibration and the per-wheel spring/damper/
- * compression solve - this never touches the per-wheel calibration itself, only redistributes
- * between two wheels that already have an independently-computed real load this tick).
+ * the SAME axle - a genuine RESTORING coupling (amplifying the roll-induced load difference
+ * between the pair, same direction a stiffer real anti-roll bar does), not an equalizing one.
+ *
+ * <p><b>Review correction (comments 53750/53752) over an earlier version of this class.</b> An
+ * earlier revision blended each side toward the pair's own raw average load. That is backwards:
+ * a real anti-roll bar INCREASES the load difference between a tilted axle's two wheels (it
+ * resists differential wheel travel, which - because each wheel's spring already pushes back
+ * harder the more it is compressed - manifests as MORE restoring torque about the roll axis for
+ * the same tilt, not less). Blending toward the average does the opposite: at full strength it
+ * makes the two loads EXACTLY equal, which eliminates the restoring differential entirely rather
+ * than strengthening it. It also ignored this ticket's own {@link WheelLoadDistribution}: two
+ * wheels on the same axle legitimately carry UNEQUAL static loads whenever the chassis COM sits
+ * off-center between them (comment 53752's own worked example - 400N/600N at rest, geometrically
+ * correct, zero actual roll) - blending those toward a shared average manufactures a roll torque
+ * that was never really there.
+ *
+ * <p><b>The fix: couple the DEVIATION from each wheel's own static baseline, not the raw load.</b>
+ * Each wheel's own {@code baseline} is its calibrated static-equilibrium load (see {@code
+ * PhysicsBridge.suspensionSpringForShare}'s own doc - {@code mass*gravity*loadShare}, the exact
+ * load this wheel's spring is calibrated to support at rest). {@code normal-baseline} is then
+ * purely the ROLL-induced (or any other transient) component - zero whenever this wheel sits
+ * exactly at its own static equilibrium, regardless of how that baseline compares to its
+ * partner's. {@link #transfer} amplifies the pair's SIGNED difference in that deviation by
+ * {@code stiffness} and moves exactly that (bounded) amount from one side to the other - the pair
+ * genuinely restoring MORE than an uncoupled pair would for the same tilt, while two wheels
+ * sitting exactly at their own (possibly unequal) static baselines see zero transfer no matter
+ * how different those baselines are from each other.
  *
  * <p><b>Axle/pair identification is purely geometric</b> (ticket's own "identify actual axle/wheel
  * grouping from geometry/config without vehicle-ID hacks"): two wheels are the same axle's
@@ -15,40 +37,19 @@ package io.github.brooswitminecraft.div;
  * skid-steer/centered wheel at {@code x==0}, two wheels on the SAME side) is an unsupported layout
  * for THAT group and is left completely uncoupled - conservative by construction, never guessed.
  *
- * <p><b>The coupling itself is a dimensionless 0-1 blend toward the pair's own average load</b>
- * (ticket's "bounded... never independently clamp two ends and manufacture net vertical force"):
- * {@code stiffness==0} (the documented default/FALLBACK) changes NOTHING - exact zero/default
- * equivalence, not merely close. {@code stiffness==1} fully equalizes the pair (both end up at
- * their shared average - the "fully rigid bar" limit). Anything in between linearly interpolates.
- * Because each side's result is always a convex combination of {@code normalA} and {@code
- * normalB} (both already non-negative, real per-wheel loads), it can never go negative and can
- * never exceed the pair's own existing max - no separate clamp is needed, or possible to forget,
- * for either side, and the pair's sum is exactly conserved by construction (see {@link
- * #blendedNormalA}'s own algebra) rather than two independently-clamped ends that would have to
+ * <p><b>Bounded and conserved.</b> {@code stiffness<=0} (the documented default/FALLBACK) returns
+ * exactly zero transfer - exact zero/default equivalence, not merely close. A positive transfer
+ * is capped at the donor side's own current load (never below zero); the SAME single transfer
+ * amount is added to one side and subtracted from the other, so the pair's total is exactly
+ * conserved by construction - never two independently-clamped ends that would have to
  * manufacture or destroy net vertical force to stay consistent.
- *
- * <p><b>This couples LOAD, not travel.</b> A real torsion-bar anti-roll bar is usually described
- * as resisting differential wheel TRAVEL; this coupling instead equalizes the pair's already-
- * computed LOAD directly, each tick - the ticket's own stated contract is "conserved suspension
- * loads", not "equalized travel". The two are closely related but not identical: at {@code
- * stiffness==1.0}, both sides' loads become EXACTLY equal starting the very first tick they are
- * coupled, which - for a pair sharing the same calibrated spring/damper/effective-mass (the
- * common case) - also makes their acceleration (and so their velocity) identical from then on.
- * The pair's two compressions then evolve as their own shared AVERAGE (which still converges to
- * the ordinary ride-height equilibrium, exactly as an uncoupled wheel would) plus/minus a FIXED
- * offset equal to half the gap that existed the first coupled tick - every bit of load imbalance
- * is still eliminated every single tick, exactly as documented, but the pre-existing travel GAP
- * itself is frozen, never progressively closed, by a fully-rigid setting. A partial ({@code
- * 0<stiffness<1}) setting does not freeze anything - see {@code
- * PhysicsBridgeAntiRollSimulationTest} for the simulated settling behavior at both ends of the
- * range.
  *
  * <p>A wheel whose paired partner has no contact THIS tick (airborne, raycast miss, or simply
  * absent from the current hit list for any other reason) must be left completely untouched by the
  * caller - there is no real partner load to redistribute with, and inventing one would manufacture
  * force from nothing. That gating is the caller's responsibility (it alone knows which wheels
- * actually have a hit this tick); this class only ever computes the pairing and the blend once
- * both sides are already known to be real.
+ * actually have a hit this tick); this class only ever computes the pairing and the transfer once
+ * both sides, and both their static baselines, are already known to be real.
  */
 public final class AntiRoll {
  private AntiRoll() {}
@@ -82,16 +83,29 @@ public final class AntiRoll {
   }
   return partner;
  }
- /** The bounded 0-1 blend toward the pair's own average, applied to side A (call again with the
-  * arguments swapped for side B's own result - see class doc for why that is always the exact
-  * conservation-preserving counterpart, never a separate clamp). {@code stiffness} outside
-  * {@code [0,1]}, or any non-finite input, is treated as exactly 0 (no coupling) rather than
-  * extrapolating past the documented bounds or propagating a non-finite result. */
- public static double blendedNormalA(double normalA, double normalB, double stiffness) {
-  if (!Double.isFinite(stiffness) || stiffness <= 0) return normalA;
-  if (!Double.isFinite(normalA) || !Double.isFinite(normalB)) return normalA;
-  double s = Math.min(stiffness, 1.0);
-  double average = (normalA + normalB) * 0.5;
-  return normalA + (average - normalA) * s;
+ /**
+  * The bounded, baseline-relative restoring transfer (see class doc) - the amount to ADD to side
+  * A's own load and SUBTRACT from side B's (a negative result means the flow actually runs from
+  * A to B). {@code baselineA}/{@code baselineB} are each side's own static-equilibrium load (see
+  * {@code PhysicsBridge.suspensionSpringForShare}'s doc); {@code normalA}/{@code normalB} are
+  * their current, already-computed dynamic loads this tick. {@code stiffness<=0}, or any
+  * non-finite input, returns exactly {@code 0.0} (no coupling) rather than extrapolating past the
+  * documented bound or propagating a non-finite result.
+  */
+ public static double transfer(double normalA, double baselineA, double normalB, double baselineB, double stiffness) {
+  if (!Double.isFinite(stiffness) || stiffness <= 0) return 0.0;
+  if (!Double.isFinite(normalA) || !Double.isFinite(normalB) || !Double.isFinite(baselineA) || !Double.isFinite(baselineB)) return 0.0;
+  // The pair's SIGNED roll-induced difference - zero whenever both sides sit exactly at their
+  // own (possibly unequal) static baseline, regardless of how different those baselines are
+  // from each other (comment 53752's own "balanced static loads... zero roll torque" case).
+  double deviationA = normalA - baselineA, deviationB = normalB - baselineB;
+  double rollSignal = deviationA - deviationB;
+  if (!Double.isFinite(rollSignal)) return 0.0;
+  double desired = stiffness * rollSignal / 2.0;
+  if (!Double.isFinite(desired)) return 0.0;
+  // Bound the ONE equal-and-opposite transfer against whichever side is actually donating this
+  // tick, never an independent per-side clamp - see class doc.
+  if (desired >= 0) return Math.min(desired, Math.max(0.0, normalB));
+  return -Math.min(-desired, Math.max(0.0, normalA));
  }
 }

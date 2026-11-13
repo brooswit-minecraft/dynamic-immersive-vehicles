@@ -10,130 +10,152 @@ import static org.junit.jupiter.api.Assertions.*;
  * giving each paired wheel its OWN independent vertical degree of freedom (a quarter-car corner,
  * own effective mass {@code mass*loadShare} - exactly the same per-wheel effective-mass
  * assumption {@link PhysicsBridge#suspensionDamperForShare}'s own critical-damping formula
- * already makes) rather than {@code PhysicsBridgeWheelLoadShareSimulationTest}'s single shared
- * chassis-heave DOF. A shared-heave DOF cannot exercise anti-roll at all: with one acceleration
- * applied identically to every wheel, an initial left/right compression gap can never change
- * regardless of any coupling - the per-corner DOF below is what actually lets the two sides
- * evolve differently, and therefore lets {@link AntiRoll#blendedNormalA}'s redistribution
- * actually do something observable. The per-tick ORDER mirrors {@code stepGround} exactly:
- * compute every wheel's own independent suspension normal first, THEN blend a geometrically-
- * paired left/right pair toward their shared average - exactly once per tick, before that normal
- * feeds back into the next tick's integration.
+ * already makes) and applying {@link AntiRoll#transfer} exactly the way {@code stepGround} does:
+ * against each side's own static-equilibrium baseline ({@code mass*gravity*loadShare}), computed
+ * BEFORE that tick's integration. Covers the review-corrected acceptance shape (comments
+ * 53750/53752): a tilted chassis must see MORE restoring roll torque than an uncoupled baseline
+ * (not less), a neutral/asymmetric-static-load pair must see NO unsolicited torque, and the
+ * actual point-cross-force roll torque (normal x lateral offset) is checked directly, not just
+ * heave/settling.
  */
 class PhysicsBridgeAntiRollSimulationTest {
  private static final double TRAVEL = 0.3;
  /** One tick for a geometric left/right pair, each with its own independent quarter-car vertical
-  * DOF (own velocity/compression, own effective mass {@code perWheelMass}) - identical per-wheel
-  * integration to {@code PhysicsBridgeWheelLoadShareSimulationTest.tick} except (1) each wheel's
-  * acceleration divides by ITS OWN effective mass rather than one shared total, so the two sides
-  * can actually diverge/converge independently, and (2) the two independently-computed normals
-  * are blended via {@link AntiRoll#blendedNormalA} before being used for that same tick's
-  * acceleration - exactly mirroring stepGround's own "Phase 1 computes every WheelHit.normal(),
-  * then the anti-roll pass replaces them, THEN that normal is applied" order. {@code contact[i]}
-  * lets a wheel be dropped from this tick's coupling (and its own force) entirely - the
-  * airborne/no-contact case this ticket's own acceptance shape names - without needing an actual
-  * raycast MISS to reproduce it. The vehicle-wide safety cap step uses is {@code 2*perWheelMass*
-  * gravity} (this symmetric pair's own total weight), matching stepGround's real {@code
-  * mass*gravity} cap applied per wheel. */
- private static void tick(double[] compression, double[] velocity, double perWheelMass, double gravity,
+  * DOF - identical per-wheel integration to {@code PhysicsBridgeWheelLoadShareSimulationTest.tick}
+  * except each wheel's acceleration divides by ITS OWN effective mass, and - mirroring
+  * stepGround's own order exactly - the two independently-computed normals are coupled via
+  * {@link AntiRoll#transfer} (against each side's own static baseline {@code effectiveMass*
+  * gravity}, i.e. {@code mass*loadShare*gravity}) before being used for that same tick's
+  * acceleration. {@code contact[i]} drops a wheel from this tick's coupling (and its own force)
+  * entirely - the airborne/no-contact case this ticket's own acceptance shape names. */
+ private static void tick(double[] compression, double[] velocity, double[] perWheelMass, double gravity,
      double[] spring, double[] damper, boolean[] contact, double stiffness) {
   int n = compression.length;
   double[] normal = new double[n];
   for (int i = 0; i < n; i++) {
-   normal[i] = contact[i] ? Math.min(2*perWheelMass*gravity, TireForces.suspension(compression[i], velocity[i], spring[i], damper[i])) : 0.0;
+   normal[i] = contact[i] ? Math.min(2*perWheelMass[i]*gravity, TireForces.suspension(compression[i], velocity[i], spring[i], damper[i])) : 0.0;
   }
   if (contact[0] && contact[1]) {
-   double a = normal[0], b = normal[1];
-   normal[0] = AntiRoll.blendedNormalA(a, b, stiffness);
-   normal[1] = AntiRoll.blendedNormalA(b, a, stiffness);
+   double baselineA = perWheelMass[0]*gravity, baselineB = perWheelMass[1]*gravity;
+   double t = AntiRoll.transfer(normal[0], baselineA, normal[1], baselineB, stiffness);
+   normal[0] = normal[0] + t;
+   normal[1] = normal[1] - t;
   }
   for (int i = 0; i < n; i++) {
    if (!contact[i]) continue;
-   double acceleration = -gravity + normal[i]/perWheelMass;
+   double acceleration = -gravity + normal[i]/perWheelMass[i];
    velocity[i] = velocity[i] + PhysicsBridge.DT*acceleration;
    compression[i] = compression[i] - PhysicsBridge.DT*velocity[i];
   }
  }
- private record Rig(double perWheelMass, double gravity, double[] spring, double[] damper) {}
- private static Rig symmetricPair(double mass, double gravity) {
-  double[] loadShares = WheelLoadDistribution.shares(new double[]{1.0,-1.0}, new double[]{0.0,0.0});
-  double spring0 = PhysicsBridge.suspensionSpringForShare(mass, loadShares[0], TRAVEL, gravity);
-  double damper0 = PhysicsBridge.suspensionDamperForShare(mass, loadShares[0], spring0);
-  return new Rig(mass*loadShares[0], gravity, new double[]{spring0,spring0}, new double[]{damper0,damper0});
+ private record Rig(double[] perWheelMass, double gravity, double[] spring, double[] damper) {}
+ private static Rig pairRig(double mass, double gravity, double[] loadShares) {
+  double[] spring = new double[2], damper = new double[2], perWheelMass = new double[2];
+  for (int i = 0; i < 2; i++) {
+   perWheelMass[i] = mass*loadShares[i];
+   spring[i] = PhysicsBridge.suspensionSpringForShare(mass, loadShares[i], TRAVEL, gravity);
+   damper[i] = PhysicsBridge.suspensionDamperForShare(mass, loadShares[i], spring[i]);
+  }
+  return new Rig(perWheelMass, gravity, spring, damper);
  }
- private static double[] settlePair(double mass, double gravity, double initialCompressionA, double initialCompressionB,
-     double stiffness, int ticks) {
-  Rig rig = symmetricPair(mass, gravity);
-  double[] compression = {initialCompressionA, initialCompressionB};
-  double[] velocity = {0, 0};
-  boolean[] contact = {true, true};
-  for (int t = 0; t < ticks; t++) tick(compression, velocity, rig.perWheelMass(), rig.gravity(), rig.spring(), rig.damper(), contact, stiffness);
-  return compression;
+ private static double normalNow(Rig rig, double compression, double velocity, int side) {
+  return Math.min(2*rig.perWheelMass()[side]*rig.gravity(), TireForces.suspension(compression, velocity, rig.spring()[side], rig.damper()[side]));
  }
  @Test void zeroStiffnessReproducesTheUncoupledSettlingExactly() {
-  // Default/off (stiffness==0) must be BYTE-for-byte (to ordinary floating-point tolerance) what
-  // the same quarter-car integration produces with no blend at all - no behavior change for the
-  // documented default, at the full simulation level, not just AntiRollTest's unit level.
   double mass = 1500, gravity = 11;
-  double[] offExplicit = settlePair(mass, gravity, TRAVEL*.1, TRAVEL*.7, 0.0, 200);
-  double[] offNegative = settlePair(mass, gravity, TRAVEL*.1, TRAVEL*.7, -1.0, 200); // negative also means off
-  assertArrayEquals(offExplicit, offNegative, 1e-12);
+  double[] shares = WheelLoadDistribution.shares(new double[]{1.0,-1.0}, new double[]{0.0,0.0});
+  Rig rig = pairRig(mass, gravity, shares);
+  double[] compA = {TRAVEL*.1, TRAVEL*.7}, velA = {0,0};
+  double[] compB = {TRAVEL*.1, TRAVEL*.7}, velB = {0,0};
+  boolean[] contact = {true, true};
+  for (int t = 0; t < 200; t++) {
+   tick(compA, velA, rig.perWheelMass(), gravity, rig.spring(), rig.damper(), contact, 0.0);
+   tick(compB, velB, rig.perWheelMass(), gravity, rig.spring(), rig.damper(), contact, -1.0); // negative also means off
+  }
+  assertArrayEquals(compB, compA, 1e-12);
  }
- @Test void partialStiffnessStillConvergesToTheSameSymmetricEquilibriumAsUncoupled() {
-  // This pair's own static load share is symmetric, so with or without a PARTIAL anti-roll
-  // coupling both sides must still settle to the SAME long-run ride-height equilibrium
-  // (travel*.5) - coupling only changes the transient path, never the eventual resting load/
-  // compression for a layout that was already symmetric to begin with.
+ @Test void symmetricAxleNeutralDisturbanceConvergesToTheSameEquilibriumWithOrWithoutCoupling() {
   double mass = 1500, gravity = 11;
-  for (double stiffness : new double[]{0.0, 0.3, 0.6, 0.9}) {
-   double[] settled = settlePair(mass, gravity, TRAVEL*.1, TRAVEL*.7, stiffness, 4000);
-   assertEquals(TRAVEL*.5, settled[0], 1e-6, "stiffness="+stiffness);
-   assertEquals(TRAVEL*.5, settled[1], 1e-6, "stiffness="+stiffness);
+  double[] shares = WheelLoadDistribution.shares(new double[]{1.0,-1.0}, new double[]{0.0,0.0}); // 0.5/0.5
+  Rig rig = pairRig(mass, gravity, shares);
+  for (double stiffness : new double[]{0.0, 0.3, 0.6, 1.0}) {
+   double[] compression = {TRAVEL*.1, TRAVEL*.7}, velocity = {0,0};
+   boolean[] contact = {true, true};
+   for (int t = 0; t < 4000; t++) tick(compression, velocity, rig.perWheelMass(), gravity, rig.spring(), rig.damper(), contact, stiffness);
+   assertEquals(TRAVEL*.5, compression[0], 1e-6, "stiffness="+stiffness);
+   assertEquals(TRAVEL*.5, compression[1], 1e-6, "stiffness="+stiffness);
   }
  }
- @Test void fullyRigidStiffnessConvergesTheAverageButFreezesTheInitialGapRatherThanClosingIt() {
-  // Documented nuance (see AntiRoll's own class doc: this couples LOAD, not travel): at exactly
-  // 1.0 the pair's normals are forced EXACTLY equal from the very first tick, which - given both
-  // sides already share the SAME calibrated spring/damper/effective-mass - makes their
-  // acceleration (and therefore velocity) identical forever after. The two compressions are then
-  // just the pair's own AVERAGE (which still converges to the ordinary travel*.5 ride-height
-  // equilibrium, exactly as an uncoupled single wheel would) plus/minus a fixed offset equal to
-  // HALF the original gap - the gap itself is frozen at whatever it was the first coupled tick,
-  // never closed, even once the average has fully settled. This is intentional, conservation-
-  // preserving behavior (every bit of load difference is eliminated every tick, exactly as
-  // documented), not a bug - "conserved suspension LOAD" is the ticket's own stated contract,
-  // not "equalized travel".
+ @Test void neutralAsymmetricAxleAtItsOwnStaticEquilibriumGetsNoUnsolicitedRollTorque() {
+  // Review comment 53752's exact reproduction, driven through the real production formulas:
+  // an asymmetric pair (x=+1.2/-0.8, so UNEQUAL loadShares/baselines) sitting exactly at its own
+  // static equilibrium must see the SAME normals - and so the SAME point-cross-force roll
+  // torque (normal*x summed over the pair) - with or without a configured anti-roll stiffness.
   double mass = 1500, gravity = 11;
-  double initialA = TRAVEL*.1, initialB = TRAVEL*.7;
-  double halfGap = (initialB - initialA) / 2.0;
-  double[] settled = settlePair(mass, gravity, initialA, initialB, 1.0, 4000);
-  assertEquals(TRAVEL*.5 - halfGap, settled[0], 1e-6);
-  assertEquals(TRAVEL*.5 + halfGap, settled[1], 1e-6);
-  assertEquals(initialB - initialA, settled[1] - settled[0], 1e-9, "the original gap must be exactly preserved, never closed, under a fully-rigid coupling");
+  double[] x = {1.2, -0.8}, z = {0.0, 0.0};
+  double[] shares = WheelLoadDistribution.shares(x, z);
+  Rig rig = pairRig(mass, gravity, shares);
+  // At rest at exactly travel*.5 compression with zero velocity, each side's own calibrated
+  // spring supports EXACTLY its own baseline (mass*gravity*loadShare) by construction - no roll.
+  double normalA = normalNow(rig, TRAVEL*.5, 0, 0);
+  double normalB = normalNow(rig, TRAVEL*.5, 0, 1);
+  double baselineA = rig.perWheelMass()[0]*gravity, baselineB = rig.perWheelMass()[1]*gravity;
+  assertEquals(baselineA, normalA, 1e-6, "sanity: resting at travel*.5 must reproduce this side's own static baseline exactly");
+  assertEquals(baselineB, normalB, 1e-6);
+  double uncoupledTorque = normalA*x[0] + normalB*x[1];
+  for (double stiffness : new double[]{0.2, 0.6, 1.0, 3.0}) {
+   double t = AntiRoll.transfer(normalA, baselineA, normalB, baselineB, stiffness);
+   double coupledTorque = (normalA+t)*x[0] + (normalB-t)*x[1];
+   assertEquals(uncoupledTorque, coupledTorque, 1e-9, "stiffness="+stiffness+": a neutral asymmetric axle must see NO change in roll torque from any configured stiffness");
+   assertEquals(0.0, t, 1e-9, "stiffness="+stiffness);
+  }
  }
- @Test void totalNormalLoadThisTickIsExactlyConservedAcrossTheBlend() {
+ @Test void tiltedAxleGetsMoreRestoringRollTorqueThanTheUncoupledBaseline() {
+  // The actual acceptance case comment 53750 asked for: a tilted (one side compressed more than
+  // its own baseline, the other less) symmetric axle must see a LARGER restoring point-cross-
+  // force roll torque with coupling than the uncoupled baseline produces on its own - never a
+  // smaller one, and never exactly equal (which would mean the bar did nothing).
   double mass = 1500, gravity = 11;
-  Rig rig = symmetricPair(mass, gravity);
-  double normalA = Math.min(2*rig.perWheelMass()*gravity, TireForces.suspension(TRAVEL*.2, 0, rig.spring()[0], rig.damper()[0]));
-  double normalB = Math.min(2*rig.perWheelMass()*gravity, TireForces.suspension(TRAVEL*.8, 0, rig.spring()[1], rig.damper()[1]));
+  double[] x = {1.0, -1.0}, z = {0.0, 0.0}; // symmetric half-track for a clean torque sign check
+  double[] shares = WheelLoadDistribution.shares(x, z); // 0.5/0.5
+  Rig rig = pairRig(mass, gravity, shares);
+  double compressedSide = TRAVEL*.75, extendedSide = TRAVEL*.25; // a genuine roll disturbance
+  double normalA = normalNow(rig, compressedSide, 0, 0);
+  double normalB = normalNow(rig, extendedSide, 0, 1);
+  double baselineA = rig.perWheelMass()[0]*gravity, baselineB = rig.perWheelMass()[1]*gravity;
+  double uncoupledTorque = normalA*x[0] + normalB*x[1];
+  for (double stiffness : new double[]{0.2, 0.5, 1.0}) {
+   double t = AntiRoll.transfer(normalA, baselineA, normalB, baselineB, stiffness);
+   double coupledTorque = (normalA+t)*x[0] + (normalB-t)*x[1];
+   assertTrue(Math.abs(coupledTorque) > Math.abs(uncoupledTorque),
+     "stiffness="+stiffness+": coupled restoring torque "+coupledTorque+" must exceed the uncoupled baseline "+uncoupledTorque);
+  }
+ }
+ @Test void totalNormalLoadThisTickIsExactlyConservedAcrossTheTransfer() {
+  double mass = 1500, gravity = 11;
+  double[] shares = WheelLoadDistribution.shares(new double[]{1.0,-1.0}, new double[]{0.0,0.0});
+  Rig rig = pairRig(mass, gravity, shares);
+  double normalA = normalNow(rig, TRAVEL*.2, 0, 0);
+  double normalB = normalNow(rig, TRAVEL*.8, 0, 1);
+  double baselineA = rig.perWheelMass()[0]*gravity, baselineB = rig.perWheelMass()[1]*gravity;
   double unblendedTotal = normalA + normalB;
   for (double stiffness : new double[]{0.0, 0.25, 0.5, 0.75, 1.0}) {
-   double blendedA = AntiRoll.blendedNormalA(normalA, normalB, stiffness);
-   double blendedB = AntiRoll.blendedNormalA(normalB, normalA, stiffness);
-   assertEquals(unblendedTotal, blendedA + blendedB, 1e-6, "stiffness="+stiffness+" must conserve this tick's total normal load exactly");
+   double t = AntiRoll.transfer(normalA, baselineA, normalB, baselineB, stiffness);
+   assertEquals(unblendedTotal, (normalA+t) + (normalB-t), 1e-6, "stiffness="+stiffness+" must conserve this tick's total normal load exactly");
   }
  }
  @Test void airbornePartnerLeavesTheGroundedWheelsSettlingCompletelyUnaffectedByConfiguredStiffness() {
   double mass = 1500, gravity = 11;
-  Rig rig = symmetricPair(mass, gravity);
+  double[] shares = WheelLoadDistribution.shares(new double[]{1.0,-1.0}, new double[]{0.0,0.0});
+  Rig rig = pairRig(mass, gravity, shares);
   boolean[] contact = {true, false}; // partner (index 1) is airborne this whole run
   double[] compressionHighStiffness = {TRAVEL*.2, 0}, velocityHighStiffness = {0, 0};
   double[] compressionNoStiffness = {TRAVEL*.2, 0}, velocityNoStiffness = {0, 0};
   for (int t = 0; t < 200; t++) {
-   tick(compressionHighStiffness, velocityHighStiffness, rig.perWheelMass(), rig.gravity(), rig.spring(), rig.damper(), contact, 1.0);
-   tick(compressionNoStiffness, velocityNoStiffness, rig.perWheelMass(), rig.gravity(), rig.spring(), rig.damper(), contact, 0.0);
+   tick(compressionHighStiffness, velocityHighStiffness, rig.perWheelMass(), gravity, rig.spring(), rig.damper(), contact, 1.0);
+   tick(compressionNoStiffness, velocityNoStiffness, rig.perWheelMass(), gravity, rig.spring(), rig.damper(), contact, 0.0);
   }
   assertEquals(compressionNoStiffness[0], compressionHighStiffness[0], 1e-12,
-    "a configured (even fully-rigid) anti-roll coupling must not change the grounded wheel's own settling at all when its paired partner has no contact this tick");
+    "a configured anti-roll coupling must not change the grounded wheel's own settling at all when its paired partner has no contact this tick");
  }
 }

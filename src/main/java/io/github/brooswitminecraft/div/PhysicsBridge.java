@@ -1863,9 +1863,16 @@ public final class PhysicsBridge {
    // pair where BOTH sides currently have a real hit is ever coupled (hitIndexForWheel[...]<0 for
    // an airborne/missing/unsupported-layout partner skips that wheel entirely - see class doc's
    // "left completely untouched" and the ticket's own "airborne/contact transitions" case).
+   // Review correction (comments 53750/53752): AntiRoll.transfer couples each side's DEVIATION
+   // from its OWN static-equilibrium baseline (mass*gravity*loadShares[wi] - the exact load
+   // suspensionSpringForShare already calibrates this wheel's spring to support at rest), not
+   // the raw normal - an asymmetric axle (unequal loadShares, e.g. COM off-center between the
+   // pair) sitting exactly at its own correct static split gets ZERO transfer regardless of how
+   // different those two baselines are from each other, and an actual roll disturbance gets a
+   // LARGER restoring differential than the uncoupled pair would have, never a smaller one.
    // Bypassed entirely (zero allocation, zero behavior change) when stiffness is exactly the
    // documented 0 FALLBACK - the ticket's explicit "default zero/off preserving accepted
-   // handling" and WheelHitTest-style zero/default-equivalence expectation.
+   // handling" and zero/default-equivalence expectation.
    if (!hits.isEmpty() && tuning.antiRollStiffness != null && tuning.antiRollStiffness > 0) {
     int[] pairPartner=AntiRoll.pairPartners(loadShareX,loadShareZ);
     int[] hitIndexForWheel=new int[wheels.size()];
@@ -1879,8 +1886,10 @@ public final class PhysicsBridge {
      int hi=hitIndexForWheel[wi], hj=hitIndexForWheel[partnerWi];
      if (hi<0 || hj<0) continue; // one or both sides not actually grounded this tick - leave both alone
      double normalA=hits.get(hi).normal(), normalB=hits.get(hj).normal();
-     newNormal[hi]=AntiRoll.blendedNormalA(normalA,normalB,tuning.antiRollStiffness);
-     newNormal[hj]=AntiRoll.blendedNormalA(normalB,normalA,tuning.antiRollStiffness);
+     double baselineA=mass*gravity*loadShares[wi], baselineB=mass*gravity*loadShares[partnerWi];
+     double t=AntiRoll.transfer(normalA,baselineA,normalB,baselineB,tuning.antiRollStiffness);
+     newNormal[hi]=normalA+t;
+     newNormal[hj]=normalB-t;
     }
     for (int i=0;i<hits.size();i++) if (newNormal[i]!=hits.get(i).normal()) hits.set(i,hits.get(i).withNormal(newNormal[i]));
    }
