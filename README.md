@@ -518,6 +518,21 @@ after changes.
 }
 ```
 
+`brakeBiasFront` (optional, 0.0-1.0) splits `brakeForce`'s total budget
+between the front and rear axle, instead of evenly across every wheel. Axle
+grouping is purely geometric (each wheel's own forward/back position),
+never "steering wheel == front" - so a rear-steering vehicle still gets a
+correct front/rear split. `0.0` sends the whole budget to the rear axle,
+`1.0` sends it all to the front axle, `0.5` is the neutral even axle split.
+Leaving it unset is a strict no-op: brakeForce is still split evenly across
+every wheel exactly as before this option existed. A layout with no
+geometrically-distinguishable rear axle (a single wheel, or every wheel at
+the same front/back position) ignores whatever bias is configured and
+falls back to the even split, rather than fabricate an axle that isn't
+there. The parking brake and the separate analog handbrake are both
+unaffected by this bias - it only redistributes the adjustable service-
+brake pedal's own budget.
+
 `massKg` is optional; omit it to use IV's calculated vehicle mass. The four
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
@@ -582,7 +597,7 @@ break anything already running.
 A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
-`propellerForce`, `angularWaterDrag`. Fields baked in at vehicle construction - `massKg`,
+`propellerForce`, `angularWaterDrag`, `brakeBiasFront`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
