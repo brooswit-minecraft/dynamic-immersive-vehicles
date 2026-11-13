@@ -1508,3 +1508,55 @@ its `OverridesTest`/`PhysicsBridgeLiveOverrideApplicationTest` additions,
 now exercised together for the first time at this merged head).
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
 again at this new head.
+
+**Final combined-head Gradle build/test (John's comments 53772/53776/53778:
+sequence PR17/MINECRAFT-522's rotor tuning in first, then integrate and
+present the final combined delta).** After PR17 merged to main
+(`67fca5e5a95b589bb040b2034651a346a9d13479`, confirmed directly via `gh pr
+view 17`/`git log origin/main`), merged `origin/main` into this branch a
+second time. This brought in `Overrides.Tuning#cyclicLimitDegrees`/
+`#cyclicAuthorityScale`/`#yawAuthorityScale` (MINECRAFT-522), conflicting
+again with this ticket's own fields in the same `Overrides.java`/
+`PhysicsBridge.java`/`OverridesTest.java`/
+`PhysicsBridgeLiveOverrideApplicationTest.java`/`README.md` regions already
+touched by the MINECRAFT-520 integration above. Resolved by hand again,
+keeping all three tickets' fields together (stallAngleDegrees/liftSlope/
+controlSurfaceSlope, brakeBiasFront, cyclicLimitDegrees/
+cyclicAuthorityScale/yawAuthorityScale) - none dropped.
+
+**Self-caught defect in this merge's own resolution.** The `FALLBACK` doc
+comment conflict (this ticket's MINECRAFT-521 sentence vs. MINECRAFT-522's)
+was first resolved by a scripted blind-concatenation pass across every
+conflict in `Overrides.java` - correct for every plain code conflict, but
+for this ONE doc-comment conflict it left a stray `*/` closing the comment
+mid-way followed by a second, now-orphaned `* ...` block with no opening
+`/**` - a real compile error (`';' expected`, 16 errors), caught by the
+project's own local `javac` compile step run before the Gradle rerun, not
+by Gradle itself. Fixed by merging the two sentences into one coherent
+javadoc (commit `eb276df`). Both a plain `javac --release 21` compile and
+the manually assembled JUnit launcher were re-run clean after the fix,
+before spending the shared Gradle slot on a second full build.
+
+Local slot-lock coordination again held for this run's own duration and
+released immediately after (M519/M520/M522 are all already merged to main
+at this point, so no sibling ticket's own heavy build could still be
+in flight). `gradle --offline clean build test` at head
+`eb276df642f6ad915524ab6c730f4d9b166ff094` - `BUILD SUCCESSFUL`, 8 tasks (8
+executed). The real JUnit XML reports total **581 tests**, 0 skipped, 0
+failures, 0 errors (567 from the prior merged-head run plus MINECRAFT-522's
+own `RotorForcesTest`/`OverridesTest`/
+`PhysicsBridgeLiveOverrideApplicationTest` additions, now exercised
+together with this ticket's own fixed-wing tests for the first time at
+this final combined head). `build/libs/dynamic-immersive-vehicles-
+0.1.0-SNAPSHOT.jar` was produced again. This is the final combined delta
+for review before merge that John's comments asked for, against `main` as
+it stands now - `MINECRAFT-520` (PR #18) and `MINECRAFT-522` (PR #17) are
+both already merged and reflected here. **MINECRAFT-519 (anti-roll, PR
+#20) is NOT yet merged** (confirmed directly via `gh pr view 20`: still
+`OPEN`, no reviews recorded at the time of this check) - John's own
+sequencing instruction named only PR17 explicitly, so this delta is
+presented now rather than held pending M519 as well; if M519 lands and
+touches the same `Overrides.java`/`PhysicsBridge.java` regions before this
+PR merges, another integration-and-rereview round will be needed the same
+way this one was, and this ticket's own PR will need to check for that
+before merging, not assume it's already been accounted for here.
