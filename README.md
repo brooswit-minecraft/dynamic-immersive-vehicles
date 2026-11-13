@@ -346,6 +346,52 @@ respawn) the vehicle to pick up a changed value for one of those. The
 reload log names exactly which changed fields, if any, fell into this
 "needs respawn" set, rather than claiming everything applied.
 
+### Ground-surface tire response (MINECRAFT-508)
+
+Separate, optional config for the five baseline ground surfaces (pavement,
+dirt, grass, gravel, ice) a wheel's actual terrain contact resolves to (see
+`GroundSurfaces`/`GroundSurface` for how a block maps to one of these). On
+first start the mod writes `config/dynamic-immersive-vehicles-surfaces.json`
+with no entries (every surface uses its hardcoded default); add an entry
+only for a surface you want to retune:
+
+```json
+{
+  "surfaces": {
+    "ice": {
+      "frictionMultiplier": 0.05,
+      "rollingResistanceMultiplier": 0.5
+    },
+    "gravel": {
+      "frictionMultiplier": 0.75
+    }
+  }
+}
+```
+
+Both fields are optional per entry (sparse, same convention as the vehicle
+config above) - an omitted field keeps that surface's hardcoded default for
+that field alone. `frictionMultiplier` must be in `[0, 3]`;
+`rollingResistanceMultiplier` must be in `[0, 10]`; both are relative to dry
+pavement's own `1.0`/`1.0`. A missing, malformed, or out-of-range file is
+never fatal - startup logs a warning/error and continues with the hardcoded
+defaults (see `GroundSurfaceOverrides`'s own class doc for the self-review
+finding this guarantees).
+
+**Load timing - read this before assuming a live edit takes effect.**
+`GroundSurfaceOverrides.load()` runs once, at mod construction (same as
+`Overrides.load()`). `GroundSurfaceOverrides.reload()` already exists and is
+fully non-throwing/last-known-good, but **nothing currently calls it** - there
+is no live-reload command or trigger wired up for this file yet. Editing
+`dynamic-immersive-vehicles-surfaces.json` while the server is running has no
+effect until the next full restart. This is now DIFFERENT from the per-vehicle
+config above: MINECRAFT-505's periodic watcher (the "Hot reload" section just
+above) already calls `Overrides.reload()` on this branch, but nothing
+equivalent exists yet for this file. Wiring an actual trigger for THIS file is
+expected to piggyback on that same `OverridesHotReload` mechanism rather than
+add a second, separate one - that wiring is not part of this ticket's bounded
+scope.
+
 ## Build
 
 CI uses Java 21 and Gradle 8.8. It resolves the exact official dependency

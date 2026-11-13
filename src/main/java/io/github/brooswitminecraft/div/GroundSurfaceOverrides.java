@@ -37,6 +37,26 @@ import java.util.function.Supplier;
  * already starts with (i.e. plain hardcoded {@link GroundSurface} defaults), at a later
  * {@link #reload} it means last-known-good - and is reported via the returned {@link ReloadResult}
  * plus a logged error, never thrown.
+ *
+ * <p><b>File/schema</b>: {@code config/dynamic-immersive-vehicles-surfaces.json} (own file,
+ * separate from {@code Overrides}'s {@code dynamic-immersive-vehicles.json} - see {@link Config}),
+ * written with no entries on first start. Top-level shape is {@code {"surfaces": {"<name>":
+ * {"frictionMultiplier": <0..3>, "rollingResistanceMultiplier": <0..10>}}}} keyed by one of the
+ * five names {@code GroundSurfaces#nameOf} produces ("pavement"/"dirt"/"grass"/"gravel"/"ice");
+ * both fields are optional per {@link Entry} (see its own doc), and both ranges are enforced by
+ * {@link Entry#validate}. See the README's "Ground-surface tire response" section for a worked
+ * example.
+ *
+ * <p><b>Load timing - {@link #reload} currently has no caller.</b> {@link #load} runs once, at
+ * mod construction. {@link #reload} is fully implemented and non-throwing/last-known-good, but
+ * nothing in this codebase calls it yet - there is no live-reload trigger wired up for this file,
+ * so editing the config file while the server is running has no effect until the next restart.
+ * (As of this branch's own base, {@code Overrides.reload()} is in the identical state - no
+ * caller either, still "Restart to reload" per that class's own doc; MINECRAFT-505 is separately
+ * adding a periodic watcher for it, not yet merged here.) Do not represent live surface-config
+ * reload as available anywhere - in a comment, a log message, or to an operator - until an actual
+ * trigger is wired up, expected to piggyback on whatever eventually calls {@code Overrides.reload()}
+ * rather than add a second, separate mechanism.
  */
 public final class GroundSurfaceOverrides {
     private GroundSurfaceOverrides() {}
@@ -138,7 +158,8 @@ public final class GroundSurfaceOverrides {
 
     /** Non-throwing hot-reload - same contract as {@link Overrides#reload}: on ANY failure,
      * {@link #overrides} stays exactly what it was before this call (last-known-good), and the
-     * failure is reported via the returned {@link ReloadResult} instead of thrown. */
+     * failure is reported via the returned {@link ReloadResult} instead of thrown. Nothing in
+     * this codebase calls this yet - see this class's own "Load timing" doc. */
     public static ReloadResult reload() {
         Path path = configPath();
         ReloadResult result = apply(() -> parseFile(path));

@@ -52,6 +52,17 @@ import net.minecraft.world.level.block.state.BlockState;
  * gap. All of the above is sourced entirely from this mod's own data-pack tags (block IDs only) -
  * no build/runtime dependency on Layered Slopes or Dynamic Terrain is added, and the entries are
  * {@code "required": false} so a deployment without Layered Slopes installed loads cleanly.
+ *
+ * <p>{@code minecraft:dirt_path} (MINECRAFT-508 review, John): flagged for verification against
+ * the pinned 1.21.1 jar rather than assumed. John's specific claim - that vanilla gives it {@code
+ * SoundType.GRAVEL} - does NOT hold: the real decompiled registration
+ * ({@code Blocks.DIRT_PATH}, {@code DirtPathBlock}) gives it {@code SoundType.GRASS}, so without
+ * an explicit tag entry it would actually land on {@code GRASS_LIKE} -> {@link GroundSurface#GRASS},
+ * not gravel. His underlying concern is still real, though: {@code dirt_path} was not listed in
+ * ANY of this ticket's tags (vanilla's own {@code #minecraft:convertable_to_mud} composed into
+ * {@code surface_dirt.json} is only dirt/coarse_dirt/rooted_dirt, not the path variant), so a worn
+ * dirt road was silently resolving to GRASS instead of the intended DIRT. Fixed by listing
+ * {@code minecraft:dirt_path} explicitly in {@code surface_dirt.json}.
  */
 public final class GroundSurfaces {
     private GroundSurfaces() {}

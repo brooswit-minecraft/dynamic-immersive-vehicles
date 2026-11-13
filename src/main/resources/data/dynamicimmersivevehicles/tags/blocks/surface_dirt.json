@@ -3,6 +3,7 @@
     "#minecraft:convertable_to_mud",
     "#minecraft:sand",
     "minecraft:farmland",
+    "minecraft:dirt_path",
     { "id": "dynamicterrain:layered_dirt", "required": false },
     { "id": "dynamicterrain:layered_coarse_dirt", "required": false }
   ]
