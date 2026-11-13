@@ -31,9 +31,31 @@ public enum Face {
      * @param yDegrees rotation about the Y axis, applied after {@code xDegrees}, same constraint
      */
     public static Face rotate(Face face, int xDegrees, int yDegrees) {
-        int[] afterX = rotateX(face.nx, face.ny, face.nz, xDegrees);
-        int[] afterY = rotateY(afterX[0], afterX[1], afterX[2], yDegrees);
-        return fromNormal(afterY[0], afterY[1], afterY[2]);
+        double[] afterX = rotateX(face.nx, face.ny, face.nz, xDegrees);
+        double[] afterY = rotateY(afterX[0], afterX[1], afterX[2], yDegrees);
+        return fromNormal((int) Math.round(afterY[0]), (int) Math.round(afterY[1]), (int) Math.round(afterY[2]));
+    }
+
+    /**
+     * Same rotation as {@link #rotate}, generalized to an arbitrary vector rather than a face
+     * normal - what a contact point or travel direction (NOT constrained to a unit axis) needs to
+     * go from model-local space into the world space {@link #rotate}'s face already lives in.
+     */
+    public static double[] rotateVector(double x, double y, double z, int xDegrees, int yDegrees) {
+        double[] afterX = rotateX(x, y, z, xDegrees);
+        return rotateY(afterX[0], afterX[1], afterX[2], yDegrees);
+    }
+
+    /**
+     * The inverse of {@link #rotateVector}: takes a WORLD-space vector (a block-local contact
+     * point relative to the block center, or a travel direction) back into the MODEL-local space
+     * the resolved face's own {@link FaceUv} convention actually describes. Reverses both the
+     * rotation order and the angle sign ({@code Ry(-y)} first, then {@code Rx(-x)}) - the standard
+     * inverse of a composed rotation.
+     */
+    public static double[] inverseRotateVector(double x, double y, double z, int xDegrees, int yDegrees) {
+        double[] afterInvY = rotateY(x, y, z, -yDegrees);
+        return rotateX(afterInvY[0], afterInvY[1], afterInvY[2], -xDegrees);
     }
 
     /** Whether a rotation (as read straight from blockstate JSON, which may be any double) is a
@@ -53,14 +75,14 @@ public enum Face {
         throw new IllegalArgumentException("not a unit axis normal: (" + x + "," + y + "," + z + ")");
     }
 
-    private static int[] rotateX(int x, int y, int z, int degrees) {
+    private static double[] rotateX(double x, double y, double z, int degrees) {
         int c = cos(degrees), s = sin(degrees);
-        return new int[] {x, y * c - z * s, y * s + z * c};
+        return new double[] {x, y * c - z * s, y * s + z * c};
     }
 
-    private static int[] rotateY(int x, int y, int z, int degrees) {
+    private static double[] rotateY(double x, double y, double z, int degrees) {
         int c = cos(degrees), s = sin(degrees);
-        return new int[] {x * c + z * s, y, -x * s + z * c};
+        return new double[] {x * c + z * s, y, -x * s + z * c};
     }
 
     private static int cos(int degrees) {

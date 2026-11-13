@@ -75,6 +75,49 @@ class DirectionalGroundSurfaceTest {
         assertEquals(first, second);
     }
 
+    /**
+     * Rotated-face behavior test (review finding, PR #16 comment 6861624029): for a block whose
+     * resolved texture came from model face {@code NORTH} rotated {@code x=90,y=90} (exactly
+     * {@code oak_log}'s real {@code axis=x} blockstate - see {@code BlockModelResolverTest}),
+     * {@code Face.rotate(NORTH,90,90)==UP} (verified in {@code FaceTest}), so this texture ends
+     * up on the world UP face. Travelling along world X maps BACK into model-local space as
+     * {@code (0,1,0)} ({@code Face.inverseRotateVector(1,0,0,90,90)}), i.e. along the model
+     * NORTH face's own V axis - the grain direction on {@link #grainAlongV}'s fixture - while
+     * travelling along world Z maps back to {@code (-1,0,0)}, across it. The rotation-aware
+     * {@link DirectionalGroundSurface#combine(GroundSurface, Optional, Face, int, int, double,
+     * double, double, double, double, double)} must reflect that: world-X travel grippier than
+     * world-Z travel on this specific rotated block.
+     */
+    @Test void rotatedFaceTravelDirectionIsClassifiedInModelSpaceNotWorldSpace() {
+        GroundSurface worldXTravel = DirectionalGroundSurface.combine(BASELINE, Optional.of(grainAlongV()),
+                Face.NORTH, 90, 90, 0.5, 0.5, 0.5, 1, 0, 0);
+        GroundSurface worldZTravel = DirectionalGroundSurface.combine(BASELINE, Optional.of(grainAlongV()),
+                Face.NORTH, 90, 90, 0.5, 0.5, 0.5, 0, 0, 1);
+        assertTrue(worldXTravel.frictionMultiplier() > worldZTravel.frictionMultiplier(),
+                "world-X travel maps back to this rotated block's along-grain axis, world-Z to its cross-grain axis");
+    }
+
+    /**
+     * Same two travel directions as above, but run through the WORLD face's own (unrotated)
+     * {@link FaceUv} convention directly - exactly what the pre-fix code did. This must come out
+     * the OPPOSITE way from the rotation-aware result just above: proof the rotation transform is
+     * doing real, direction-reversing work on a rotated block, not a no-op refactor.
+     */
+    @Test void worldFaceConventionAloneGetsThisRotatedBlockBackwards() {
+        Face worldFace = Face.rotate(Face.NORTH, 90, 90);
+        assertEquals(Face.UP, worldFace);
+
+        FaceUv.Uv naiveWorldXTravel = FaceUv.direction(worldFace, 1, 0, 0);
+        FaceUv.Uv naiveWorldZTravel = FaceUv.direction(worldFace, 0, 0, 1);
+        GroundSurface naiveWorldX = DirectionalGroundSurface.combine(BASELINE, Optional.of(grainAlongV()),
+                0.5, 0.5, naiveWorldXTravel.u(), naiveWorldXTravel.v());
+        GroundSurface naiveWorldZ = DirectionalGroundSurface.combine(BASELINE, Optional.of(grainAlongV()),
+                0.5, 0.5, naiveWorldZTravel.u(), naiveWorldZTravel.v());
+
+        assertTrue(naiveWorldX.frictionMultiplier() < naiveWorldZ.frictionMultiplier(),
+                "sampling the world face's own UV convention directly misclassifies this rotated block's grain backwards");
+    }
+
     /** Force-path: the directional grip difference must actually change what {@link TireForces}
      * is willing to deliver, not merely differ as an intermediate {@code GroundSurface} value. */
     @Test void crossGrainReducesTheActualTireForceBudget() {

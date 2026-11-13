@@ -40,11 +40,25 @@ final class BlockModelResolver {
         Object load(String namespace, String path);
     }
 
-    static Optional<Map<Face, String>> resolve(String namespace, String blockPath, Map<String, String> stateValues) {
+    /**
+     * What resolved for one WORLD face: the canonical texture id, which MODEL-local face it came
+     * from, and the blockstate's own rotation (both always a multiple of 90, see
+     * {@link Face#isRightAngle}) that was applied to place it there. A rotation moves a texture
+     * onto a different world face WITHOUT changing the texture's own U/V axes to match - those
+     * axes rotate right along with it, so a caller sampling grain direction must transform its
+     * contact point/travel vector by this same rotation (into model-local space) before applying
+     * {@code modelFace}'s own {@link FaceUv} convention; using the world face's convention
+     * directly, as if the texture had never rotated, silently misreads which way the grain runs
+     * on anything but an identity rotation (see {@code DirectionalGroundSurface}'s own doc on the
+     * review finding that caught this).
+     */
+    record FaceTexture(String textureId, Face modelFace, int rotationXDegrees, int rotationYDegrees) {}
+
+    static Optional<Map<Face, FaceTexture>> resolve(String namespace, String blockPath, Map<String, String> stateValues) {
         return resolve(namespace, blockPath, stateValues, BlockModelResolver::readClasspathJson);
     }
 
-    static Optional<Map<Face, String>> resolve(String namespace, String blockPath, Map<String, String> stateValues,
+    static Optional<Map<Face, FaceTexture>> resolve(String namespace, String blockPath, Map<String, String> stateValues,
             JsonLoader loader) {
         Map<String, Object> blockstate = asObject(loader.load(namespace, "blockstates/" + blockPath));
         if (blockstate == null) {
@@ -103,12 +117,16 @@ final class BlockModelResolver {
         // The faces above are keyed by MODEL-local face (what the model's own JSON calls "up",
         // "north", etc). The blockstate's own x/y rotation moves each model face onto a different
         // WORLD face before it's ever placed - this is exactly what makes a laid log's end-grain
-        // texture show up on east/west instead of up/down. Re-key onto the rotated (world) face.
+        // texture show up on east/west instead of up/down. Re-key onto the rotated (world) face,
+        // but keep the ORIGINAL model face (and the rotation itself) alongside the texture id -
+        // the UV/grain axes a caller needs still belong to the model face, not the world one.
         int xDegrees = (int) Math.round(rotX);
         int yDegrees = (int) Math.round(rotY);
-        Map<Face, String> worldFaces = new HashMap<>();
+        Map<Face, FaceTexture> worldFaces = new HashMap<>();
         for (Map.Entry<Face, String> entry : modelFaces.entrySet()) {
-            worldFaces.put(Face.rotate(entry.getKey(), xDegrees, yDegrees), entry.getValue());
+            Face modelFace = entry.getKey();
+            worldFaces.put(Face.rotate(modelFace, xDegrees, yDegrees),
+                    new FaceTexture(entry.getValue(), modelFace, xDegrees, yDegrees));
         }
         return Optional.of(worldFaces);
     }

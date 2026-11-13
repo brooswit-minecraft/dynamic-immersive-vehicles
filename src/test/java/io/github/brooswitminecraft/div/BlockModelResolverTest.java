@@ -50,41 +50,60 @@ class BlockModelResolverTest {
         return (namespace, path) -> documents.get(namespace + ":" + path);
     }
 
+    private static String textureOf(Map<Face, BlockModelResolver.FaceTexture> faces, Face worldFace) {
+        return faces.get(worldFace).textureId();
+    }
+
     @Test void verticalAxisResolvesEndAndSideFacesCorrectly() {
-        Map<Face, String> faces = BlockModelResolver
+        Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver
                 .resolve("minecraft", "oak_log", Map.of("axis", "y"), logFixture())
                 .orElseThrow();
-        assertEquals("minecraft:block/oak_log_top", faces.get(Face.UP));
-        assertEquals("minecraft:block/oak_log_top", faces.get(Face.DOWN));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.NORTH));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.EAST));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.UP));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.DOWN));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.NORTH));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.EAST));
+        // Identity rotation: the resolved model face equals the world face it's keyed by.
+        assertEquals(Face.UP, faces.get(Face.UP).modelFace());
+        assertEquals(0, faces.get(Face.UP).rotationXDegrees());
+        assertEquals(0, faces.get(Face.UP).rotationYDegrees());
     }
 
     /** MINECRAFT-517's own "laid logs" requirement: a log lying north-south shows its end-grain
      * texture on the north/south faces (and bark everywhere else), matching the real in-game look. */
     @Test void axisZLogResolvesEndGrainOnNorthSouth() {
-        Map<Face, String> faces = BlockModelResolver
+        Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver
                 .resolve("minecraft", "oak_log", Map.of("axis", "z"), logFixture())
                 .orElseThrow();
-        assertEquals("minecraft:block/oak_log_top", faces.get(Face.NORTH));
-        assertEquals("minecraft:block/oak_log_top", faces.get(Face.SOUTH));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.UP));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.DOWN));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.EAST));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.WEST));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.NORTH));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.SOUTH));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.UP));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.DOWN));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.EAST));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.WEST));
+        // World NORTH came from the model's own DOWN (end) face, rotated x=90,y=0 (verified via
+        // Face.rotate(DOWN,90,0)==NORTH) - the rotation a UV-basis consumer
+        // (DirectionalGroundSurface) needs is carried alongside the texture.
+        assertEquals(Face.DOWN, faces.get(Face.NORTH).modelFace());
+        assertEquals(90, faces.get(Face.NORTH).rotationXDegrees());
+        assertEquals(0, faces.get(Face.NORTH).rotationYDegrees());
     }
 
     /** A log lying east-west shows its end-grain on the east/west faces instead. */
     @Test void axisXLogResolvesEndGrainOnEastWest() {
-        Map<Face, String> faces = BlockModelResolver
+        Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver
                 .resolve("minecraft", "oak_log", Map.of("axis", "x"), logFixture())
                 .orElseThrow();
-        assertEquals("minecraft:block/oak_log_top", faces.get(Face.EAST));
-        assertEquals("minecraft:block/oak_log_top", faces.get(Face.WEST));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.UP));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.DOWN));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.NORTH));
-        assertEquals("minecraft:block/oak_log", faces.get(Face.SOUTH));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.EAST));
+        assertEquals("minecraft:block/oak_log_top", textureOf(faces, Face.WEST));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.UP));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.DOWN));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.NORTH));
+        assertEquals("minecraft:block/oak_log", textureOf(faces, Face.SOUTH));
+        // World EAST came from the model's own UP (end) face, rotated x=90,y=90 this time -
+        // different rotation than the axis=z case even though both still land on a side face.
+        assertEquals(Face.UP, faces.get(Face.EAST).modelFace());
+        assertEquals(90, faces.get(Face.EAST).rotationXDegrees());
+        assertEquals(90, faces.get(Face.EAST).rotationYDegrees());
     }
 
     @Test void nonRightAngleRotationReturnsNoEvidenceRatherThanGuessing() {
@@ -98,13 +117,13 @@ class BlockModelResolverTest {
     }
 
     @Test void unmatchedStateValueReturnsNoEvidence() {
-        Optional<Map<Face, String>> faces =
+        Optional<Map<Face, BlockModelResolver.FaceTexture>> faces =
                 BlockModelResolver.resolve("minecraft", "oak_log", Map.of("axis", "diagonal"), logFixture());
         assertFalse(faces.isPresent());
     }
 
     @Test void missingBlockstateReturnsNoEvidence() {
-        Optional<Map<Face, String>> faces =
+        Optional<Map<Face, BlockModelResolver.FaceTexture>> faces =
                 BlockModelResolver.resolve("minecraft", "nonexistent_block", Map.of(), logFixture());
         assertFalse(faces.isPresent());
     }
@@ -185,7 +204,7 @@ class BlockModelResolverTest {
                         {"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {
                             "up": {"texture": "minecraft:block/cropped_top", "uv": [0, 0, 8, 8]},
                             "down": {"texture": "minecraft:block/cropped_bottom"}}}]}"""));
-        Map<Face, String> faces = BlockModelResolver.resolve("minecraft", "cropped_block", Map.of(), loader).orElseThrow();
+        Map<Face, BlockModelResolver.FaceTexture> faces = BlockModelResolver.resolve("minecraft", "cropped_block", Map.of(), loader).orElseThrow();
         assertFalse(faces.containsKey(Face.UP), "cropped face UV should be omitted, not guessed");
         assertTrue(faces.containsKey(Face.DOWN), "an uncropped face on the same element should still resolve");
     }

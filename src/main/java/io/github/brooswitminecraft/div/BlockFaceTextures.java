@@ -20,17 +20,21 @@ import net.minecraft.world.level.block.state.properties.Property;
  * {@code GroundSurface}'s class doc).
  */
 public final class BlockFaceTextures {
-    private static final Map<String, Optional<Map<Face, ResourceLocation>>> CACHE = new ConcurrentHashMap<>();
+    private static final Map<String, Optional<Map<Face, Resolution>>> CACHE = new ConcurrentHashMap<>();
 
     private BlockFaceTextures() {}
 
-    public static Optional<ResourceLocation> textureFor(BlockState state, Direction face) {
+    /** See {@link BlockModelResolver.FaceTexture} - same fields, just with {@code textureId}
+     * already parsed, since every real caller needs it as a {@link ResourceLocation} anyway. */
+    public record Resolution(ResourceLocation textureId, Face modelFace, int rotationXDegrees, int rotationYDegrees) {}
+
+    public static Optional<Resolution> textureFor(BlockState state, Direction face) {
         ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         Map<String, String> stateValues = stateValues(state);
         String key = BlockModelResolver.cacheKey(blockId.toString(), stateValues);
-        Optional<Map<Face, ResourceLocation>> faces = CACHE.computeIfAbsent(key,
+        Optional<Map<Face, Resolution>> faces = CACHE.computeIfAbsent(key,
                 k -> BlockModelResolver.resolve(blockId.getNamespace(), blockId.getPath(), stateValues)
-                        .map(BlockFaceTextures::toResourceLocations));
+                        .map(BlockFaceTextures::toResolutions));
         return faces.map(m -> m.get(toFace(face)));
     }
 
@@ -51,9 +55,11 @@ public final class BlockFaceTextures {
         return property.getName(value);
     }
 
-    private static Map<Face, ResourceLocation> toResourceLocations(Map<Face, String> faces) {
-        Map<Face, ResourceLocation> resolved = new HashMap<>();
-        faces.forEach((face, textureId) -> resolved.put(face, ResourceLocation.parse(textureId)));
+    private static Map<Face, Resolution> toResolutions(Map<Face, BlockModelResolver.FaceTexture> faces) {
+        Map<Face, Resolution> resolved = new HashMap<>();
+        faces.forEach((face, faceTexture) -> resolved.put(face, new Resolution(
+                ResourceLocation.parse(faceTexture.textureId()), faceTexture.modelFace(),
+                faceTexture.rotationXDegrees(), faceTexture.rotationYDegrees())));
         return resolved;
     }
 
