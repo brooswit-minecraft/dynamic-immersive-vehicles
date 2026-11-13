@@ -106,6 +106,16 @@ public final class Overrides {
   // own doc): a genuinely combined high-demand tick (e.g. hard braking mid-turn) can still see
   // the shared radial projection reduce achieved longitudinal force somewhat.
   public Double lateralGripMultiplier;
+  // MINECRAFT-521: bounded fixed-wing lift/stall-cap and control-authority tuning, consumed by
+  // PhysicsBridge.stepFlight via FlightForces.liftCoefficient/controlSurfaceForce. stallAngleDegrees
+  // is the hard stall cutoff (degrees) FlightForces.liftCoefficient clamps angle of attack to;
+  // liftSlope is the wing's own per-radian lift-curve slope; controlSurfaceSlope is the
+  // independently-tunable per-radian aileron/elevator/rudder authority slope (previously the same
+  // hardcoded constant as liftSlope - see FlightForces's own doc). None of these affect a
+  // rotorcraft (stepRotor has no wing/control-surface model to apply them to) or a ground vehicle.
+  public Double stallAngleDegrees;
+  public Double liftSlope;
+  public Double controlSurfaceSlope;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -135,6 +145,14 @@ public final class Overrides {
    // Never above 1: this knob is explicitly for REDUCING lateral grip (John's own "less grip...
    // so it slides"), not for granting more lateral authority than the real friction circle.
    if (lateralGripMultiplier != null && !(Double.isFinite(lateralGripMultiplier) && lateralGripMultiplier > 0 && lateralGripMultiplier <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Bounded well short of a literal post-stall simulation (ticket's own "do not claim full
+   // post-stall spin/soft-body simulation" constraint): 45deg keeps this a genuine hard stall
+   // CAP, never a config path to effectively disabling stall at all.
+   if (stallAngleDegrees != null && !(Double.isFinite(stallAngleDegrees) && stallAngleDegrees > 0 && stallAngleDegrees <= 45)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Bounded generously around the thin-airfoil-theory default (2*pi ~= 6.283) - finite, positive,
+   // never so large it produces an absurd lift/control force from a tiny angle/deflection.
+   if (liftSlope != null && !(Double.isFinite(liftSlope) && liftSlope > 0 && liftSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (controlSurfaceSlope != null && !(Double.isFinite(controlSurfaceSlope) && controlSurfaceSlope > 0 && controlSurfaceSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
@@ -168,6 +186,9 @@ public final class Overrides {
     throw new IllegalArgumentException("part overrides do not support selfRight* fields (no part-level consumer yet)");
    if (upperMassFraction != null) throw new IllegalArgumentException("part overrides do not support 'upperMassFraction' (no part-level consumer yet)");
    if (lateralGripMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'lateralGripMultiplier' (no part-level consumer yet)");
+   if (stallAngleDegrees != null) throw new IllegalArgumentException("part overrides do not support 'stallAngleDegrees' (no part-level consumer yet)");
+   if (liftSlope != null) throw new IllegalArgumentException("part overrides do not support 'liftSlope' (no part-level consumer yet)");
+   if (controlSurfaceSlope != null) throw new IllegalArgumentException("part overrides do not support 'controlSurfaceSlope' (no part-level consumer yet)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -176,7 +197,10 @@ public final class Overrides {
   * Values/units/provenance unchanged from the shared numbers this ticket's physics work has
   * always used: driveForce 8000N, brakeForce 12000N, suspensionTravel 0.3m, friction mu=1.0
   * (dimensionless), maxSteerDegrees 30deg, hullFillFactor 0.5 (dimensionless), waterDrag 400
-  * (solver-internal units), propellerForce 6000N. */
+  * (solver-internal units), propellerForce 6000N. MINECRAFT-521: stallAngleDegrees/liftSlope/
+  * controlSurfaceSlope fall back to {@link FlightForces}'s own DEFAULT_* constants - the exact
+  * values that class previously hardcoded, so an unconfigured fixed-wing vehicle flies
+  * byte-identically to before this ticket. */
  private static final Tuning FALLBACK = new Tuning();
  static {
   FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
@@ -184,6 +208,9 @@ public final class Overrides {
   FALLBACK.upperMassFraction=0.5;
   FALLBACK.lateralGripMultiplier=1.0;
   FALLBACK.angularWaterDrag=0.0;
+  FALLBACK.stallAngleDegrees=FlightForces.DEFAULT_STALL_ANGLE_DEGREES;
+  FALLBACK.liftSlope=FlightForces.DEFAULT_LIFT_SLOPE;
+  FALLBACK.controlSurfaceSlope=FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -195,6 +222,7 @@ public final class Overrides {
   c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   c.angularWaterDrag=t.angularWaterDrag;
+  c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -220,6 +248,9 @@ public final class Overrides {
   m.upperMassFraction = child.upperMassFraction!=null?child.upperMassFraction:parent.upperMassFraction;
   m.lateralGripMultiplier = child.lateralGripMultiplier!=null?child.lateralGripMultiplier:parent.lateralGripMultiplier;
   m.angularWaterDrag = child.angularWaterDrag!=null?child.angularWaterDrag:parent.angularWaterDrag;
+  m.stallAngleDegrees = child.stallAngleDegrees!=null?child.stallAngleDegrees:parent.stallAngleDegrees;
+  m.liftSlope = child.liftSlope!=null?child.liftSlope:parent.liftSlope;
+  m.controlSurfaceSlope = child.controlSurfaceSlope!=null?child.controlSurfaceSlope:parent.controlSurfaceSlope;
   return m;
  }
  /**
@@ -391,6 +422,9 @@ public final class Overrides {
   result.selfRightFadeEndDegrees = firstNonNull(override!=null?override.selfRightFadeEndDegrees:null, packMetadata!=null?packMetadata.selfRightFadeEndDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeEndDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeEndDegrees:null);
   result.upperMassFraction = firstNonNull(override!=null?override.upperMassFraction:null, packMetadata!=null?packMetadata.upperMassFraction:null, ivAdapted!=null?ivAdapted.upperMassFraction:null, physicallyDerived!=null?physicallyDerived.upperMassFraction:null, FALLBACK.upperMassFraction);
   result.lateralGripMultiplier = firstNonNull(override!=null?override.lateralGripMultiplier:null, packMetadata!=null?packMetadata.lateralGripMultiplier:null, ivAdapted!=null?ivAdapted.lateralGripMultiplier:null, physicallyDerived!=null?physicallyDerived.lateralGripMultiplier:null, FALLBACK.lateralGripMultiplier);
+  result.stallAngleDegrees = firstNonNull(override!=null?override.stallAngleDegrees:null, packMetadata!=null?packMetadata.stallAngleDegrees:null, ivAdapted!=null?ivAdapted.stallAngleDegrees:null, physicallyDerived!=null?physicallyDerived.stallAngleDegrees:null, FALLBACK.stallAngleDegrees);
+  result.liftSlope = firstNonNull(override!=null?override.liftSlope:null, packMetadata!=null?packMetadata.liftSlope:null, ivAdapted!=null?ivAdapted.liftSlope:null, physicallyDerived!=null?physicallyDerived.liftSlope:null, FALLBACK.liftSlope);
+  result.controlSurfaceSlope = firstNonNull(override!=null?override.controlSurfaceSlope:null, packMetadata!=null?packMetadata.controlSurfaceSlope:null, ivAdapted!=null?ivAdapted.controlSurfaceSlope:null, physicallyDerived!=null?physicallyDerived.controlSurfaceSlope:null, FALLBACK.controlSurfaceSlope);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

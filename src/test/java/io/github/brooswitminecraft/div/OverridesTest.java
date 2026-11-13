@@ -69,6 +69,9 @@ class OverridesTest {
   assertEquals(12000.0, r.brakeForce); assertEquals(30.0, r.maxSteerDegrees);
   assertEquals(0.5, r.hullFillFactor); assertEquals(400.0, r.waterDrag); assertEquals(6000.0, r.propellerForce);
   assertEquals(0.0, r.angularWaterDrag, "angularWaterDrag's fallback is 0 - no rotational damping term unless configured");
+  assertEquals(FlightForces.DEFAULT_STALL_ANGLE_DEGREES, r.stallAngleDegrees, "stallAngleDegrees falls back to FlightForces's own previously-hardcoded 15deg");
+  assertEquals(FlightForces.DEFAULT_LIFT_SLOPE, r.liftSlope, 1e-9, "liftSlope falls back to FlightForces's own previously-hardcoded 2*pi");
+  assertEquals(FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE, r.controlSurfaceSlope, 1e-9, "controlSurfaceSlope falls back to the same previously-hardcoded 2*pi");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -80,6 +83,7 @@ class OverridesTest {
   assertNotNull(r.brakeForce); assertNotNull(r.maxSteerDegrees);
   assertNotNull(r.hullFillFactor); assertNotNull(r.waterDrag); assertNotNull(r.propellerForce);
   assertNotNull(r.angularWaterDrag);
+  assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
  }
 
  // MINECRAFT-518: angularWaterDrag - rotational water-drag torque coefficient for a floating
@@ -110,6 +114,71 @@ class OverridesTest {
  @Test void angularWaterDragIsRejectedOnAPartOverride() {
   var part = new Overrides.Tuning(); part.angularWaterDrag = 10.0;
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ // MINECRAFT-521: stallAngleDegrees/liftSlope/controlSurfaceSlope - bounded fixed-wing lift/
+ // stall-cap and control-authority tuning, consumed by PhysicsBridge.stepFlight.
+
+ @Test void stallAngleDegreesOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.stallAngleDegrees = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.stallAngleDegrees = -5.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.stallAngleDegrees = 45.001;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.stallAngleDegrees = 45.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.stallAngleDegrees = 12.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void liftSlopeOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.liftSlope = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.liftSlope = -1.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.liftSlope = 10.001;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.liftSlope = 10.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.liftSlope = 4.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void controlSurfaceSlopeOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.controlSurfaceSlope = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.controlSurfaceSlope = -1.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.controlSurfaceSlope = 10.001;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.controlSurfaceSlope = 10.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.controlSurfaceSlope = 3.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void fixedWingFieldsParticipateInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.stallAngleDegrees = 20.0; override.liftSlope = 5.0; override.controlSurfaceSlope = 4.0;
+   Overrides.setForTest(java.util.Map.of("packid:glider", override));
+   var r = Overrides.resolved("packid:glider");
+   assertEquals(20.0, r.stallAngleDegrees, "an explicit operator override must take precedence over the documented fallback");
+   assertEquals(5.0, r.liftSlope, 1e-9);
+   assertEquals(4.0, r.controlSurfaceSlope, 1e-9);
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void fixedWingFieldsAreRejectedOnAPartOverride() {
+  var stall = new Overrides.Tuning(); stall.stallAngleDegrees = 12.0;
+  assertThrows(IllegalArgumentException.class, stall::validateSupportedForPart);
+  var lift = new Overrides.Tuning(); lift.liftSlope = 4.0;
+  assertThrows(IllegalArgumentException.class, lift::validateSupportedForPart);
+  var control = new Overrides.Tuning(); control.controlSurfaceSlope = 4.0;
+  assertThrows(IllegalArgumentException.class, control::validateSupportedForPart);
  }
 
  @Test void packMetadataFillsAGapBelowAMissingOperatorOverrideButAboveTheFallback() {

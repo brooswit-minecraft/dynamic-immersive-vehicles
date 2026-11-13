@@ -295,7 +295,8 @@ public final class PhysicsBridge {
   * by direct inspection of every {@code tuning.X} read site in this file (stepGround/stepFlight/
   * stepRotor) and in BuoyantForces.apply (waterDrag/propellerForce/angularWaterDrag):
   * suspensionTravel/friction/driveForce/brakeForce/maxSteerDegrees/lateralGripMultiplier/
-  * waterDrag/propellerForce/angularWaterDrag. Mutating
+  * waterDrag/propellerForce/angularWaterDrag/stallAngleDegrees/liftSlope/controlSurfaceSlope
+  * (the last three MINECRAFT-521, stepFlight only). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -321,6 +322,9 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.waterDrag, fresh.waterDrag)) { target.waterDrag = fresh.waterDrag; appliedOut.add("waterDrag"); }
   if (!java.util.Objects.equals(target.propellerForce, fresh.propellerForce)) { target.propellerForce = fresh.propellerForce; appliedOut.add("propellerForce"); }
   if (!java.util.Objects.equals(target.angularWaterDrag, fresh.angularWaterDrag)) { target.angularWaterDrag = fresh.angularWaterDrag; appliedOut.add("angularWaterDrag"); }
+  if (!java.util.Objects.equals(target.stallAngleDegrees, fresh.stallAngleDegrees)) { target.stallAngleDegrees = fresh.stallAngleDegrees; appliedOut.add("stallAngleDegrees"); }
+  if (!java.util.Objects.equals(target.liftSlope, fresh.liftSlope)) { target.liftSlope = fresh.liftSlope; appliedOut.add("liftSlope"); }
+  if (!java.util.Objects.equals(target.controlSurfaceSlope, fresh.controlSurfaceSlope)) { target.controlSurfaceSlope = fresh.controlSurfaceSlope; appliedOut.add("controlSurfaceSlope"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
@@ -2217,6 +2221,12 @@ public final class PhysicsBridge {
    * calculation on that field's raw number. {@code tuning.driveForce} is reused as this
    * vehicle's max thrust, the same way it is reused as max drive force for a ground vehicle -
    * one shared, per-car-overridable propulsive-force knob rather than a second config field.
+   * MINECRAFT-521: {@code tuning.stallAngleDegrees}/{@code tuning.liftSlope} (wing lift, via
+   * {@link FlightForces#liftCoefficient}) and {@code tuning.controlSurfaceSlope} (aileron/
+   * elevator/rudder authority, via {@link FlightForces#controlSurfaceForce}) are read fresh from
+   * the live {@code tuning} object every tick, same as every other live-safe field below - an
+   * unconfigured vehicle gets exactly {@link FlightForces}'s own previous hardcoded constants via
+   * {@link Overrides}'s FALLBACK.
    */
   private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
    var motorized = v.definition.motorized;
@@ -2228,7 +2238,7 @@ public final class PhysicsBridge {
    double dynamicPressure=FlightForces.dynamicPressure(AIR_DENSITY,speed);
    double angleOfAttack=Math.atan2(-verticalSpeed,Math.abs(forwardSpeed));
    double sideslip=Math.atan2(lateralSpeed,Math.abs(forwardSpeed));
-   double liftCoeff=FlightForces.liftCoefficient(angleOfAttack);
+   double liftCoeff=FlightForces.liftCoefficient(angleOfAttack,tuning.stallAngleDegrees,tuning.liftSlope);
    double aspectRatio=motorized.wingArea>0 ? (motorized.wingSpan*motorized.wingSpan)/motorized.wingArea : 0;
    double dragCoeff=FlightForces.dragCoefficient(liftCoeff,Math.max(0.02,motorized.dragCoefficient),aspectRatio);
    double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
@@ -2250,9 +2260,9 @@ public final class PhysicsBridge {
    double aileronDeflection=Math.toRadians(v.aileronInputVar.currentValue);
    double elevatorDeflection=Math.toRadians(v.elevatorInputVar.currentValue);
    double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
-   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure)*wingArm;
-   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure)*tailArm;
-   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure)*tailArm;
+   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope)*wingArm;
+   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope)*tailArm;
+   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope)*tailArm;
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
    applyTowingCompensation(v);

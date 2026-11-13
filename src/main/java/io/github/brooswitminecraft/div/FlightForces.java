@@ -13,9 +13,21 @@ package io.github.brooswitminecraft.div;
  */
 public final class FlightForces {
  private FlightForces() {}
- private static final double STALL_ANGLE = Math.toRadians(15);
- /** Thin-airfoil lift slope, per radian of angle of attack or control-surface deflection. */
- private static final double LIFT_SLOPE = 2 * Math.PI;
+ /**
+  * MINECRAFT-521: these three were previously hardcoded here (stall cap, lift slope, control-
+  * surface slope); they are now {@link Overrides.Tuning} fields instead, so every caller of
+  * {@link #liftCoefficient} and {@link #controlSurfaceForce} must pass a resolved value rather
+  * than this class picking one implicitly. These constants ARE that resolved value's own
+  * documented FALLBACK (byte-identical to the old hardcoded behavior for an unconfigured
+  * vehicle) - {@link Overrides}'s FALLBACK block reuses them directly rather than re-stating the
+  * same numbers a second time.
+  */
+ public static final double DEFAULT_STALL_ANGLE_DEGREES = 15.0;
+ /** Thin-airfoil lift slope, per radian of angle of attack. */
+ public static final double DEFAULT_LIFT_SLOPE = 2 * Math.PI;
+ /** Per-radian control-surface deflection authority - previously the same constant as the wing's
+  * own lift slope; now independently tunable (see {@link #controlSurfaceForce}). */
+ public static final double DEFAULT_CONTROL_SURFACE_SLOPE = 2 * Math.PI;
  private static final double GRAVITY = 9.81;
 
  /** Dynamic pressure q = 1/2 * rho * v^2, the common scale factor for every aerodynamic force. */
@@ -26,11 +38,15 @@ public final class FlightForces {
  /**
   * Lift coefficient from angle of attack, clamped at a hard stall rather than following the real
   * post-stall coefficient collapse - this model targets level and moderately banked/climbing
-  * flight, not spins or departed flight.
+  * flight, not spins or departed flight. {@code stallAngleDegrees} and {@code liftSlope} are the
+  * resolved, bounded {@link Overrides.Tuning#stallAngleDegrees}/{@link Overrides.Tuning#liftSlope}
+  * for this vehicle (see {@link #DEFAULT_STALL_ANGLE_DEGREES}/{@link #DEFAULT_LIFT_SLOPE} for the
+  * unconfigured fallback) - this method itself has no implicit default of its own.
   */
- public static double liftCoefficient(double angleOfAttackRadians) {
-  double clamped = Math.max(-STALL_ANGLE, Math.min(STALL_ANGLE, angleOfAttackRadians));
-  return LIFT_SLOPE * clamped;
+ public static double liftCoefficient(double angleOfAttackRadians, double stallAngleDegrees, double liftSlope) {
+  double stallAngleRadians = Math.toRadians(stallAngleDegrees);
+  double clamped = Math.max(-stallAngleRadians, Math.min(stallAngleRadians, angleOfAttackRadians));
+  return liftSlope * clamped;
  }
 
  /**
@@ -50,12 +66,14 @@ public final class FlightForces {
  }
 
  /**
-  * A control surface's own incremental force from its deflection: the same linear per-radian
-  * lift slope as the wing, scaled by the surface's own JSON area. Shared by aileron roll torque,
-  * elevator pitch torque, and rudder yaw torque.
+  * A control surface's own incremental force from its deflection: a linear per-radian authority
+  * slope - {@code controlSurfaceSlope}, the resolved {@link Overrides.Tuning#controlSurfaceSlope}
+  * (see {@link #DEFAULT_CONTROL_SURFACE_SLOPE} for the unconfigured fallback), independently
+  * tunable from the wing's own {@link #liftCoefficient} slope - scaled by the surface's own JSON
+  * area. Shared by aileron roll torque, elevator pitch torque, and rudder yaw torque.
   */
- public static double controlSurfaceForce(double deflectionRadians, double area, double dynamicPressure) {
-  return LIFT_SLOPE * deflectionRadians * area * dynamicPressure;
+ public static double controlSurfaceForce(double deflectionRadians, double area, double dynamicPressure, double controlSurfaceSlope) {
+  return controlSurfaceSlope * deflectionRadians * area * dynamicPressure;
  }
 
  /** Throttle-linear thrust; this model does not account for airspeed/advance-ratio falloff. */

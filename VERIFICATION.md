@@ -1338,3 +1338,72 @@ flight force model in particular (`FlightForces`/`PhysicsBridge.stepFlight`)
 is proven only at the pure-function level above; nothing here has confirmed an
 aircraft/blimp is flyable, stable, or even stays airborne in an actual game.
 Heavy build/decompile/game work must not run on TayneStation.
+
+## Configurable fixed-wing lift/stall-cap and control authority (MINECRAFT-521, added 2026-11-13)
+
+Hosted CI billing was blocked for this four-track sprint (MINECRAFT-519/520/
+521/522, dispatched 2026-11-13); this is an exact-head local check instead,
+same approach as the recovered-prototype/rotor-physics evidence above - not
+the hosted Gradle build, not the `runtime-smoke` Mixin-apply check.
+
+`FlightForces.liftCoefficient` previously hardcoded its stall-angle cap
+(15deg) and lift slope (`2*pi`), and `controlSurfaceForce` reused that same
+lift-slope constant for aileron/elevator/rudder authority. All three are now
+explicit parameters - no implicit default inside `FlightForces` itself - with
+the exact previous numbers preserved as named constants
+(`DEFAULT_STALL_ANGLE_DEGREES`/`DEFAULT_LIFT_SLOPE`/
+`DEFAULT_CONTROL_SURFACE_SLOPE`) that `Overrides`'s FALLBACK reuses directly,
+so an unconfigured vehicle's flight behavior is byte-identical to before this
+ticket.
+
+Added three `Overrides.Tuning` fields - `stallAngleDegrees` (bounded
+`(0,45]`, deliberately short of disabling the hard stall cutoff entirely, per
+this ticket's own "do not claim full post-stall spin/soft-body simulation"
+scope), `liftSlope`, and `controlSurfaceSlope` (both bounded `(0,10]`, a
+generous margin around the `2*pi` thin-airfoil default) - validated, rejected
+on a `parts` override (no part-level consumer), and wired through the same
+precedence chain (`resolveFields`) and `extends`-template inheritance every
+other vehicle-level field already uses. `PhysicsBridge.stepFlight` is the one
+and only consumer: `tuning.stallAngleDegrees`/`tuning.liftSlope` feed
+`liftCoefficient`'s wing lift, `tuning.controlSurfaceSlope` feeds all three
+`controlSurfaceForce` calls (aileron roll, elevator pitch, rudder yaw) - no
+dead config. All three are read fresh from the live `tuning` object every
+tick (the same pattern already proven for `driveForce`/`friction`/etc.), so
+they are added to `PhysicsBridge.applyLiveSafeFields`'s live-safe set rather
+than `reportFieldsNeedingRespawn`'s construction-cached one - a live on-disk
+edit takes effect on an already-active flight body's very next tick, no
+respawn needed.
+
+`FlightForcesTest` covers the configurability directly: a narrower
+`stallAngleDegrees` moves where the hard cutoff actually clamps (not just
+that 15deg still clamps at 15deg), a doubled `liftSlope`/`controlSurfaceSlope`
+doubles the resulting coefficient/force at a fixed angle/deflection
+(independently of each other - control authority no longer rides on the
+wing's own slope), and the validated extremes (45deg stall angle, slope 10)
+stay finite with a still-hard cutoff. `OverridesTest` covers out-of-range
+rejection at both bounds for all three fields, the full operator-override-
+over-fallback precedence chain, and part-override rejection.
+`PhysicsBridgeLiveOverrideApplicationTest` covers all three actually being
+mutated in place by `applyLiveSafeFields` and reported in its applied-field
+set. No fixture in this repository can construct a live
+`EntityVehicleF_Physics`/Sable body (see `PhysicsBridgeStepperTest`'s own
+doc), so `stepFlight`'s force/torque application itself - like `stepFlight`
+and `stepRotor` generally - remains exercised only at this pure-function/
+wiring level, never by a live runtime tick; this is the same disclosed limit
+every prior flight/rotor ticket here has stood on, not a new gap introduced
+by this one.
+
+Local check: `javac --release 21 -proc:none` against the real `mts.jar`,
+Sable NeoForge 2.0.5, Sable Companion 1.6.0, joml 1.10.5, and this repo's
+exact pinned NeoForge 21.1.265 (`neoforge-21.1.265-merged.jar`, reused from
+this host's own MINECRAFT-494 moddev build output at the identical pinned
+version, plus the separate FancyModLoader/bus/netty/mojang-logging/
+mixin/jetbrains-annotations/datafixerupper jars NeoForge's own source
+references but that merged artifact does not bundle) confirms every changed
+file (`FlightForces.java`, `Overrides.java`, `PhysicsBridge.java`, and the
+three updated test files) compiles cleanly with zero errors against IV's
+real `JSONVehicle.motorized`/control-input-var fields. All 540 tests in the
+repository pass under a manually assembled JUnit Platform launcher (JUnit
+5.11.4/platform 1.11.4) - the same full suite as every prior local check
+here, not merely the new/changed tests - confirming this change introduces
+no regression anywhere else in the suite.
