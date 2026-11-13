@@ -36,6 +36,14 @@ import org.slf4j.Logger;
  * investigation confirmed does NOT have the client resources jar on its classpath - only a real
  * {@code gradle runServer} does) - a real failure of the claim this probe exists to check, not a
  * tolerated "optional content absent" case the way {@code GroundSurfaceTagProbe}'s MISSING is.
+ *
+ * <p>Non-mutating (review finding): this placed an {@code oak_log} at {@link #POS} and never
+ * restored whatever was there before, a permanent world write that violates this ticket's own
+ * "No erosion/world mutation" boundary - exactly the kind of defect a snapshot/restore makes
+ * impossible rather than merely unlikely. {@link #maybeRun} now snapshots the ORIGINAL block at
+ * {@link #POS} before touching it and restores that exact state in a {@code finally} block, so
+ * the restore runs even if a case throws - the world is left exactly as found regardless of
+ * outcome.
  */
 public final class DirectionalGroundSurfaceProbe {
     private DirectionalGroundSurfaceProbe() {}
@@ -74,47 +82,58 @@ public final class DirectionalGroundSurfaceProbe {
             LOGGER.error("[DIV directionalGroundSurfaceProbe] FAIL minecraft:oak_log not present in this registry at all - cannot run");
             return;
         }
+        // Snapshot whatever was really at POS before this probe touches it at all, so it can be
+        // restored exactly - including the case where POS was air, or some other block entirely.
+        BlockState original = overworld.getBlockState(POS);
         int pass = 0, fail = 0;
-        for (AxisCase c : CASES) {
-            BlockState state = oakLog.defaultBlockState().setValue(RotatedPillarBlock.AXIS, c.axis());
-            overworld.setBlockAndUpdate(POS, state);
-            // Re-read the state back from the live world (not the local `state` variable) - this
-            // is what actually proves placement took effect, not merely that setBlockAndUpdate's
-            // argument was well-formed.
-            BlockState placed = overworld.getBlockState(POS);
-            boolean placementOk = placed.getBlock() == oakLog && placed.getValue(RotatedPillarBlock.AXIS) == c.axis();
+        try {
+            for (AxisCase c : CASES) {
+                BlockState state = oakLog.defaultBlockState().setValue(RotatedPillarBlock.AXIS, c.axis());
+                overworld.setBlockAndUpdate(POS, state);
+                // Re-read the state back from the live world (not the local `state` variable) -
+                // this is what actually proves placement took effect, not merely that
+                // setBlockAndUpdate's argument was well-formed.
+                BlockState placed = overworld.getBlockState(POS);
+                boolean placementOk = placed.getBlock() == oakLog && placed.getValue(RotatedPillarBlock.AXIS) == c.axis();
 
-            // A tire always contacts a log from above: world UP is end-grain for a standing log
-            // (axis=y) and bark for a laid one (axis=x/z) - either way, a real resolvable face.
-            Direction contactFace = Direction.UP;
-            var textureResolution = io.github.brooswitminecraft.div.BlockFaceTextures.textureFor(placed, contactFace);
-            boolean textureResolved = textureResolution.isPresent();
-            boolean fieldLoaded = textureResolved
-                    && io.github.brooswitminecraft.div.CanonicalTextures.at(textureResolution.get().textureId()).isPresent();
+                // A tire always contacts a log from above: world UP is end-grain for a standing
+                // log (axis=y) and bark for a laid one (axis=x/z) - either way, a real resolvable face.
+                Direction contactFace = Direction.UP;
+                var textureResolution = io.github.brooswitminecraft.div.BlockFaceTextures.textureFor(placed, contactFace);
+                boolean textureResolved = textureResolution.isPresent();
+                boolean fieldLoaded = textureResolved
+                        && io.github.brooswitminecraft.div.CanonicalTextures.at(textureResolution.get().textureId()).isPresent();
 
-            GroundSurface baseline = GroundSurfaces.at(overworld, POS);
-            GroundSurface along = DirectionalGroundSurface.at(overworld, POS, contactFace,
-                    0.5, 1.0, 0.5, c.travelAlong().getStepX(), c.travelAlong().getStepY(), c.travelAlong().getStepZ());
-            GroundSurface across = DirectionalGroundSurface.at(overworld, POS, contactFace,
-                    0.5, 1.0, 0.5, c.travelAcross().getStepX(), c.travelAcross().getStepY(), c.travelAcross().getStepZ());
-            // "Non-baseline directional output": at least one of the two sampled directions must
-            // actually differ from the MINECRAFT-508 isotropic baseline, and the two directions
-            // must differ from EACH OTHER - both are required to show this is real per-face
-            // texture evidence driving the result, not the safe fallback firing silently.
-            boolean nonBaseline = along.frictionMultiplier() != baseline.frictionMultiplier()
-                    || across.frictionMultiplier() != baseline.frictionMultiplier();
-            boolean directional = along.frictionMultiplier() != across.frictionMultiplier();
-            boolean ok = placementOk && textureResolved && fieldLoaded
-                    && (!c.requireDirectional() || (nonBaseline && directional));
+                GroundSurface baseline = GroundSurfaces.at(overworld, POS);
+                GroundSurface along = DirectionalGroundSurface.at(overworld, POS, contactFace,
+                        0.5, 1.0, 0.5, c.travelAlong().getStepX(), c.travelAlong().getStepY(), c.travelAlong().getStepZ());
+                GroundSurface across = DirectionalGroundSurface.at(overworld, POS, contactFace,
+                        0.5, 1.0, 0.5, c.travelAcross().getStepX(), c.travelAcross().getStepY(), c.travelAcross().getStepZ());
+                // "Non-baseline directional output": at least one of the two sampled directions
+                // must actually differ from the MINECRAFT-508 isotropic baseline, and the two
+                // directions must differ from EACH OTHER - both are required to show this is real
+                // per-face texture evidence driving the result, not the safe fallback firing silently.
+                boolean nonBaseline = along.frictionMultiplier() != baseline.frictionMultiplier()
+                        || across.frictionMultiplier() != baseline.frictionMultiplier();
+                boolean directional = along.frictionMultiplier() != across.frictionMultiplier();
+                boolean ok = placementOk && textureResolved && fieldLoaded
+                        && (!c.requireDirectional() || (nonBaseline && directional));
 
-            LOGGER.info("[DIV directionalGroundSurfaceProbe] axis=" + c.axisName() + " placementOk=" + placementOk
-                    + " textureResolved=" + textureResolved + " fieldLoaded=" + fieldLoaded
-                    + " baselineFriction=" + baseline.frictionMultiplier()
-                    + " alongGrainFriction=" + along.frictionMultiplier() + " crossGrainFriction=" + across.frictionMultiplier()
-                    + " nonBaseline=" + nonBaseline + " directional=" + directional + " requireDirectional=" + c.requireDirectional()
-                    + " result=" + (ok ? "PASS" : "FAIL"));
-            if (ok) pass++; else fail++;
+                LOGGER.info("[DIV directionalGroundSurfaceProbe] axis=" + c.axisName() + " placementOk=" + placementOk
+                        + " textureResolved=" + textureResolved + " fieldLoaded=" + fieldLoaded
+                        + " baselineFriction=" + baseline.frictionMultiplier()
+                        + " alongGrainFriction=" + along.frictionMultiplier() + " crossGrainFriction=" + across.frictionMultiplier()
+                        + " nonBaseline=" + nonBaseline + " directional=" + directional + " requireDirectional=" + c.requireDirectional()
+                        + " result=" + (ok ? "PASS" : "FAIL"));
+                if (ok) pass++; else fail++;
+            }
+            LOGGER.info("[DIV directionalGroundSurfaceProbe] COMPLETE pass=" + pass + " fail=" + fail + " total=" + CASES.length);
+        } finally {
+            // Exception-safe restore: runs even if a case above threw, so this probe never leaves
+            // a permanent world mutation behind regardless of outcome.
+            overworld.setBlockAndUpdate(POS, original);
+            boolean restored = overworld.getBlockState(POS).equals(original);
+            LOGGER.info("[DIV directionalGroundSurfaceProbe] restoredOriginalBlockAt=" + POS + " restored=" + restored);
         }
-        LOGGER.info("[DIV directionalGroundSurfaceProbe] COMPLETE pass=" + pass + " fail=" + fail + " total=" + CASES.length);
     }
 }
