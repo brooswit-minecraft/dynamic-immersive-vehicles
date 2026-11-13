@@ -35,6 +35,11 @@ public record WheelAuxPayload(int hPatternTarget, double handbrakeMagnitude) imp
    // occupant may command it - a passenger riding the same vehicle must be rejected outright,
    // not merely ignored by coincidence of never sending a packet.
    if (!PhysicsBridge.isControllingRider(v, player.getUUID())) return;
+   // Recorded ONLY after the controller-seat check above already passed - advanceWheelAuxInputs
+   // then revokes everything the instant that stops being true (ticket comment 53617), rather
+   // than relying on another "clear" packet that would fail this same check once it is no
+   // longer true.
+   PhysicsBridge.recordWheelAuxOwner(v, player.getUUID());
    // setHandbrakeMagnitude/setHPatternTarget each independently reject non-finite/out-of-range
    // input themselves - this handler does not need to duplicate that validation.
    PhysicsBridge.setHPatternTarget(v, payload.hPatternTarget());

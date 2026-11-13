@@ -82,12 +82,39 @@ public final class HPatternShifter {
  public static final class Tracker {
   private int lastRequest = DISABLED;
   private boolean achieved = true;
+  // The gear this tracker expects to observe NEXT call if its own last issued action actually
+  // took effect - null means "unknown" (nothing issued yet, or the last action's outcome was
+  // not yet confirmed via recordOutcome). Used ONLY to detect an EXTERNAL change (a paddle, or
+  // native's simpleThrottle auto-reverse, acting mid-climb) - ticket comment 53617: "cancel/
+  // supersede outstanding H demand when a paddle action intervenes", not fight back toward the
+  // superseded target. A null expectation (including right after a PartEngine-refused action)
+  // never triggers this check, so a safety refusal is never mistaken for an external change.
+  private Integer expectedGear;
   public Action nextAction(int currentGear, int request) {
-   if (request != lastRequest) { lastRequest = request; achieved = false; }
-   if (achieved) return Action.NONE;
+   if (request != lastRequest) { lastRequest = request; achieved = false; expectedGear = null; }
+   if (!achieved && expectedGear != null && currentGear != expectedGear) {
+    // Something other than this tracker's own last action changed the gear while a climb was
+    // outstanding - cancel it outright. A genuinely new shifter slot (a changed request) is
+    // required to resume, exactly like the already-reached case above.
+    achieved = true;
+   }
+   if (achieved) { expectedGear = null; return Action.NONE; }
    Action action = step(currentGear, request);
+   expectedGear = switch (action) {
+    case SHIFT_UP -> currentGear + 1;
+    case SHIFT_DOWN -> currentGear - 1;
+    case NEUTRAL -> 0;
+    case NONE -> currentGear;
+   };
    if (action == Action.NONE) achieved = true;
    return action;
+  }
+  /** Caller reports whether the action {@link #nextAction} just returned actually took effect
+   * (e.g. {@code PartEngine.shiftUp()}'s own boolean return) - a refusal clears this tracker's
+   * expectation rather than leaving it wrong, so the NEXT call's external-change check does not
+   * misfire on a safety refusal it already knows about. Not needed after {@code Action.NONE}. */
+  public void recordOutcome(boolean succeeded) {
+   if (!succeeded) expectedGear = null;
   }
  }
 }

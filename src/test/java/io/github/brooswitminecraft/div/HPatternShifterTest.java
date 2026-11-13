@@ -43,79 +43,105 @@ class HPatternShifterTest {
   assertEquals(HPatternShifter.Action.SHIFT_UP, HPatternShifter.step(0, 2));
  }
 
- // --- Tracker: the actual per-engine usage ---
+ // --- Tracker: the actual per-engine usage (nextAction + recordOutcome, matching how
+ // PhysicsBridge.advanceWheelAuxInputs actually drives it) ---
+
+ /** Drives a tracker toward {@code target} assuming every issued action succeeds (reports
+  * {@code recordOutcome(true)} each time, same as PhysicsBridge does for a real
+  * shiftUp()/shiftDown()/shiftNeutral() that actually took effect), applying the gear delta
+  * itself exactly the way a real engine would. */
+ private static int climb(HPatternShifter.Tracker tracker, int startGear, int target, int maxTicks) {
+  int gear = startGear;
+  for (int i = 0; i < maxTicks; i++) {
+   var action = tracker.nextAction(gear, target);
+   if (action == HPatternShifter.Action.NONE) break;
+   gear = switch (action) { case SHIFT_UP -> gear + 1; case SHIFT_DOWN -> gear - 1; case NEUTRAL -> 0; default -> gear; };
+   tracker.recordOutcome(true);
+  }
+  return gear;
+ }
 
  @Test void trackerClimbsMultipleTicksTowardAStableTargetInEitherDirection() {
-  var up = new HPatternShifter.Tracker();
-  int gear = 0;
-  HPatternShifter.Action a;
-  while ((a = up.nextAction(gear, 3)) != HPatternShifter.Action.NONE) { assertEquals(HPatternShifter.Action.SHIFT_UP, a); gear++; }
-  assertEquals(3, gear);
-
-  var down = new HPatternShifter.Tracker();
-  gear = 5;
-  while ((a = down.nextAction(gear, 2)) != HPatternShifter.Action.NONE) { assertEquals(HPatternShifter.Action.SHIFT_DOWN, a); gear--; }
-  assertEquals(2, gear);
+  assertEquals(3, climb(new HPatternShifter.Tracker(), 0, 3, 10));
+  assertEquals(2, climb(new HPatternShifter.Tracker(), 5, 2, 10));
  }
  @Test void fiveToTwoThenReverseThenNeutralFullSequence() {
   // ticket 53603's explicit test ask: "test 5→2, reverse safety, neutral".
   var tracker = new HPatternShifter.Tracker();
-  int gear = 5;
-  HPatternShifter.Action a;
-  while ((a = tracker.nextAction(gear, 2)) != HPatternShifter.Action.NONE) { gear--; }
+  int gear = climb(tracker, 5, 2, 10);
   assertEquals(2, gear);
-  while ((a = tracker.nextAction(gear, HPatternShifter.REVERSE_REQUEST)) != HPatternShifter.Action.NONE) {
-   gear = switch (a) { case NEUTRAL -> 0; case SHIFT_DOWN -> gear - 1; default -> gear; };
-  }
+  gear = climb(tracker, gear, HPatternShifter.REVERSE_REQUEST, 10);
   assertEquals(-1, gear, "reverse request should settle at the first reverse gear, via neutral");
-  while ((a = tracker.nextAction(gear, HPatternShifter.NEUTRAL_REQUEST)) != HPatternShifter.Action.NONE) { gear = 0; }
+  gear = climb(tracker, gear, HPatternShifter.NEUTRAL_REQUEST, 10);
   assertEquals(0, gear);
  }
  @Test void trackerDoesNotReclimbAHeldTargetAfterReaching() {
   var tracker = new HPatternShifter.Tracker();
-  assertEquals(HPatternShifter.Action.SHIFT_UP, tracker.nextAction(0, 1));
-  assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(1, 1));
+  assertEquals(1, climb(tracker, 0, 1, 10));
   for (int i = 0; i < 10; i++) assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(1, 1));
  }
- @Test void aPaddleShiftIsNotClobberedByAnUnchangedHeldHPatternTarget() {
+ @Test void aPaddleShiftIsNotClobberedByAnUnchangedHeldHPatternTargetAfterItIsReached() {
   var tracker = new HPatternShifter.Tracker();
-  int gear = 0;
-  HPatternShifter.Action a;
-  while ((a = tracker.nextAction(gear, 4)) != HPatternShifter.Action.NONE) { gear++; }
-  assertEquals(4, gear);
-  gear = 3; // simulated independent paddle downshift
+  assertEquals(4, climb(tracker, 0, 4, 10));
+  int gear = 3; // simulated independent paddle downshift, AFTER the target was already reached
   assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(gear, 4),
-    "an unchanged held H-pattern target must not revert a paddle shift that moved currentGear below it");
+    "an unchanged held H-pattern target must not revert a paddle shift that moved currentGear below it, once already reached");
  }
  @Test void movingTheShifterToAGenuinelyNewSlotResumesClimbing() {
   var tracker = new HPatternShifter.Tracker();
-  tracker.nextAction(0, 1);
-  assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(1, 1));
+  assertEquals(1, climb(tracker, 0, 1, 10));
   assertEquals(HPatternShifter.Action.SHIFT_UP, tracker.nextAction(1, 2));
  }
- @Test void simpleThrottleAutoReverseDoesNotFightAHeldHPatternSlot() {
+ @Test void simpleThrottleAutoReverseDoesNotFightAHeldHPatternSlotAfterItIsReached() {
   // ticket 53603: "resolve simpleThrottle auto-reverse conflict" - native's simpleThrottle can
   // change currentGear on its own (via a different Var-toggle path this class never touches).
   // As long as the H-pattern's OWN request value is unchanged, the tracker must stay latched
-  // and silent, never fighting to climb back to the held slot.
+  // and silent once the target was already reached, never fighting to climb back.
   var tracker = new HPatternShifter.Tracker();
-  int gear = 0;
-  HPatternShifter.Action a;
-  while ((a = tracker.nextAction(gear, 1)) != HPatternShifter.Action.NONE) { gear++; }
-  assertEquals(1, gear);
-  gear = -1; // simpleThrottle auto-reverse, independent of this tracker
-  assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(gear, 1));
-  gear = 1; // simpleThrottle auto-forward again
-  assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(gear, 1));
+  assertEquals(1, climb(tracker, 0, 1, 10));
+  assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(-1, 1), "simpleThrottle auto-reverse, independent of this tracker");
+  assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(1, 1), "simpleThrottle auto-forward again");
  }
  @Test void aSafetyRefusedShiftSimplyRetriesNextTickWithoutFalselyLatching() {
   // PartEngine.shiftUp()/shiftDown() can refuse a shift (e.g. unsafe direction/speed) without
-  // changing the gear. Since the tracker only latches on step()==NONE (currentGear==target), a
-  // refusal (gear unchanged, action still non-NONE) must keep retrying, not get stuck achieved.
+  // changing the gear. recordOutcome(false) must mean the NEXT call does not mistake the
+  // unchanged gear for an external intervention and cancel the climb.
   var tracker = new HPatternShifter.Tracker();
   assertEquals(HPatternShifter.Action.SHIFT_UP, tracker.nextAction(0, 1));
-  // Simulate PartEngine refusing the shift (gear stays 0, as if shiftUp() returned false).
+  tracker.recordOutcome(false); // simulate PartEngine refusing the shift - gear stays 0
   assertEquals(HPatternShifter.Action.SHIFT_UP, tracker.nextAction(0, 1),
-    "a refused shift must retry, not silently give up");
+    "a refused shift must retry, not silently give up or be mistaken for an external change");
+ }
+ @Test void repeatedRefusalsNeverFalselyTriggerExternalChangeCancellation() {
+  var tracker = new HPatternShifter.Tracker();
+  for (int i = 0; i < 20; i++) {
+   assertEquals(HPatternShifter.Action.SHIFT_UP, tracker.nextAction(0, 3), "refusal #"+i+" must keep retrying toward the target");
+   tracker.recordOutcome(false);
+  }
+ }
+
+ // --- The actual new behavior ticket comment 53617 asked for: a paddle (or any other external
+ // cause) acting MID-CLIMB, before the target is reached, must cancel the outstanding climb
+ // outright rather than being fought. ---
+
+ @Test void anExternalGearChangeMidClimbCancelsTheOutstandingTarget() {
+  var tracker = new HPatternShifter.Tracker();
+  assertEquals(HPatternShifter.Action.SHIFT_UP, tracker.nextAction(0, 5)); // climbing toward 5, now expects gear 1
+  tracker.recordOutcome(true);
+  // A paddle fires independently, moving the gear to 3 instead of the expected 1 - a genuine
+  // external intervention mid-climb, not a refusal (which would leave gear at 0).
+  assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(3, 5),
+    "an external gear change mid-climb must cancel the outstanding H-pattern target, not keep climbing toward it");
+  // The SAME unchanged target (5) must stay cancelled afterward too - this is "supersede", not
+  // a one-tick skip.
+  assertEquals(HPatternShifter.Action.NONE, tracker.nextAction(3, 5));
+ }
+ @Test void aNewHPatternSlotAfterAnExternalInterventionResumesNormally() {
+  var tracker = new HPatternShifter.Tracker();
+  tracker.nextAction(0, 5);
+  tracker.recordOutcome(true);
+  tracker.nextAction(3, 5); // external intervention cancels the climb toward 5
+  // The physical shifter is now moved to a genuinely new slot (2) - must resume climbing.
+  assertEquals(HPatternShifter.Action.SHIFT_DOWN, tracker.nextAction(3, 2));
  }
 }

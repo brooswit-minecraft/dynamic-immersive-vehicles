@@ -312,23 +312,61 @@ CLIENT config.
     to a genuinely different slot) - this is also what keeps native's own
     `simpleThrottle` auto-reverse from fighting a held slot. See
     `HPatternShifterTest` for both scenarios directly.
+  - A paddle (or any other external cause) acting **mid-climb**, before the
+    H-pattern target is reached, cancels the outstanding climb outright
+    instead of being fought (ticket comment 53617): `Tracker.nextAction`
+    tracks the gear it expects after its own last issued action
+    (`expectedGear`); if the observed gear differs from that expectation and
+    the target has not been reached yet, the climb is treated as superseded
+    and goes silent on that target until the shifter moves to a genuinely
+    new slot. A safety-refused shift (`PartEngine.shiftUp()`/`shiftDown()`
+    declining without changing the gear) is distinguished from this via
+    `Tracker.recordOutcome(false)` - a refusal retries next tick, it is
+    never mistaken for an external intervention.
   - `currentHPatternTarget` distinguishes "no H-pattern device configured
     or present at all" (→ disabled, no action) from "configured, present,
     and genuinely reading released" (→ neutral) - the first case matters
     because `hybridShiftEnabled` defaults on, and a keyboard-only player
     (the common case) must never have their vehicle forced into neutral on
-    mount just because no shift button happens to be pressed.
+    mount just because no shift button happens to be pressed. The device
+    sample is validated for consistency across every CONFIGURED H-pattern
+    channel specifically, not merely "any channel active" - if even one
+    configured button's device is absent, the whole sample is treated as
+    disabled rather than partially trusted. Reading a channel also combines
+    `getJoystickComponentCount` with `isJoystickComponentAxis`, since some
+    IV backends mix buttons and axes in that same count - an index within
+    range is not on its own proof the component is a button.
   - Server-side authorization/validation (ticket comment 53603): only the
     vehicle's own controlling (driver) seat occupant's packets are accepted
     (`PhysicsBridge.isControllingRider`) - a passenger is rejected outright.
     An out-of-range/invalid target, or a non-finite handbrake magnitude, is
-    rejected rather than stored. Any engine/vehicle whose last update is
-    older than a bounded timeout (100 ticks / 5s) is released automatically
-    (`PhysicsBridge.advanceWheelAuxInputs`'s own staleness sweep), covering
-    dismount, disconnect, and vehicle change uniformly - a client also
-    sends one best-effort "clear" packet on an ordinary dismount so that
-    common case doesn't have to wait out the timeout, but the timeout is
-    what actually guarantees release, not that packet.
+    rejected rather than stored.
+  - **Real ownership tracking, not a best-effort dismount packet** (ticket
+    comment 53617: a "clear on dismount" packet cannot work, because the
+    controller-seat check already fails by the time such a packet could be
+    sent). `PhysicsBridge.recordWheelAuxOwner` records the authorized
+    player per vehicle; every server tick,
+    `advanceWheelAuxInputs` first sweeps every tracked vehicle for
+    ownership loss (the recorded owner no longer the controlling rider -
+    dismount, seat change, disconnect) and clears its H-pattern/handbrake
+    state and tracker outright, BEFORE applying any climb step - so a
+    revoked owner can never sneak in one more tick of input. A fresh
+    owner's request for the same slot the previous owner held genuinely
+    re-climbs to it (never silently treated as "already there" from stale
+    tracker state).
+  - **A real per-tick client heartbeat, not only changed-value sends**
+    (ticket comment 53617: the server-side staleness timeout was
+    independently discovered releasing a continuously-held handbrake after
+    5s, because the client only ever sent on change). `WheelAuxInput` now
+    resends on every change AND unconditionally every `HEARTBEAT_TICKS`
+    (20) ticks even with nothing changed, so a held handbrake or H-pattern
+    slot never goes stale merely from being held steady.
+  - Any engine/vehicle whose last update is older than the bounded timeout
+    (100 ticks / 5s) is still released automatically
+    (`PhysicsBridge.advanceWheelAuxInputs`'s own staleness sweep) as a
+    backstop - disconnect and genuine client stop are still covered by it -
+    but with the heartbeat above, an actively-held control no longer trips
+    it by itself.
 - **An analog handbrake.** IV has no analog handbrake control at all -
   `CAR_PARK` is the only parking/handbrake-adjacent control, and it is a
   plain digital toggle. This project adds one, as its own SEPARATELY
@@ -350,24 +388,55 @@ CLIENT config.
     forces every wheel's own magnitude to 1.0, unchanged. Missing/disabled/
     disconnected always resolves to exactly 0.0, never a stale value.
 
-`HPatternShifterTest`/`WheelAxisCalibrationTest`/`WheelAuxStalenessTest`/
-`HPatternShifterBidirectionalProductionGapTest` cover the pure logic above
-directly, including the server-tick-continuation and staleness-timeout
-behavior (driven the same way production drives it: one recorded input,
-many subsequent per-tick advances, no new packet). What those tests do
-NOT cover, and this project has no way to cover without a live Minecraft/
-NeoForge runtime (the same pre-existing boundary VERIFICATION.md already
-documents elsewhere in this project): the actual client-side GLFW-level
-joystick reading, the real network round-trip, and `PhysicsBridge`'s own
-glue code running against a real `EntityVehicleF_Physics`/`PartEngine`.
-That gap is a tooling limitation of this environment, not something to be
-treated as "needs a physical wheel" - no hardware is connected to Zippy at
-all right now (ticket comment 53557's device inventory), so feel/calibration
-against a real G29+shifter+handbrake remains John's own verification once
-hardware exists, but the correctness fixes above (authorization, staleness,
-bidirectional climb, per-wheel braking) are software-correctness concerns
-this project is responsible for testing as directly as this environment
-allows, not something to defer to his playtesting.
+`HPatternShifterTest`/`WheelAxisCalibrationTest`/`WheelAuxStalenessTest`
+cover the pure logic above directly, including mid-climb external-change
+cancellation and safety-refusal retry. `MultiContactFrictionSolverBrakingTest.
+differentPerContactBrakeMagnitudesProduceDistinctBrakingForcesForFrontVsRearWheel`
+is the regression for the per-wheel braking change itself: two contacts in the
+SAME solve call with different `brakeMagnitude` values (mirroring a
+non-steering/handbrake-composed wheel next to a steering/service-brake-only
+wheel) must produce distinct braking forces - a regression back to a single
+shared magnitude parameter would make them equal.
+
+Everything above that genuinely requires a live IV `EntityVehicleF_Physics`/
+`PartEngine`/`PartSeat` (not constructible from a plain unit test - the same
+pre-existing boundary VERIFICATION.md documents elsewhere in this project) is
+instead covered by `WheelAuxProbe` (ticket comment 53617's own ask: "prove
+this against the real production entry points, not a reimplementation
+loop") - an opt-in, bounded, CI/isolated-host-only runtime probe following
+this project's established pattern (`AnchorFrameProbe`, `BrakeSweepProbe`,
+`GroundSurfaceTagProbe`, etc.), gated by `-Ddiv.experimentalWheelAuxProbe=true`
+(wired in `build.gradle` via `DIV_WHEEL_AUX_PROBE=true gradle runServer`) and
+a strict no-op otherwise. It spawns a real chassis/engine/controller-seat,
+then drives `PhysicsBridge.setHPatternTarget`/`recordWheelAuxOwner`/
+`advanceWheelAuxInputs` directly against them and asserts against the real
+`PartEngine.currentGearVar`:
+
+1. a single recorded target climbs multiple gears across multiple real
+   server ticks with no further input (the exact stall this project's
+   earlier, now-removed `HPatternShifterBidirectionalProductionGapTest`
+   claimed to cover by looping `Tracker` directly instead - John's review
+   correctly flagged that as not actually exercising production code; this
+   probe is its replacement, run against the real entry points instead)
+2. dismounting the controlling seat revokes ownership before a newly
+   recorded target can apply
+3. a fresh owner remounting the same seat and requesting the same slot
+   genuinely re-climbs to it
+4. a stale (timed-out) target no longer fights an independent gear change
+
+Verified locally via `gradle runServer` against a real headless dedicated
+server: `[DIV wheelAuxProbe] COMPLETE pass=4 fail=0`. CI cannot currently
+run this (the hosted runner's own established billing/spend-capacity
+restriction - see ticket comment 53620 - blocks every job from starting,
+not a code failure), so this local run plus `gradle clean build`/`gradle
+test` passing is the evidence offered in place of it. No hardware G29 is
+connected to Zippy right now (ticket comment 53557's device inventory), so
+feel/calibration against a real wheel remains John's own verification once
+hardware exists - but the correctness fixes above (authorization,
+ownership revocation, heartbeat, staleness, bidirectional climb, mid-climb
+cancellation, per-wheel braking) are software-correctness concerns this
+project is responsible for testing as directly as this environment allows,
+not something to defer to his playtesting.
 
 ## Configuration
 

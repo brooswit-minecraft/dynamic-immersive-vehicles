@@ -49,9 +49,17 @@ public final class PhysicsBridge {
  private static final java.util.Map<PartEngine, Integer> hPatternTargetByEngine = new IdentityHashMap<>();
  private static final java.util.Map<PartEngine, Long> hPatternLastUpdateTick = new IdentityHashMap<>();
  private static final java.util.Map<PartEngine, HPatternShifter.Tracker> hPatternTrackers = new IdentityHashMap<>();
+ // The player currently AUTHORIZED to drive this vehicle's wheel-aux state (ticket comment
+ // 53617): recorded only once WheelAuxPayload's own controller-seat check has already passed,
+ // and checked EVERY tick in advanceWheelAuxInputs - a dismount/disconnect/seat change is
+ // caught immediately (own ownership-loss sweep), not left to wait out the staleness timeout
+ // below (that timeout is now purely the belt-and-suspenders fallback for a client that stops
+ // sending ENTIRELY without ever losing control, e.g. a hung game process still seated).
+ private static final java.util.Map<EntityVehicleF_Physics, java.util.UUID> wheelAuxOwner = new IdentityHashMap<>();
  private static long wheelAuxTickCounter = 0;
  // 100 ticks = 5s at 20tps - generous enough that ordinary network jitter/lag never triggers it,
- // short enough that a genuinely stuck/disconnected input releases promptly (comment 53603).
+ // short enough that a genuinely stuck client releases promptly even without an ownership-loss
+ // event (comment 53603/53617).
  private static final long WHEEL_AUX_STALE_TIMEOUT_TICKS = 100;
  /**
   * Client → server: the live analog handbrake pedal/lever magnitude (0-1), read and calibrated
@@ -88,42 +96,75 @@ public final class PhysicsBridge {
   }
  }
  /**
-  * Server-tick continuation (ticket comment 53603) for both wheel-aux inputs above - called once
-  * per real server tick (see {@code DynamicImmersiveVehicles}'s own wiring), independent of
-  * whether any vehicle's physics step happens to run that same tick.
+  * Client → server (via the packet handler, AFTER its own controller-seat check already
+  * passed): records who is currently authorized to drive this vehicle's wheel-aux state, so
+  * {@link #advanceWheelAuxInputs} can immediately revoke everything the instant that player
+  * stops controlling it (ticket comment 53617 - a plain "clear on dismount" packet cannot work,
+  * since by the time it would be sent the sender has already failed that same controller-seat
+  * check).
+  */
+ public static void recordWheelAuxOwner(EntityVehicleF_Physics v, java.util.UUID playerId) {
+  wheelAuxOwner.put(v, playerId);
+ }
+ /**
+  * Server-tick continuation (ticket comment 53603/53617) for both wheel-aux inputs above -
+  * called once per real server tick (see {@code DynamicImmersiveVehicles}'s own wiring),
+  * independent of whether any vehicle's physics step happens to run that same tick.
+  *
+  * <p>Order matters (comment 53617: "expire state BEFORE taking another H shift action"):
+  * ownership loss, then staleness, are both checked and cleared FIRST, so a revoked/expired
+  * engine never takes one more climb step on the same tick it is released; only entries that
+  * survive both checks get a climb step applied.
   *
   * <p>H-pattern: one climb step per engine per tick via its own {@link HPatternShifter.Tracker}
   * - entirely independent of IV's own {@code useShifter} setting and its {@code
   * shiftSelectionVar}, so native's own {@code useShifter=false} paddle handling (already
   * shipped, unmodified) keeps working alongside this untouched; they only converge on {@code
-  * PartEngine}'s public shift methods, at most one caller's step per tick each, so a paddle and
-  * an H-pattern climb step landing in the same tick is a real but narrow edge case (both are
-  * single discrete actions; worst case is one extra gear change that tick, not a crash or stuck
-  * state) rather than a data race.
-  *
-  * <p>Staleness: any engine/vehicle whose last update is older than {@link
-  * #WHEEL_AUX_STALE_TIMEOUT_TICKS} is released outright (map entries removed, not merely zeroed)
-  * - covers dismount, disconnect, and vehicle change uniformly without needing a dedicated event
-  * hook for each.
+  * PartEngine}'s public shift methods. The tracker itself (see its own doc) detects and cancels
+  * an outstanding climb the instant something ELSE changes {@code currentGearVar} between this
+  * class's own ticks - a paddle (or native's {@code simpleThrottle} auto-reverse) intervening
+  * mid-climb always wins, matching the explicit "user expressly wants together" requirement
+  * rather than fighting back toward the superseded H-pattern target.
   */
  public static void advanceWheelAuxInputs() {
   wheelAuxTickCounter++;
+  // Ownership-loss revocation (comment 53617) - checked first, before staleness, before
+  // applying any climb step this tick.
+  wheelAuxOwner.entrySet().removeIf(e -> {
+   var v = e.getKey();
+   if (v.isValid && isControllingRider(v, e.getValue())) return false;
+   clearWheelAuxState(v);
+   return true;
+  });
+  hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid || isWheelAuxStale(hPatternLastUpdateTick.getOrDefault(engine, 0L)));
+  handbrakeMagnitude.keySet().removeIf(v -> !v.isValid || isWheelAuxStale(handbrakeLastUpdateTick.getOrDefault(v, 0L)));
   for (var entry : hPatternTargetByEngine.entrySet()) {
    var engine = entry.getKey();
-   if (!engine.isValid) continue;
    var tracker = hPatternTrackers.computeIfAbsent(engine, ignored -> new HPatternShifter.Tracker());
    switch (tracker.nextAction((int)engine.currentGearVar.currentValue, entry.getValue())) {
-    case SHIFT_UP -> engine.shiftUp();
-    case SHIFT_DOWN -> engine.shiftDown();
-    case NEUTRAL -> engine.shiftNeutral();
+    case SHIFT_UP -> tracker.recordOutcome(engine.shiftUp());
+    case SHIFT_DOWN -> tracker.recordOutcome(engine.shiftDown());
+    case NEUTRAL -> { engine.shiftNeutral(); tracker.recordOutcome(true); }
     case NONE -> {}
    }
   }
-  hPatternTargetByEngine.keySet().removeIf(engine -> isWheelAuxStale(hPatternLastUpdateTick.getOrDefault(engine, 0L)));
-  hPatternLastUpdateTick.keySet().removeIf(engine -> isWheelAuxStale(hPatternLastUpdateTick.getOrDefault(engine, 0L)));
-  hPatternTrackers.keySet().removeIf(engine -> !engine.isValid);
-  handbrakeMagnitude.keySet().removeIf(v -> isWheelAuxStale(handbrakeLastUpdateTick.getOrDefault(v, 0L)));
-  handbrakeLastUpdateTick.keySet().removeIf(v -> isWheelAuxStale(handbrakeLastUpdateTick.getOrDefault(v, 0L)));
+  hPatternLastUpdateTick.keySet().removeIf(engine -> !hPatternTargetByEngine.containsKey(engine));
+  handbrakeLastUpdateTick.keySet().removeIf(v -> !handbrakeMagnitude.containsKey(v));
+  hPatternTrackers.keySet().removeIf(engine -> !engine.isValid || !hPatternTargetByEngine.containsKey(engine));
+ }
+ /** Removes every wheel-aux entry for one vehicle outright (not merely zeroing values) - used
+  * by both the ownership-loss and (indirectly, per-engine) staleness paths, and critically, this
+  * is what lets a NEW owner's H-pattern input start from a fresh {@link HPatternShifter.Tracker}
+  * instead of silently inheriting a stale "already achieved" latch for whatever slot the shifter
+  * happens to rest in (ticket comment 53617: "remount/swap can inherit achieved latch"). */
+ private static void clearWheelAuxState(EntityVehicleF_Physics v) {
+  handbrakeMagnitude.remove(v);
+  handbrakeLastUpdateTick.remove(v);
+  for (var part : v.allParts) if (part instanceof PartEngine engine) {
+   hPatternTargetByEngine.remove(engine);
+   hPatternLastUpdateTick.remove(engine);
+   hPatternTrackers.remove(engine);
+  }
  }
  private static boolean isWheelAuxStale(long lastUpdateTick) {
   return WheelAuxStaleness.isStale(lastUpdateTick, wheelAuxTickCounter, WHEEL_AUX_STALE_TIMEOUT_TICKS);
@@ -730,6 +771,7 @@ public final class PhysicsBridge {
   hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid);
   hPatternLastUpdateTick.keySet().removeIf(engine -> !engine.isValid);
   hPatternTrackers.keySet().removeIf(engine -> !engine.isValid);
+  wheelAuxOwner.keySet().removeIf(v -> !v.isValid);
  }
  public static void unload(Object level) {
   registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
@@ -743,6 +785,7 @@ public final class PhysicsBridge {
   hPatternTargetByEngine.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
   hPatternLastUpdateTick.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
   hPatternTrackers.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
+  wheelAuxOwner.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**

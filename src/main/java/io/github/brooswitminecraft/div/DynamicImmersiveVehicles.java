@@ -77,5 +77,12 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSurfaceTagProbe.maybeRun(overworld);
   });
+  // Opt-in, CI/isolated-host-only wheel-aux state-machine probe (ticket MINECRAFT-504, review
+  // comment 53617) - OFF by default, a strict no-op otherwise. Never touches any real vehicle
+  // or world content - see WheelAuxProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.WheelAuxProbe.maybeRun(overworld);
+  });
  }
 }
