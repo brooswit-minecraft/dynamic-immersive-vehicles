@@ -73,6 +73,15 @@ import java.util.Set;
  * <p>Opt-in via {@code -Ddiv.experimentalBuoyancyAngularDrag=true} - OFF by default, never runs
  * during normal play, never touches any real vehicle, Zippy, or world content. Runs ONCE per
  * server lifetime, for a bounded window, then stops.
+ *
+ * <p><b>Requires an explicit {@code massKg} override seeded in the config file for ALL THREE
+ * test vehicles</b> (same lesson {@code GroundSupportFixtureProbe}'s own doc already states, for
+ * exactly the same reason): confirmed live, a first run with no {@code massKg} override left mass
+ * at {@code Math.max(50, v.getMass())} - effectively a near-massless synthetic hull for a ~0.7m^3
+ * displacement - and both water scenarios launched off the carved pool within 4-6 ticks under
+ * their own real buoyant force, well past {@link #PLATFORM_BOUND_VERTICAL}. A ~400kg override
+ * reproduces a plausible small-boat mass and settles normally; see VERIFICATION.md's own
+ * "Configurable boat angular water drag" section for the measured results this produced.
  */
 public final class BuoyancyAngularDragProbe {
  private BuoyancyAngularDragProbe() {}

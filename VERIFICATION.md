@@ -1200,18 +1200,83 @@ live-safe fields `applyLiveSafeFields` mutates in place (and confirms it
 is absent from `reportFieldsNeedingRespawn`'s construction-cached set,
 unchanged from before this ticket).
 
-`BuoyantForces.apply`'s actual velocity-retention application against a live
-rigid body remains in the same live-entity/`ServerLevel`/Sable-runtime
-testing gap as the rest of this file (documented above under "Buoyancy
-tests") - exercised only by an in-game run, not by any unit test in this
-repository. No compatible vehicle pack or in-game run is recorded for this
-ticket either, so this specific addition (a boat resisting an induced spin
-differently with `angularWaterDrag` configured than with it left at the
-0.0 default) is not yet confirmed to look/feel right at runtime, only to
-compile, validate its bounds, and preserve exact default behavior at the
-pure-function/unit-test level above. `gradle test` passing locally (same
-CI billing-blocked situation as every other ticket in this file) is the
-evidence offered for that.
+**Production-path runtime evidence (review 53675/53676, Servy slot
+coordinated with and released by MINECRAFT-506), added after the fixes
+above.** `BuoyantForces.apply`'s actual velocity-retention application
+against a live rigid body was in the same live-entity/`ServerLevel`/
+Sable-runtime testing gap as the rest of this file (documented above under
+"Buoyancy tests") - exercised only by an in-game run, not by any unit test
+in this repository. New `BuoyancyAngularDragProbe` (opt-in via
+`-Ddiv.experimentalBuoyancyAngularDrag=true`, same pattern as
+`GroundSupportFixtureProbe`) closes that gap for this specific addition: a
+real `EntityVehicleF_Physics` with one `canFloat` `PartGroundDevice` (no
+engine), spawned pre-tilted 25 degrees roll over a real carved water pool,
+driven by the real Mixin-intercepted tick loop - three scenarios,
+`divtest:boatdrag-off` (`angularWaterDrag` unset, the 0.0 fallback),
+`divtest:boatdrag-on` (`angularWaterDrag: 80`), and
+`divtest:boatdrag-beached` (`angularWaterDrag: 80`, spawned on a plain
+stone platform with no water anywhere nearby).
+
+Run locally (`DIV_BUOYANCY_ANGULAR_DRAG_PROBE=true gradle runServer`,
+Servy slot confirmed free by MINECRAFT-506's own release notices) with an
+explicit `massKg: 400.0` override seeded for all three test vehicles in
+`run/config/dynamic-immersive-vehicles.json` (a first attempt without an
+explicit `massKg` left mass at `Math.max(50, v.getMass())` - effectively
+a near-massless synthetic hull - and both water scenarios launched off the
+carved pool within 4-6 ticks under their own real buoyant force, the same
+"seed massKg explicitly" lesson `GroundSupportFixtureProbe`'s own doc
+already states for exactly this reason). With that fixed, measured over
+140 ticks (7s):
+
+- `off` (`angularWaterDrag` at its 0.0 fallback): the pre-tilted hull did
+  NOT settle - it tumbled/oscillated past the tipping point, reaching
+  roll angles near 180 degrees (essentially inverted) and continuing to
+  oscillate there, for a cumulative absolute roll change of **3015
+  degrees** over the window. This is the EXISTING buoyancy/righting-torque
+  model's own real behavior for this specific two-float (left/right only,
+  no fore-aft spread), ~400kg synthetic test hull - not something this
+  ticket's own code path touches when the coefficient is exactly 0 (that
+  branch is skipped entirely by `tuning.angularWaterDrag > 0`, confirmed
+  by inspection) - disclosed here as an honest observation about the
+  baseline, not a defect this ticket is fixing.
+- `on` (`angularWaterDrag: 80`): the SAME pre-tilted starting condition
+  instead settled smoothly - peaking at roll=29 degrees then decaying
+  cleanly to roll approximately 0 degrees (final: -0.05 degrees) by the
+  end of the window, for a cumulative absolute roll change of only
+  **38.9 degrees** - about 1/78th of `off`'s rotational activity. This is
+  real, substantial, measured evidence that `angularWaterDrag` actually
+  changes the hull's rotational behavior through the real production path
+  (Mixin -> `PhysicsBridge` -> `BuoyantBody` -> `BuoyantForces.apply` ->
+  Sable/Rapier), not just at the pure-function/unit-test level - review's
+  core ask.
+- `beached` (`angularWaterDrag: 80`, no water anywhere nearby): stayed
+  essentially frozen at its initial 25-degree tilt for the entire window
+  (cumulative absolute roll change: 0.002 degrees, numerical noise) -
+  confirming review's explicit "unsubmerged/default cases are no-ops"
+  ask: with no float device ever submerged, `BuoyantForces.apply`'s own
+  `averageFraction>0` gate never engages the retention regardless of how
+  large the configured coefficient is.
+- All three scenarios stayed finite and within the bounded test area for
+  the full window (review's "state remains finite/stable" ask) once the
+  `massKg` fix above was applied.
+
+Full server log evidence (chunk grid requests, each scenario's spawn line,
+periodic tick samples, each `COMPLETE` line, the `COMPARISON` and
+`UNSUBMERGED-NOOP-CHECK` summary lines) was produced by this exact run;
+not committed to this repository (the probe's own disposable `run/`
+directory is gitignored, same as every other probe here), consistent with
+this ticket's "exact-head local tests/runtime ... honest disclosure"
+requirement - the numbers above are transcribed directly from that run's
+log output, not estimated or reconstructed.
+
+**Disclosed, deliberate scope limit, unchanged from `BuoyancyAngularDragProbe`'s
+own doc:** this run does not exercise the config hot-reload path itself
+(review's "verify live-safe reload takes effect") - that remains covered
+only at the unit level, by `PhysicsBridgeLiveOverrideApplicationTest`
+confirming `angularWaterDrag` is one of `applyLiveSafeFields`'s
+mutated-in-place fields (i.e. that `BuoyantForces.apply` re-reads the SAME
+live `Tuning` object every tick), not by a live on-disk-edit-and-reload
+exercised through this specific runtime probe.
 
 No compatible vehicle pack or in-game run is currently recorded, so there is no
 playable-MVP claim for any category above - ground, flight, or boat. The
