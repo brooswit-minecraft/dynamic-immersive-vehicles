@@ -1677,10 +1677,17 @@ public final class PhysicsBridge {
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
-    // MINECRAFT-508: baseline ground-surface response (tag-driven pavement/dirt/grass/gravel/
-    // ice; directional per-pixel/16x16-face response is a deferred later sprint, not this
-    // lookup) - resolved from the actual terrain hit block, not the suspension anchor.
-    GroundSurface surface=GroundSurfaces.at(level,((net.minecraft.world.phys.BlockHitResult)hit).getBlockPos());
+    // MINECRAFT-508/517: tag-driven pavement/dirt/grass/gravel/ice baseline, layered with
+    // MINECRAFT-517's directional per-face canonical-texture grain response (safe no-op fallback
+    // to the exact MINECRAFT-508 baseline when that texture/model can't be resolved - see
+    // DirectionalGroundSurface's own doc) - resolved from the actual terrain hit block/face, not
+    // the suspension anchor. `forward` is this wheel's own rolling direction, the travel
+    // direction grain response is relative to.
+    var terrainHit=(net.minecraft.world.phys.BlockHitResult)hit;
+    Vector3d hitLocal=new Vector3d(hit.getLocation().x,hit.getLocation().y,hit.getLocation().z).sub(
+      terrainHit.getBlockPos().getX(),terrainHit.getBlockPos().getY(),terrainHit.getBlockPos().getZ());
+    GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
+      hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
       damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface));
    }
