@@ -20,6 +20,11 @@ package io.github.brooswitminecraft.div;
 public final class RotorForces {
  private RotorForces() {}
  private static final double MAX_CYCLIC_TILT = Math.toRadians(20);
+ /** Hard safety cap on a configured cyclic limit (MINECRAFT-522): a real rotor disk's blade
+  * flapping range cannot be tilted onto its edge no matter how an operator configures it, so
+  * {@link Overrides.Tuning#cyclicLimitDegrees} is range-checked against this at config load/
+  * reload time - see {@link Overrides.Tuning#validate}. */
+ public static final double MAX_CYCLIC_LIMIT_DEGREES = 45.0;
 
  /**
   * Collective pitch authority from throttle, matching IV's own rotor pitch mapping
@@ -39,9 +44,20 @@ public final class RotorForces {
  }
 
  /** Cyclic tilt angle (forward/back or side-to-side), clamped the way a real rotor's blade
-  * flapping range is: the disk cannot be tilted onto its edge. */
+  * flapping range is: the disk cannot be tilted onto its edge. Uses the fixed 20-degree default
+  * clamp - see {@link #cyclicTilt(double, double)} for the configurable-limit overload
+  * (MINECRAFT-522). */
  public static double cyclicTilt(double inputRadians) {
-  return Math.max(-MAX_CYCLIC_TILT, Math.min(MAX_CYCLIC_TILT, inputRadians));
+  return cyclicTilt(inputRadians, MAX_CYCLIC_TILT);
+ }
+
+ /** {@link #cyclicTilt(double)} with an explicit, operator-configured clamp
+  * ({@code Overrides.Tuning#cyclicLimitDegrees}, MINECRAFT-522) instead of the fixed 20-degree
+  * default - {@code maxTiltRadians} itself is expected to already be validated/clamped to
+  * {@link #MAX_CYCLIC_LIMIT_DEGREES} by {@link Overrides.Tuning#validate}, so this does not
+  * re-check it. */
+ public static double cyclicTilt(double inputRadians, double maxTiltRadians) {
+  return Math.max(-maxTiltRadians, Math.min(maxTiltRadians, inputRadians));
  }
 
  /** The vertical component of rotor thrust once the disk is tilted by cyclic input - tilting
@@ -64,14 +80,32 @@ public final class RotorForces {
   * scales with available thrust and rotor disk radius, not with dynamic pressure.
   */
  public static double cyclicTorque(double tiltRadians, double thrust, double rotorRadius) {
-  return Math.sin(tiltRadians) * thrust * rotorRadius;
+  return cyclicTorque(tiltRadians, thrust, rotorRadius, 1.0);
+ }
+
+ /** {@link #cyclicTorque(double, double, double)} with an explicit operator-configured
+  * authority multiplier ({@code Overrides.Tuning#cyclicAuthorityScale}, MINECRAFT-522) applied
+  * on top of the unchanged thrust/radius physics - 1.0 reproduces the exact prior behavior. Still
+  * respects thrust availability (zero thrust still gives zero torque regardless of scale) and
+  * grants no unpowered free torque - the scale only reshapes how much of the already-available,
+  * thrust-derived authority reaches the fuselage. */
+ public static double cyclicTorque(double tiltRadians, double thrust, double rotorRadius, double authorityScale) {
+  return Math.sin(tiltRadians) * thrust * rotorRadius * authorityScale;
  }
 
  /** Yaw (anti-torque/tail-rotor) authority, the rotorcraft analogue of a rudder: like cyclic
   * torque, scales with available thrust and arm, not airspeed - see the class-level
   * simplification note on why this is one lumped abstraction rather than a modeled tail rotor. */
  public static double yawTorque(double rudderRadians, double thrust, double tailArm) {
-  return rudderRadians * thrust * tailArm;
+  return yawTorque(rudderRadians, thrust, tailArm, 1.0);
+ }
+
+ /** {@link #yawTorque(double, double, double)} with an explicit operator-configured authority
+  * multiplier ({@code Overrides.Tuning#yawAuthorityScale}, MINECRAFT-522) - same contract as
+  * {@link #cyclicTorque(double, double, double, double)}: 1.0 is a no-op, still gated by thrust,
+  * no free unpowered torque. */
+ public static double yawTorque(double rudderRadians, double thrust, double tailArm, double authorityScale) {
+  return rudderRadians * thrust * tailArm * authorityScale;
  }
 
  /** Rotor disk radius in meters from IV's own propeller diameter field (inches). */

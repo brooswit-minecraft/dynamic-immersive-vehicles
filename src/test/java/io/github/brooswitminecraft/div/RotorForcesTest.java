@@ -104,4 +104,65 @@ class RotorForcesTest {
  @Test void zeroDiameterGivesZeroRadius() {
   assertEquals(0, RotorForces.rotorRadiusMeters(0));
  }
+
+ // MINECRAFT-522: configurable cyclic-limit and cyclic/yaw authority tuning.
+
+ @Test void cyclicTiltWithExplicitLimitClampsAtThatLimitNotTwentyDegrees() {
+  double tenDegreeLimit = Math.toRadians(10);
+  assertEquals(tenDegreeLimit, RotorForces.cyclicTilt(Math.toRadians(45), tenDegreeLimit), 1e-9);
+  assertEquals(-tenDegreeLimit, RotorForces.cyclicTilt(Math.toRadians(-45), tenDegreeLimit), 1e-9);
+  double fiveDegrees = Math.toRadians(5);
+  assertEquals(fiveDegrees, RotorForces.cyclicTilt(fiveDegrees, tenDegreeLimit), 1e-9, "within the configured limit, passes through unchanged");
+ }
+
+ @Test void cyclicTiltWithNoExplicitLimitMatchesTheTwentyDegreeDefault() {
+  double input = Math.toRadians(30);
+  assertEquals(RotorForces.cyclicTilt(input), RotorForces.cyclicTilt(input, Math.toRadians(20)), 1e-9);
+ }
+
+ @Test void cyclicTorqueWithUnitScaleMatchesTheUnscaledOverload() {
+  double tilt = Math.toRadians(10), thrust = 5000, radius = 2;
+  assertEquals(RotorForces.cyclicTorque(tilt, thrust, radius), RotorForces.cyclicTorque(tilt, thrust, radius, 1.0), 1e-9);
+ }
+
+ @Test void cyclicTorqueScalesLinearlyWithAuthorityScale() {
+  double tilt = Math.toRadians(10), thrust = 5000, radius = 2;
+  double base = RotorForces.cyclicTorque(tilt, thrust, radius, 1.0);
+  assertEquals(2 * base, RotorForces.cyclicTorque(tilt, thrust, radius, 2.0), 1e-6);
+  assertEquals(0.5 * base, RotorForces.cyclicTorque(tilt, thrust, radius, 0.5), 1e-6);
+ }
+
+ @Test void cyclicTorqueScaleGrantsNoUnpoweredFreeTorqueAtZeroThrust() {
+  assertEquals(0, RotorForces.cyclicTorque(Math.toRadians(10), 0, 2, 5.0), 1e-9);
+ }
+
+ @Test void yawTorqueWithUnitScaleMatchesTheUnscaledOverload() {
+  double rudder = Math.toRadians(10), thrust = 5000, tailArm = 2;
+  assertEquals(RotorForces.yawTorque(rudder, thrust, tailArm), RotorForces.yawTorque(rudder, thrust, tailArm, 1.0), 1e-9);
+ }
+
+ @Test void yawTorqueScalesLinearlyWithAuthorityScale() {
+  double rudder = Math.toRadians(10), thrust = 5000, tailArm = 2;
+  double base = RotorForces.yawTorque(rudder, thrust, tailArm, 1.0);
+  assertEquals(3 * base, RotorForces.yawTorque(rudder, thrust, tailArm, 3.0), 1e-6);
+ }
+
+ @Test void yawTorqueScaleGrantsNoUnpoweredFreeTorqueAtZeroThrust() {
+  assertEquals(0, RotorForces.yawTorque(Math.toRadians(10), 0, 2, 5.0), 1e-9);
+ }
+
+ @Test void cyclicLimitDegreesIsAPerAxisClampNotACombinedDiskAngleBound() {
+  // John's review (comment 53751): cyclicLimitDegrees clamps pitch and roll INDEPENDENTLY - same
+  // as this class's own prior fixed 20-degree constant always did (PhysicsBridge.stepRotor calls
+  // cyclicTilt separately for tiltPitch and tiltRoll) - so the COMBINED disk tilt
+  // (hypot of both axes) can exceed the configured/default number when both axes are near their
+  // own limit at once. This is unchanged, original behavior, not something this ticket introduces.
+  double limit = Math.toRadians(45);
+  double pitch = RotorForces.cyclicTilt(Math.toRadians(90), limit);
+  double roll = RotorForces.cyclicTilt(Math.toRadians(90), limit);
+  assertEquals(limit, pitch, 1e-9); assertEquals(limit, roll, 1e-9);
+  double combined = Math.hypot(pitch, roll);
+  assertTrue(combined > limit, "combined (hypot) disk tilt must be allowed to exceed the per-axis limit - it is not a total-disk-angle bound");
+  assertEquals(Math.toRadians(45 * Math.sqrt(2)), combined, 1e-9);
+ }
 }

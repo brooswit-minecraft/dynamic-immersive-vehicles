@@ -116,6 +116,20 @@ public final class Overrides {
   public Double stallAngleDegrees;
   public Double liftSlope;
   public Double controlSurfaceSlope;
+  // MINECRAFT-522: rotorcraft-only cyclic/yaw tuning, mirroring RotorForces.cyclicTilt's own
+  // bounded-clamp contract and RotorForces.cyclicTorque/yawTorque's new authority-scale overloads
+  // - see those methods' own docs. cyclicLimitDegrees bounds how far EACH AXIS (pitch and roll
+  // independently, matching the class's prior hardcoded 20-degree clamp exactly) of the disk can
+  // be tilted; it is not a combined/total-disk-angle bound - the combined tilt (hypot of both
+  // axes) can exceed this number when both axes are near their limit simultaneously, unchanged
+  // from the model's original per-axis-clamp behavior (John's review, comment 53751).
+  // cyclicAuthorityScale/yawAuthorityScale multiply the already thrust-gated cyclic/yaw torque,
+  // never granting unpowered free torque. All three re-read live every tick by
+  // PhysicsBridge.stepRotor, same as driveForce/maxSteerDegrees - see
+  // PhysicsBridge.applyLiveSafeFields.
+  public Double cyclicLimitDegrees;
+  public Double cyclicAuthorityScale;
+  public Double yawAuthorityScale;
   // MINECRAFT-520: configurable front/rear SERVICE-brake distribution - 0.0 sends the whole
   // tuning.brakeForce budget to the geometric rear axle group, 1.0 sends it all to the front
   // group, 0.5 is the neutral/even axle split. No FALLBACK entry (like selfRight*/massKg/
@@ -164,6 +178,16 @@ public final class Overrides {
    // never so large it produces an absurd lift/control force from a tiny angle/deflection.
    if (liftSlope != null && !(Double.isFinite(liftSlope) && liftSlope > 0 && liftSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (controlSurfaceSlope != null && !(Double.isFinite(controlSurfaceSlope) && controlSurfaceSlope > 0 && controlSurfaceSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-522: bounded the same way the class doc on RotorForces.MAX_CYCLIC_LIMIT_DEGREES
+   // explains - a real rotor disk cannot be tilted onto its edge, so even an operator-configured
+   // limit is capped there, never just "whatever value was typed".
+   if (cyclicLimitDegrees != null && !(Double.isFinite(cyclicLimitDegrees) && cyclicLimitDegrees > 0 && cyclicLimitDegrees <= io.github.brooswitminecraft.div.RotorForces.MAX_CYCLIC_LIMIT_DEGREES)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Authority scale multiplies already thrust-gated torque (RotorForces.cyclicTorque/yawTorque) -
+   // strictly positive (a zero or negative scale would be a confusing way to disable attitude/yaw
+   // authority entirely; that is what cyclicLimitDegrees/disabling the rotorcraft itself is for),
+   // capped at 5x to keep this a tuning knob, not a way to grant unbounded attitude/yaw torque.
+   if (cyclicAuthorityScale != null && !(Double.isFinite(cyclicAuthorityScale) && cyclicAuthorityScale > 0 && cyclicAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (yawAuthorityScale != null && !(Double.isFinite(yawAuthorityScale) && yawAuthorityScale > 0 && yawAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Inclusive at both ends (0.0 all-rear, 1.0 all-front are the documented, legitimate
    // extremes - see BrakeBiasDistributionTest's own front/rear-extreme coverage), unlike
    // lateralGripMultiplier's exclusive-zero: a brake bias of exactly 0 or 1 is a normal,
@@ -205,6 +229,9 @@ public final class Overrides {
    if (stallAngleDegrees != null) throw new IllegalArgumentException("part overrides do not support 'stallAngleDegrees' (no part-level consumer yet)");
    if (liftSlope != null) throw new IllegalArgumentException("part overrides do not support 'liftSlope' (no part-level consumer yet)");
    if (controlSurfaceSlope != null) throw new IllegalArgumentException("part overrides do not support 'controlSurfaceSlope' (no part-level consumer yet)");
+   if (cyclicLimitDegrees != null) throw new IllegalArgumentException("part overrides do not support 'cyclicLimitDegrees' (no part-level consumer yet)");
+   if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
+   if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
    if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
   }
  }
@@ -218,6 +245,9 @@ public final class Overrides {
   * controlSurfaceSlope fall back to {@link FlightForces}'s own DEFAULT_* constants - the exact
   * values that class previously hardcoded, so an unconfigured fixed-wing vehicle flies
   * byte-identically to before this ticket. */
+  * (solver-internal units), propellerForce 6000N. MINECRAFT-522: cyclicLimitDegrees 20deg and
+  * cyclicAuthorityScale/yawAuthorityScale 1.0 (unit scaling) reproduce RotorForces' own prior
+  * hardcoded constant/behavior exactly - see that class's doc. */
  private static final Tuning FALLBACK = new Tuning();
  static {
   FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
@@ -228,6 +258,9 @@ public final class Overrides {
   FALLBACK.stallAngleDegrees=FlightForces.DEFAULT_STALL_ANGLE_DEGREES;
   FALLBACK.liftSlope=FlightForces.DEFAULT_LIFT_SLOPE;
   FALLBACK.controlSurfaceSlope=FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE;
+  FALLBACK.cyclicLimitDegrees=20.0;
+  FALLBACK.cyclicAuthorityScale=1.0;
+  FALLBACK.yawAuthorityScale=1.0;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -240,6 +273,7 @@ public final class Overrides {
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   c.angularWaterDrag=t.angularWaterDrag;
   c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
+  c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.brakeBiasFront=t.brakeBiasFront;
   return c;
  }
@@ -269,6 +303,9 @@ public final class Overrides {
   m.stallAngleDegrees = child.stallAngleDegrees!=null?child.stallAngleDegrees:parent.stallAngleDegrees;
   m.liftSlope = child.liftSlope!=null?child.liftSlope:parent.liftSlope;
   m.controlSurfaceSlope = child.controlSurfaceSlope!=null?child.controlSurfaceSlope:parent.controlSurfaceSlope;
+  m.cyclicLimitDegrees = child.cyclicLimitDegrees!=null?child.cyclicLimitDegrees:parent.cyclicLimitDegrees;
+  m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
+  m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
   m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   return m;
  }
@@ -448,6 +485,9 @@ public final class Overrides {
   result.stallAngleDegrees = firstNonNull(override!=null?override.stallAngleDegrees:null, packMetadata!=null?packMetadata.stallAngleDegrees:null, ivAdapted!=null?ivAdapted.stallAngleDegrees:null, physicallyDerived!=null?physicallyDerived.stallAngleDegrees:null, FALLBACK.stallAngleDegrees);
   result.liftSlope = firstNonNull(override!=null?override.liftSlope:null, packMetadata!=null?packMetadata.liftSlope:null, ivAdapted!=null?ivAdapted.liftSlope:null, physicallyDerived!=null?physicallyDerived.liftSlope:null, FALLBACK.liftSlope);
   result.controlSurfaceSlope = firstNonNull(override!=null?override.controlSurfaceSlope:null, packMetadata!=null?packMetadata.controlSurfaceSlope:null, ivAdapted!=null?ivAdapted.controlSurfaceSlope:null, physicallyDerived!=null?physicallyDerived.controlSurfaceSlope:null, FALLBACK.controlSurfaceSlope);
+  result.cyclicLimitDegrees = firstNonNull(override!=null?override.cyclicLimitDegrees:null, packMetadata!=null?packMetadata.cyclicLimitDegrees:null, ivAdapted!=null?ivAdapted.cyclicLimitDegrees:null, physicallyDerived!=null?physicallyDerived.cyclicLimitDegrees:null, FALLBACK.cyclicLimitDegrees);
+  result.cyclicAuthorityScale = firstNonNull(override!=null?override.cyclicAuthorityScale:null, packMetadata!=null?packMetadata.cyclicAuthorityScale:null, ivAdapted!=null?ivAdapted.cyclicAuthorityScale:null, physicallyDerived!=null?physicallyDerived.cyclicAuthorityScale:null, FALLBACK.cyclicAuthorityScale);
+  result.yawAuthorityScale = firstNonNull(override!=null?override.yawAuthorityScale:null, packMetadata!=null?packMetadata.yawAuthorityScale:null, ivAdapted!=null?ivAdapted.yawAuthorityScale:null, physicallyDerived!=null?physicallyDerived.yawAuthorityScale:null, FALLBACK.yawAuthorityScale);
   // No FALLBACK entry (mirrors selfRight*/enabled/massKg above) - stays null unless some level
   // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
   // needs to reproduce the pre-ticket even split.
