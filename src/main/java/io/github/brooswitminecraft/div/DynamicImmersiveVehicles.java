@@ -9,6 +9,7 @@ public final class DynamicImmersiveVehicles {
   GroundContactDiagnostics.logStartupMarker(PhysicsBridge.resolveDebugGroundContactTicks(System.getProperty("div.debugGroundContactTicks")),
     PhysicsBridge.effectiveFrictionSolverIterations());
   Overrides.load();
+  GroundSurfaceOverrides.load();
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
   // Ticket 53518 (MINECRAFT-505): bounded, periodic operator-config hot reload - see
   // OverridesHotReload's own doc for why mtime-polling, and PhysicsBridge.reloadOverrides for

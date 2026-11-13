@@ -1,9 +1,9 @@
 {
   "values": [
-    "minecraft:dirt",
-    "minecraft:coarse_dirt",
-    "minecraft:dirt_path",
+    "#minecraft:convertable_to_mud",
+    "#minecraft:sand",
     "minecraft:farmland",
-    "minecraft:rooted_dirt"
+    { "id": "dynamicterrain:layered_dirt", "required": false },
+    { "id": "dynamicterrain:layered_coarse_dirt", "required": false }
   ]
 }

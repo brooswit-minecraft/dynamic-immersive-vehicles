@@ -1,8 +1,7 @@
 {
   "values": [
-    "minecraft:ice",
-    "minecraft:packed_ice",
-    "minecraft:blue_ice",
-    "minecraft:frosted_ice"
+    "#minecraft:ice",
+    { "id": "dynamicterrain:layered_ice", "required": false },
+    { "id": "dynamicterrain:layered_packed_ice", "required": false }
   ]
 }
