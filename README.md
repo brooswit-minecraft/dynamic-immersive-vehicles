@@ -193,6 +193,13 @@ pinned installed artifact (`curse.maven:minecraft-transport-simulator-286703:792
 IV 24.0.0), not just upstream source (which can be ahead of what is actually
 pinned/installed):
 
+> **Current installed state (ticket comment 53549): capability confirmed,
+> binding/calibration still pending.** The running profile's
+> `controlsettings.json` has no joystick assignments and `useShifter=false` -
+> native support existing in the mod is a different fact from a G29 actually
+> being bound on this install. Treat the steps below as what to configure,
+> not as something already done.
+
 - **Bind it in IV's own controls GUI/`controlsettings.json`**, the same way
   as any other joystick: per-axis min/max travel, inversion, and a global
   deadzone for `CAR_TURN` (steering), `CAR_GAS` and `CAR_BRAKE` (separate
