@@ -27,14 +27,14 @@ class ServiceDriveBiasTest {
    new Vector3d(1.0, -0.4, -1.5), new Vector3d(-1.0, -0.4, -1.5),
  };
  private static final double[] Z = {1.5, 1.5, -1.5, -1.5};
- /** The exact per-wheel DRIVE-force ratio {@code PhysicsBridge.stepGround} computes - share
-  * (from {@link DriveBiasDistribution#shares}) times wheel count, composing directly with the
-  * solver's own {@code driveForcePerWheel} multiply. */
+ /** The exact per-wheel DRIVE-force ratio {@code PhysicsBridge.stepGround} actually computes -
+  * {@link DriveBiasDistribution#shareRatios} directly, composing with the solver's own
+  * {@code driveForcePerWheel} multiply. NOT {@code shares(...)[i]*wheelCount} computed here -
+  * self-review (PR #24 comment 6871636687) found that round-trip is not always exactly 1.0 for
+  * the unset/fallback case (ordinary floating-point error at some wheel counts); this test
+  * fixture must exercise the same corrected production call PhysicsBridge makes. */
  private static double[] driveShareRatiosFromBias(Double biasFront) {
-  double[] shares = DriveBiasDistribution.shares(Z, biasFront);
-  double[] ratios = new double[Z.length];
-  for (int i = 0; i < Z.length; i++) ratios[i] = shares[i] * Z.length;
-  return ratios;
+  return DriveBiasDistribution.shareRatios(Z, biasFront);
  }
  @Test void conservationHoldsAcrossSeveralBiasValues() {
   for (double bias : new double[]{0.0, 0.25, 0.5, 0.75, 1.0}) {
@@ -75,9 +75,7 @@ class ServiceDriveBiasTest {
   // DriveBiasDistributionTest's own asymmetric case, verified again here at the ratio level
   // actually fed to the solver.
   double[] z = {2.0, -1.0, -1.0};
-  double[] shares = DriveBiasDistribution.shares(z, 0.7);
-  double[] ratios = new double[3];
-  for (int i = 0; i < 3; i++) ratios[i] = shares[i] * z.length;
+  double[] ratios = DriveBiasDistribution.shareRatios(z, 0.7);
   double total = 0; for (int i = 0; i < 3; i++) total += ratios[i] * (TOTAL_DRIVE_FORCE / z.length);
   assertEquals(TOTAL_DRIVE_FORCE, total, 1e-6);
   assertEquals(0.7 * 3, ratios[0], 1e-9, "the lone front wheel's ratio carries the WHOLE front share, expressed as a ratio");

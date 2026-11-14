@@ -1635,3 +1635,33 @@ Not yet performed: in-game acceptance (real vehicle spawn with a
 configured `driveBiasFront`, observed front/rear-biased acceleration) -
 this ticket's own brief says focused engineering tests are in scope, not
 John's broad/hardware playtesting, which is explicitly out of scope here.
+
+**Self-review finding and fix (PR #24 comment 6871636687).** The initial
+version computed each wheel's drive-force ratio as `DriveBiasDistribution.
+shares(...)[i] * wheels.size()` (the same shape `brakeShareRatios` already
+uses) - for the unset/fallback case this is `(1.0/n)*n`, which is NOT
+always the exact literal `1.0` (ordinary floating-point error, e.g. at
+n=49 wheels it evaluates to `0.9999999999999999`), so an unconfigured
+vehicle's drive would differ from the pre-ticket `drive/wheels.size()`
+formula by that tiny error - a real violation of this ticket's own "unset
+retains exact accepted behavior" requirement, which means byte-identical,
+not merely close. Fixed by adding `DriveBiasDistribution#shareRatios`,
+which fills the fallback with the literal constant `1.0` directly instead
+of deriving it through division then remultiplication, and switching
+`PhysicsBridge.stepGround` (and the test fixtures) to call it directly
+instead of computing `shares(...)[i]*wheels.size()` itself.
+`DriveBiasDistributionTest` gained a non-rounding regression test sweeping
+wheel counts 1-97 (confirming every one gets the exact `1.0` ratio, and
+specifically identifying which counts the naive round-trip would have
+rounded), plus a degenerate-layout exactness test and a budget-conservation
+test for the biased case.
+
+Same local slot-lock coordination (claimed 2026-11-14T04:26:01Z, released
+2026-11-14T04:27:10Z, no concurrent process observed). `/tmp/gradle-8.14/
+bin/gradle --offline clean build test --console=plain` against the fixed
+head - `BUILD SUCCESSFUL` in 1m 9s, 8 tasks (8 executed, a true clean this
+time). The real JUnit XML reports total **630 tests**, 0 skipped, 0
+failures, 0 errors (14 from `DriveBiasDistributionTest`, 7 from
+`ServiceDriveBiasTest`, plus every pre-existing test unchanged alongside
+them). `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was
+produced again.

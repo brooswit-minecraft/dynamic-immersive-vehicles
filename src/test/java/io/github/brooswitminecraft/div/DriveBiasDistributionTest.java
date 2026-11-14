@@ -99,4 +99,44 @@ class DriveBiasDistributionTest {
    assertEquals(1.0, s, 1e-9, "trial " + trial + ": shares must sum to exactly 1.0");
   }
  }
+
+ // --- shareRatios: what PhysicsBridge actually multiplies into driveForcePerWheel ---
+ @Test void unsetBiasRatioIsTheExactLiteral1point0AtEveryWheelCountIncludingOnesWhereNaiveShareTimesCountWouldRound() {
+  // Self-review (PR #24 comment 6871636687): shares(z,null)[i]*n is NOT always exactly 1.0 -
+  // e.g. (1.0/49)*49 == 0.9999999999999999, ordinary floating-point error. shareRatios must
+  // return the literal constant 1.0, never that rounded value, for every wheel count - the
+  // ticket's own "unset retains exact accepted behavior" requirement means byte-identical.
+  for (int n = 1; n <= 97; n++) {
+   double[] z = new double[n];
+   for (int i = 0; i < n; i++) z[i] = i * 0.37 - 1.1;
+   double naiveRoundTrip = (1.0 / n) * n;
+   double[] ratios = DriveBiasDistribution.shareRatios(z, null);
+   for (double r : ratios) {
+    assertEquals(1.0, r, 0.0, "n="+n+": ratio must be the exact literal 1.0, not merely close to it");
+   }
+   if (naiveRoundTrip != 1.0) {
+    assertNotEquals(naiveRoundTrip, ratios[0], "n="+n+" is a case where the naive share*n round-trip actually rounds (got "+naiveRoundTrip+") - shareRatios must not reproduce that rounding");
+   }
+  }
+ }
+ @Test void degenerateLayoutRatioIsAlsoTheExactLiteral1point0() {
+  // Same exactness requirement for shares' own degenerate-layout fallbacks (single wheel, every
+  // wheel at the same z) - not just the unset-bias case above.
+  double[] oneWheel = {2.3};
+  for (double r : DriveBiasDistribution.shareRatios(oneWheel, 0.7)) assertEquals(1.0, r, 0.0);
+  double[] sameZ = new double[49];
+  java.util.Arrays.fill(sameZ, 0.3);
+  for (double r : DriveBiasDistribution.shareRatios(sameZ, 1.0)) assertEquals(1.0, r, 0.0);
+ }
+ @Test void biasedRatiosConserveTheTotalBudgetAcrossManyWheelCounts() {
+  // ratios no longer sum to n via raw addition of shares (shareRatios isn't shares*n) - verify
+  // the conserved quantity directly instead: sum(ratio[i]/n) must still be exactly 1.0's worth
+  // of budget, i.e. sum(ratio[i]) == n for the biased (non-fallback) case.
+  double[] z = {1.5, 1.5, -1.5, -1.5};
+  for (double bias : new double[]{0.0, 0.25, 0.5, 0.75, 1.0}) {
+   double[] ratios = DriveBiasDistribution.shareRatios(z, bias);
+   double sum = 0; for (double r : ratios) sum += r;
+   assertEquals(4.0, sum, 1e-9, "bias="+bias);
+  }
+ }
 }

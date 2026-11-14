@@ -85,4 +85,39 @@ public final class DriveBiasDistribution {
   for (int i = 0; i < n; i++) result[i] = isFront[i] ? frontPerWheel : rearPerWheel;
   return result;
  }
+ /**
+  * {@link #shares} expressed as a RATIO (share*wheelCount) - what {@code PhysicsBridge} actually
+  * multiplies into {@code driveForcePerWheel} (see {@code MultiContactFrictionSolver.
+  * FrictionContact#driveShareRatio}). This is NOT simply {@code shares(z,biasFront)[i]*n}
+  * computed by the caller: self-review (PR #24 comment 6871636687) found that round-trip
+  * introduces ordinary floating-point error for the unset/fallback case at some wheel counts
+  * (e.g. {@code (1.0/49)*49 == 0.9999999999999999}, not the exact {@code 1.0} the pre-ticket
+  * {@code drive/wheels.size()} formula needs byte-for-byte) - the ticket's own "unset retains
+  * exact accepted behavior" requirement means EXACT, not merely close. This method fills the
+  * fallback (unset {@code biasFront}, or any degenerate layout {@link #shares} itself falls back
+  * on) with the literal constant {@code 1.0} instead of deriving it through division then
+  * remultiplication, so every wheel's ratio is byte-identically the true no-op in every case
+  * {@link #shares} already documents as a fallback - never merely numerically close to it. */
+ public static double[] shareRatios(double[] z, Double biasFront) {
+  int n = z.length;
+  double[] evenRatios = new double[n];
+  if (n == 0) return evenRatios;
+  java.util.Arrays.fill(evenRatios, 1.0);
+  if (biasFront == null) return evenRatios;
+  double maxZ = Double.NEGATIVE_INFINITY;
+  for (double v : z) maxZ = Math.max(maxZ, v);
+  boolean[] isFront = new boolean[n];
+  int frontCount = 0;
+  for (int i = 0; i < n; i++) {
+   isFront[i] = z[i] >= maxZ - AXLE_EPSILON;
+   if (isFront[i]) frontCount++;
+  }
+  int rearCount = n - frontCount;
+  if (rearCount == 0) return evenRatios; // no distinguishable rear axle - nothing to bias against
+  double[] result = new double[n];
+  double frontRatio = biasFront * n / frontCount;
+  double rearRatio = (1.0 - biasFront) * n / rearCount;
+  for (int i = 0; i < n; i++) result[i] = isFront[i] ? frontRatio : rearRatio;
+  return result;
+ }
 }

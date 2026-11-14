@@ -300,7 +300,7 @@ public final class PhysicsBridge {
   * stallAngleDegrees/liftSlope/controlSurfaceSlope (MINECRAFT-521, stepFlight only)/
   * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
   * brakeBiasFront (MINECRAFT-520, same reasoning)/driveBiasFront (MINECRAFT-524, same reasoning -
-  * stepGround reads tuning.driveBiasFront fresh every tick via DriveBiasDistribution#shares).
+  * stepGround reads tuning.driveBiasFront fresh every tick via DriveBiasDistribution#shareRatios).
   * Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
@@ -1744,16 +1744,17 @@ public final class PhysicsBridge {
    double[] brakeShares=BrakeBiasDistribution.shares(loadShareZ,tuning.brakeBiasFront);
    double[] brakeShareRatios=new double[brakeShares.length];
    for (int i=0;i<brakeShares.length;i++) brakeShareRatios[i]=brakeShares[i]*wheels.size();
-   // MINECRAFT-524: each wheel's own DRIVE-force budget share, the exact same shape as
-   // brakeShareRatios immediately above (same per-wheel z, same ratio=share*wheelCount
-   // expression so it composes directly with driveForcePerWheel's own multiply in
-   // MultiContactFrictionSolver.solveFriction) but biased by tuning.driveBiasFront instead of
-   // brakeBiasFront - a ratio of exactly 1.0 for every wheel (tuning.driveBiasFront unset, or any
-   // layout DriveBiasDistribution falls back on) reproduces today's uniform per-wheel drive
-   // budget byte-identically, since 1.0 is the pure no-op multiplier.
-   double[] driveShares=DriveBiasDistribution.shares(loadShareZ,tuning.driveBiasFront);
-   double[] driveShareRatios=new double[driveShares.length];
-   for (int i=0;i<driveShares.length;i++) driveShareRatios[i]=driveShares[i]*wheels.size();
+   // MINECRAFT-524: each wheel's own DRIVE-force budget ratio, the same role as
+   // brakeShareRatios immediately above (composes directly with driveForcePerWheel's own
+   // multiply in MultiContactFrictionSolver.solveFriction) but biased by tuning.driveBiasFront
+   // instead of brakeBiasFront. Uses DriveBiasDistribution#shareRatios directly (NOT
+   // shares(...)[i]*wheels.size() computed here, unlike brakeShareRatios above) - self-review (PR
+   // #24 comment 6871636687) found that share-then-remultiply round-trip is not always the exact
+   // 1.0 no-op at every wheel count (ordinary floating-point error, e.g. 49 wheels), which would
+   // make an unconfigured vehicle's drive differ from the pre-ticket drive/wheels.size() formula
+   // by that same tiny error - shareRatios's own doc has the full reasoning for why this needs to
+   // be byte-identical, not merely close.
+   double[] driveShareRatios=DriveBiasDistribution.shareRatios(loadShareZ,tuning.driveBiasFront);
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
