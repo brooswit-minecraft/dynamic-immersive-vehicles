@@ -64,6 +64,14 @@ public final class HitchRotationFrameProbe {
  private static final Vector3d HITCH_LOCAL_OFFSET = new Vector3d(0, 0, -1); // behind towing's own origin
  private static final Vector3d HOOKUP_LOCAL_OFFSET = new Vector3d(0, 0, 1); // ahead of towed's own origin
  private static boolean chunksRequested = false, boxesCreated = false, measuring = false;
+ // Review (PR comment 6871906290): a chunk-wait/create failure previously only set
+ // measuring=true/ticksRemaining=0, which does NOT stop the next tick from re-entering
+ // `if (!boxesCreated)` and retrying creation indefinitely - boxesCreated itself was never set.
+ // `terminal` is the single, explicit "this probe is permanently done - success OR failure, never
+ // retry" guard, checked FIRST on every tick; `cleanedUp` makes releasing this probe's own
+ // resources (joint/boxes/forced chunk - nothing else) idempotent regardless of which exit path
+ // reaches it (normal completion, or any of the three failure/timeout paths).
+ private static boolean terminal = false, cleanedUp = false;
  private static int chunkWaitTicksElapsed = 0, activationTicksElapsed = 0, ticksRemaining = 0;
  private static int[] chunkCoords;
  private static BoxPhysicsObject boxTowing, boxTowed;
@@ -74,15 +82,13 @@ public final class HitchRotationFrameProbe {
  private static final Logger LOGGER = LogUtils.getLogger();
 
  public static void maybeRun(ServerLevel level) {
-  if (!ENABLED) return;
+  if (!ENABLED || terminal) return;
   if (!chunksRequested) {
    chunksRequested = true;
    try {
     requestChunks(level);
    } catch (RuntimeException ex) {
-    LOGGER.error("[DIV hitchRotationFrameProbe] failed to request chunks", ex);
-    ticksRemaining = 0;
-    measuring = true;
+    fail(level, "failed to request chunks", ex);
    }
    return;
   }
@@ -90,9 +96,7 @@ public final class HitchRotationFrameProbe {
    chunkWaitTicksElapsed++;
    if (!chunksActuallyLoaded(level)) {
     if (chunkWaitTicksElapsed > MAX_CHUNK_WAIT_TICKS) {
-     LOGGER.error("[DIV hitchRotationFrameProbe] FAILED - chunk never finished loading within " + MAX_CHUNK_WAIT_TICKS + " ticks");
-     ticksRemaining = 0;
-     measuring = true;
+     fail(level, "chunk never finished loading within " + MAX_CHUNK_WAIT_TICKS + " ticks", null);
     }
     return;
    }
@@ -100,9 +104,7 @@ public final class HitchRotationFrameProbe {
     createBoxes(level);
     boxesCreated = true;
    } catch (RuntimeException ex) {
-    LOGGER.error("[DIV hitchRotationFrameProbe] failed to create boxes", ex);
-    ticksRemaining = 0;
-    measuring = true;
+    fail(level, "failed to create boxes", ex);
    }
    return;
   }
@@ -113,16 +115,44 @@ public final class HitchRotationFrameProbe {
     ticksRemaining = PROBE_TICKS;
     LOGGER.info("[DIV hitchRotationFrameProbe] activated after " + activationTicksElapsed + " ticks - beginning " + PROBE_TICKS + "-tick measurement");
    } else if (activationTicksElapsed > MAX_ACTIVATION_TICKS) {
-    LOGGER.error("[DIV hitchRotationFrameProbe] FAILED - never became ready within " + MAX_ACTIVATION_TICKS + " ticks");
-    ticksRemaining = 0;
-    measuring = true;
+    fail(level, "never became ready within " + MAX_ACTIVATION_TICKS + " ticks", null);
    }
    return;
   }
   if (ticksRemaining <= 0) return;
   logTick(level);
   ticksRemaining--;
-  if (ticksRemaining == 0) logConclusion();
+  if (ticksRemaining == 0) {
+   logConclusion();
+   cleanup(level);
+   terminal = true;
+  }
+ }
+
+ /** Single terminal-failure path (review's explicit ask): logs once, then permanently stops -
+  * {@code terminal=true} makes every subsequent {@code maybeRun} call an immediate no-op, so a
+  * chunk/create failure can never re-enter {@code !boxesCreated} and retry. Always cleans up
+  * whatever this probe itself already created before marking terminal. */
+ private static void fail(ServerLevel level, String message, RuntimeException cause) {
+  if (cause != null) LOGGER.error("[DIV hitchRotationFrameProbe] FAILED - " + message, cause);
+  else LOGGER.error("[DIV hitchRotationFrameProbe] FAILED - " + message);
+  cleanup(level);
+  terminal = true;
+ }
+
+ /** Idempotent (guarded by {@code cleanedUp}) - removes ONLY this probe's own joint/boxes and
+  * its own forced chunk (review's explicit "remove only this probe's joint/boxes and its own
+  * forced chunk ticket"), never anything else on the level. Safe to call from any exit path,
+  * including ones reached before the joint or boxes (or even the chunk request) ever existed. */
+ private static void cleanup(ServerLevel level) {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  var physics = SubLevelContainer.getContainer(level).physicsSystem();
+  if (joint != null && joint.isValid()) joint.remove();
+  if (boxTowing != null && boxTowing.isActive()) physics.removeObject(boxTowing);
+  if (boxTowed != null && boxTowed.isActive()) physics.removeObject(boxTowed);
+  if (chunkCoords != null) level.setChunkForced(chunkCoords[0], chunkCoords[1], false);
+  LOGGER.info("[DIV hitchRotationFrameProbe] cleaned up probe joint/boxes and released its own forced chunk");
  }
 
  private static boolean activate(ServerLevel level) {
