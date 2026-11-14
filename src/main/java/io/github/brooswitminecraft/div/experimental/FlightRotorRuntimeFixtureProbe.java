@@ -4,7 +4,6 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.logging.LogUtils;
-import io.github.brooswitminecraft.div.Overrides;
 import io.github.brooswitminecraft.div.PhysicsBridge;
 import minecrafttransportsimulator.baseclasses.Point3D;
 import minecrafttransportsimulator.baseclasses.RotationMatrix;
@@ -195,6 +194,11 @@ public final class FlightRotorRuntimeFixtureProbe {
   // The VALID window's own accelProxy, captured so the following INVALID window can assert
   // against it (review finding 3's "matched control" ask) instead of a raw ratio across windows.
   double lastValidRollAccel = Double.NaN, lastValidYawAccel = Double.NaN;
+  // Captured the first time this scenario's Body is observed active (start of its first window)
+  // - every later window asserts PhysicsBridge.debugExecutedStepSnapshot(vehicle).bodyIdentity()
+  // still == this same reference, proving the SAME live body across BASELINE/VALID/INVALID
+  // (review 53905's "assert identity stable across reloads"), never a silent respawn/rebuild.
+  Object bodyIdentity;
   Scenario(String label, String systemName, Kind kind, Role role) { this.label = label; this.systemName = systemName; this.kind = kind; this.role = role; }
  }
 
@@ -313,11 +317,14 @@ public final class FlightRotorRuntimeFixtureProbe {
     : Map.of("cyclicLimitDegrees", 35.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0);
  }
 
- /** One representative field from {@link #validFieldsFor} per {@link Kind}, read back live from
-  * the actual resolved config - see the retention check's own doc for why this replaces a
-  * physical-response-based comparison. */
- private static Double liveResolvedRepresentativeField(Kind kind, String key) {
-  var tuning = Overrides.resolved(key);
+ /** One representative field from {@link #validFieldsFor} per {@link Kind}, read from a {@link
+  * PhysicsBridge.DebugExecutedStepSnapshot}'s own {@code tuning()} - the active Body's REAL live-
+  * cached tuning object, not a fresh global {@link Overrides#resolved} re-derivation (review
+  * 53897/53907's own point: those are two different things that merely happen to usually agree).
+  * Returns {@code null} if {@code snapshot} itself is {@code null} (no active Body). */
+ private static Double representativeTuningField(Kind kind, PhysicsBridge.DebugExecutedStepSnapshot snapshot) {
+  if (snapshot == null) return null;
+  var tuning = snapshot.tuning();
   return kind == Kind.FIXED_WING ? tuning.liftSlope : tuning.cyclicAuthorityScale;
  }
 
@@ -631,17 +638,29 @@ public final class FlightRotorRuntimeFixtureProbe {
   // tick(s) (construction, initial-velocity seeding) happen before this scenario's own
   // measurement window starts, same SETTLE-before-measuring structure BrakeSweepProbe uses.
   if (s.ticksInPhase >= SETTLE_TICKS) {
-   beginWindow(s, s.role == Role.LIVE_RELOAD ? Phase.OBSERVE_BASELINE : Phase.OBSERVE);
+   if (!beginWindow(s, s.role == Role.LIVE_RELOAD ? Phase.OBSERVE_BASELINE : Phase.OBSERVE)) return;
    LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " SETTLE complete - beginning " + s.phase + " window");
   }
  }
 
- private static void beginWindow(Scenario s, Phase phase) {
+ /** @return true if this scenario may proceed into {@code phase}; false if it was just failed
+  * (identity check below) - in which case the caller must return immediately rather than act as
+  * though {@code phase} actually started. */
+ private static boolean beginWindow(Scenario s, Phase phase) {
+  var snapshot = PhysicsBridge.debugExecutedStepSnapshot(s.vehicle);
+  if (snapshot == null) { fail(s, "no active Body found when beginning phase=" + phase + " - dispatch/activation itself failed or was lost"); return false; }
+  if (s.bodyIdentity == null) {
+   s.bodyIdentity = snapshot.bodyIdentity();
+  } else if (s.bodyIdentity != snapshot.bodyIdentity()) {
+   fail(s, "active Body identity CHANGED entering phase=" + phase + " - this scenario's vehicle was respawned/rebuilt, not the same live body the ticket requires (review 53905)");
+   return false;
+  }
   s.phase = phase;
   s.ticksInPhase = 0;
   s.startM11 = s.vehicle.orientation.m11; s.startM00 = s.vehicle.orientation.m00;
   s.midM11 = Double.NaN; s.midM00 = Double.NaN;
   s.windowStartVerticalSpeed = verticalSpeedMps(s);
+  return true;
  }
 
  private static int windowTicksFor(Scenario s) { return s.role == Role.LIVE_RELOAD ? RELOAD_WINDOW_TICKS : OBSERVE_TICKS; }
@@ -680,6 +699,17 @@ public final class FlightRotorRuntimeFixtureProbe {
 
   switch (s.role) {
    case ACTIVATION_DEFAULT -> {
+    // Review 53907: a merely-SELECTED stepper does not prove force application actually ran
+    // (M527's own root cause is exactly a selected non-GROUND stepper whose execution a candidate
+    // unconditionally skips) - assert the REAL executed-step counters directly instead of (or
+    // alongside) the physical free-fall proxy below.
+    var snapshot = PhysicsBridge.debugExecutedStepSnapshot(s.vehicle);
+    String expectedStepper = s.kind == Kind.FIXED_WING ? "FLIGHT" : "ROTOR";
+    if (snapshot == null || snapshot.executedStepCount() <= 0 || !expectedStepper.equals(snapshot.lastExecutedStepperName())) {
+     fail(s, "ACTIVATION dispatch check failed - debugExecutedStepSnapshot=" + snapshot
+       + " (expected lastExecutedStepperName=" + expectedStepper + " with executedStepCount>0 - force application never actually ran for this body)");
+     return;
+    }
     double freeFallThreshold = -GRAVITY * windowSeconds * 0.8;
     boolean activated = s.kind == Kind.FIXED_WING ? verticalSpeedDelta > freeFallThreshold : Math.abs(verticalSpeedDelta / windowSeconds) < GRAVITY * 0.5;
     if (!activated) {
@@ -689,7 +719,8 @@ public final class FlightRotorRuntimeFixtureProbe {
     }
     baselineRollAccel.put(s.kind, rollAccel);
     baselineYawAccel.put(s.kind, yawAccel);
-    LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " ACTIVATION PASSED (dispatch confirmed) - recorded baseline rollAccelProxy=" + rollAccel + " yawAccelProxy=" + yawAccel);
+    LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " ACTIVATION PASSED (dispatch confirmed: executedStepCount=" + snapshot.executedStepCount()
+      + " lastExecutedStepperName=" + snapshot.lastExecutedStepperName() + ") - recorded baseline rollAccelProxy=" + rollAccel + " yawAccelProxy=" + yawAccel);
    }
    case CONFIGURED -> {
     Double baseRoll = baselineRollAccel.get(s.kind);
@@ -724,7 +755,7 @@ public final class FlightRotorRuntimeFixtureProbe {
      // its own doc); re-asserting here additionally proves retention PERSISTS through the whole
      // OBSERVE_INVALID window, including across OverridesHotReload's own periodic mtime poll.
      double expected = validFieldsFor(s.kind).get(s.kind == Kind.FIXED_WING ? "liftSlope" : "cyclicAuthorityScale");
-     Double actual = liveResolvedRepresentativeField(s.kind, PACK_ID + ":" + s.systemName);
+     Double actual = representativeTuningField(s.kind, PhysicsBridge.debugExecutedStepSnapshot(s.vehicle));
      if (actual == null || Math.abs(actual - expected) > 1e-9) {
       fail(s, "INVALID live-reload retention check failed - live-resolved representative field=" + actual
         + " does not match the VALID value=" + expected + " - the rejected invalid edit corrupted or reverted the live config");
@@ -737,7 +768,7 @@ public final class FlightRotorRuntimeFixtureProbe {
   }
 
   if (next == Phase.DONE) { LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " COMPLETE (PASSED)"); s.phase = Phase.DONE; return; }
-  beginWindow(s, next);
+  if (!beginWindow(s, next)) return;
  }
 
  private static void applyValidConfig(Scenario s) {
@@ -761,7 +792,7 @@ public final class FlightRotorRuntimeFixtureProbe {
   }
   LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " VALID config written and reloaded live (no respawn): " + report.configResult().message()
     + " liveUpdatedVehicles=" + report.vehiclesUpdatedLive() + " fieldsNeedingRespawn=" + report.fieldsNeedingRespawn());
-  beginWindow(s, Phase.OBSERVE_VALID);
+  if (!beginWindow(s, Phase.OBSERVE_VALID)) return;
  }
 
  private static void applyInvalidConfig(Scenario s) {
@@ -786,7 +817,7 @@ public final class FlightRotorRuntimeFixtureProbe {
   // itself had just (re)written, or risked OverridesHotReload's own background 100-tick mtime
   // poll re-reading the file in between and reapplying the valid values independently - neither
   // would actually prove the REJECTED reload itself preserved the live state.
-  Double resolvedValue = liveResolvedRepresentativeField(s.kind, PACK_ID + ":" + s.systemName);
+  Double resolvedValue = representativeTuningField(s.kind, PhysicsBridge.debugExecutedStepSnapshot(s.vehicle));
   double expectedValidValue = validFieldsFor(s.kind).get(s.kind == Kind.FIXED_WING ? "liftSlope" : "cyclicAuthorityScale");
   if (resolvedValue == null || Math.abs(resolvedValue - expectedValidValue) > 1e-9) {
    fail(s, "INVALID live-reload retention check failed IMMEDIATELY after rejection - live-resolved representative field=" + resolvedValue
@@ -806,7 +837,7 @@ public final class FlightRotorRuntimeFixtureProbe {
    fail(s, "FAILED to repair the on-disk config back to the VALID entry after the invalid-reload check - a later scenario's own reload could now fail for an unrelated reason");
    return;
   }
-  beginWindow(s, Phase.OBSERVE_INVALID);
+  if (!beginWindow(s, Phase.OBSERVE_INVALID)) return;
  }
 
  /** Reached from every terminal path once this probe might have touched the shared config file

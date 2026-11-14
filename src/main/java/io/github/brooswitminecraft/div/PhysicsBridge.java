@@ -786,6 +786,35 @@ public final class PhysicsBridge {
  public static Vector3d debugReadAngularVelocity(EntityVehicleF_Physics v) {
   return registry.get(v) instanceof Body body ? body.handle.getAngularVelocity(new Vector3d()) : null;
  }
+ /**
+  * Diagnostic/test-only snapshot (MINECRAFT-526 review 53897/53905/53907) bundling everything a
+  * test needs to assert real dispatch/retention without re-deriving any of it: {@code
+  * bodyIdentity} is the active {@code Body} instance itself as a plain reference-equality-
+  * comparable {@code Object} (its real type is package-private, so a caller outside this file can
+  * only {@code ==}/{@code equals} it against a value from an earlier call - enough to assert "the
+  * SAME live body, never respawned or rebuilt" across a sequence of reloads); {@code
+  * lastExecutedStepper}/{@code executedStepCount} are {@code step()}'s own live counters, updated
+  * ONLY at the point force application actually ran (never on a tick {@code
+  * skipNonGroundForTwoBody} skipped) - review 53907's explicit point that a merely-SELECTED
+  * stepper does not prove force application executed (M527's own root cause is exactly a selected
+  * non-GROUND stepper whose execution this candidate unconditionally skips), so a test asserting
+  * dispatch must see the counter actually advance, not just read a recomputed selection; {@code
+  * tuning} is the exact {@link Overrides.Tuning} object this Body reads its own {@code tuning.X}
+  * fields from every tick (the same reference {@code stepFlight}/{@code stepRotor}/{@code
+  * stepGround} use) - NOT a fresh {@link Overrides#resolved} re-derivation, which is a different
+  * value that merely happens to usually agree. Never read by any production code path.
+  */
+ // lastExecutedStepperName (not the package-private Stepper enum itself) so a caller outside
+ // this package can actually call String methods on it (toString()/equals() on an inaccessible
+ // enum type fails to compile even via inherited Object/Enum methods).
+ public record DebugExecutedStepSnapshot(Object bodyIdentity, String lastExecutedStepperName, long executedStepCount, Overrides.Tuning tuning) {}
+ /** Returns {@code null} if there is no active Body (ineligible, floating, or not yet
+  * activated) - see {@link DebugExecutedStepSnapshot}'s own doc for every field's meaning. */
+ public static DebugExecutedStepSnapshot debugExecutedStepSnapshot(EntityVehicleF_Physics v) {
+  return registry.get(v) instanceof Body body
+    ? new DebugExecutedStepSnapshot(body, body.lastExecutedStepper == null ? null : body.lastExecutedStepper.name(), body.executedStepCount, body.tuning())
+    : null;
+ }
  public static void cleanup() {
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
@@ -1155,6 +1184,15 @@ public final class PhysicsBridge {
   // so this stays a one-line, easily revertible default flip rather than deleting the gate.
   private static final boolean EXPERIMENTAL_TWO_BODY_CHASSIS = !"false".equalsIgnoreCase(System.getProperty("div.experimentalTwoBodyChassis", "true"));
   final boolean twoBodyActive;
+  // Diagnostic/test-only (MINECRAFT-526 review 53905/53907 - "last ACTUALLY EXECUTED stepper plus
+  // advancing counter recorded inside non-skipped dispatch"): a selected Stepper alone does not
+  // prove force application actually ran - M527's own root cause is exactly a selected non-GROUND
+  // stepper whose force application is unconditionally skipped by this candidate. Set ONLY at the
+  // point step() below actually calls stepGround/stepFlight/stepRotor (never on a skipped tick),
+  // so a test can distinguish "dispatch decided X" from "X's force application actually executed"
+  // - see debugExecutedStepSnapshot's own doc. Never read by any production code path.
+  Stepper lastExecutedStepper;
+  long executedStepCount;
   // Non-null only when twoBodyActive - the upper half-body/handle and the fixed joint connecting
   // it to the lower half (box/handle below). Construction/cleanup hold these; stepGround's own
   // owner-resolution logic is what actually targets upperHandle for an upper-owned wheel set.
@@ -1546,6 +1584,7 @@ public final class PhysicsBridge {
     loggedNonGroundTwoBodyWarning=true;
    }
    boolean skipNonGroundForTwoBody = twoBodyActive && plan.stepper()!=Stepper.GROUND;
+   if (!skipNonGroundForTwoBody) { lastExecutedStepper = plan.stepper(); executedStepCount++; }
    boolean primaryAwake = skipNonGroundForTwoBody ? false : switch (plan.stepper()) {
     case GROUND -> stepGround(v,pose,q,inverse,angular,velocity,up);
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);

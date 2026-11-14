@@ -1776,3 +1776,46 @@ internal stepper selection directly (that state is package-private) -
 proxy only, not a direct read of which stepper ran. Extending either would
 need a new PhysicsBridge-side read-only diagnostic hook, which is outside
 this ticket's own scope (no production code changes).
+
+**Third independent review round (comments 53905/53907) - minimal, explicitly-
+authorized read-only production diagnostic hooks added.** Review correctly
+found two remaining gaps even at 6/6: (1) `liveResolvedRepresentativeField`
+read the GLOBAL `Overrides.resolved(key)`, not the active Body's own cached
+tuning - those are two different things that merely happen to usually agree,
+and a merely-SELECTED stepper (the only thing this file could previously
+observe) does not prove force application actually ran - M527's own root
+cause is exactly a selected non-GROUND stepper whose execution a candidate
+unconditionally skips. (2) No assertion proved the SAME live body persisted
+across BASELINE/VALID/INVALID (never silently respawned/rebuilt).
+
+Added three minimal, explicitly-scoped, read-only diagnostic additions to
+`PhysicsBridge.java` (same established pattern as the pre-existing
+`debugInjectAngularVelocity`/`debugReadAngularVelocity` - "Never called from
+any production code path - only from this experimental test probe"):
+`Body.lastExecutedStepper`/`executedStepCount` are set ONLY at the exact
+point `step()` actually calls `stepGround`/`stepFlight`/`stepRotor` (never
+on a tick `skipNonGroundForTwoBody` skipped), and
+`PhysicsBridge.debugExecutedStepSnapshot(vehicle)` returns a small public
+record bundling the active Body's own identity (opaque `Object`, `==`-
+comparable only), that real executed-stepper name/counter, and the Body's
+own actual live `tuning()` reference. No physics mutation, no API redesign,
+no change to any production code PATH (only two new fields written at an
+existing call site, read by nothing in production).
+
+The probe now uses this directly: `beginWindow` asserts
+`debugExecutedStepSnapshot(...).bodyIdentity()` is unchanged (`==`) every
+time a scenario enters a new window, failing immediately if the live body
+was ever replaced; `ACTIVATION_DEFAULT` asserts `executedStepCount>0` and
+`lastExecutedStepperName` matches the expected mode BEFORE trusting the
+physical free-fall proxy; the VALID/INVALID retention checks now read the
+representative field from this snapshot's own `tuning()` instead of
+`Overrides.resolved`.
+
+Re-verified: `gradle --offline compileJava/test --rerun-tasks` - `BUILD
+SUCCESSFUL`, 605 tests, 0 failures, 0 errors (unchanged). Live run 7
+(`/tmp/m526-live-run7.log`, 2026-11-14 ~06:02-06:09 UTC): `ALL SCENARIOS
+FINISHED - 6/6 PASSED` again, now with concrete evidence lines like
+`ACTIVATION PASSED (dispatch confirmed: executedStepCount=65
+lastExecutedStepperName=FLIGHT)` and `retention confirmed immediately after
+rejection - live-resolved representative field=9.5` (read from the real
+active Body, not the global resolver).
