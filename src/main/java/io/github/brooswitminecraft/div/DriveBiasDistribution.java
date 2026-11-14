@@ -16,6 +16,25 @@ package io.github.brooswitminecraft.div;
  * redistributed by fixed geometric axle shares) - describing it as any of those three would
  * overclaim what this does.
  *
+ * <p><b>Native driven-wheel metadata exists but is deliberately not consulted here, matching
+ * this codebase's own pre-existing choice.</b> John's review (correcting an earlier draft of
+ * this class's own doc, which wrongly claimed no such metadata exists at all) is right that the
+ * pinned native library DOES have real per-engine driven-wheel associations -
+ * {@code PartEngine#linkedWheels}/{@code #drivenWheels} (confirmed directly via {@code javap}
+ * against the pinned {@code mts.jar}: both are real, non-empty-typed {@code List<PartGroundDevice>}
+ * fields), populated from {@code JSONPartDefinition#linkedParts} - this is genuine per-wheel
+ * drivetrain membership, not absent. But {@code PhysicsBridge}'s existing, PRE-this-ticket
+ * {@code groundContacts}/{@code stepGround} already never reads {@code linkedWheels}/
+ * {@code drivenWheels} at all (confirmed by inspection: zero references anywhere in this
+ * package) - the {@code drive/wheels.size()} formula this ticket's own bias replaces already
+ * treats every non-spare ground-contact wheel as uniformly drive-eligible, regardless of whether
+ * it is actually in any engine's native {@code drivenWheels} list. This class preserves that
+ * exact existing choice unchanged - it does not newly consult {@code drivenWheels} to decide
+ * WHICH wheels receive drive at all (that would be a materially larger, behavior-changing
+ * redesign of an already-accepted default, out of this ticket's own bounded "add an axle split
+ * over the existing budget" scope) - it only changes HOW the budget already being split evenly
+ * is redistributed between the front and rear geometric groups.
+ *
  * <p><b>Axle grouping is geometric, not steering-based.</b> The FRONT axle is whichever wheel(s)
  * sit at the maximum {@code z} (within {@link #AXLE_EPSILON}) - {@code z} is this engine's own
  * forward axis ({@code PhysicsBridge}'s {@code forward} is {@code q.transform(0,0,1)}), so the

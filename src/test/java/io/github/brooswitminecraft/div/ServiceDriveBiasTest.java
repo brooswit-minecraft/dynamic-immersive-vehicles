@@ -37,6 +37,10 @@ class ServiceDriveBiasTest {
   return DriveBiasDistribution.shareRatios(Z, biasFront);
  }
  @Test void conservationHoldsAcrossSeveralBiasValues() {
+  // Deliberate floating-point TOLERANCE (1e-6), unlike shareRatios' own exact-1.0 contract for
+  // the unset/fallback case above - the biased branch's own division (biasFront/frontCount etc.)
+  // is ordinary floating-point arithmetic with no exact-byte-identical requirement attached to
+  // it (only the unset/degenerate fallback carries that requirement - see shareRatios' own doc).
   for (double bias : new double[]{0.0, 0.25, 0.5, 0.75, 1.0}) {
    double[] ratios = driveShareRatiosFromBias(bias);
    double total = 0; for (double r : ratios) total += r * (TOTAL_DRIVE_FORCE / Z.length);
@@ -86,9 +90,13 @@ class ServiceDriveBiasTest {
   // conservative, unredistributed-loss behavior every other per-wheel budget (suspension,
   // brake) already has for a missing contact. Dropping one wheel's own FrictionContact from the
   // list passed to the solver (as PhysicsBridge.stepGround's own `hits` naturally does when a
-  // raycast misses) must not inflate any other wheel's own ratio to compensate.
+  // raycast misses) must not inflate any other wheel's own ratio to compensate - checked here by
+  // MAGNITUDE (John's review, comment 53838), not merely by direction: the 3-wheel result must
+  // accelerate strictly LESS than the reference 4-wheel result, since the missing wheel's own
+  // 1/4 share of the budget is genuinely gone, never redistributed onto the other three.
   double[] ratios = driveShareRatiosFromBias(0.5); // neutral bias: every wheel ratio == 1.0
   for (double r : ratios) assertEquals(1.0, r, 1e-12);
+  double referenceFourWheelSpeed = driveForOneTick(0.0, ratios, 64);
   // Only 3 of the 4 wheels grounded this tick (front-right missing) - the other three keep
   // their own unchanged ratio; nothing here re-derives a 3-wheel share.
   var contacts = new MultiContactFrictionSolver.FrictionContact[]{
@@ -99,7 +107,37 @@ class ServiceDriveBiasTest {
   Vector3d velocity = new Vector3d(0, 0, 0), angular = new Vector3d(0, 0, 0);
   double driveForcePerWheel = TOTAL_DRIVE_FORCE / Z.length;
   MultiContactFrictionSolver.solveFriction(contacts, MASS, INERTIA, IDENTITY, IDENTITY, velocity, angular, 0, driveForcePerWheel, FRICTION, 1.0, DT, 64);
-  assertTrue(velocity.dot(FORWARD) > 0.0, "the three still-grounded wheels must still accelerate the vehicle forward with the missing wheel's own drive share simply gone, got "+velocity.dot(FORWARD));
+  double threeWheelSpeed = velocity.dot(FORWARD);
+  assertTrue(threeWheelSpeed > 0.0, "the three still-grounded wheels must still accelerate the vehicle forward with the missing wheel's own drive share simply gone, got "+threeWheelSpeed);
+  assertTrue(threeWheelSpeed < referenceFourWheelSpeed,
+    "losing one wheel's own share must leave the vehicle with LESS total drive, not the same amount redistributed onto the rest: three-wheel speed "+threeWheelSpeed+" must be strictly below the four-wheel reference "+referenceFourWheelSpeed);
+ }
+ @Test void driveShareRatioComposesMultiplicativelyWithSkidSteerMultiplierNotReplacingIt() {
+  // John's review (comment 53838): explicit coverage that a configured front/rear bias and
+  // skid-steer's own per-wheel differential multiplier compose TOGETHER
+  // (driveForcePerWheel*skidSteerMultiplier*driveShareRatio - MultiContactFrictionSolver's own
+  // doc) rather than either one silently overriding the other. Solved as four INDEPENDENT
+  // single-contact calls (not one combined 4-contact call): in the real multi-contact solve, an
+  // earlier-processed wheel's own impulse this same pass perturbs the shared workingVelocity/
+  // workingAngular before a later wheel in the array is processed (genuine, intended cross-
+  // contact coupling - not a bug), which gives a later wheel a tiny nonzero rollingResistance
+  // even starting from rest; that coupling would contaminate an exact per-wheel product check
+  // that has nothing to do with this test's own question. Solving each wheel alone, starting
+  // from rest with zero prior velocity every time, isolates exactly the one composition this
+  // test checks.
+  double driveForcePerWheel = 500; // deliberately small, well under NORMAL*FRICTION, so the
+  // friction-circle clamp never binds and the raw product is observable unperturbed.
+  double[] skidSteerMultipliers = {1.3, 0.7, 1.3, 0.7}; // a left/right skid-steer differential
+  double[] driveRatios = driveShareRatiosFromBias(0.8); // an asymmetric front/rear bias, same time
+  for (int i = 0; i < Z.length; i++) {
+   var contacts = new MultiContactFrictionSolver.FrictionContact[]{
+     new MultiContactFrictionSolver.FrictionContact(POINTS[i], FORWARD, RIGHT, NORMAL, skidSteerMultipliers[i], 1.0, 1.0, 0.0, driveRatios[i]),
+   };
+   Vector3d velocity = new Vector3d(0, 0, 0), angular = new Vector3d(0, 0, 0);
+   var results = MultiContactFrictionSolver.solveFriction(contacts, MASS, INERTIA, IDENTITY, IDENTITY, velocity, angular, 0, driveForcePerWheel, FRICTION, 1.0, DT, 1);
+   double expected = driveForcePerWheel * skidSteerMultipliers[i] * driveRatios[i];
+   assertEquals(expected, results[0].longitudinal(), 1e-6, "wheel "+i+": skid-steer multiplier and drive-bias ratio must compose multiplicatively, neither one overriding the other");
+  }
  }
  private static double driveForOneTick(double initialSpeed, double[] ratios, int iterations) {
   return driveForOneTick(initialSpeed, ratios, iterations, 1);
