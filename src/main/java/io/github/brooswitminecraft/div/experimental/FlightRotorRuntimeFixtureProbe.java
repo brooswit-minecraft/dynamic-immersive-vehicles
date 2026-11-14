@@ -28,7 +28,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,37 +52,49 @@ import java.util.Set;
  * strictly SEQUENTIALLY (one vehicle/world-generation operation active at a time), same reasoning
  * as {@code BrakeSweepProbe}'s own doc (review 53330's watchdog-crash finding).
  *
- * <p>Method, per vehicle kind (fixed-wing / rotorcraft): one ACTIVATION_DEFAULT run proves (a)
- * this vehicle is actually PhysicsBridge-managed and dispatched to the correct stepper - a
- * fixed-wing/rotorcraft left undispatched or misdispatched to GROUND would simply free-fall at
- * {@code g}=9.81 m/s^2 with no corrective force at all, trivially distinguishable from the damped
- * response an engaged {@code stepFlight}/{@code stepRotor} actually produces - and (b) logs that
- * response's own magnitude as the unconfigured/FALLBACK baseline. One CONFIGURED run, with an
- * operator override already in place at spawn, re-runs the identical control input and logs the
- * same metrics for comparison against that baseline - this is {@code liftSlope}/{@code
- * controlSurfaceSlope} (fixed-wing, MINECRAFT-521) or {@code cyclicLimitDegrees}/{@code
- * cyclicAuthorityScale}/{@code yawAuthorityScale} (rotorcraft, MINECRAFT-522) actually reaching
- * {@code stepFlight}/{@code stepRotor}'s real force/torque math on a live body, not merely a
- * resolved {@code Tuning} record. One LIVE_RELOAD run starts unconfigured, observes a baseline,
- * then calls the exact production hot-reload entrypoint ({@code PhysicsBridge.reloadOverrides()},
- * the same one {@code OverridesHotReload} calls on its own mtime-poll) against a VALID edit to the
- * live config file for this same still-active vehicle (no respawn), observes the response change
- * in place, then calls it again against an INVALID edit and observes that the configured response
- * from the valid edit is retained unchanged - the "retain last-known-good on errors" contract
- * {@code OverridesTest}/{@code Overrides.apply}'s own doc already proves in isolation, now proven
- * against a live body's actual tick-to-tick force application too.
+ * <p>Method, per vehicle kind (fixed-wing / rotorcraft): one ACTIVATION_DEFAULT run asserts (a)
+ * this vehicle is actually PhysicsBridge-managed and dispatched to the correct stepper - checked
+ * by asserting its vertical speed over the window is far from free-fall-only (a misdispatched
+ * vehicle, or one PhysicsBridge never activates at all, simply falls at {@code g}=9.81 m/s^2 with
+ * no corrective force) - and (b) records that response's own magnitude as the unconfigured/
+ * FALLBACK baseline for the CONFIGURED scenario below to compare against. One CONFIGURED run, with
+ * an operator override already in place at spawn, re-runs the identical control input and asserts
+ * its own measured response is meaningfully LARGER than that baseline - this is {@code
+ * liftSlope}/{@code controlSurfaceSlope} (fixed-wing, MINECRAFT-521) or {@code
+ * cyclicLimitDegrees}/{@code cyclicAuthorityScale}/{@code yawAuthorityScale} (rotorcraft,
+ * MINECRAFT-522) actually reaching {@code stepFlight}/{@code stepRotor}'s real force/torque math
+ * on a live body, not merely a resolved {@code Tuning} record. One LIVE_RELOAD run starts
+ * unconfigured, observes a baseline, then calls the exact production hot-reload entrypoint
+ * ({@code PhysicsBridge.reloadOverrides()}, the same one {@code OverridesHotReload} calls on its
+ * own mtime-poll) against a VALID edit to the live config file for this same still-active vehicle
+ * (no respawn), asserts the response changed in place, then calls it again against an INVALID
+ * edit and asserts the configured response from the valid edit is retained essentially unchanged
+ * - the "retain last-known-good on errors" contract {@code OverridesTest}/{@code Overrides.apply}
+ * 's own doc already proves in isolation, now proven against a live body's actual tick-to-tick
+ * force application too.
+ *
+ * <p><b>Response metric and why it is history-independent (review finding, self-review 2):</b> a
+ * raw {@code orientation.m11} (verticality) delta across a whole multi-second window is NOT a
+ * matched control for a continuously-torqued body - a later window inherits angular velocity
+ * accumulated by an earlier one, so a bigger raw delta on its own does not prove a bigger TORQUE,
+ * only a bigger velocity-at-the-time (which this scenario's own earlier window could already
+ * explain). Each window therefore samples {@code m11} (roll) and, for rotorcraft only, {@code
+ * m00} (a yaw-rotation proxy, same convention {@code BrakeSweepProbe} already uses) at its own
+ * start/middle/end and reports the SECOND DIFFERENCE {@code (end-mid)-(mid-start)} - this is an
+ * acceleration-like proxy. Since torque (hence angular acceleration, to first order) depends only
+ * on the CURRENTLY active config and control input, not on inherited angular velocity, this proxy
+ * is comparable window-to-window even though the live body is never respawned or reset between
+ * them. {@code accelProxy}'s own doc below has the exact arithmetic.
  *
  * <p>What this proves: the dispatch/live-field-application seam actually works end to end on a
- * real spawned vehicle. What this does NOT prove: that the resulting flight/hover feel is
- * well-tuned, realistic, or calibrated - same disclosed limit {@code BrakeSweepProbe} itself
- * carries for ground feel. The numeric bounds/speeds/tilt angles below are a best-effort choice
- * reasoned from this repo's own force-model formulas (see inline rationale at each constant), not
- * an empirically live-tuned value - this file has been compiled against the real {@code mts.jar}/
- * Sable/NeoForge classpath (see this ticket's VERIFICATION.md entry) but, same as every prior
- * flight/rotor PR's own disclosed limit, has not yet been run against an actual live dev server;
- * an operator doing that run for the first time should treat a watchdog timeout or an out-of-
- * bounds failure as a signal to shrink {@code OBSERVE_TICKS}/speeds further, the same iterative
- * process {@code BrakeSweepProbe}'s own doc history (review 53327/53330) already went through.
+ * real spawned vehicle, for all four of this ticket's named cases. What this does NOT prove: that
+ * the resulting flight/hover feel is well-tuned, realistic, or calibrated - same disclosed limit
+ * {@code BrakeSweepProbe} itself carries for ground feel. Every scenario's PASS/FAIL is explicit
+ * (see {@code fail}/the final summary line) - this file never reports overall success after any
+ * scenario failed. The numeric bounds/speeds/tilt angles below are a best-effort choice reasoned
+ * from this repo's own force-model formulas (see inline rationale at each constant) - see this
+ * ticket's VERIFICATION.md entry for whether this has actually been exercised against a live dev
+ * server yet, and with what result.
  */
 public final class FlightRotorRuntimeFixtureProbe {
  private FlightRotorRuntimeFixtureProbe() {}
@@ -93,18 +105,19 @@ public final class FlightRotorRuntimeFixtureProbe {
  // kept to the same order of magnitude as that probe's own now-proven-safe CHUNK_RADIUS=5/
  // WheelAuxProbe's CHUNK_RADIUS, and at a chunk coordinate region none of BrakeSweepProbe (600),
  // WheelAuxProbe (900), or TurnComparisonProbe (10200) use.
- private static final int CHUNK_RADIUS = 6;
+ private static final int CHUNK_RADIUS = 7;
  private static final int CHUNK_X = 14400, CHUNK_Z = 14400;
  private static final int SPAWN_Y = 160;
  // No block platform is built at all (unlike every ground-domain probe) - flight/rotor scenarios
  // never need solid ground under them, only the chunk grid above to be loaded/generated so the
  // entity exists and ticks; this also means zero extra block-placement cost on top of the
  // chunk-generation cost already budgeted above.
- private static final double BOUND_HORIZONTAL = 70; // matches every ground probe's own proven-safe PLATFORM_RADIUS
+ private static final double BOUND_HORIZONTAL = 95; // CHUNK_RADIUS*16=112 loaded - see ROTOR_AILERON_DEGREES's own drift note
  private static final double BOUND_VERTICAL = 90;
  private static final int SETTLE_TICKS = 15;
  private static final int OBSERVE_TICKS = 50; // 2.5s - ACTIVATION_DEFAULT/CONFIGURED's single observation window
  private static final int RELOAD_WINDOW_TICKS = 35; // 1.75s - each of LIVE_RELOAD's three windows (baseline/valid/invalid)
+ private static final double GRAVITY = 9.81;
  private static final Logger LOGGER = LogUtils.getLogger();
 
  // ---- Fixed-wing scenario constants ----
@@ -118,9 +131,17 @@ public final class FlightRotorRuntimeFixtureProbe {
  private static final int FW_EMPTY_MASS = 900;
 
  // ---- Rotorcraft scenario constants ----
- private static final double ROTOR_AILERON_DEGREES = 5.0; // small on purpose - cyclicAuthorityScale multiplies
-   // torque directly (not gated by this angle vs. the clamp), so a small, translation-drift-cheap
-   // tilt is already enough to show the configured-vs-default authority difference cleanly.
+ // Review finding (4): 5deg never exercised the 20(default)-vs-35(configured) cyclicLimitDegrees
+ // clamp, and zero rudder never exercised yawAuthorityScale at all. 25deg sits ABOVE the default
+ // 20deg clamp (so the default/baseline scenario's tiltRoll is clamp-limited at 20deg) but BELOW
+ // the configured 35deg clamp (so the configured scenario's tiltRoll is the full, unclamped
+ // 25deg) - cyclicAuthorityScale(4x) and the clamp relief both then contribute to a genuinely
+ // bigger measured roll response, not just the authority scale alone.
+ private static final double ROTOR_AILERON_DEGREES = 25.0;
+ // Nonzero on purpose (review finding 4) - yawTorque is rudderRadians*thrust*tailArm*scale; zero
+ // rudder makes yawAuthorityScale structurally untestable regardless of its own value. Within
+ // EntityVehicleF_Physics.MAX_RUDDER_ANGLE=45.
+ private static final double ROTOR_RUDDER_DEGREES = 20.0;
  // Chosen so default-FALLBACK driveForce(8000N)*collective(~0.71*1.35-0.35=0.609) roughly
  // balances this chassis's own weight (500kg*9.81=4905N vs thrust~4870N) - i.e. closest to a
  // bounded, near-stationary hover, rather than a sustained climb/descent that would need a much
@@ -129,6 +150,13 @@ public final class FlightRotorRuntimeFixtureProbe {
  private static final int ROTOR_PROPELLER_DIAMETER_INCHES = 48;
  private static final float ROTOR_TAIL_DISTANCE = 4f;
  private static final int ROTOR_EMPTY_MASS = 500;
+ // Review finding (1)/(3): CONFIGURED/LIVE_RELOAD assert their own measured accelProxy is
+ // meaningfully bigger than this margin times the ACTIVATION_DEFAULT scenario's own recorded
+ // baseline for the same Kind - a plain ">" would pass on noise alone.
+ private static final double RESPONSE_MARGIN = 1.2;
+ // How close an INVALID-reload window's accelProxy must stay to the preceding VALID window's own
+ // (relative difference) to count as "retained the valid config, did not revert or break".
+ private static final double RETENTION_TOLERANCE = 0.5;
 
  private enum Kind { FIXED_WING, ROTOR }
  private enum Role { ACTIVATION_DEFAULT, CONFIGURED, LIVE_RELOAD }
@@ -142,11 +170,13 @@ public final class FlightRotorRuntimeFixtureProbe {
   Phase phase = Phase.SPAWNING;
   int ticksInPhase = 0;
   double spawnX, spawnZ, spawnY;
-  // Logged at the start of whichever window is currently active, so each window's own delta can
-  // be reported independently (baseline vs valid vs invalid for LIVE_RELOAD; the single window
-  // for ACTIVATION_DEFAULT/CONFIGURED).
-  double windowStartM11, windowStartVerticalSpeed;
-  double lastValidWindowM11Delta = Double.NaN;
+  // Three-point samples for the current window's accelProxy (roll=m11, yaw proxy=m00 - see
+  // accelProxy's own doc) - captured at tick 1, the window midpoint, and the window's last tick.
+  double startM11, midM11, endM11, startM00, midM00, endM00;
+  double windowStartVerticalSpeed;
+  // The VALID window's own accelProxy, captured so the following INVALID window can assert
+  // against it (review finding 3's "matched control" ask) instead of a raw ratio across windows.
+  double lastValidRollAccel = Double.NaN, lastValidYawAccel = Double.NaN;
   Scenario(String label, String systemName, Kind kind, Role role) { this.label = label; this.systemName = systemName; this.kind = kind; this.role = role; }
  }
 
@@ -154,6 +184,13 @@ public final class FlightRotorRuntimeFixtureProbe {
  private static int terrainWaitTicksElapsed = 0;
  private static List<Scenario> scenarios;
  private static int currentScenarioIndex = 0;
+ private static int scenariosPassed = 0;
+ // Review finding (1)/(3): ACTIVATION_DEFAULT's own measured accelProxy per Kind, so CONFIGURED
+ // and LIVE_RELOAD's baseline window can assert against a real recorded number rather than just
+ // logging one. Populated once ACTIVATION_DEFAULT for that Kind finishes (scenario order in
+ // buildScenarios always runs ACTIVATION_DEFAULT before CONFIGURED/LIVE_RELOAD for the same Kind).
+ private static final Map<Kind, Double> baselineRollAccel = new EnumMap<>(Kind.class);
+ private static final Map<Kind, Double> baselineYawAccel = new EnumMap<>(Kind.class);
  // Snapshot of the config file's content before this probe ever wrote to it (or empty if it did
  // not exist yet) - restored verbatim at ALL_DONE so this opt-in fixture leaves the shared
  // run/config/dynamic-immersive-vehicles.json exactly as it found it (deterministic cleanup, same
@@ -204,15 +241,15 @@ public final class FlightRotorRuntimeFixtureProbe {
  private static Path configPath() { return FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json"); }
  private static Gson gson() { return new GsonBuilder().setPrettyPrinting().create(); }
 
- /** Reads the current config file (or an empty {@code {"vehicles":{}}} shell if none exists yet
-  * - {@code Overrides.load()} normally guarantees one exists by the time any probe runs, but this
-  * does not assume that), merges in one {@code key -> fields} entry under {@code "vehicles"}
-  * WITHOUT disturbing any other entry already present, and writes the result back - never a
-  * blind full-file overwrite, so nothing an operator (or another probe/regression fixture) has
-  * already configured on this shared file is lost. */
- /** @return true on a successful write, false on a failure the caller must treat as a reason to
-  * abort (routing through RESTORE_CONFIG) rather than proceeding to reload/run on a config file
-  * that may be half-written or still the pre-probe original. */
+ /** Reads the current config file (or a fresh empty shell if none exists yet - {@code
+  * Overrides.load()} normally guarantees one exists by the time any probe runs, but this does not
+  * assume that), merges in one {@code key -> fields} entry under {@code "vehicles"} WITHOUT
+  * disturbing any other entry already present, and writes the result back - never a blind
+  * full-file overwrite, so nothing an operator (or another probe/regression fixture) has already
+  * configured on this shared file is lost.
+  * @return true on a successful write, false on a failure the caller must treat as a reason to
+  * abort (routing through RESTORE_CONFIG, or failing the current scenario) rather than proceeding
+  * to reload/run on a config file that may be half-written or still the pre-probe original. */
  private static boolean mergeVehicleOverrideAndWrite(String key, Map<String, Double> fields) {
   JsonObject root;
   try {
@@ -233,6 +270,12 @@ public final class FlightRotorRuntimeFixtureProbe {
    LOGGER.error("[DIV flightRotorFixture] FAILED to write config at " + configPath(), ex);
    return false;
   }
+ }
+
+ private static Map<String, Double> validFieldsFor(Kind kind) {
+  return kind == Kind.FIXED_WING
+    ? Map.of("liftSlope", 9.5, "controlSurfaceSlope", 9.5)
+    : Map.of("cyclicLimitDegrees", 35.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0);
  }
 
  private static void writeInitialConfigOnce() {
@@ -259,13 +302,11 @@ public final class FlightRotorRuntimeFixtureProbe {
   // and LIVE_RELOAD's own systemNames are deliberately absent from the file at this point, so
   // Overrides.resolved(...) falls through to FALLBACK for them exactly like an unconfigured real
   // vehicle (LIVE_RELOAD writes its own entry live, mid-scenario - see applyValidConfig below).
-  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + "fw-configured",
-      Map.of("liftSlope", 9.5, "controlSurfaceSlope", 9.5))) {
+  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + "fw-configured", validFieldsFor(Kind.FIXED_WING))) {
    globalPhase = GlobalPhase.RESTORE_CONFIG;
    return;
   }
-  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + "rotor-configured",
-      Map.of("cyclicLimitDegrees", 35.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0))) {
+  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + "rotor-configured", validFieldsFor(Kind.ROTOR))) {
    globalPhase = GlobalPhase.RESTORE_CONFIG;
    return;
   }
@@ -283,6 +324,8 @@ public final class FlightRotorRuntimeFixtureProbe {
 
  private static List<Scenario> buildScenarios() {
   List<Scenario> list = new ArrayList<>();
+  // ACTIVATION_DEFAULT always precedes CONFIGURED/LIVE_RELOAD for the same Kind - both of those
+  // assert against baselineRollAccel/baselineYawAccel, which only ACTIVATION_DEFAULT populates.
   list.add(new Scenario("fw-activation-default", "fw-activation-default", Kind.FIXED_WING, Role.ACTIVATION_DEFAULT));
   list.add(new Scenario("fw-configured", "fw-configured", Kind.FIXED_WING, Role.CONFIGURED));
   list.add(new Scenario("fw-live-reload", "fw-live-reload", Kind.FIXED_WING, Role.LIVE_RELOAD));
@@ -293,18 +336,25 @@ public final class FlightRotorRuntimeFixtureProbe {
  }
 
  private static void runScenarios(ServerLevel level) {
-  if (currentScenarioIndex >= scenarios.size()) { globalPhase = GlobalPhase.RESTORE_CONFIG; return; }
+  if (currentScenarioIndex >= scenarios.size()) {
+   // Review finding (5): never report overall success after any scenario failed - this explicit
+   // count is the one place that claim is made, and it is made honestly.
+   LOGGER.info("[DIV flightRotorFixture] ALL SCENARIOS FINISHED - " + scenariosPassed + "/" + scenarios.size() + " PASSED"
+     + (scenariosPassed == scenarios.size() ? "" : " - at least one scenario FAILED, see its own STOPPED line above"));
+   globalPhase = GlobalPhase.RESTORE_CONFIG;
+   return;
+  }
   Scenario s = scenarios.get(currentScenarioIndex);
   try {
    switch (s.phase) {
     case SPAWNING -> spawn(level, s);
     case SETTLE -> settle(s);
-    case OBSERVE -> observe(s, Phase.DONE, null);
-    case OBSERVE_BASELINE -> observe(s, Phase.APPLY_VALID, "BASELINE (unconfigured)");
+    case OBSERVE -> finishWindow(s, Phase.DONE, null);
+    case OBSERVE_BASELINE -> finishWindow(s, Phase.APPLY_VALID, "BASELINE (unconfigured)");
     case APPLY_VALID -> applyValidConfig(s);
-    case OBSERVE_VALID -> observe(s, Phase.APPLY_INVALID, "VALID live-reload");
+    case OBSERVE_VALID -> finishWindow(s, Phase.APPLY_INVALID, "VALID live-reload");
     case APPLY_INVALID -> applyInvalidConfig(s);
-    case OBSERVE_INVALID -> observe(s, Phase.DONE, "INVALID live-reload (must retain the VALID config above)");
+    case OBSERVE_INVALID -> finishWindow(s, Phase.DONE, "INVALID live-reload (must retain the VALID config above)");
     case DONE, FAILED -> advanceToNextScenario(s);
    }
   } catch (RuntimeException ex) {
@@ -314,6 +364,7 @@ public final class FlightRotorRuntimeFixtureProbe {
  }
 
  private static void advanceToNextScenario(Scenario s) {
+  if (s.phase == Phase.DONE) scenariosPassed++;
   if (s.vehicle != null) s.vehicle.remove();
   currentScenarioIndex++;
  }
@@ -338,10 +389,15 @@ public final class FlightRotorRuntimeFixtureProbe {
   // rest (a hover test has no need for one).
   if (s.kind == Kind.FIXED_WING) vehicle.motion.set(0, 0, FW_TARGET_SPEED / 20.0);
   world.spawnEntity(vehicle);
+  // Review finding (5b): retain the reference the moment the entity actually exists in the world
+  // (BEFORE adding parts, which can themselves throw) - advanceToNextScenario's cleanup only
+  // removes s.vehicle if it is non-null, so a part-construction exception between here and the
+  // old "s.vehicle = vehicle" placement (after addPropeller) used to leak a spawned-but-untracked
+  // entity in the saved world on that failure path.
+  s.vehicle = vehicle;
   s.engine = addEngine(vehicle, engineSlot);
   if (propellerSlot != null) addPropeller(vehicle, propellerSlot);
 
-  s.vehicle = vehicle;
   s.spawnX = blockX + 0.5; s.spawnZ = blockZ + 0.5; s.spawnY = SPAWN_Y;
   s.phase = Phase.SETTLE;
   s.ticksInPhase = 0;
@@ -484,6 +540,7 @@ public final class FlightRotorRuntimeFixtureProbe {
   } else {
    v.throttleVar.setTo(ROTOR_THROTTLE, false);
    v.aileronInputVar.setTo(ROTOR_AILERON_DEGREES, false);
+   v.rudderInputVar.setTo(ROTOR_RUDDER_DEGREES, false);
   }
  }
 
@@ -502,7 +559,7 @@ public final class FlightRotorRuntimeFixtureProbe {
  }
 
  private static void fail(Scenario s, String reason) {
-  LOGGER.error("[DIV flightRotorFixture] scenario=" + s.label + " STOPPED (preserved as evidence) - " + reason);
+  LOGGER.error("[DIV flightRotorFixture] scenario=" + s.label + " STOPPED (preserved as evidence) - FAIL - " + reason);
   s.phase = Phase.FAILED;
  }
 
@@ -511,7 +568,8 @@ public final class FlightRotorRuntimeFixtureProbe {
   LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " " + label + " tick=" + s.ticksInPhase
     + " forwardSpeed=" + forwardSpeedMps(s) + " verticalSpeed=" + verticalSpeedMps(s) + " position=" + v.position
     + " up(m01,m11,m21)=(" + v.orientation.m01 + "," + v.orientation.m11 + "," + v.orientation.m21 + ")"
-    + " throttle=" + v.throttleVar.currentValue + " aileron=" + v.aileronInputVar.currentValue);
+    + " yawProxy(m00,m22)=(" + v.orientation.m00 + "," + v.orientation.m22 + ")"
+    + " throttle=" + v.throttleVar.currentValue + " aileron=" + v.aileronInputVar.currentValue + " rudder=" + v.rudderInputVar.currentValue);
  }
 
  private static void settle(Scenario s) {
@@ -522,49 +580,111 @@ public final class FlightRotorRuntimeFixtureProbe {
   // tick(s) (construction, initial-velocity seeding) happen before this scenario's own
   // measurement window starts, same SETTLE-before-measuring structure BrakeSweepProbe uses.
   if (s.ticksInPhase >= SETTLE_TICKS) {
-   s.phase = s.role == Role.LIVE_RELOAD ? Phase.OBSERVE_BASELINE : Phase.OBSERVE;
-   s.ticksInPhase = 0;
-   s.windowStartM11 = s.vehicle.orientation.m11;
-   s.windowStartVerticalSpeed = verticalSpeedMps(s);
+   beginWindow(s, s.role == Role.LIVE_RELOAD ? Phase.OBSERVE_BASELINE : Phase.OBSERVE);
    LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " SETTLE complete - beginning " + s.phase + " window");
   }
  }
 
+ private static void beginWindow(Scenario s, Phase phase) {
+  s.phase = phase;
+  s.ticksInPhase = 0;
+  s.startM11 = s.vehicle.orientation.m11; s.startM00 = s.vehicle.orientation.m00;
+  s.midM11 = Double.NaN; s.midM00 = Double.NaN;
+  s.windowStartVerticalSpeed = verticalSpeedMps(s);
+ }
+
+ private static int windowTicksFor(Scenario s) { return s.role == Role.LIVE_RELOAD ? RELOAD_WINDOW_TICKS : OBSERVE_TICKS; }
+
+ /** The acceleration-like, history-independent response proxy this file's own class doc explains
+  * - the second difference of three samples spaced evenly across one window. Independent of
+  * whatever angular velocity this body carried INTO the window (to first order), since it only
+  * compares how much the rate of change itself changed within this window's own fixed-input
+  * duration. */
+ private static double accelProxy(double start, double mid, double end) { return (end - mid) - (mid - start); }
+
  /** Shared window-runner for every OBSERVE* phase: applies this scenario's fixed control input
-  * every tick, logs periodically, and on window completion reports the delta from
-  * {@code windowStartM11}/{@code windowStartVerticalSpeed} (this window's own actual measured
-  * response) before transitioning to {@code next}. {@code windowLabel} null means "just finish
-  * the scenario" (ACTIVATION_DEFAULT/CONFIGURED); non-null additionally logs that label so
-  * LIVE_RELOAD's three windows are each individually identifiable in the log. */
- private static void observe(Scenario s, Phase next, String windowLabel) {
+  * every tick, captures the start/mid/end samples {@link #accelProxy} needs, and on window
+  * completion computes and ASSERTS against that proxy (see each {@code Role} branch below) before
+  * transitioning to {@code next}. {@code windowLabel} null means "just finish the scenario"
+  * (ACTIVATION_DEFAULT/CONFIGURED); non-null additionally logs that label so LIVE_RELOAD's three
+  * windows are each individually identifiable. */
+ private static void finishWindow(Scenario s, Phase next, String windowLabel) {
   s.ticksInPhase++;
   if (!checkBoundedOrFail(s)) return;
   applyControlInputs(s);
+  int windowTicks = windowTicksFor(s);
+  int midTick = Math.max(1, windowTicks / 2);
+  if (s.ticksInPhase == midTick) { s.midM11 = s.vehicle.orientation.m11; s.midM00 = s.vehicle.orientation.m00; }
   if (s.ticksInPhase % 10 == 0) logState(s, "OBSERVE" + (windowLabel != null ? "[" + windowLabel + "]" : ""));
-  int windowTicks = s.role == Role.LIVE_RELOAD ? RELOAD_WINDOW_TICKS : OBSERVE_TICKS;
   if (s.ticksInPhase < windowTicks) return;
-  double m11Delta = s.windowStartM11 - s.vehicle.orientation.m11; // positive = rolled away from level
+  double endM11 = s.vehicle.orientation.m11, endM00 = s.vehicle.orientation.m00;
   double verticalSpeedDelta = verticalSpeedMps(s) - s.windowStartVerticalSpeed;
-  String freeFallComparison = " (free-fall-only over this window would be verticalSpeed<=-" + (9.81 * windowTicks / 20.0) + ")";
+  double windowSeconds = windowTicks / 20.0;
+  double rollAccel = accelProxy(s.startM11, s.midM11, endM11);
+  double yawAccel = accelProxy(s.startM00, s.midM00, endM00);
   LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " " + (windowLabel != null ? windowLabel + " " : "") + "WINDOW COMPLETE"
-    + " rollM11Delta=" + m11Delta + " verticalSpeedDelta=" + verticalSpeedDelta + " verticalSpeedNow=" + verticalSpeedMps(s) + freeFallComparison);
-  if (next == Phase.APPLY_INVALID && Double.isFinite(m11Delta)) s.lastValidWindowM11Delta = m11Delta;
-  if (next == Phase.DONE && s.role == Role.LIVE_RELOAD && Double.isFinite(s.lastValidWindowM11Delta)) {
-   double ratio = s.lastValidWindowM11Delta == 0 ? Double.NaN : m11Delta / s.lastValidWindowM11Delta;
-   LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label
-     + " INVALID-vs-VALID rollM11Delta ratio=" + ratio + " (expected close to 1.0 - an invalid reload must retain the prior VALID config, not fall back to FALLBACK or break)");
+    + " rollAccelProxy=" + rollAccel + " yawAccelProxy=" + yawAccel + " verticalSpeedDelta=" + verticalSpeedDelta
+    + " verticalSpeedNow=" + verticalSpeedMps(s) + " (free-fall-only over this window would be verticalSpeedDelta<=-" + (GRAVITY * windowSeconds) + ")");
+
+  switch (s.role) {
+   case ACTIVATION_DEFAULT -> {
+    double freeFallThreshold = -GRAVITY * windowSeconds * 0.8;
+    boolean activated = s.kind == Kind.FIXED_WING ? verticalSpeedDelta > freeFallThreshold : Math.abs(verticalSpeedDelta / windowSeconds) < GRAVITY * 0.5;
+    if (!activated) {
+     fail(s, "ACTIVATION check failed - verticalSpeedDelta=" + verticalSpeedDelta + " over " + windowSeconds
+       + "s looks like an un-managed/misdispatched body (free-fall or equivalent), not an engaged stepFlight/stepRotor");
+     return;
+    }
+    baselineRollAccel.put(s.kind, rollAccel);
+    baselineYawAccel.put(s.kind, yawAccel);
+    LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " ACTIVATION PASSED (dispatch confirmed) - recorded baseline rollAccelProxy=" + rollAccel + " yawAccelProxy=" + yawAccel);
+   }
+   case CONFIGURED -> {
+    Double baseRoll = baselineRollAccel.get(s.kind);
+    if (baseRoll == null || !(Math.abs(rollAccel) > Math.abs(baseRoll) * RESPONSE_MARGIN)) {
+     fail(s, "CONFIGURED roll response check failed - rollAccelProxy=" + rollAccel + " not meaningfully bigger than baseline=" + baseRoll + " (margin=" + RESPONSE_MARGIN + ")");
+     return;
+    }
+    if (s.kind == Kind.ROTOR) {
+     Double baseYaw = baselineYawAccel.get(s.kind);
+     if (baseYaw == null || !(Math.abs(yawAccel) > Math.abs(baseYaw) * RESPONSE_MARGIN)) {
+      fail(s, "CONFIGURED yaw response check failed - yawAccelProxy=" + yawAccel + " not meaningfully bigger than baseline=" + baseYaw + " (margin=" + RESPONSE_MARGIN + ")");
+      return;
+     }
+    }
+    LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " CONFIGURED response PASSED vs baseline (roll=" + baseRoll + (s.kind == Kind.ROTOR ? (", yaw=" + baselineYawAccel.get(s.kind)) : "") + ")");
+   }
+   case LIVE_RELOAD -> {
+    if (next == Phase.APPLY_VALID) {
+     Double baseRoll = baselineRollAccel.get(s.kind);
+     if (baseRoll == null) { fail(s, "no recorded baseline for kind=" + s.kind + " - ACTIVATION_DEFAULT must run first"); return; }
+     LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " BASELINE window complete rollAccelProxy=" + rollAccel + " (unconfigured, compare against recorded baseline=" + baseRoll + ")");
+    } else if (next == Phase.APPLY_INVALID) {
+     Double baseRoll = baselineRollAccel.get(s.kind);
+     if (baseRoll == null || !(Math.abs(rollAccel) > Math.abs(baseRoll) * RESPONSE_MARGIN)) {
+      fail(s, "VALID live-reload roll response check failed - rollAccelProxy=" + rollAccel + " not meaningfully bigger than baseline=" + baseRoll + " (margin=" + RESPONSE_MARGIN + ") - reload may not have actually taken effect");
+      return;
+     }
+     s.lastValidRollAccel = rollAccel; s.lastValidYawAccel = yawAccel;
+    } else { // next == Phase.DONE: the INVALID window just finished
+     if (!Double.isFinite(s.lastValidRollAccel)) { fail(s, "no recorded VALID-window rollAccelProxy to compare the INVALID window against"); return; }
+     double relDiff = s.lastValidRollAccel == 0 ? Double.NaN : Math.abs(rollAccel - s.lastValidRollAccel) / Math.abs(s.lastValidRollAccel);
+     if (!(relDiff <= RETENTION_TOLERANCE)) {
+      fail(s, "INVALID live-reload retention check failed - rollAccelProxy=" + rollAccel + " vs prior VALID=" + s.lastValidRollAccel
+        + " relativeDiff=" + relDiff + " exceeds tolerance=" + RETENTION_TOLERANCE + " - the rejected invalid edit may have corrupted or reverted the live config");
+      return;
+     }
+     LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " INVALID-vs-VALID retention PASSED - rollAccelProxy=" + rollAccel + " vs prior VALID=" + s.lastValidRollAccel + " relativeDiff=" + relDiff);
+    }
+   }
   }
-  s.phase = next;
-  s.ticksInPhase = 0;
-  s.windowStartM11 = s.vehicle.orientation.m11;
-  s.windowStartVerticalSpeed = verticalSpeedMps(s);
-  if (next == Phase.DONE) LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " COMPLETE");
+
+  if (next == Phase.DONE) { LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " COMPLETE (PASSED)"); s.phase = Phase.DONE; return; }
+  beginWindow(s, next);
  }
 
  private static void applyValidConfig(Scenario s) {
-  Map<String, Double> fields = s.kind == Kind.FIXED_WING
-    ? Map.of("liftSlope", 9.5, "controlSurfaceSlope", 9.5)
-    : Map.of("cyclicLimitDegrees", 35.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0);
+  Map<String, Double> fields = validFieldsFor(s.kind);
   if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, fields)) {
    fail(s, "FAILED to write the VALID config to disk - aborting this scenario rather than reloading a possibly-stale file");
    return;
@@ -576,19 +696,16 @@ public final class FlightRotorRuntimeFixtureProbe {
   }
   LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " VALID config written and reloaded live (no respawn): " + report.configResult().message()
     + " liveUpdatedVehicles=" + report.vehiclesUpdatedLive() + " fieldsNeedingRespawn=" + report.fieldsNeedingRespawn());
-  s.phase = Phase.OBSERVE_VALID;
-  s.ticksInPhase = 0;
-  s.windowStartM11 = s.vehicle.orientation.m11;
-  s.windowStartVerticalSpeed = verticalSpeedMps(s);
+  beginWindow(s, Phase.OBSERVE_VALID);
  }
 
  private static void applyInvalidConfig(Scenario s) {
   // Out-of-range per Overrides.Tuning#validate: liftSlope/controlSurfaceSlope must be in (0,10],
   // cyclicLimitDegrees must be in (0, RotorForces.MAX_CYCLIC_LIMIT_DEGREES] - both reject <= 0.
-  Map<String, Double> fields = s.kind == Kind.FIXED_WING
+  Map<String, Double> invalidFields = s.kind == Kind.FIXED_WING
     ? Map.of("liftSlope", -1.0, "controlSurfaceSlope", 9.5)
     : Map.of("cyclicLimitDegrees", 0.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0);
-  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, fields)) {
+  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, invalidFields)) {
    fail(s, "FAILED to write the INVALID config to disk - aborting this scenario rather than reloading a possibly-stale file");
    return;
   }
@@ -597,11 +714,19 @@ public final class FlightRotorRuntimeFixtureProbe {
    fail(s, "INVALID live-reload unexpectedly SUCCEEDED (should have been rejected, retaining the prior VALID config) - this is a regression finding, not expected scenario behavior: " + report.configResult().message());
    return;
   }
-  LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " INVALID config correctly REJECTED, last-known-good (the VALID config above) retained: " + report.configResult().message());
-  s.phase = Phase.OBSERVE_INVALID;
-  s.ticksInPhase = 0;
-  s.windowStartM11 = s.vehicle.orientation.m11;
-  s.windowStartVerticalSpeed = verticalSpeedMps(s);
+  LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " INVALID config correctly REJECTED, last-known-good (the VALID config above) retained in memory: " + report.configResult().message());
+  // Review finding (2): the file ON DISK still carries this invalid entry (Overrides.reload only
+  // ever swaps its in-memory maps, never touches the file) - Overrides.reload validates the
+  // WHOLE config as one unit, so leaving this invalid entry in place would poison every LATER
+  // scenario's own mergeVehicleOverrideAndWrite/reloadOverrides call (including a different
+  // Kind's), not just this one. Immediately repair this key back to the known-VALID fields on
+  // disk (a plain write, not a reload - the in-memory state is already correct and must not be
+  // touched again) so the file stays globally valid for everything that runs after this.
+  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, validFieldsFor(s.kind))) {
+   fail(s, "FAILED to repair the on-disk config back to the VALID entry after the invalid-reload check - a later scenario's own reload could now fail for an unrelated reason");
+   return;
+  }
+  beginWindow(s, Phase.OBSERVE_INVALID);
  }
 
  /** Reached from every terminal path once this probe might have touched the shared config file
@@ -629,7 +754,7 @@ public final class FlightRotorRuntimeFixtureProbe {
   * never actually forced (a plain no-op for those), so this needs no separate tracking of which
   * specific coordinates WAIT_TERRAIN forced before a possible timeout. Always the last real step
   * before ALL_DONE, reached from every terminal path via {@link #restoreConfigOnce} - a forced
-  * chunk left behind (review finding on the first version of this file) would otherwise persist
+  * chunk left behind (review finding on an earlier version of this file) would otherwise persist
   * in the saved world indefinitely. */
  private static void releaseChunksOnce(ServerLevel level) {
   for (int dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++)
