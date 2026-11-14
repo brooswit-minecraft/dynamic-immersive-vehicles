@@ -2427,7 +2427,7 @@ public final class PhysicsBridge {
     // stepGround's own owner-resolution fix. Skip (logged once) rather than silently misapply.
     if (twoBodyActive) {
      if (!loggedTwoBodyTowingWarning) {
-      LOGGER.error("[DIV twoBodyChassis] entity="+v.uniqueUUID+" has an active towing compensation thrust - unsupported for this candidate (createHitch itself has a separate, already-flagged anchor-convention issue too); skipping this impulse.");
+      LOGGER.error("[DIV twoBodyChassis] entity="+v.uniqueUUID+" has an active towing compensation thrust - unsupported for this candidate (a real lever-arm mismatch for a two-body chassis, independent of MINECRAFT-525's now-fixed createHitch anchor/frame convention); skipping this impulse.");
       loggedTwoBodyTowingWarning=true;
      }
     } else {
