@@ -299,10 +299,11 @@ public final class PhysicsBridge {
   * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
   * stallAngleDegrees/liftSlope/controlSurfaceSlope (MINECRAFT-521, stepFlight only)/
   * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
-  * brakeBiasFront (MINECRAFT-520, same reasoning)/suspensionDampingRatio (MINECRAFT-523,
-  * stepGround reads tuning.suspensionDampingRatio fresh every tick via
-  * suspensionDamper/suspensionDamperForShare/effectiveMassDamper, same as every other field in
-  * this list). Mutating
+  * brakeBiasFront (MINECRAFT-520, same reasoning)/driveBiasFront (MINECRAFT-524, same reasoning -
+  * stepGround reads tuning.driveBiasFront fresh every tick via DriveBiasDistribution#shareRatios)/
+  * suspensionDampingRatio (MINECRAFT-523, stepGround reads tuning.suspensionDampingRatio fresh
+  * every tick via suspensionDamper/suspensionDamperForShare/effectiveMassDamper, same as every
+  * other field in this list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -336,6 +337,7 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.cyclicAuthorityScale, fresh.cyclicAuthorityScale)) { target.cyclicAuthorityScale = fresh.cyclicAuthorityScale; appliedOut.add("cyclicAuthorityScale"); }
   if (!java.util.Objects.equals(target.yawAuthorityScale, fresh.yawAuthorityScale)) { target.yawAuthorityScale = fresh.yawAuthorityScale; appliedOut.add("yawAuthorityScale"); }
   if (!java.util.Objects.equals(target.brakeBiasFront, fresh.brakeBiasFront)) { target.brakeBiasFront = fresh.brakeBiasFront; appliedOut.add("brakeBiasFront"); }
+  if (!java.util.Objects.equals(target.driveBiasFront, fresh.driveBiasFront)) { target.driveBiasFront = fresh.driveBiasFront; appliedOut.add("driveBiasFront"); }
   if (!java.util.Objects.equals(target.suspensionDampingRatio, fresh.suspensionDampingRatio)) { target.suspensionDampingRatio = fresh.suspensionDampingRatio; appliedOut.add("suspensionDampingRatio"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
@@ -1760,11 +1762,11 @@ public final class PhysicsBridge {
    // localVelocity, damperUsed, ...) untouched and exactly what Phase 1 actually measured.
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
-     double skidSteerMultiplier, double brakeShareRatio, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface,
+     double skidSteerMultiplier, double brakeShareRatio, double driveShareRatio, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface,
      int wheelIndex) {
     WheelHit withNormal(double newNormal) {
      return new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,newNormal,forward,right,point,
-       skidSteerMultiplier,brakeShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
+       skidSteerMultiplier,brakeShareRatio,driveShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
     }
    }
    // MINECRAFT-506: each wheel's own static load SHARE, from its horizontal (x,z) anchor
@@ -1793,12 +1795,24 @@ public final class PhysicsBridge {
    double[] brakeShares=BrakeBiasDistribution.shares(loadShareZ,tuning.brakeBiasFront);
    double[] brakeShareRatios=new double[brakeShares.length];
    for (int i=0;i<brakeShares.length;i++) brakeShareRatios[i]=brakeShares[i]*wheels.size();
+   // MINECRAFT-524: each wheel's own DRIVE-force budget ratio, the same role as
+   // brakeShareRatios immediately above (composes directly with driveForcePerWheel's own
+   // multiply in MultiContactFrictionSolver.solveFriction) but biased by tuning.driveBiasFront
+   // instead of brakeBiasFront. Uses DriveBiasDistribution#shareRatios directly (NOT
+   // shares(...)[i]*wheels.size() computed here, unlike brakeShareRatios above) - self-review (PR
+   // #24 comment 6871636687) found that share-then-remultiply round-trip is not always the exact
+   // 1.0 no-op at every wheel count (ordinary floating-point error, e.g. 49 wheels), which would
+   // make an unconfigured vehicle's drive differ from the pre-ticket drive/wheels.size() formula
+   // by that same tiny error - shareRatios's own doc has the full reasoning for why this needs to
+   // be byte-identical, not merely close.
+   double[] driveShareRatios=DriveBiasDistribution.shareRatios(loadShareZ,tuning.driveBiasFront);
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
     int wheelIdx=wheelIndex++;
     double loadShare=loadShares[wheelIdx];
     double brakeShareRatio=brakeShareRatios[wheelIdx];
+    double driveShareRatio=driveShareRatios[wheelIdx];
     double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity);
     double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring,tuning.suspensionDampingRatio);
     double radius=wheel.getHeight()/2;
@@ -1869,7 +1883,7 @@ public final class PhysicsBridge {
     GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
       hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      brakeShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
+      brakeShareRatio,driveShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
    }
    // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
    // class-level correction for the full defect this closes). For the single-body path this is
@@ -2088,13 +2102,16 @@ public final class PhysicsBridge {
    // ONLY the service-pedal component below, via perWheelBrakeMagnitude - see that method's own
    // doc for why the parking brake and the handbrake stay exactly as unbiased as they were
    // before this ticket, and why an unconfigured/fallback bias (ratio 1.0 for every wheel) is a
-   // pure no-op reproducing this exact pre-ticket formula.
+   // pure no-op reproducing this exact pre-ticket formula. MINECRAFT-524: h.driveShareRatio()
+   // folds the configured front/rear DRIVE-force bias into the FrictionContact passed below -
+   // solveFriction's own driveForcePerWheel*skidSteerMultiplier*driveShareRatio composition (see
+   // its own doc) is the drive-side analog of this same brakeShareRatio pattern.
    var contacts=hits.stream().map(h->{
     double wheelBrakeMagnitude = perWheelBrakeMagnitude(h.wheel().placementDefinition.turnsWithSteer,
       v.parkingBrakeVar.isActive, brakeMagnitude, handbrakeMagnitudeThisTick, h.brakeShareRatio());
     return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude);
+     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude,h.driveShareRatio());
    }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
