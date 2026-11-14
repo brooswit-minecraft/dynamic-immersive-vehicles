@@ -247,11 +247,26 @@ public final class Overrides {
    // this same entry's own suspensionTravel if set, else the documented flat fallback (0.3) as the
    // conservative assumed travel - see maxStableSuspensionDampingRatio's own doc for the formula
    // and its one remaining (pre-existing, out-of-scope) assumption.
+   //
+   // Review finding (comment 53844): the underlying linearized stability condition is a STRICT
+   // inequality - AT the computed bound exactly, the integration's characteristic root sits at
+   // magnitude exactly 1, which is a sustained, non-decaying oscillation (confirmed by an
+   // independent sweep at travel 0.2's own exact bound, 1.7758240724699157: a constant
+   // .093125/.106875 alternation around the .1 target, never converging), not the "still
+   // stable" a non-strict `>` comparison alone would wrongly accept. STABILITY_MARGIN applies a
+   // modest (0.5%) safety factor below the computed bound - confirmed by the same sweep to
+   // actually converge - so this check rejects the exact boundary too, not only values past it.
    if (suspensionDampingRatio != null) {
     double travelForStabilityCheck = suspensionTravel != null ? suspensionTravel : FALLBACK.suspensionTravel;
-    if (suspensionDampingRatio > maxStableSuspensionDampingRatio(travelForStabilityCheck)) throw new IllegalArgumentException("invalid vehicle tuning");
+    if (suspensionDampingRatio > maxStableSuspensionDampingRatio(travelForStabilityCheck)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
    }
   }
+  /** See the {@code suspensionDampingRatio} cross-field check in {@link #validate()} - a modest
+   * safety factor applied to {@link #maxStableSuspensionDampingRatio} so the exact computed
+   * boundary (a sustained non-decaying oscillation, confirmed by sweep - not actually stable
+   * despite satisfying a naive non-strict {@code <=} comparison) is rejected too, not merely
+   * values past it. */
+  private static final double STABILITY_MARGIN = 0.995;
   /**
    * MINECRAFT-523 review (comments 53839/53840): the largest {@code suspensionDampingRatio}
    * that stays numerically stable at a given {@code suspensionTravel}, under {@code

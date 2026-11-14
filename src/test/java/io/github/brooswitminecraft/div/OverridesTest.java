@@ -849,4 +849,23 @@ class OverridesTest {
   assertDoesNotThrow(tinyTravelNoRatio::validate,
     "suspensionTravel alone, with no suspensionDampingRatio configured at all, must be unaffected by this cross-field check");
  }
+
+ /**
+  * Review finding (comment 53844): the underlying linearized stability condition is a STRICT
+  * inequality - at the computed bound EXACTLY, the integration sustains a non-decaying
+  * oscillation (confirmed by an independent sweep: ratio 1.7758240724699157 at travel 0.2
+  * alternates .093125/.106875 around a .1 target forever, never converging), so a naive
+  * non-strict comparison would wrongly accept it. validate() must reject the exact boundary
+  * too, not merely values strictly past it.
+  */
+ @Test void suspensionDampingRatioAtTheExactComputedStabilityBoundaryIsStillRejected() {
+  double exactBoundaryRatioAtTravelPoint2 = 1.7758240724699157;
+  var atExactBoundary = new Overrides.Tuning(); atExactBoundary.suspensionTravel = 0.2; atExactBoundary.suspensionDampingRatio = exactBoundaryRatioAtTravelPoint2;
+  assertThrows(IllegalArgumentException.class, atExactBoundary::validate,
+    "the exact computed stability boundary itself is a sustained non-decaying oscillation (confirmed by sweep), not actually stable, and must be rejected");
+  // Comfortably below the boundary (the margin applied) must still validate.
+  var justBelowBoundary = new Overrides.Tuning(); justBelowBoundary.suspensionTravel = 0.2; justBelowBoundary.suspensionDampingRatio = exactBoundaryRatioAtTravelPoint2*0.99;
+  assertDoesNotThrow(justBelowBoundary::validate,
+    "a ratio comfortably below the computed boundary (confirmed by sweep to actually converge) must still be accepted");
+ }
 }

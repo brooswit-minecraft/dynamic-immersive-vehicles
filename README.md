@@ -764,7 +764,11 @@ numerically unstable, using this same vehicle's own `suspensionTravel` (or
 the documented `0.3` fallback if it does not set one) - e.g. `2.0` is
 rejected at `suspensionTravel: 0.2`, even though `2.0` alone is within the
 flat range, while a lower ratio (around `1.77` or less at that same travel)
-is still accepted. This never narrows or widens `suspensionTravel`'s own
+is still accepted. The computed bound itself applies a modest (0.5%) safety
+margin below the exact linearized stability threshold - the exact threshold
+is itself a sustained, non-decaying oscillation (confirmed by sweep), not
+genuinely stable, so it is rejected too, not merely values past it. This
+never narrows or widens `suspensionTravel`'s own
 already-independently-validated `(0,1]` range by itself - an extremely
 small travel with NO `suspensionDampingRatio` configured at all is
 unaffected; that combination's own numerical behavior (even at the
