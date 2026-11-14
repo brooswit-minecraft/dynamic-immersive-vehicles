@@ -6,6 +6,7 @@ import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 interface VehicleBody {
  void step(EntityVehicleF_Physics v);
  void remove();
+ PhysicsBridge.InheritedRigidBodyVelocity captureReplacementState(EntityVehicleF_Physics v);
  /** Identity of the level this body lives in, for PhysicsBridge.unload()'s level-unload sweep. */
  Object level();
  /**
