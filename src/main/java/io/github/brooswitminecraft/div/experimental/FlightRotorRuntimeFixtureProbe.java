@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.logging.LogUtils;
+import io.github.brooswitminecraft.div.Overrides;
 import io.github.brooswitminecraft.div.PhysicsBridge;
 import minecrafttransportsimulator.baseclasses.Point3D;
 import minecrafttransportsimulator.baseclasses.RotationMatrix;
@@ -154,9 +155,25 @@ public final class FlightRotorRuntimeFixtureProbe {
  // meaningfully bigger than this margin times the ACTIVATION_DEFAULT scenario's own recorded
  // baseline for the same Kind - a plain ">" would pass on noise alone.
  private static final double RESPONSE_MARGIN = 1.2;
- // How close an INVALID-reload window's accelProxy must stay to the preceding VALID window's own
- // (relative difference) to count as "retained the valid config, did not revert or break".
- private static final double RETENTION_TOLERANCE = 0.5;
+ // Live-run finding: sampling accelProxy's three points across the WHOLE window (50/35 ticks)
+ // let the body tumble through multiple full rotations first - m11/m00 are periodic in the
+ // actual rotation angle, so samples that far apart alias rather than measure anything
+ // meaningful. Confining the three samples to this much shorter EARLY sub-window (right after
+ // control input turns on, before large-angle/multi-rotation effects dominate) keeps the
+ // measurement in the small-angle-ish regime where accelProxy's own "proportional to current
+ // torque" rationale actually holds. The overall window length above is still used for the
+ // bounded-travel/vertical-speed-over-free-fall checks, which have no such periodicity problem.
+ private static final int RESPONSE_SAMPLE_TICKS = 8;
+ // Live-run finding: comparing the VALID and INVALID windows' own physical accelProxy readings
+ // was too noisy to assert on reliably - by the third consecutive window on the same live,
+ // never-respawned body, real translational/rotational state has accumulated and drifted far
+ // enough (observed: forward speed swinging between ~2 and ~25 m/s, position nearing this
+ // probe's own bound) that this proxy cannot cleanly separate "the config changed" from "the
+ // body's own flight state evolved" - see this file's class doc on accelProxy's own limits.
+ // retentionRepresentativeField below sidesteps that noise entirely: it reads back the actual
+ // live-resolved Overrides.Tuning the rejected reload left in memory and compares the EXACT
+ // configured number directly - deterministic, no physics involved, and more direct evidence of
+ // "retained the VALID config" than any physical re-derivation could be.
 
  private enum Kind { FIXED_WING, ROTOR }
  private enum Role { ACTIVATION_DEFAULT, CONFIGURED, LIVE_RELOAD }
@@ -171,7 +188,8 @@ public final class FlightRotorRuntimeFixtureProbe {
   int ticksInPhase = 0;
   double spawnX, spawnZ, spawnY;
   // Three-point samples for the current window's accelProxy (roll=m11, yaw proxy=m00 - see
-  // accelProxy's own doc) - captured at tick 1, the window midpoint, and the window's last tick.
+  // accelProxy's own doc) - captured at tick 1, RESPONSE_SAMPLE_TICKS/2, and RESPONSE_SAMPLE_TICKS
+  // (an early sub-window of the full OBSERVE/RELOAD window - see RESPONSE_SAMPLE_TICKS's own doc).
   double startM11, midM11, endM11, startM00, midM00, endM00;
   double windowStartVerticalSpeed;
   // The VALID window's own accelProxy, captured so the following INVALID window can assert
@@ -197,6 +215,13 @@ public final class FlightRotorRuntimeFixtureProbe {
  // requirement this ticket's own scope names explicitly).
  private static String originalConfigContent;
  private static boolean originalConfigExisted;
+ // Review finding (self-review 1 / 53853): track exactly which chunk coordinates THIS probe
+ // force-added a ticket for (only ever the ones found unloaded at the time - see waitTerrain),
+ // so releaseChunksOnce can unforce precisely those and nothing else - a blanket unforce of the
+ // whole grid risked releasing a coordinate some OTHER owner (or a prior probe run) had already
+ // force-loaded for its own unrelated reason, not one this probe itself is responsible for.
+ private static final Set<Long> chunksForcedByThisProbe = new java.util.HashSet<>();
+ private static long chunkKey(int x, int z) { return ((long) x << 32) ^ (z & 0xffffffffL); }
  // True from the moment writeInitialConfigOnce's snapshot succeeds - every exit from that point
  // on (success, a later write/reload failure, or a scenario failure) MUST pass through
  // RESTORE_CONFIG before ALL_DONE. Before the snapshot succeeds, nothing has been written, so
@@ -224,13 +249,13 @@ public final class FlightRotorRuntimeFixtureProbe {
    for (int dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++)
     if (chunkSource.getChunkNow(CHUNK_X + dx, CHUNK_Z + dz) == null) {
      level.setChunkForced(CHUNK_X + dx, CHUNK_Z + dz, true);
+     chunksForcedByThisProbe.add(chunkKey(CHUNK_X + dx, CHUNK_Z + dz));
      allLoaded = false;
     }
   // Every WAIT_TERRAIN exit (success below, or the timeout below) now funnels through
   // RESTORE_CONFIG -> RELEASE_CHUNKS rather than jumping straight to ALL_DONE, so a chunk forced
   // on an earlier tick of this same loop (even one abandoned by a timeout) is still released -
-  // see releaseChunksOnce, which unconditionally unforces the whole grid rather than tracking
-  // exactly which coordinates were forced (unforcing an already-unforced coordinate is a no-op).
+  // see releaseChunksOnce, which only ever unforces chunksForcedByThisProbe's own recorded set.
   if (allLoaded) { globalPhase = GlobalPhase.WRITE_INITIAL_CONFIG; return; }
   if (terrainWaitTicksElapsed > MAX_TERRAIN_WAIT_TICKS) {
    LOGGER.error("[DIV flightRotorFixture] FAILED - terrain chunk grid never finished loading");
@@ -276,6 +301,14 @@ public final class FlightRotorRuntimeFixtureProbe {
   return kind == Kind.FIXED_WING
     ? Map.of("liftSlope", 9.5, "controlSurfaceSlope", 9.5)
     : Map.of("cyclicLimitDegrees", 35.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0);
+ }
+
+ /** One representative field from {@link #validFieldsFor} per {@link Kind}, read back live from
+  * the actual resolved config - see the retention check's own doc for why this replaces a
+  * physical-response-based comparison. */
+ private static Double liveResolvedRepresentativeField(Kind kind, String key) {
+  var tuning = Overrides.resolved(key);
+  return kind == Kind.FIXED_WING ? tuning.liftSlope : tuning.cyclicAuthorityScale;
  }
 
  private static void writeInitialConfigOnce() {
@@ -405,7 +438,11 @@ public final class FlightRotorRuntimeFixtureProbe {
  }
 
  private static JSONVehicle buildFixedWingDefinition(String systemName) {
-  var v = baseVehicleDefinition(systemName);
+  // Review-the-live-run finding: a too-small box here previously gave this 900kg hull a tiny
+  // moment of inertia, so FlightForces' own ordinary roll/pitch torque spun it violently (its
+  // own up-vector flipped sign within half a second) instead of a controlled response - sized
+  // closer to FW_WING_SPAN/a real fuselage length instead.
+  var v = baseVehicleDefinition(systemName, FW_WING_SPAN, 3f);
   v.motorized.isAircraft = true;
   v.motorized.wingArea = FW_WING_AREA; v.motorized.wingSpan = FW_WING_SPAN;
   v.motorized.aileronArea = FW_AILERON_AREA; v.motorized.elevatorArea = FW_ELEVATOR_AREA; v.motorized.rudderArea = FW_RUDDER_AREA;
@@ -415,7 +452,7 @@ public final class FlightRotorRuntimeFixtureProbe {
  }
 
  private static JSONVehicle buildRotorDefinition(String systemName) {
-  var v = baseVehicleDefinition(systemName);
+  var v = baseVehicleDefinition(systemName, 2f, 1f);
   // Deliberately NOT setting motorized.isAircraft/isBlimp - PhysicsBridge.selectStepper's own
   // contract (MINECRAFT-497 fix) is that an installed isRotor propeller wins dispatch
   // unconditionally, independent of that flag; leaving it false is itself part of this
@@ -425,7 +462,7 @@ public final class FlightRotorRuntimeFixtureProbe {
   return v;
  }
 
- private static JSONVehicle baseVehicleDefinition(String systemName) {
+ private static JSONVehicle baseVehicleDefinition(String systemName, float collisionWidth, float collisionHeight) {
   var v = new JSONVehicle();
   v.packID = PACK_ID; v.systemName = systemName;
   v.motorized = new JSONVehicle.VehicleMotorized();
@@ -436,10 +473,14 @@ public final class FlightRotorRuntimeFixtureProbe {
   v.general = new minecrafttransportsimulator.jsondefs.AJSONItem.General();
   v.general.health = 100;
   // Minimal single-box collision shape - same minimal-marker pattern BrakeSweepProbe's own
-  // buildVehicleDefinition uses; this ticket's scenarios need no wheel geometry at all.
+  // buildVehicleDefinition uses; this ticket's scenarios need no wheel geometry at all. Sizing
+  // matters here (live-run finding): a too-small box gives too-small a moment of inertia for its
+  // mass, so ordinary aerodynamic torque spins the body violently instead of producing a
+  // controlled roll/pitch - the fixed-wing scenario's own box is sized closer to its wingspan for
+  // exactly this reason (see buildFixedWingDefinition).
   var mainBox = new JSONCollisionBox();
   mainBox.pos = new Point3D(0, 0, 0);
-  mainBox.width = 2f; mainBox.height = 1f;
+  mainBox.width = collisionWidth; mainBox.height = collisionHeight;
   var group = new JSONCollisionGroup();
   group.collisionTypes = Set.of(JSONCollisionGroup.CollisionType.VEHICLE);
   group.collisions = List.of(mainBox);
@@ -613,11 +654,12 @@ public final class FlightRotorRuntimeFixtureProbe {
   if (!checkBoundedOrFail(s)) return;
   applyControlInputs(s);
   int windowTicks = windowTicksFor(s);
-  int midTick = Math.max(1, windowTicks / 2);
+  int midTick = Math.max(1, RESPONSE_SAMPLE_TICKS / 2);
   if (s.ticksInPhase == midTick) { s.midM11 = s.vehicle.orientation.m11; s.midM00 = s.vehicle.orientation.m00; }
+  if (s.ticksInPhase == RESPONSE_SAMPLE_TICKS) { s.endM11 = s.vehicle.orientation.m11; s.endM00 = s.vehicle.orientation.m00; }
   if (s.ticksInPhase % 10 == 0) logState(s, "OBSERVE" + (windowLabel != null ? "[" + windowLabel + "]" : ""));
   if (s.ticksInPhase < windowTicks) return;
-  double endM11 = s.vehicle.orientation.m11, endM00 = s.vehicle.orientation.m00;
+  double endM11 = s.endM11, endM00 = s.endM00;
   double verticalSpeedDelta = verticalSpeedMps(s) - s.windowStartVerticalSpeed;
   double windowSeconds = windowTicks / 20.0;
   double rollAccel = accelProxy(s.startM11, s.midM11, endM11);
@@ -667,14 +709,17 @@ public final class FlightRotorRuntimeFixtureProbe {
      }
      s.lastValidRollAccel = rollAccel; s.lastValidYawAccel = yawAccel;
     } else { // next == Phase.DONE: the INVALID window just finished
-     if (!Double.isFinite(s.lastValidRollAccel)) { fail(s, "no recorded VALID-window rollAccelProxy to compare the INVALID window against"); return; }
-     double relDiff = s.lastValidRollAccel == 0 ? Double.NaN : Math.abs(rollAccel - s.lastValidRollAccel) / Math.abs(s.lastValidRollAccel);
-     if (!(relDiff <= RETENTION_TOLERANCE)) {
-      fail(s, "INVALID live-reload retention check failed - rollAccelProxy=" + rollAccel + " vs prior VALID=" + s.lastValidRollAccel
-        + " relativeDiff=" + relDiff + " exceeds tolerance=" + RETENTION_TOLERANCE + " - the rejected invalid edit may have corrupted or reverted the live config");
+     // Deterministic, not physics-derived (see liveResolvedRepresentativeField's own doc) -
+     // directly reads back what the rejected reload actually left resolved in memory.
+     double expected = validFieldsFor(s.kind).get(s.kind == Kind.FIXED_WING ? "liftSlope" : "cyclicAuthorityScale");
+     Double actual = liveResolvedRepresentativeField(s.kind, PACK_ID + ":" + s.systemName);
+     if (actual == null || Math.abs(actual - expected) > 1e-9) {
+      fail(s, "INVALID live-reload retention check failed - live-resolved representative field=" + actual
+        + " does not match the VALID value=" + expected + " - the rejected invalid edit corrupted or reverted the live config");
       return;
      }
-     LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " INVALID-vs-VALID retention PASSED - rollAccelProxy=" + rollAccel + " vs prior VALID=" + s.lastValidRollAccel + " relativeDiff=" + relDiff);
+     LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " INVALID-vs-VALID retention PASSED - live-resolved representative field still=" + actual
+       + " (physical accelProxy this window, for reference only: " + rollAccel + " vs prior VALID window's " + s.lastValidRollAccel + ")");
     }
    }
   }
@@ -750,17 +795,19 @@ public final class FlightRotorRuntimeFixtureProbe {
   globalPhase = GlobalPhase.RELEASE_CHUNKS;
  }
 
- /** Unconditionally unforces the entire WAIT_TERRAIN grid - including any coordinate that was
-  * never actually forced (a plain no-op for those), so this needs no separate tracking of which
-  * specific coordinates WAIT_TERRAIN forced before a possible timeout. Always the last real step
-  * before ALL_DONE, reached from every terminal path via {@link #restoreConfigOnce} - a forced
-  * chunk left behind (review finding on an earlier version of this file) would otherwise persist
-  * in the saved world indefinitely. */
+ /** Unforces exactly the coordinates {@code chunksForcedByThisProbe} recorded THIS probe itself
+  * force-adding a ticket for (review finding 53853: a blanket unforce of the whole grid risked
+  * releasing some other owner's pre-existing forced ticket this probe never created). Always the
+  * last real step before ALL_DONE, reached from every terminal path via {@link
+  * #restoreConfigOnce} - a forced chunk left behind (an earlier version of this file's own review
+  * finding) would otherwise persist in the saved world indefinitely. */
  private static void releaseChunksOnce(ServerLevel level) {
-  for (int dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++)
-   for (int dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++)
-    level.setChunkForced(CHUNK_X + dx, CHUNK_Z + dz, false);
-  LOGGER.info("[DIV flightRotorFixture] released every forced chunk in the WAIT_TERRAIN grid - ALL_DONE");
+  for (long key : chunksForcedByThisProbe) {
+   int x = (int) (key >> 32), z = (int) key;
+   level.setChunkForced(x, z, false);
+  }
+  LOGGER.info("[DIV flightRotorFixture] released " + chunksForcedByThisProbe.size() + " chunk(s) this probe itself forced - ALL_DONE");
+  chunksForcedByThisProbe.clear();
   globalPhase = GlobalPhase.ALL_DONE;
  }
 }

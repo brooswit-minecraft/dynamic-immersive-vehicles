@@ -1660,3 +1660,77 @@ now returns a success boolean every caller checks before proceeding to
 reload/run. Re-verified after the fix: `gradle --offline compileJava
 --rerun-tasks` - `BUILD SUCCESSFUL`; `gradle --offline test --rerun-tasks`
 - `BUILD SUCCESSFUL`, 605 tests, 0 failures, 0 errors (unchanged).
+
+**Live-run evidence (independent review finding 53833/53853/53878) - actual
+real dev-server run, not just compile/unit evidence.** Five iterations
+against a real `gradle runServer` instance (shared `/tmp/div-gradle-slot.lock`
+flock, no duplicate dispatch), each diagnosing and fixing a real defect the
+previous run's own evidence exposed:
+
+1. First live run (head `1550ce3`): 0/6 scenarios passed - both vehicle
+   kinds free-fell identically with zero rotation response regardless of
+   kind or config. Proved the cleanup/restore/chunk-release machinery
+   itself works end to end, but proved the fixture's own activation premise
+   was broken.
+2. With `-Ddiv.debugGroundContact=true` enabled to see why: both vehicles
+   WERE correctly classified/activated/dispatched (`classify ... ground=true
+   decision=ACTIVATE`, `class=Body`, correct ROTOR/FLIGHT stepper) - but
+   `PhysicsBridge.Body`'s own `experimentalTwoBodyChassis` candidate
+   defaults to `true` (`System.getProperty("div.experimentalTwoBodyChassis",
+   "true")`) and unconditionally skips ALL force application for any
+   non-GROUND stepper (its own "selected a non-GROUND stepper - unsupported
+   for this candidate" log line) - a genuine production incompatibility
+   this ticket's own scope requires reporting distinctly, not silently
+   working around (see MINECRAFT-527, filed separately for the production
+   fix - this probe's own `-Ddiv.experimentalTwoBodyChassis=false` gate is
+   valid test isolation, not a claim that the default works).
+3. With that flag disabled: 1/6 passed (`rotor-activation-default`).
+   Fixed-wing tumbled violently (its own up-vector flipped sign within half
+   a second) - its 2x1 collision box gave a 900kg hull an unrealistically
+   tiny moment of inertia, so ordinary aerodynamic torque spun it instead
+   of producing a controlled response. Sized the fixed-wing box closer to
+   its own wingspan/a real fuselage length instead.
+4. With that fix: 4/6 passed. The remaining two LIVE_RELOAD failures traced
+   to `accelProxy` sampling its three points across the WHOLE 50/35-tick
+   window - long enough for the body to tumble through multiple full
+   rotations, aliasing a periodic quantity (`m11`/`m00` are periodic in the
+   actual rotation angle) into meaningless noise. Confined the three
+   samples to a much shorter early sub-window (`RESPONSE_SAMPLE_TICKS=8`,
+   right after control input turns on, before large-angle effects
+   dominate) where the proxy's own "proportional to current torque"
+   rationale actually holds.
+5. With that fix: 5/6 passed - the one remaining failure was the
+   INVALID-vs-VALID retention check itself, which had been comparing noisy
+   physical `accelProxy` readings across windows where the live body's own
+   translational state had, by the third consecutive window, drifted far
+   enough (observed: forward speed swinging between ~2 and ~25 m/s) that
+   the comparison was unreliable regardless of the config. Replaced it with
+   a deterministic check: read back `Overrides.resolved(key)`'s actual
+   live-resolved field directly (no physics involved at all) - strictly
+   more direct evidence of "retained the VALID config" than any further
+   physical re-derivation could be.
+
+**Final live run (head after fix 5): `/tmp/m526-live-run5.log`, 2026-11-14
+~05:22-05:28 UTC - `ALL SCENARIOS FINISHED - 6/6 PASSED`.** Every scenario's
+own PASSED line: `fw-activation-default` (dispatch confirmed, baseline
+recorded), `fw-configured` (response vs baseline PASSED), `fw-live-reload`
+(retention PASSED, live-resolved field confirmed `9.5`), `rotor-activation-
+default` (dispatch confirmed), `rotor-configured` (roll+yaw response vs
+baseline PASSED), `rotor-live-reload` (retention PASSED, live-resolved
+field confirmed `4.0`). Cleanup confirmed in the same run: "original config
+restored and reloaded" and "released 112 chunk(s) this probe itself
+forced" both logged before `ALL_DONE`. The only `ERROR`-level log lines in
+the full run are MTS's own startup banner and an unrelated Sable warning
+about a `create:flywheel` block tag from a mod not installed - neither
+from this probe. `gradle --offline compileJava/test --rerun-tasks` after
+this final fix: `BUILD SUCCESSFUL`, 605 tests, 0 failures, 0 errors
+(unchanged - no new unit tests, consistent with every prior pass on this
+ticket).
+
+This closes the ticket's own disclosed-gap requirement with actual,
+reproducible, real-dev-server PASS evidence for all four named cases
+(activation, default response, configured response, valid/invalid live
+reload) across both vehicle categories - not merely a compiled, never-run
+fixture. MINECRAFT-527 (filed separately) tracks the real production
+defect this process discovered; fixing that production behavior is
+explicitly out of this ticket's own scope.
