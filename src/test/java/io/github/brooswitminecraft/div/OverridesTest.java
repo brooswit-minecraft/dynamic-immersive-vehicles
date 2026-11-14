@@ -761,22 +761,26 @@ class OverridesTest {
   }
  }
 
- // MINECRAFT-523: suspensionDampingRatio - dimensionless, strictly positive, capped at 3.0
+ // MINECRAFT-523: suspensionDampingRatio - dimensionless, strictly positive, capped at 2.0
  // damping ratio PhysicsBridge.suspensionDamper/suspensionDamperForShare/effectiveMassDamper
- // already apply; 0.7 (FALLBACK) reproduces the exact prior hardcoded constant.
+ // already apply; 0.7 (FALLBACK) reproduces the exact prior hardcoded constant. The 2.0 cap
+ // (review finding, ticket comment 53827) keeps a real margin below the measured ~2.2-2.3
+ // numerical-instability onset Body.stepGround's explicit-damping-term integration has at this
+ // project's documented default example config - see validate()'s own doc and
+ // PhysicsBridgeSuspensionDampingRatioTest's stability sweep.
 
  @Test void suspensionDampingRatioOutOfRangeFailsValidation() {
   var zero = new Overrides.Tuning(); zero.suspensionDampingRatio = 0.0; // never valid - an undamped oscillator
   assertThrows(IllegalArgumentException.class, zero::validate);
   var negative = new Overrides.Tuning(); negative.suspensionDampingRatio = -0.7;
   assertThrows(IllegalArgumentException.class, negative::validate);
-  var tooLarge = new Overrides.Tuning(); tooLarge.suspensionDampingRatio = 3.01;
+  var tooLarge = new Overrides.Tuning(); tooLarge.suspensionDampingRatio = 2.01;
   assertThrows(IllegalArgumentException.class, tooLarge::validate);
   var nan = new Overrides.Tuning(); nan.suspensionDampingRatio = Double.NaN;
   assertThrows(IllegalArgumentException.class, nan::validate);
   var criticallyDamped = new Overrides.Tuning(); criticallyDamped.suspensionDampingRatio = 1.0;
   assertDoesNotThrow(criticallyDamped::validate);
-  var upperBound = new Overrides.Tuning(); upperBound.suspensionDampingRatio = 3.0; // inclusive upper bound is allowed
+  var upperBound = new Overrides.Tuning(); upperBound.suspensionDampingRatio = 2.0; // inclusive upper bound is allowed
   assertDoesNotThrow(upperBound::validate);
   var nearZero = new Overrides.Tuning(); nearZero.suspensionDampingRatio = 0.01; // exclusive lower bound - just above zero is allowed
   assertDoesNotThrow(nearZero::validate);

@@ -549,7 +549,7 @@ unaffected by this bias - it only redistributes the adjustable service-
 brake pedal's own budget.
 
 `suspensionDampingRatio` (optional, dimensionless, strictly positive and
-capped at `3.0`) is the per-wheel critical-damping-ratio multiplier
+capped at `2.0`) is the per-wheel critical-damping-ratio multiplier
 `suspensionSpringForShare`'s own paired damping formula applies - previously
 a hardcoded `0.7` shared by every vehicle, now a per-vehicle setting. `1.0`
 is critical damping (settles to ride height as fast as possible without
@@ -732,7 +732,7 @@ conserved.
 ### Suspension damping ratio (MINECRAFT-523)
 
 Optional, per-vehicle `suspensionDampingRatio` - a dimensionless, strictly
-positive, `3.0`-capped multiplier
+positive, `2.0`-capped multiplier
 [`PhysicsBridge.suspensionDamperForShare`](src/main/java/io/github/brooswitminecraft/div/PhysicsBridge.java)
 (and its non-share-based counterpart `suspensionDamper`) apply on top of
 each wheel's own calibrated spring rate:
@@ -743,7 +743,15 @@ reproducing this project's exact prior hardcoded constant - no change in
 behavior for a vehicle that never configures this field. Values below `1.0`
 make the suspension progressively underdamped (it overshoots ride height
 and bounces before settling); values above `1.0` make it progressively
-overdamped (it settles without ever overshooting, but more sluggishly).
+overdamped, settling without overshooting but more sluggishly, WITHIN the
+validated `(0, 2.0]` range. That cap is not an arbitrary headroom number:
+`Body.stepGround`'s own fixed-timestep semi-implicit integration treats the
+damping term explicitly, which has a real numerical-stability bound (an
+independently-measured settling sweep at this project's documented default
+example found sustained, non-converging chatter starting around ratio
+`2.2`-`2.3`) - `2.0` keeps a real margin below that measured onset. A value
+above `2.0` is rejected at config load/reload, the same as any other
+out-of-range field.
 
 This is purely a DAMPING change - it never touches the calibrated spring
 rate, the `travel*.5` ride-height equilibrium a wheel settles toward, or

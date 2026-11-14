@@ -18,18 +18,36 @@ import static org.junit.jupiter.api.Assertions.*;
 class PhysicsBridgeSuspensionDampingRatioTest {
  private static final double TRAVEL = 0.3;
 
- @Test void defaultRatioOfPoint7MatchesTheDeprecatedHardcodedOverloadsByteIdentically() {
+ /**
+  * Review finding (ticket comment 53827): comparing the new ratio-explicit overload only
+  * against the OLD overload - which itself just delegates to the new one with a hardcoded 0.7 -
+  * never independently proves anything; both sides would move together even if the shared
+  * implementation were wrong. This instead hardcodes a LITERAL copy of the exact original
+  * formula (the same literal {@code 2*Math.sqrt(...)*.7} this class's own pre-ticket source once
+  * had) as an independent oracle, so a real regression in the generalized implementation would
+  * actually be caught.
+  */
+ @Test void defaultRatioOfPoint7MatchesALiteralOracleOfTheOriginalHardcodedFormula() {
   double mass=1500, spring=35750.0, loadShare=0.25;
-  assertEquals(PhysicsBridge.suspensionDamper(mass, 4, spring), PhysicsBridge.suspensionDamper(mass, 4, spring, 0.7),
-    "the old 3-arg overload must be byte-identical to the new one at the exact calibrated 0.7 default");
-  assertEquals(PhysicsBridge.suspensionDamperForShare(mass, loadShare, spring), PhysicsBridge.suspensionDamperForShare(mass, loadShare, spring, 0.7),
-    "the old 3-arg overload must be byte-identical to the new one at the exact calibrated 0.7 default");
-  Vector3d point=new Vector3d(0,0,0), up=new Vector3d(0,1,0);
+  double literalOracleSuspensionDamper = 2*Math.sqrt(spring*mass/4)*.7;
+  assertEquals(literalOracleSuspensionDamper, PhysicsBridge.suspensionDamper(mass, 4, spring, 0.7), 1e-12,
+    "suspensionDamper at ratio 0.7 must match a literal, independently-written copy of the original hardcoded formula");
+  double literalOracleSuspensionDamperForShare = 2*Math.sqrt(spring*mass*loadShare)*.7;
+  assertEquals(literalOracleSuspensionDamperForShare, PhysicsBridge.suspensionDamperForShare(mass, loadShare, spring, 0.7), 1e-12,
+    "suspensionDamperForShare at ratio 0.7 must match a literal, independently-written copy of the original hardcoded formula");
+
+  Vector3d point=new Vector3d(0.3,0.1,0.5), up=new Vector3d(0,1,0);
   Quaterniond identity=new Quaterniond();
-  Vector3d inertia=new Vector3d(100,100,100);
-  var legacy = PhysicsBridge.effectiveMassDamper(spring, mass, point, up, identity, inertia, 123.0);
-  var explicit = PhysicsBridge.effectiveMassDamper(spring, mass, point, up, identity, inertia, 0.7, 123.0);
-  assertEquals(legacy.damper(), explicit.damper(), "the old 7-arg overload must be byte-identical to the new one at the exact calibrated 0.7 default");
+  Vector3d inertia=new Vector3d(1200,1300,900);
+  var candidate = PhysicsBridge.effectiveMassDamper(spring, mass, point, up, identity, inertia, 0.7, 123.0);
+  double literalOracleEffectiveMassDamper = 2*Math.sqrt(spring*candidate.effectiveMass())*.7;
+  assertEquals(literalOracleEffectiveMassDamper, candidate.damper(), 1e-9,
+    "effectiveMassDamper's own candidate formula at ratio 0.7 must match a literal, independently-written copy of the original hardcoded formula");
+
+  // The deprecated hardcoded-ratio overloads (kept only for other pre-existing test call sites)
+  // must still agree with the same oracle, confirming they were not left behind by this fix.
+  assertEquals(literalOracleSuspensionDamper, PhysicsBridge.suspensionDamper(mass, 4, spring), 1e-12);
+  assertEquals(literalOracleSuspensionDamperForShare, PhysicsBridge.suspensionDamperForShare(mass, loadShare, spring), 1e-12);
  }
 
  @Test void damperScalesLinearlyWithTheConfiguredRatioRegardlessOfLoadShare() {
@@ -81,7 +99,21 @@ class PhysicsBridgeSuspensionDampingRatioTest {
   return trace;
  }
 
- @Test void changedSettlingResponseAnUnderdampedRatioOvershootsEquilibriumWhileAnOverdampedRatioDoesNot() {
+ /**
+  * Review finding (ticket comment 53827): the first revision of this test only checked a
+  * "closest approach within the first 200 ticks" window for its overdamped case at ratio 2.5 -
+  * which masked SUSTAINED long-run chatter that never actually converges (confirmed by an
+  * independent 6000-tick sweep at this project's documented default example: ratio 2.5 and 3.0
+  * both settle into a persistent, non-decaying ~0.015-0.045 compression spread, never reaching
+  * the 0.15 equilibrium). That is a genuine numerical-stability failure of
+  * Body.stepGround's explicit-damping-term integration at those ratios, not a cosmetic wobble -
+  * see {@link Overrides.Tuning#suspensionDampingRatio}'s own doc for the measured ~2.2-2.3
+  * instability onset. {@code suspensionDampingRatio}'s validated range is now capped at 2.0
+  * specifically to stay below that onset; this test uses an overdamped ratio (1.8) INSIDE the
+  * now-supported range and asserts genuine LATE-WINDOW convergence (the last 200 of 2000 ticks
+  * all within a tight tolerance of equilibrium), not merely an early closest-approach.
+  */
+ @Test void changedSettlingResponseAnUnderdampedRatioOvershootsEquilibriumWhileASupportedOverdampedRatioConvergesAndStaysConverged() {
   double mass=1500, gravity=11;
   double spring=PhysicsBridge.suspensionSpringForShare(mass, 0.25, TRAVEL, gravity);
   double equilibrium=TRAVEL*.5;
@@ -93,20 +125,36 @@ class PhysicsBridgeSuspensionDampingRatioTest {
   assertTrue(underdampedMax > equilibrium + overshootTolerance,
     "a strongly underdamped ratio (0.15) must visibly overshoot the "+equilibrium+" equilibrium - max observed "+underdampedMax);
 
-  double overdampedDamper=PhysicsBridge.suspensionDamperForShare(mass, 0.25, spring, 2.5);
-  double[] overdampedTrace=settleTrace(mass, 0.25, gravity, spring, overdampedDamper, 400);
+  double overdampedRatio=1.8; // inside the validated (0,2.0] range, with margin below the measured instability onset
+  double overdampedDamper=PhysicsBridge.suspensionDamperForShare(mass, 0.25, spring, overdampedRatio);
+  int ticks=2000;
+  double[] overdampedTrace=settleTrace(mass, 0.25, gravity, spring, overdampedDamper, ticks);
   double overdampedMax=java.util.Arrays.stream(overdampedTrace).max().getAsDouble();
   assertTrue(overdampedMax <= equilibrium + overshootTolerance,
-    "a strongly overdamped ratio (2.5) must settle toward "+equilibrium+" without overshooting - max observed "+overdampedMax);
-  // TireForces.suspension's own one-sided (never-negative) force law means a wheel resting
-  // almost exactly at equilibrium can still show small, bounded long-run chatter as the clamp
-  // repeatedly re-engages (a real, pre-existing property of that one-sided law under explicit
-  // integration, not something this ticket's damping ratio change introduces or needs to
-  // eliminate) - so this checks only that the approach actually GETS close to equilibrium at
-  // some point within a generous early window, not that every later tick stays exactly there.
-  double closestApproach=java.util.Arrays.stream(overdampedTrace, 0, 200).map(c -> Math.abs(c-equilibrium)).min().getAsDouble();
-  assertTrue(closestApproach < 0.02,
-    "an overdamped wheel must actually approach close to "+equilibrium+" within the first 200 ticks - closest approach was off by "+closestApproach);
+    "an overdamped ratio ("+overdampedRatio+") within the validated range must settle toward "+equilibrium+" without overshooting - max observed "+overdampedMax);
+  double lateWindowMin=Double.MAX_VALUE, lateWindowMax=-Double.MAX_VALUE;
+  for (int t=ticks-200;t<ticks;t++) { lateWindowMin=Math.min(lateWindowMin, overdampedTrace[t]); lateWindowMax=Math.max(lateWindowMax, overdampedTrace[t]); }
+  assertEquals(equilibrium, lateWindowMin, 1e-3, "an overdamped ratio within the validated range must have actually CONVERGED by the late window, not just approached once early");
+  assertEquals(equilibrium, lateWindowMax, 1e-3, "an overdamped ratio within the validated range must STAY converged through the late window, not drift back away from equilibrium");
+ }
+
+ /**
+  * Direct evidence for the validated upper bound itself (ticket comment 53827's "establish a
+  * stable supported range" ask): the documented 2.0 cap must actually be stable over a long
+  * settling window at this project's documented default example, not merely "less unstable"
+  * than the previously-allowed 3.0.
+  */
+ @Test void theValidatedUpperBoundOfTwoRemainsNumericallyStableOverALongSettlingWindow() {
+  double mass=1500, gravity=11, loadShare=0.25;
+  double spring=PhysicsBridge.suspensionSpringForShare(mass, loadShare, TRAVEL, gravity);
+  double equilibrium=TRAVEL*.5;
+  double damperAtCap=PhysicsBridge.suspensionDamperForShare(mass, loadShare, spring, 2.0);
+  int ticks=6000;
+  double[] trace=settleTrace(mass, loadShare, gravity, spring, damperAtCap, ticks);
+  double lateWindowMin=Double.MAX_VALUE, lateWindowMax=-Double.MAX_VALUE;
+  for (int t=ticks-500;t<ticks;t++) { lateWindowMin=Math.min(lateWindowMin, trace[t]); lateWindowMax=Math.max(lateWindowMax, trace[t]); }
+  assertEquals(equilibrium, lateWindowMin, 1e-6, "the validated upper bound (ratio 2.0) must remain exactly converged over a long settling window, not merely early on");
+  assertEquals(equilibrium, lateWindowMax, 1e-6, "the validated upper bound (ratio 2.0) must show no sustained chatter/drift in the late window");
  }
 
  @Test void sharedConfiguredRatioAppliesConsistentlyAcrossAnAsymmetricUnequalLoadAxle() {

@@ -232,10 +232,20 @@ public final class Overrides {
    // never a sensible suspension, and not what "configurable damping" is meant to permit; a
    // vehicle that truly wants no settling behavior should disable physics for it instead, the
    // same reasoning cyclicAuthorityScale/yawAuthorityScale's own strictly-positive bound above
-   // uses), capped at 3.0 - generous headroom above 1.0 (critical damping) for a deliberately
-   // sluggish/overdamped feel while still refusing an unbounded/mistyped value, the same
-   // "finite bounded" shape every other dimensionless tuning knob in this class already uses.
-   if (suspensionDampingRatio != null && !(Double.isFinite(suspensionDampingRatio) && suspensionDampingRatio > 0 && suspensionDampingRatio <= 3.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // uses), capped at 2.0 for a deliberately sluggish/overdamped feel while still refusing an
+   // unbounded/mistyped value. Review finding: Body.stepGround's own semi-implicit Euler
+   // integration treats the damping term EXPLICITLY (computed from the OLD velocity), which has
+   // a real stability bound independent of mass/loadShare - the per-wheel natural frequency
+   // omega=sqrt(gravity/(suspensionTravel*.5)) cancels mass/loadShare out of
+   // c*DT/m_eff = 2*ratio*omega*DT entirely. A 6000-tick settling sweep at this project's
+   // documented default example (suspensionTravel 0.3, gravity ~11) found sustained, non-settling
+   // chatter beginning around ratio 2.2-2.3 (a 0.09-0.15 spread at ratio 3.0, versus an exact
+   // 0.15 settle at ratio<=2.2) - not a cosmetic wobble, a genuine failure to converge. 2.0 keeps
+   // a real margin below that measured onset for the documented default configuration; it is NOT
+   // a provable bound for every possible suspensionTravel (a sufficiently small configured travel
+   // raises omega enough to destabilize even the unconfigured 0.7 default - a pre-existing
+   // property of suspensionTravel's own already-validated (0,1] range, unrelated to this field).
+   if (suspensionDampingRatio != null && !(Double.isFinite(suspensionDampingRatio) && suspensionDampingRatio > 0 && suspensionDampingRatio <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
