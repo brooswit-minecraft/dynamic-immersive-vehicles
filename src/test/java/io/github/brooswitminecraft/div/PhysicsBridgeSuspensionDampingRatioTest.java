@@ -157,6 +157,41 @@ class PhysicsBridgeSuspensionDampingRatioTest {
   assertEquals(equilibrium, lateWindowMax, 1e-6, "the validated upper bound (ratio 2.0) must show no sustained chatter/drift in the late window");
  }
 
+ /**
+  * Review finding (comments 53839/53840): the flat 2.0 ceiling alone only proves stable at this
+  * project's documented default {@code suspensionTravel} (0.3) - at a SMALLER, independently
+  * valid {@code suspensionTravel} (0.2, well inside suspensionTravel's own (0,1] range), ratio
+  * 2.0 is numerically unstable. This reproduces the reviewer's own exact numbers as independent
+  * confirmation, and demonstrates that {@code Overrides.Tuning}'s new travel-aware cross-field
+  * check (see its own {@code maxStableSuspensionDampingRatio} doc) accepts a genuinely stable
+  * ratio at that same smaller travel instead.
+  */
+ @Test void aSmallerValidSuspensionTravelLowersTheActuallyStableRatioBelowTheFlatTwoCeiling() {
+  double mass=1500, gravity=11, loadShare=0.25, smallerTravel=0.2;
+  double equilibrium=smallerTravel*.5;
+  double springAtSmallerTravel=PhysicsBridge.suspensionSpringForShare(mass, loadShare, smallerTravel, gravity);
+  int ticks=6000;
+
+  // Reproduces the reviewer's own exact reported numbers: ratio 2.0 at travel 0.2 never
+  // converges - a sustained ~0.0807-0.0991 late-window chatter against a 0.1 target.
+  double damperAtFlatCeiling=PhysicsBridge.suspensionDamperForShare(mass, loadShare, springAtSmallerTravel, 2.0);
+  double[] unstableTrace=settleTrace(mass, loadShare, gravity, springAtSmallerTravel, damperAtFlatCeiling, ticks);
+  double unstableLateMin=Double.MAX_VALUE, unstableLateMax=-Double.MAX_VALUE;
+  for (int t=ticks-500;t<ticks;t++) { unstableLateMin=Math.min(unstableLateMin, unstableTrace[t]); unstableLateMax=Math.max(unstableLateMax, unstableTrace[t]); }
+  assertTrue(unstableLateMax-unstableLateMin > 0.01,
+    "ratio 2.0 at travel 0.2 must show sustained, non-decaying late-window chatter, not mere early transient - observed spread "+(unstableLateMax-unstableLateMin));
+
+  // A ratio actually within Overrides.Tuning's own newly-accepted cross-field bound for this
+  // travel (confirmed stable at 1.6 < the ~1.776 computed bound) converges cleanly instead.
+  double stableRatio=1.6;
+  double damperAtStableRatio=PhysicsBridge.suspensionDamperForShare(mass, loadShare, springAtSmallerTravel, stableRatio);
+  double[] stableTrace=settleTrace(mass, loadShare, gravity, springAtSmallerTravel, damperAtStableRatio, ticks);
+  double stableLateMin=Double.MAX_VALUE, stableLateMax=-Double.MAX_VALUE;
+  for (int t=ticks-500;t<ticks;t++) { stableLateMin=Math.min(stableLateMin, stableTrace[t]); stableLateMax=Math.max(stableLateMax, stableTrace[t]); }
+  assertEquals(equilibrium, stableLateMin, 1e-6, "ratio "+stableRatio+" at travel "+smallerTravel+" (within Overrides' own accepted cross-field bound) must converge exactly, with no late-window drift");
+  assertEquals(equilibrium, stableLateMax, 1e-6, "ratio "+stableRatio+" at travel "+smallerTravel+" (within Overrides' own accepted cross-field bound) must converge exactly, with no late-window drift");
+ }
+
  @Test void sharedConfiguredRatioAppliesConsistentlyAcrossAnAsymmetricUnequalLoadAxle() {
   // MINECRAFT-506/519's own asymmetric-axle premise: a COM offset toward one side gives the two
   // wheels DIFFERENT loadShares (and therefore different calibrated spring/damper rates), but a

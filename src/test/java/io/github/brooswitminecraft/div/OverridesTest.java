@@ -817,4 +817,36 @@ class OverridesTest {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }
  }
+
+ // MINECRAFT-523 review (comments 53839/53840): the flat 2.0 ceiling alone is not provably
+ // stable at every suspensionTravel - a smaller configured travel raises the per-wheel natural
+ // frequency enough to destabilize ratios well under 2.0 too (confirmed by an independent
+ // settling sweep reproducing the reviewer's own numbers exactly - see
+ // PhysicsBridgeSuspensionDampingRatioTest). validate() now also rejects a configured
+ // (suspensionDampingRatio, suspensionTravel) PAIR whenever it would already be numerically
+ // unstable under Body.stepGround's own integration, not just an out-of-[0,2.0]-range ratio.
+
+ @Test void suspensionDampingRatioIsRejectedWhenUnstableForItsOwnConfiguredSuspensionTravel() {
+  // At travel=0.2 (well within suspensionTravel's own independently-valid (0,1] range), ratio
+  // 2.0 is within the flat [0,2.0] range but was independently confirmed (sweep) to never
+  // converge - must still be rejected by the travel-aware check.
+  var unstablePair = new Overrides.Tuning(); unstablePair.suspensionTravel = 0.2; unstablePair.suspensionDampingRatio = 2.0;
+  assertThrows(IllegalArgumentException.class, unstablePair::validate,
+    "ratio 2.0 at travel 0.2 is numerically unstable (confirmed by sweep) and must be rejected even though 2.0 alone is in range");
+  // A ratio comfortably below that travel's own stability bound (~1.776) must still validate.
+  var stablePair = new Overrides.Tuning(); stablePair.suspensionTravel = 0.2; stablePair.suspensionDampingRatio = 1.6;
+  assertDoesNotThrow(stablePair::validate,
+    "ratio 1.6 at travel 0.2 is below that travel's own stability bound and must still be accepted");
+  // The documented default travel (0.7 ratio, no suspensionTravel override at all) must remain
+  // exactly as valid as before this review fix - the cross-field check must not retune defaults.
+  var defaultRatioNoTravelOverride = new Overrides.Tuning(); defaultRatioNoTravelOverride.suspensionDampingRatio = 0.7;
+  assertDoesNotThrow(defaultRatioNoTravelOverride::validate,
+    "the documented 0.7 default, with no suspensionTravel override, must remain valid against the assumed 0.3 fallback travel");
+  // An extremely small travel's own existing (0,1]-range validity is untouched by this field -
+  // this check only ever REJECTS an unstable ratio for that travel, never widens or narrows
+  // suspensionTravel's own accepted range.
+  var tinyTravelNoRatio = new Overrides.Tuning(); tinyTravelNoRatio.suspensionTravel = 0.02;
+  assertDoesNotThrow(tinyTravelNoRatio::validate,
+    "suspensionTravel alone, with no suspensionDampingRatio configured at all, must be unaffected by this cross-field check");
+ }
 }

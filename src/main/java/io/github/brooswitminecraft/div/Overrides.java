@@ -232,20 +232,55 @@ public final class Overrides {
    // never a sensible suspension, and not what "configurable damping" is meant to permit; a
    // vehicle that truly wants no settling behavior should disable physics for it instead, the
    // same reasoning cyclicAuthorityScale/yawAuthorityScale's own strictly-positive bound above
-   // uses), capped at 2.0 for a deliberately sluggish/overdamped feel while still refusing an
-   // unbounded/mistyped value. Review finding: Body.stepGround's own semi-implicit Euler
-   // integration treats the damping term EXPLICITLY (computed from the OLD velocity), which has
-   // a real stability bound independent of mass/loadShare - the per-wheel natural frequency
-   // omega=sqrt(gravity/(suspensionTravel*.5)) cancels mass/loadShare out of
-   // c*DT/m_eff = 2*ratio*omega*DT entirely. A 6000-tick settling sweep at this project's
-   // documented default example (suspensionTravel 0.3, gravity ~11) found sustained, non-settling
-   // chatter beginning around ratio 2.2-2.3 (a 0.09-0.15 spread at ratio 3.0, versus an exact
-   // 0.15 settle at ratio<=2.2) - not a cosmetic wobble, a genuine failure to converge. 2.0 keeps
-   // a real margin below that measured onset for the documented default configuration; it is NOT
-   // a provable bound for every possible suspensionTravel (a sufficiently small configured travel
-   // raises omega enough to destabilize even the unconfigured 0.7 default - a pre-existing
-   // property of suspensionTravel's own already-validated (0,1] range, unrelated to this field).
+   // uses), hard-capped at 2.0 - never exceedable regardless of travel, a documentable ceiling
+   // even though (see maxStableSuspensionDampingRatio's own doc) it is NOT provably stable for
+   // every travel on its own; the real, travel-dependent bound below is what actually guards
+   // stability.
    if (suspensionDampingRatio != null && !(Double.isFinite(suspensionDampingRatio) && suspensionDampingRatio > 0 && suspensionDampingRatio <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Review finding (comments 53839/53840): the flat 2.0 ceiling above only proves stable at
+   // this project's documented default suspensionTravel (0.3) - Body.stepGround's own explicit-
+   // damping-term integration has a REAL, travel-dependent stability bound (confirmed against an
+   // independent settling sweep reproducing the reviewer's own numbers exactly: ratio 2.0 at
+   // travel 0.2 settles into a sustained .0807-.0991 chatter against a .10 target, never
+   // converging), so a flat ratio cap alone cannot bound it across suspensionTravel's own already-
+   // validated (0,1] range. Reject whenever the CONFIGURED pair would already be unstable, using
+   // this same entry's own suspensionTravel if set, else the documented flat fallback (0.3) as the
+   // conservative assumed travel - see maxStableSuspensionDampingRatio's own doc for the formula
+   // and its one remaining (pre-existing, out-of-scope) assumption.
+   if (suspensionDampingRatio != null) {
+    double travelForStabilityCheck = suspensionTravel != null ? suspensionTravel : FALLBACK.suspensionTravel;
+    if (suspensionDampingRatio > maxStableSuspensionDampingRatio(travelForStabilityCheck)) throw new IllegalArgumentException("invalid vehicle tuning");
+   }
+  }
+  /**
+   * MINECRAFT-523 review (comments 53839/53840): the largest {@code suspensionDampingRatio}
+   * that stays numerically stable at a given {@code suspensionTravel}, under {@code
+   * Body.stepGround}'s own explicit-damping-term semi-implicit Euler integration at this
+   * project's fixed {@link PhysicsBridge#DT}. Derived from the per-wheel natural frequency
+   * {@code omega = sqrt(2*gravity/travel)} (mass/loadShare cancel out of the stability term
+   * entirely - confirmed algebraically and by sweep) and the reviewer's own linearized stability
+   * condition {@code (DT*omega)^2 + 4*ratio*DT*omega < 4}, solved for {@code ratio}:
+   * {@code ratio < (4 - (DT*omega)^2) / (4*DT*omega)}. A {@code travel} small enough that even
+   * {@code DT*omega >= 2} (so the spring term ALONE already exceeds the stability budget, before
+   * any damping at all) returns {@code 0} - meaning no positive ratio is stable there; that is a
+   * pre-existing property of {@code suspensionTravel}'s own already-validated {@code (0,1]} range
+   * (an extremely small configured travel destabilizes even the unconfigured {@code 0.7} default),
+   * not something introduced by this field, and this ticket does not attempt to fix it.
+   * <p>Uses this project's own documented default gravity (the Sable {@code DimensionPhysics.
+   * DEFAULT_GRAVITY} magnitude, 11 - see {@link PhysicsBridge#suspensionSpring}'s own doc) as a
+   * conservative standard assumption, since gravity is a live per-dimension physics property,
+   * never a {@code Tuning} field this validator can see - an unusually high dimension-configured
+   * gravity could still destabilize a configuration this check accepts, exactly the same
+   * pre-existing, out-of-{@code Tuning}-scope limitation every other hardcoded physics default in
+   * this class (spring/damper calibration included) already carries.
+   */
+  private static double maxStableSuspensionDampingRatio(double travel) {
+   double gravity = 11.0;
+   double omega = Math.sqrt(2*gravity/travel);
+   double dtOmega = PhysicsBridge.DT*omega;
+   double headroom = 4 - dtOmega*dtOmega;
+   if (headroom <= 0) return 0;
+   return headroom/(4*dtOmega);
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):

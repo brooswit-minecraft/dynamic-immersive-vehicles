@@ -753,6 +753,24 @@ example found sustained, non-converging chatter starting around ratio
 above `2.0` is rejected at config load/reload, the same as any other
 out-of-range field.
 
+**That flat `2.0` ceiling is not provably stable on its own for every
+`suspensionTravel`.** The actual stability bound is travel-dependent (via
+the per-wheel natural frequency, `omega = sqrt(2*gravity/suspensionTravel)`
+- mass/loadShare cancel out of it entirely): a smaller configured
+`suspensionTravel` raises that frequency enough to destabilize a ratio well
+under `2.0` too. Config load/reload therefore also rejects any configured
+`(suspensionDampingRatio, suspensionTravel)` PAIR that would already be
+numerically unstable, using this same vehicle's own `suspensionTravel` (or
+the documented `0.3` fallback if it does not set one) - e.g. `2.0` is
+rejected at `suspensionTravel: 0.2`, even though `2.0` alone is within the
+flat range, while a lower ratio (around `1.77` or less at that same travel)
+is still accepted. This never narrows or widens `suspensionTravel`'s own
+already-independently-validated `(0,1]` range by itself - an extremely
+small travel with NO `suspensionDampingRatio` configured at all is
+unaffected; that combination's own numerical behavior (even at the
+unconfigured `0.7` default) is a pre-existing property of `suspensionTravel`
+this ticket does not change or newly guard.
+
 This is purely a DAMPING change - it never touches the calibrated spring
 rate, the `travel*.5` ride-height equilibrium a wheel settles toward, or
 the static-load geometry [anti-roll](#axle-anti-roll-minecraft-519) and
