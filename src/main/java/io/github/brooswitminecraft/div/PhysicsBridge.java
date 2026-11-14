@@ -299,7 +299,11 @@ public final class PhysicsBridge {
   * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
   * stallAngleDegrees/liftSlope/controlSurfaceSlope (MINECRAFT-521, stepFlight only)/
   * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
-  * brakeBiasFront (MINECRAFT-520, same reasoning). Mutating
+  * brakeBiasFront (MINECRAFT-520, same reasoning)/driveBiasFront (MINECRAFT-524, same reasoning -
+  * stepGround reads tuning.driveBiasFront fresh every tick via DriveBiasDistribution#shareRatios)/
+  * suspensionDampingRatio (MINECRAFT-523, stepGround reads tuning.suspensionDampingRatio fresh
+  * every tick via suspensionDamper/suspensionDamperForShare/effectiveMassDamper, same as every
+  * other field in this list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -333,6 +337,8 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.cyclicAuthorityScale, fresh.cyclicAuthorityScale)) { target.cyclicAuthorityScale = fresh.cyclicAuthorityScale; appliedOut.add("cyclicAuthorityScale"); }
   if (!java.util.Objects.equals(target.yawAuthorityScale, fresh.yawAuthorityScale)) { target.yawAuthorityScale = fresh.yawAuthorityScale; appliedOut.add("yawAuthorityScale"); }
   if (!java.util.Objects.equals(target.brakeBiasFront, fresh.brakeBiasFront)) { target.brakeBiasFront = fresh.brakeBiasFront; appliedOut.add("brakeBiasFront"); }
+  if (!java.util.Objects.equals(target.driveBiasFront, fresh.driveBiasFront)) { target.driveBiasFront = fresh.driveBiasFront; appliedOut.add("driveBiasFront"); }
+  if (!java.util.Objects.equals(target.suspensionDampingRatio, fresh.suspensionDampingRatio)) { target.suspensionDampingRatio = fresh.suspensionDampingRatio; appliedOut.add("suspensionDampingRatio"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
@@ -881,9 +887,23 @@ public final class PhysicsBridge {
   * coefficient for this wheel's share of the sprung mass) so the settling the convergence
   * simulation checks neither oscillates indefinitely nor is sluggish enough to look like
   * persistent sinking. Same extraction rationale as {@link #suspensionSpring}.
+  * @deprecated kept only for existing test call sites that never configure a damping ratio -
+  * delegates to {@link #suspensionDamper(double,int,double,double)} with the exact calibrated
+  * 0.7 default (MINECRAFT-523). Every real production call site passes the vehicle's own
+  * resolved {@code tuning.suspensionDampingRatio} explicitly instead.
   */
+ @Deprecated
  static double suspensionDamper(double mass, int wheelCount, double spring) {
-  return 2*Math.sqrt(spring*mass/wheelCount)*.7;
+  return suspensionDamper(mass, wheelCount, spring, 0.7);
+ }
+ /**
+  * MINECRAFT-523: {@link #suspensionDamper(double,int,double)} generalized to an explicit,
+  * configurable, dimensionless damping ratio (replacing the previously-hardcoded {@code .7})
+  * - see {@code Overrides.Tuning#suspensionDampingRatio}'s own doc for the validated range and
+  * default. At {@code dampingRatio==0.7} this is byte-identical to the old hardcoded formula.
+  */
+ static double suspensionDamper(double mass, int wheelCount, double spring, double dampingRatio) {
+  return 2*Math.sqrt(spring*mass/wheelCount)*dampingRatio;
  }
  /**
   * MINECRAFT-506: the same ride-height-equilibrium calibration as {@link #suspensionSpring},
@@ -906,9 +926,23 @@ public final class PhysicsBridge {
   return mass*loadShare*gravity/(suspensionTravel*.5);
  }
  /** {@link #suspensionDamper}'s own share-generalized counterpart - same relationship to it that
-  * {@link #suspensionSpringForShare} has to {@link #suspensionSpring}. */
+  * {@link #suspensionSpringForShare} has to {@link #suspensionSpring}.
+  * @deprecated kept only for existing test call sites that never configure a damping ratio -
+  * delegates to {@link #suspensionDamperForShare(double,double,double,double)} with the exact
+  * calibrated 0.7 default (MINECRAFT-523). */
+ @Deprecated
  static double suspensionDamperForShare(double mass, double loadShare, double spring) {
-  return 2*Math.sqrt(spring*mass*loadShare)*.7;
+  return suspensionDamperForShare(mass, loadShare, spring, 0.7);
+ }
+ /**
+  * MINECRAFT-523: {@link #suspensionDamperForShare(double,double,double)} generalized to an
+  * explicit, configurable, dimensionless damping ratio (replacing the previously-hardcoded
+  * {@code .7}) - see {@code Overrides.Tuning#suspensionDampingRatio}'s own doc for the validated
+  * range and default. At {@code dampingRatio==0.7} this is byte-identical to the old hardcoded
+  * formula - the exact "preserve calibrated defaults" equivalence this ticket requires.
+  */
+ static double suspensionDamperForShare(double mass, double loadShare, double spring, double dampingRatio) {
+  return 2*Math.sqrt(spring*mass*loadShare)*dampingRatio;
  }
  /**
   * MINECRAFT-520: this wheel's own composed {@code MultiContactFrictionSolver.FrictionContact}
@@ -1054,8 +1088,28 @@ public final class PhysicsBridge {
   * site for the exact opt-in flag and this ticket's comment history for the full measurement
   * record.
   */
+ /**
+  * @deprecated kept only for existing test call sites that never configure a damping ratio -
+  * delegates to {@link #effectiveMassDamper(double,double,Vector3d,Vector3d,Quaterniond,Vector3d,double,double)}
+  * with the exact calibrated 0.7 default (MINECRAFT-523).
+  */
+ @Deprecated
  static EffectiveMassDamperResult effectiveMassDamper(double spring, double mass, Vector3d point, Vector3d direction,
      Quaterniond inverseOrientation, Vector3d inertiaBody, double fallbackDamper) {
+  return effectiveMassDamper(spring, mass, point, direction, inverseOrientation, inertiaBody, 0.7, fallbackDamper);
+ }
+ /**
+  * MINECRAFT-523: {@link #effectiveMassDamper(double,double,Vector3d,Vector3d,Quaterniond,Vector3d,double)}
+  * generalized to an explicit, configurable, dimensionless {@code dampingRatio} (replacing the
+  * previously-hardcoded {@code .7}) - this is the ticket's explicit "define the interaction with
+  * the experimental effective-mass damping candidate so a configured ratio does not silently
+  * disappear when that candidate is opted in" requirement: whichever basis (shared share-of-mass,
+  * or this candidate's own per-contact effective mass) ends up computing the damper, it always
+  * uses the SAME configured ratio, never a second hardcoded {@code .7}. At
+  * {@code dampingRatio==0.7} this is byte-identical to the old hardcoded formula.
+  */
+ static EffectiveMassDamperResult effectiveMassDamper(double spring, double mass, Vector3d point, Vector3d direction,
+     Quaterniond inverseOrientation, Vector3d inertiaBody, double dampingRatio, double fallbackDamper) {
   if (!Double.isFinite(spring) || spring<=0 || !Double.isFinite(mass) || mass<=0
     || !Double.isFinite(inertiaBody.x) || inertiaBody.x<=0
     || !Double.isFinite(inertiaBody.y) || inertiaBody.y<=0
@@ -1078,7 +1132,7 @@ public final class PhysicsBridge {
    effectiveMass = io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.contactEffectiveMass(mass, point, direction, inverseOrientation, inertiaBody);
   } catch (RuntimeException e) { return new EffectiveMassDamperResult(fallbackDamper, Double.NaN); }
   if (!Double.isFinite(effectiveMass) || effectiveMass<=0) return new EffectiveMassDamperResult(fallbackDamper, effectiveMass);
-  double damperCandidate = 2*Math.sqrt(spring*effectiveMass)*.7;
+  double damperCandidate = 2*Math.sqrt(spring*effectiveMass)*dampingRatio;
   if (!Double.isFinite(damperCandidate) || damperCandidate<0) return new EffectiveMassDamperResult(fallbackDamper, effectiveMass);
   return new EffectiveMassDamperResult(damperCandidate, effectiveMass);
  }
@@ -1661,7 +1715,7 @@ public final class PhysicsBridge {
    // variables at all - it uses wheelSpring/wheelDamper, computed per wheel from that wheel's
    // own geometry-derived static load share (see WheelLoadDistribution).
    double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel,gravity);
-   double damper=suspensionDamper(mass,wheels.size(),spring);
+   double damper=suspensionDamper(mass,wheels.size(),spring,tuning.suspensionDampingRatio);
    boolean contact=false;
    boolean debugThisTick=DEBUG_GROUND_CONTACT && debugGroundContactTicksRemaining>0;
    int debugTick=DEBUG_GROUND_CONTACT_TICKS-debugGroundContactTicksRemaining;
@@ -1747,11 +1801,11 @@ public final class PhysicsBridge {
    // localVelocity, damperUsed, ...) untouched and exactly what Phase 1 actually measured.
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
-     double skidSteerMultiplier, double brakeShareRatio, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface,
+     double skidSteerMultiplier, double brakeShareRatio, double driveShareRatio, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface,
      int wheelIndex) {
     WheelHit withNormal(double newNormal) {
      return new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,newNormal,forward,right,point,
-       skidSteerMultiplier,brakeShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
+       skidSteerMultiplier,brakeShareRatio,driveShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
     }
    }
    // MINECRAFT-506: each wheel's own static load SHARE, from its horizontal (x,z) anchor
@@ -1780,14 +1834,26 @@ public final class PhysicsBridge {
    double[] brakeShares=BrakeBiasDistribution.shares(loadShareZ,tuning.brakeBiasFront);
    double[] brakeShareRatios=new double[brakeShares.length];
    for (int i=0;i<brakeShares.length;i++) brakeShareRatios[i]=brakeShares[i]*wheels.size();
+   // MINECRAFT-524: each wheel's own DRIVE-force budget ratio, the same role as
+   // brakeShareRatios immediately above (composes directly with driveForcePerWheel's own
+   // multiply in MultiContactFrictionSolver.solveFriction) but biased by tuning.driveBiasFront
+   // instead of brakeBiasFront. Uses DriveBiasDistribution#shareRatios directly (NOT
+   // shares(...)[i]*wheels.size() computed here, unlike brakeShareRatios above) - self-review (PR
+   // #24 comment 6871636687) found that share-then-remultiply round-trip is not always the exact
+   // 1.0 no-op at every wheel count (ordinary floating-point error, e.g. 49 wheels), which would
+   // make an unconfigured vehicle's drive differ from the pre-ticket drive/wheels.size() formula
+   // by that same tiny error - shareRatios's own doc has the full reasoning for why this needs to
+   // be byte-identical, not merely close.
+   double[] driveShareRatios=DriveBiasDistribution.shareRatios(loadShareZ,tuning.driveBiasFront);
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
     int wheelIdx=wheelIndex++;
     double loadShare=loadShares[wheelIdx];
     double brakeShareRatio=brakeShareRatios[wheelIdx];
+    double driveShareRatio=driveShareRatios[wheelIdx];
     double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity);
-    double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring);
+    double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring,tuning.suspensionDampingRatio);
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
     boolean upperOwned=twoBodyActive && io.github.brooswitminecraft.div.experimental.TwoBodyChassis.isUpperHalf(anchor.y);
@@ -1825,10 +1891,13 @@ public final class PhysicsBridge {
     // Direction `up` is this body's own chassis/suspension-ray direction, NOT a re-derived actual
     // terrain surface normal (review comment 53223's correction; no geometry change here). See
     // PhysicsBridge.effectiveMassDamper's own doc for the guard/fallback behavior and the
-    // measured record showing this is NOT a validated fix.
+    // measured record showing this is NOT a validated fix. MINECRAFT-523: both the ON and OFF
+    // damper bases now share the SAME configured tuning.suspensionDampingRatio - the candidate
+    // never falls back to a second hardcoded .7, so a configured damping ratio does not silently
+    // disappear when this experimental candidate is opted in.
     Vector3d predictorPoint=new Vector3d(point).add(predictorLeverArmCorrection);
     var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
-      ? effectiveMassDamper(wheelSpring,mass,predictorPoint,up,inverse,aggregateInertiaBody,wheelDamper)
+      ? effectiveMassDamper(wheelSpring,mass,predictorPoint,up,inverse,aggregateInertiaBody,tuning.suspensionDampingRatio,wheelDamper)
       : new EffectiveMassDamperResult(wheelDamper, Double.NaN);
     // The vehicle-wide mass*gravity safety cap is UNCHANGED (not tightened to mass*gravity*
     // loadShare) - it is documented as a safety cap, not a load-distribution model (see
@@ -1853,7 +1922,7 @@ public final class PhysicsBridge {
     GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
       hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      brakeShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
+      brakeShareRatio,driveShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
    }
    // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
    // class-level correction for the full defect this closes). For the single-body path this is
@@ -2072,13 +2141,16 @@ public final class PhysicsBridge {
    // ONLY the service-pedal component below, via perWheelBrakeMagnitude - see that method's own
    // doc for why the parking brake and the handbrake stay exactly as unbiased as they were
    // before this ticket, and why an unconfigured/fallback bias (ratio 1.0 for every wheel) is a
-   // pure no-op reproducing this exact pre-ticket formula.
+   // pure no-op reproducing this exact pre-ticket formula. MINECRAFT-524: h.driveShareRatio()
+   // folds the configured front/rear DRIVE-force bias into the FrictionContact passed below -
+   // solveFriction's own driveForcePerWheel*skidSteerMultiplier*driveShareRatio composition (see
+   // its own doc) is the drive-side analog of this same brakeShareRatio pattern.
    var contacts=hits.stream().map(h->{
     double wheelBrakeMagnitude = perWheelBrakeMagnitude(h.wheel().placementDefinition.turnsWithSteer,
       v.parkingBrakeVar.isActive, brakeMagnitude, handbrakeMagnitudeThisTick, h.brakeShareRatio());
     return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude);
+     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude,h.driveShareRatio());
    }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,

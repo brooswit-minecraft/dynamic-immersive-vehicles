@@ -1819,3 +1819,205 @@ FINISHED - 6/6 PASSED` again, now with concrete evidence lines like
 lastExecutedStepperName=FLIGHT)` and `retention confirmed immediately after
 rejection - live-resolved representative field=9.5` (read from the real
 active Body, not the global resolver).
+
+## Configurable front/rear drive-force distribution (MINECRAFT-524, added 2026-11-13)
+
+Bounded M507 slice (the bounded-scope instruction on the ticket itself):
+inspected the native IV driven-wheel metadata first (decompiled `mts.jar`
+via `javap` - `JSONPart.JSONPartGroundDevice`/`PartWheel` have no per-wheel
+powered/drivetrain-membership field at all, only `isWheel`/`isTread`/
+`canGoFlat`/friction fields; `JSONPartDefinition.isSpare` is the one
+drive-relevant exclusion flag, and `PhysicsBridge#groundContacts` already
+excludes `isSpare` wheels from the `wheels` list `stepGround` splits the
+drive budget across). Confirmed `stepGround`'s pre-ticket behavior was
+`drive/wheels.size()` - a plain even split with no axle distinction, the
+exact `brakeForce/wheels.size()` shape MINECRAFT-520 fixed for braking.
+
+Implementation deliberately mirrors MINECRAFT-520's own
+`BrakeBiasDistribution`/`brakeBiasFront` field-for-field (same geometric
+front/rear axle grouping off each wheel's own `z` anchor, same exact-1.0
+conservation, same unset/degenerate-layout fallback to the even split):
+new `DriveBiasDistribution` class, new `Overrides.Tuning#driveBiasFront`
+(0.0-1.0, no FALLBACK entry - null means unset, rejected on `parts`
+entries since a part has no own axle position, live-hot-reloaded via
+`applyLiveSafeFields` the same as `brakeBiasFront`), and a new
+`driveShareRatio` field on `MultiContactFrictionSolver.FrictionContact`
+(default 1.0 in every existing shorter constructor, so every pre-existing
+call site - including every other ticket's own tests - is unaffected byte-
+identically) that `solveFriction`'s drive branch now multiplies into
+`driveForcePerWheel*skidSteerMultiplier`, composing with skid-steer/tracks
+the same way `brakeMagnitude` already composes for braking. Explicitly
+documented (class doc, `Overrides.Tuning#driveBiasFront`'s own comment,
+README) as a geometric budget split only - not a differential, not
+traction control, and not a gear-ratio simulation, per the ticket's own
+explicit constraint.
+
+Evidence named by the ticket: `DriveBiasDistributionTest` covers
+conservation, front/rear extremes (0.0/1.0), odd/asymmetric wheel counts,
+multi-axle lumping, reversed/ambiguous layouts, and the unset-bias/
+degenerate-layout fallback to the exact pre-ticket even split (mirrors
+`BrakeBiasDistributionTest`). `ServiceDriveBiasTest` is the real
+production-path integration against the actual
+`MultiContactFrictionSolver.solveFriction` on a representative 4-wheel
+layout: conservation across several bias values, front-only and rear-only
+drive still accelerating the vehicle forward from rest, reverse travel
+(negative `driveForcePerWheel`, mirroring the engine's own
+`Math.signum(currentGearVar)` sign flip) still accelerating backward
+regardless of bias, asymmetric (trike-like) wheel counts, and a wheel
+missing its own ground contact this tick simply losing its own share
+rather than having it redistributed to the others (mirrors
+`ServiceBrakeBiasTest`). `OverridesTest` and
+`PhysicsBridgeLiveOverrideApplicationTest` gained `driveBiasFront`
+coverage mirroring their existing `brakeBiasFront` cases (range validation
+at both inclusive extremes, no-fallback-stays-null, full precedence chain,
+part-override rejection, and live hot-reload mutation).
+
+Local slot-lock coordination (per ticket comments 53806/53810/53820/53823
+- a live multi-agent coordination exchange on this ticket itself, a shared
+cooperative `flock` on `/tmp/div-gradle-slot.lock` held for the whole
+Gradle lifetime, claimed 2026-11-14T04:17:51Z, released immediately after
+completion at 2026-11-14T04:19:04Z, no concurrent Java/Gradle process of
+another owner observed at claim time). `/tmp/gradle-8.14/bin/gradle
+--offline clean build test --console=plain`, Gradle 8.14 / JDK 21
+(Temurin), against this branch
+(`minecraft-524/front-rear-drive-force-distribution`) at head `1364dbc`
+(origin/main) - `BUILD SUCCESSFUL` in 1m 12s, 8 tasks (7 executed, 1
+up-to-date). The real JUnit XML reports total **627 tests**, 0 skipped, 0
+failures, 0 errors across the whole suite (11 from the new
+`DriveBiasDistributionTest` and 7 from the new `ServiceDriveBiasTest`,
+plus every pre-existing test run unchanged alongside them - confirming
+this change introduces no regression anywhere else in the suite, skid-
+steer/tracks and MINECRAFT-520's own brake-bias behavior included).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced.
+
+Not yet performed: in-game acceptance (real vehicle spawn with a
+configured `driveBiasFront`, observed front/rear-biased acceleration) -
+this ticket's own brief says focused engineering tests are in scope, not
+John's broad/hardware playtesting, which is explicitly out of scope here.
+
+**Self-review finding and fix (PR #24 comment 6871636687).** The initial
+version computed each wheel's drive-force ratio as `DriveBiasDistribution.
+shares(...)[i] * wheels.size()` (the same shape `brakeShareRatios` already
+uses) - for the unset/fallback case this is `(1.0/n)*n`, which is NOT
+always the exact literal `1.0` (ordinary floating-point error, e.g. at
+n=49 wheels it evaluates to `0.9999999999999999`), so an unconfigured
+vehicle's drive would differ from the pre-ticket `drive/wheels.size()`
+formula by that tiny error - a real violation of this ticket's own "unset
+retains exact accepted behavior" requirement, which means byte-identical,
+not merely close. Fixed by adding `DriveBiasDistribution#shareRatios`,
+which fills the fallback with the literal constant `1.0` directly instead
+of deriving it through division then remultiplication, and switching
+`PhysicsBridge.stepGround` (and the test fixtures) to call it directly
+instead of computing `shares(...)[i]*wheels.size()` itself.
+`DriveBiasDistributionTest` gained a non-rounding regression test sweeping
+wheel counts 1-97 (confirming every one gets the exact `1.0` ratio, and
+specifically identifying which counts the naive round-trip would have
+rounded), plus a degenerate-layout exactness test and a budget-conservation
+test for the biased case.
+
+Same local slot-lock coordination (claimed 2026-11-14T04:26:01Z, released
+2026-11-14T04:27:10Z, no concurrent process observed). `/tmp/gradle-8.14/
+bin/gradle --offline clean build test --console=plain` against commit
+`e33c4a6cccceade1d37876d3fc5be69fa9b17e98` - `BUILD SUCCESSFUL` in 1m 9s, 8
+tasks (8 executed, a true clean this time). The real JUnit XML reports
+total **630 tests**, 0 skipped, 0 failures, 0 errors (14 from
+`DriveBiasDistributionTest`, 7 from `ServiceDriveBiasTest`, plus every
+pre-existing test unchanged alongside them).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
+again.
+
+**Second review round (comment 53838) and fix.** John's review found two
+things: (1) my own prior "no native driven-wheel metadata exists" claim
+was wrong - `PartEngine#linkedWheels`/`#drivenWheels` are real native
+`List<PartGroundDevice>` fields (confirmed via `javap` against the pinned
+`mts.jar`); corrected to the narrower, still-true claim that
+`PhysicsBridge`'s existing pre-ticket code never reads them (confirmed:
+zero references anywhere in this package), so this ticket's own bounded
+axle-split scope is unaffected - it preserves that existing choice rather
+than newly filtering by native drivetrain membership. (2) Three concrete
+test-strengthening asks, all addressed: the missing-contact test now
+asserts a magnitude reduction (three-wheel result strictly below a
+four-wheel reference, not merely a direction check); a new skid-steer
+composition test verifies `driveForcePerWheel*skidSteerMultiplier*
+driveShareRatio` composes exactly, solved as four independent single-
+contact calls (a combined multi-contact call was tried first and failed -
+see below - because cross-contact coupling within one pass gives a
+later-processed wheel a tiny nonzero rolling-resistance term even
+starting from rest, which is correct solver behavior, not a composition
+bug, but contaminates an exact per-wheel product check); and an explicit
+comment distinguishes the biased branch's deliberate floating-point
+tolerance from `shareRatios`' own exact-1.0 contract.
+
+**Self-caught test defect, fixed before the final build.** The first
+version of the new skid-steer composition test solved all four wheels
+together in one `solveFriction` call and asserted each wheel's output
+equaled the exact product - this failed (`expected 560.0 but was
+560.1848888888888`) because the solver processes contacts sequentially
+within a pass, so wheel 1's own rolling-resistance term saw a tiny nonzero
+residual speed left over from wheel 0's own impulse earlier in the same
+pass. Root-caused via direct inspection of `solveFriction`'s own loop
+order, confirmed this is intended cross-contact coupling (not a defect in
+`driveShareRatio` itself), and fixed the TEST (not the production code) by
+solving each wheel as an independent single-contact call instead.
+
+Local slot-lock coordination (claimed 2026-11-14T04:40:19Z, released
+2026-11-14T04:41:07Z; a concurrent `gradle --offline clean build test`
+FAILED attempt before this one - at the test-only stage, from the flawed
+combined-contact test above - was this session's own, not a conflict with
+another owner). `/tmp/gradle-8.14/bin/gradle --offline clean build test
+--console=plain` against commit `ee999d0...` (this ticket's current PR
+#24 head) - `BUILD SUCCESSFUL` in 47s, 8 tasks (8 executed). The real
+JUnit XML reports total **631 tests**, 0 skipped, 0 failures, 0 errors (8
+from `ServiceDriveBiasTest`, up from 7 - the new skid-steer composition
+test - plus every other test unchanged).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
+again. Slot released immediately after; M526 claimed it next per the
+stated order.
+
+**Third review round (comment 53855) - acceptance pending integration,
+plus a doc-wording fix.** Independent technical review accepted head
+`6484196` (631 tests: exact-unset ratios, native-metadata correction,
+missing-contact magnitude and isolated skid-multiplier tests all found
+sound) but withheld formal approval pending two things: (1)
+`DriveBiasDistribution`'s own "Conservation" doc overclaimed the BIASED
+branch's own conservation as exact arithmetic ("never a renormalized
+approximation") - only `shareRatios`' unset/degenerate FALLBACK case
+actually carries a byte-exact requirement; fixed (`f3cd160`, doc-only, no
+logic change) to state the biased branch's own division is ordinary
+floating-point arithmetic with a tolerance claim, matching what the tests
+already assert (`assertEquals(..., 1e-9)`, never tolerance-0). (2)
+MINECRAFT-523's own damping PR #22 (`f3d7f8a`) had formal approval and was
+instructed to land on `main` first, with this ticket then required to
+integrate the merged `main`, preserve both tickets' schema/ground changes,
+and present a final combined head for formal approval - rather than
+approving/merging an intermediate head that would go stale the moment
+PR #22 landed.
+
+**Integration.** Confirmed PR #22 merged to `main` at `46fc2fb` (merge
+commit; `f3d7f8a` is its own head). `git fetch origin && git merge
+origin/main --no-edit` into this branch produced conflicts in
+`README.md`, `Overrides.java`, `PhysicsBridge.java`, and
+`PhysicsBridgeLiveOverrideApplicationTest.java` - the same shared-schema
+regions (`Tuning` field declarations, `validate()`/
+`validateSupportedForPart()`/`copy()`/`mergeOntoParent()`/`resolveFields()`,
+`applyLiveSafeFields`, the live-safe-field list in both code and prose,
+and the config-reference table) every prior multi-ticket integration in
+this file has hit. Resolved by hand, keeping BOTH tickets' fields side by
+side everywhere (this ticket's `driveBiasFront`/`driveShareRatio`
+alongside MINECRAFT-523's `suspensionDampingRatio`/stability-bound
+validation) - nothing dropped from either side. `OverridesTest.java` and
+`docs/dynamic-immersive-vehicles.example.json` merged cleanly with no
+conflicts. Merge commit `9f4e737dd18b2e48dc5f292ef4baff11cbc55d64`.
+
+Local slot-lock coordination (claimed 2026-11-14T04:51:01Z, released
+2026-11-14T04:51:42Z; no concurrent process observed - M526 had already
+released at 04:48:07Z per its own entry in the shared slot log).
+`/tmp/gradle-8.14/bin/gradle --offline clean build test --console=plain`
+against the merge commit `9f4e737dd18b2e48dc5f292ef4baff11cbc55d64` -
+`BUILD SUCCESSFUL` in 40s, 8 tasks (8 executed). The real JUnit XML
+reports total **645 tests**, 0 skipped, 0 failures, 0 errors (this
+ticket's 631 plus MINECRAFT-523's own 14 net-new tests from `main`, all
+exercised together for the first time at this combined head).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
+again. This is the final combined head presented for formal approval -
+`9f4e737dd18b2e48dc5f292ef4baff11cbc55d64`.
