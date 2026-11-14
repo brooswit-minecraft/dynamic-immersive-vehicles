@@ -153,6 +153,22 @@ public final class Overrides {
   // brake and the separate analog handbrake - see PhysicsBridge.perWheelBrakeMagnitude's own doc
   // for why those two never get redistributed by this bias.
   public Double brakeBiasFront;
+  // MINECRAFT-523: optional, per-vehicle dimensionless suspension damping ratio - the critical-
+  // damping-ratio multiplier PhysicsBridge.suspensionDamperForShare/suspensionDamper/
+  // effectiveMassDamper already apply (2*sqrt(spring*mass)*ratio), previously a hardcoded
+  // 0.7 shared by every vehicle. 0.7 (FALLBACK below) reproduces that exact prior constant - a
+  // byte-identical default equivalence for every vehicle that never sets this field, same as
+  // suspensionTravel/friction/etc. 1.0 is critical damping (fastest non-oscillating settle);
+  // below 1.0 (toward the strictly-positive lower bound) is progressively underdamped
+  // (oscillates more before settling); above 1.0 (up to the documented upper bound) is
+  // progressively overdamped (settles without oscillating, but more sluggishly). Re-read live
+  // every tick by PhysicsBridge.stepGround, same as brakeBiasFront - see
+  // PhysicsBridge.applyLiveSafeFields. Explicitly shared with the opt-in experimental
+  // effective-mass damping candidate (-Ddiv.experimentalEffectiveMassDamping, see
+  // PhysicsBridge.effectiveMassDamper's own doc) - when that candidate is active it still uses
+  // THIS configured ratio, never a second hardcoded 0.7, so a configured value never silently
+  // disappears depending on whether that unrelated experimental candidate happens to be enabled.
+  public Double suspensionDampingRatio;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -212,6 +228,14 @@ public final class Overrides {
    // lateralGripMultiplier's exclusive-zero: a brake bias of exactly 0 or 1 is a normal,
    // physically sensible configuration (e.g. a rear-brakes-only trike), not a degenerate one.
    if (brakeBiasFront != null && !(Double.isFinite(brakeBiasFront) && brakeBiasFront >= 0 && brakeBiasFront <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Strictly positive (a zero or negative ratio is an undamped or energy-adding oscillator -
+   // never a sensible suspension, and not what "configurable damping" is meant to permit; a
+   // vehicle that truly wants no settling behavior should disable physics for it instead, the
+   // same reasoning cyclicAuthorityScale/yawAuthorityScale's own strictly-positive bound above
+   // uses), capped at 3.0 - generous headroom above 1.0 (critical damping) for a deliberately
+   // sluggish/overdamped feel while still refusing an unbounded/mistyped value, the same
+   // "finite bounded" shape every other dimensionless tuning knob in this class already uses.
+   if (suspensionDampingRatio != null && !(Double.isFinite(suspensionDampingRatio) && suspensionDampingRatio > 0 && suspensionDampingRatio <= 3.0)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
@@ -253,6 +277,7 @@ public final class Overrides {
    if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
    if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
+   if (suspensionDampingRatio != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatio' (no part-level consumer yet)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -281,6 +306,10 @@ public final class Overrides {
   FALLBACK.cyclicLimitDegrees=20.0;
   FALLBACK.cyclicAuthorityScale=1.0;
   FALLBACK.yawAuthorityScale=1.0;
+  // MINECRAFT-523: the exact ratio PhysicsBridge.suspensionDamper/suspensionDamperForShare/
+  // effectiveMassDamper previously hardcoded - an unconfigured vehicle settles byte-identically
+  // to before this ticket.
+  FALLBACK.suspensionDampingRatio=0.7;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -296,6 +325,7 @@ public final class Overrides {
   c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.brakeBiasFront=t.brakeBiasFront;
+  c.suspensionDampingRatio=t.suspensionDampingRatio;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -329,6 +359,7 @@ public final class Overrides {
   m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
   m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
+  m.suspensionDampingRatio = child.suspensionDampingRatio!=null?child.suspensionDampingRatio:parent.suspensionDampingRatio;
   return m;
  }
  /**
@@ -515,6 +546,7 @@ public final class Overrides {
   // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
   // needs to reproduce the pre-ticket even split.
   result.brakeBiasFront = firstNonNull(override!=null?override.brakeBiasFront:null, packMetadata!=null?packMetadata.brakeBiasFront:null, ivAdapted!=null?ivAdapted.brakeBiasFront:null, physicallyDerived!=null?physicallyDerived.brakeBiasFront:null);
+  result.suspensionDampingRatio = firstNonNull(override!=null?override.suspensionDampingRatio:null, packMetadata!=null?packMetadata.suspensionDampingRatio:null, ivAdapted!=null?ivAdapted.suspensionDampingRatio:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatio:null, FALLBACK.suspensionDampingRatio);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

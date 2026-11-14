@@ -76,6 +76,7 @@ class OverridesTest {
   assertEquals(20.0, r.cyclicLimitDegrees, "cyclicLimitDegrees' fallback matches RotorForces' own prior hardcoded 20-degree clamp");
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
+  assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -90,6 +91,7 @@ class OverridesTest {
   assertNotNull(r.antiRollStiffness);
   assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
+  assertNotNull(r.suspensionDampingRatio);
  }
 
  // MINECRAFT-519: antiRollStiffness - dimensionless 0 (off, the FALLBACK) to 1 (fully-rigid-bar)
@@ -754,6 +756,59 @@ class OverridesTest {
    assertFalse(badResult.success());
    assertEquals(12.0, Overrides.resolved("packid:glider2").stallAngleDegrees,
      "a throwing parse must retain the prior good state, same as a validation failure does");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-523: suspensionDampingRatio - dimensionless, strictly positive, capped at 3.0
+ // damping ratio PhysicsBridge.suspensionDamper/suspensionDamperForShare/effectiveMassDamper
+ // already apply; 0.7 (FALLBACK) reproduces the exact prior hardcoded constant.
+
+ @Test void suspensionDampingRatioOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.suspensionDampingRatio = 0.0; // never valid - an undamped oscillator
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.suspensionDampingRatio = -0.7;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.suspensionDampingRatio = 3.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nan = new Overrides.Tuning(); nan.suspensionDampingRatio = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nan::validate);
+  var criticallyDamped = new Overrides.Tuning(); criticallyDamped.suspensionDampingRatio = 1.0;
+  assertDoesNotThrow(criticallyDamped::validate);
+  var upperBound = new Overrides.Tuning(); upperBound.suspensionDampingRatio = 3.0; // inclusive upper bound is allowed
+  assertDoesNotThrow(upperBound::validate);
+  var nearZero = new Overrides.Tuning(); nearZero.suspensionDampingRatio = 0.01; // exclusive lower bound - just above zero is allowed
+  assertDoesNotThrow(nearZero::validate);
+ }
+
+ @Test void suspensionDampingRatioParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.suspensionDampingRatio = 1.4;
+   Overrides.setForTest(java.util.Map.of("packid:stiff_damper_vehicle", override));
+   assertEquals(1.4, Overrides.resolved("packid:stiff_damper_vehicle").suspensionDampingRatio,
+     "an explicit operator override must take precedence over the 0.7 fallback");
+
+   var packMetadata = new Overrides.Tuning(); packMetadata.suspensionDampingRatio = 0.9;
+   assertEquals(0.9, Overrides.resolved("packid:not_configured", packMetadata, null, null).suspensionDampingRatio,
+     "pack metadata must win over the flat fallback when no operator override exists");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void suspensionDampingRatioIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.suspensionDampingRatio = 1.0;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ @Test void suspensionDampingRatioIsInheritedThroughExtends() {
+  try {
+   var template = new Overrides.Tuning(); template.suspensionDampingRatio = 0.5;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "soft-damper";
+   Overrides.setForTest(java.util.Map.of("soft-damper", template), java.util.Map.of("packid:inherits_damping", child), java.util.Map.of());
+   assertEquals(0.5, Overrides.resolved("packid:inherits_damping").suspensionDampingRatio,
+     "a child entry leaving suspensionDampingRatio unset must inherit its template's own value");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }
