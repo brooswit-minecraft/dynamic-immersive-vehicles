@@ -1,5 +1,7 @@
 package io.github.brooswitminecraft.div;
 import dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis;
+import minecrafttransportsimulator.baseclasses.RotationMatrix;
+import org.joml.Quaterniond;
 import org.joml.Vector3d;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -35,6 +37,29 @@ class HitchJointTest {
   var dest = new Vector3d();
   var result = HitchJoint.anchorLocalOffset(new Vector3d(), new Vector3d(), dest);
   assertSame(dest, result);
+ }
+
+ @Test void localJointFrameIsIdentityWhenRotIsUnset() {
+  // JSONConnection.rot's own documented default/no-op: "has no effect" when the connection is
+  // not mounted/restricted, and an unset rot (null - not every connection authors one) must
+  // still mean "impose no extra twist" rather than NPE or some other default.
+  var identity = HitchJoint.localJointFrame(null);
+  assertEquals(new Quaterniond(), identity);
+ }
+
+ @Test void localJointFrameConvertsAnAuthoredRotation() {
+  // A 90-degree yaw (same RotationMatrix.rotateY IV itself uses) starting from IV's own
+  // identity (RotationMatrix's constructor already calls setToZero(), which - despite the
+  // name - sets the IDENTITY matrix, not zero). Independently worked out from the exact
+  // RotationMatrix->Quaterniond index mapping PhysicsBridge.Body's constructor already
+  // established (not merely restating HitchJoint's own implementation): the resulting
+  // quaternion must carry local +Z to +X.
+  var rot = new RotationMatrix().rotateY(90);
+  var quaternion = HitchJoint.localJointFrame(rot);
+  var transformed = quaternion.transform(new Vector3d(0, 0, 1));
+  assertEquals(1, transformed.x, 1e-9);
+  assertEquals(0, transformed.y, 1e-9);
+  assertEquals(0, transformed.z, 1e-9);
  }
 
  @Test void ordinaryConnectionLocksOnlyLinearAxes() {

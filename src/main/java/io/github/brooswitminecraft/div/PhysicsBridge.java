@@ -687,18 +687,34 @@ public final class PhysicsBridge {
   * MINECRAFT-525: {@code pos1}/{@code pos2} are the confirmed BODY-LOCAL anchor offsets (ticket
   * comment 53256/53243's real-native-source-plus-empirical-probe finding, already applied to
   * {@code TwoBodyLifecycle.create}'s own joint) rather than the world-space points this method
-  * previously computed via {@code HitchJoint.anchorWorldPosition} - that call echoed each body's
-  * own world orientation into {@code orientation1}/{@code orientation2} too, which the same
-  * finding confirmed is wrong: those are LOCAL joint-frame rotations, not a world-orientation
-  * echo, so identity (impose no extra twist, matching {@code TwoBodyLifecycle}) is passed for
-  * both instead. No body pose/position is needed here at all any more.
+  * previously computed via {@code HitchJoint.anchorWorldPosition}. {@code local_frame1}/
+  * {@code local_frame2} are LOCAL joint-frame rotations, not an echo of each body's own world
+  * orientation (also confirmed wrong by the same finding) - but review 53817 caught that this is
+  * NOT simply "always identity" either: the pinned IV24 {@code JSONConnection.rot} field is
+  * explicitly documented as mattering for a mounted/restricted connection's locked pitch/yaw/roll
+  * axes, so each side's own connection {@code rot} (identity when unset - see
+  * {@code HitchJoint.localJointFrame}) is honored instead of being discarded.
+  *
+  * <p>Known, pre-existing, NOT fixed here (bounded per review 53817's "handle supported endpoints
+  * correctly or explicitly bound unsupported cases"): {@code connection.hitchConnection}/
+  * {@code hookupConnection}'s {@code pos}/{@code rot} are used as-is, directly in {@code towing}/
+  * {@code trailer}'s own vehicle-root-local frame. When the owning {@code towingEntity}/
+  * {@code towedEntity} is itself an {@code APart} (a connection defined on an installed part
+  * rather than the vehicle's own root JSON) rather than the vehicle itself, IV may define that
+  * part's own connection pos/rot relative to the PART's local frame, which would need composing
+  * through the part's own relative position/orientation/scale to reach vehicle-root-local space
+  * first - this method does not do that composition, matching the original (pre-MINECRAFT-525)
+  * code's behavior exactly (not a regression introduced by this ticket). A part-mounted hitch
+  * connection point is therefore unverified/unsupported; a vehicle-root-defined connection (the
+  * common case) is unaffected.
   */
  private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
   var hitchOffset = HitchJoint.anchorLocalOffset(towing.center,
     new Vector3d(connection.hitchConnection.pos.x, connection.hitchConnection.pos.y, connection.hitchConnection.pos.z), new Vector3d());
   var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center,
     new Vector3d(connection.hookupConnection.pos.x, connection.hookupConnection.pos.y, connection.hookupConnection.pos.z), new Vector3d());
-  var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset, new Quaterniond(), new Quaterniond(),
+  var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset,
+    HitchJoint.localJointFrame(connection.hitchConnection.rot), HitchJoint.localJointFrame(connection.hookupConnection.rot),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
   return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
  }

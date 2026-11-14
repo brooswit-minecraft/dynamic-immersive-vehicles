@@ -1,5 +1,8 @@
 package io.github.brooswitminecraft.div;
 import dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis;
+import minecrafttransportsimulator.baseclasses.RotationMatrix;
+import org.joml.Matrix3d;
+import org.joml.Quaterniond;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
 import java.util.EnumSet;
@@ -7,9 +10,10 @@ import java.util.Set;
 
 /**
  * Pure geometry/axis-selection for a trailer hitch: where the joint anchors sit relative to each
- * body's own Sable origin, and which degrees of freedom IV's own connection flags imply should
- * be locked. Operates only on plain joml types, so it needs no live entity, world, or Sable
- * runtime to test; PhysicsBridge supplies the actual body centers and JSONConnection flags.
+ * body's own Sable origin, which local joint-frame rotation each side imposes, and which degrees
+ * of freedom IV's own connection flags imply should be locked. Operates only on plain joml/MTS
+ * data types (no live entity, world, or Sable runtime needed to test); PhysicsBridge supplies
+ * the actual body centers and JSONConnection fields.
  */
 public final class HitchJoint {
  private HitchJoint() {}
@@ -30,6 +34,23 @@ public final class HitchJoint {
   */
  public static Vector3d anchorLocalOffset(Vector3dc bodyCenter, Vector3dc localOffset, Vector3d dest) {
   return dest.set(localOffset).sub(bodyCenter);
+ }
+ /**
+  * {@code GenericConstraintConfiguration}'s {@code local_frame1}/{@code local_frame2} for one
+  * hitch connection. Review finding (comment 53817): the decompiled, pinned IV24
+  * {@code JSONConnection.rot} field is explicitly documented as "Used on mounted and restricted
+  * connections. Has no effect on other connections" - so an ordinary (unmounted, unrestricted)
+  * connection correctly stays IDENTITY regardless of {@code rot} (nothing is locked for it, so
+  * the local-frame choice cannot matter), but a mounted/restricted connection's {@code rot} - if
+  * authored - IS the frame {@link #lockedAxes}'s pitch/yaw/roll axis selection is actually
+  * defined against, and must be honored rather than forced to identity. {@code rot==null}
+  * (unset in the pack JSON) still means identity - the field's own documented default. Uses the
+  * exact same {@code RotationMatrix}-&gt;{@code Quaterniond} conversion already established for a
+  * vehicle's own world orientation in {@code PhysicsBridge.Body}'s constructor.
+  */
+ public static Quaterniond localJointFrame(RotationMatrix rot) {
+  if (rot == null) return new Quaterniond();
+  return new Quaterniond().setFromNormalized(new Matrix3d(rot.m00, rot.m10, rot.m20, rot.m01, rot.m11, rot.m21, rot.m02, rot.m12, rot.m22));
  }
  /**
   * Degrees of freedom to lock for one hitch, from IV's own per-connection flags: linear motion
