@@ -15,7 +15,8 @@
       "driveForce": 8000.0,
       "brakeForce": 12000.0,
       "maxSteerDegrees": 30.0,
-      "antiRollStiffness": 0.4
+      "antiRollStiffness": 0.4,
+      "suspensionDampingRatio": 0.85
     },
     "examplepack:helicopter": {
       "massKg": 2200.0,

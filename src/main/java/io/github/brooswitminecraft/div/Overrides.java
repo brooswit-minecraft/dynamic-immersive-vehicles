@@ -164,6 +164,22 @@ public final class Overrides {
   // default. This is a geometric budget split only - not a differential, not traction control,
   // and not a gear-ratio simulation (see DriveBiasDistribution's own doc).
   public Double driveBiasFront;
+  // MINECRAFT-523: optional, per-vehicle dimensionless suspension damping ratio - the critical-
+  // damping-ratio multiplier PhysicsBridge.suspensionDamperForShare/suspensionDamper/
+  // effectiveMassDamper already apply (2*sqrt(spring*mass)*ratio), previously a hardcoded
+  // 0.7 shared by every vehicle. 0.7 (FALLBACK below) reproduces that exact prior constant - a
+  // byte-identical default equivalence for every vehicle that never sets this field, same as
+  // suspensionTravel/friction/etc. 1.0 is critical damping (fastest non-oscillating settle);
+  // below 1.0 (toward the strictly-positive lower bound) is progressively underdamped
+  // (oscillates more before settling); above 1.0 (up to the documented upper bound) is
+  // progressively overdamped (settles without oscillating, but more sluggishly). Re-read live
+  // every tick by PhysicsBridge.stepGround, same as brakeBiasFront - see
+  // PhysicsBridge.applyLiveSafeFields. Explicitly shared with the opt-in experimental
+  // effective-mass damping candidate (-Ddiv.experimentalEffectiveMassDamping, see
+  // PhysicsBridge.effectiveMassDamper's own doc) - when that candidate is active it still uses
+  // THIS configured ratio, never a second hardcoded 0.7, so a configured value never silently
+  // disappears depending on whether that unrelated experimental candidate happens to be enabled.
+  public Double suspensionDampingRatio;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -227,6 +243,74 @@ public final class Overrides {
    // drive bias (e.g. a front-wheel-drive-only or rear-wheel-drive-only configuration) is a
    // normal, physically sensible setting, not a degenerate one.
    if (driveBiasFront != null && !(Double.isFinite(driveBiasFront) && driveBiasFront >= 0 && driveBiasFront <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Strictly positive (a zero or negative ratio is an undamped or energy-adding oscillator -
+   // never a sensible suspension, and not what "configurable damping" is meant to permit; a
+   // vehicle that truly wants no settling behavior should disable physics for it instead, the
+   // same reasoning cyclicAuthorityScale/yawAuthorityScale's own strictly-positive bound above
+   // uses), hard-capped at 2.0 - never exceedable regardless of travel, a documentable ceiling
+   // even though (see maxStableSuspensionDampingRatio's own doc) it is NOT provably stable for
+   // every travel on its own; the real, travel-dependent bound below is what actually guards
+   // stability.
+   if (suspensionDampingRatio != null && !(Double.isFinite(suspensionDampingRatio) && suspensionDampingRatio > 0 && suspensionDampingRatio <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Review finding (comments 53839/53840): the flat 2.0 ceiling above only proves stable at
+   // this project's documented default suspensionTravel (0.3) - Body.stepGround's own explicit-
+   // damping-term integration has a REAL, travel-dependent stability bound (confirmed against an
+   // independent settling sweep reproducing the reviewer's own numbers exactly: ratio 2.0 at
+   // travel 0.2 settles into a sustained .0807-.0991 chatter against a .10 target, never
+   // converging), so a flat ratio cap alone cannot bound it across suspensionTravel's own already-
+   // validated (0,1] range. Reject whenever the CONFIGURED pair would already be unstable, using
+   // this same entry's own suspensionTravel if set, else the documented flat fallback (0.3) as the
+   // conservative assumed travel - see maxStableSuspensionDampingRatio's own doc for the formula
+   // and its one remaining (pre-existing, out-of-scope) assumption.
+   //
+   // Review finding (comment 53844): the underlying linearized stability condition is a STRICT
+   // inequality - AT the computed bound exactly, the integration's characteristic root sits at
+   // magnitude exactly 1, which is a sustained, non-decaying oscillation (confirmed by an
+   // independent sweep at travel 0.2's own exact bound, 1.7758240724699157: a constant
+   // .093125/.106875 alternation around the .1 target, never converging), not the "still
+   // stable" a non-strict `>` comparison alone would wrongly accept. STABILITY_MARGIN applies a
+   // modest (0.5%) safety factor below the computed bound - confirmed by the same sweep to
+   // actually converge - so this check rejects the exact boundary too, not only values past it.
+   if (suspensionDampingRatio != null) {
+    double travelForStabilityCheck = suspensionTravel != null ? suspensionTravel : FALLBACK.suspensionTravel;
+    if (suspensionDampingRatio > maxStableSuspensionDampingRatio(travelForStabilityCheck)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+   }
+  }
+  /** See the {@code suspensionDampingRatio} cross-field check in {@link #validate()} - a modest
+   * safety factor applied to {@link #maxStableSuspensionDampingRatio} so the exact computed
+   * boundary (a sustained non-decaying oscillation, confirmed by sweep - not actually stable
+   * despite satisfying a naive non-strict {@code <=} comparison) is rejected too, not merely
+   * values past it. */
+  private static final double STABILITY_MARGIN = 0.995;
+  /**
+   * MINECRAFT-523 review (comments 53839/53840): the largest {@code suspensionDampingRatio}
+   * that stays numerically stable at a given {@code suspensionTravel}, under {@code
+   * Body.stepGround}'s own explicit-damping-term semi-implicit Euler integration at this
+   * project's fixed {@link PhysicsBridge#DT}. Derived from the per-wheel natural frequency
+   * {@code omega = sqrt(2*gravity/travel)} (mass/loadShare cancel out of the stability term
+   * entirely - confirmed algebraically and by sweep) and the reviewer's own linearized stability
+   * condition {@code (DT*omega)^2 + 4*ratio*DT*omega < 4}, solved for {@code ratio}:
+   * {@code ratio < (4 - (DT*omega)^2) / (4*DT*omega)}. A {@code travel} small enough that even
+   * {@code DT*omega >= 2} (so the spring term ALONE already exceeds the stability budget, before
+   * any damping at all) returns {@code 0} - meaning no positive ratio is stable there; that is a
+   * pre-existing property of {@code suspensionTravel}'s own already-validated {@code (0,1]} range
+   * (an extremely small configured travel destabilizes even the unconfigured {@code 0.7} default),
+   * not something introduced by this field, and this ticket does not attempt to fix it.
+   * <p>Uses this project's own documented default gravity (the Sable {@code DimensionPhysics.
+   * DEFAULT_GRAVITY} magnitude, 11 - see {@link PhysicsBridge#suspensionSpring}'s own doc) as a
+   * conservative standard assumption, since gravity is a live per-dimension physics property,
+   * never a {@code Tuning} field this validator can see - an unusually high dimension-configured
+   * gravity could still destabilize a configuration this check accepts, exactly the same
+   * pre-existing, out-of-{@code Tuning}-scope limitation every other hardcoded physics default in
+   * this class (spring/damper calibration included) already carries.
+   */
+  private static double maxStableSuspensionDampingRatio(double travel) {
+   double gravity = 11.0;
+   double omega = Math.sqrt(2*gravity/travel);
+   double dtOmega = PhysicsBridge.DT*omega;
+   double headroom = 4 - dtOmega*dtOmega;
+   if (headroom <= 0) return 0;
+   return headroom/(4*dtOmega);
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
@@ -269,6 +353,7 @@ public final class Overrides {
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
    if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (driveBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'driveBiasFront' (vehicle-only concept - a part has no own axle position)");
+   if (suspensionDampingRatio != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatio' (no part-level consumer yet)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -297,6 +382,10 @@ public final class Overrides {
   FALLBACK.cyclicLimitDegrees=20.0;
   FALLBACK.cyclicAuthorityScale=1.0;
   FALLBACK.yawAuthorityScale=1.0;
+  // MINECRAFT-523: the exact ratio PhysicsBridge.suspensionDamper/suspensionDamperForShare/
+  // effectiveMassDamper previously hardcoded - an unconfigured vehicle settles byte-identically
+  // to before this ticket.
+  FALLBACK.suspensionDampingRatio=0.7;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -313,6 +402,7 @@ public final class Overrides {
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.brakeBiasFront=t.brakeBiasFront;
   c.driveBiasFront=t.driveBiasFront;
+  c.suspensionDampingRatio=t.suspensionDampingRatio;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -347,6 +437,7 @@ public final class Overrides {
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
   m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
+  m.suspensionDampingRatio = child.suspensionDampingRatio!=null?child.suspensionDampingRatio:parent.suspensionDampingRatio;
   return m;
  }
  /**
@@ -537,6 +628,7 @@ public final class Overrides {
   // same reason - stays null (no bias configured) unless some level actually sets it, which is
   // exactly the signal DriveBiasDistribution needs to reproduce the pre-ticket even split.
   result.driveBiasFront = firstNonNull(override!=null?override.driveBiasFront:null, packMetadata!=null?packMetadata.driveBiasFront:null, ivAdapted!=null?ivAdapted.driveBiasFront:null, physicallyDerived!=null?physicallyDerived.driveBiasFront:null);
+  result.suspensionDampingRatio = firstNonNull(override!=null?override.suspensionDampingRatio:null, packMetadata!=null?packMetadata.suspensionDampingRatio:null, ivAdapted!=null?ivAdapted.suspensionDampingRatio:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatio:null, FALLBACK.suspensionDampingRatio);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

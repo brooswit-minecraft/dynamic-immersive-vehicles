@@ -561,6 +561,24 @@ across every wheel exactly as before this option existed. This is a
 geometric budget split only - not a differential, not traction control,
 and not a gear-ratio simulation.
 
+`suspensionDampingRatio` (optional, dimensionless, strictly positive and
+capped at `2.0`) is the per-wheel critical-damping-ratio multiplier
+`suspensionSpringForShare`'s own paired damping formula applies - previously
+a hardcoded `0.7` shared by every vehicle, now a per-vehicle setting. `1.0`
+is critical damping (settles to ride height as fast as possible without
+oscillating); below `1.0` is progressively underdamped (bounces/oscillates
+more before settling); above `1.0` is progressively overdamped (settles
+without oscillating, but more sluggishly). Leaving it unset reproduces the
+exact prior `0.7` behavior byte-identically. It is explicitly shared with
+the opt-in experimental effective-mass damping candidate
+(`-Ddiv.experimentalEffectiveMassDamping`, see
+[`PhysicsBridge.effectiveMassDamper`](src/main/java/io/github/brooswitminecraft/div/PhysicsBridge.java)'s
+own doc) - when that unrelated candidate is enabled, it still uses this
+same configured ratio rather than a second hardcoded `0.7`, so a configured
+value never silently disappears depending on whether that candidate happens
+to be active. See [Suspension damping ratio](#suspension-damping-ratio-minecraft-523)
+below for the full math and a worked example.
+
 `massKg` is optional; omit it to use IV's calculated vehicle mass. The four
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
@@ -671,7 +689,7 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
-`yawAuthorityScale`, `brakeBiasFront`, `driveBiasFront`. Fields baked in at vehicle construction - `massKg`,
+`yawAuthorityScale`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
@@ -719,6 +737,82 @@ conserved.
   "vehicles": {
     "examplepack:ordinary_car": {
       "antiRollStiffness": 0.4
+    }
+  }
+}
+```
+
+### Suspension damping ratio (MINECRAFT-523)
+
+Optional, per-vehicle `suspensionDampingRatio` - a dimensionless, strictly
+positive, `2.0`-capped multiplier
+[`PhysicsBridge.suspensionDamperForShare`](src/main/java/io/github/brooswitminecraft/div/PhysicsBridge.java)
+(and its non-share-based counterpart `suspensionDamper`) apply on top of
+each wheel's own calibrated spring rate:
+`damper = 2 * sqrt(spring * mass * loadShare) * suspensionDampingRatio`.
+`1.0` is critical damping - the fastest a wheel can settle to ride height
+without oscillating. Leaving it unset (the documented fallback) is `0.7`,
+reproducing this project's exact prior hardcoded constant - no change in
+behavior for a vehicle that never configures this field. Values below `1.0`
+make the suspension progressively underdamped (it overshoots ride height
+and bounces before settling); values above `1.0` make it progressively
+overdamped, settling without overshooting but more sluggishly, WITHIN the
+validated `(0, 2.0]` range. That cap is not an arbitrary headroom number:
+`Body.stepGround`'s own fixed-timestep semi-implicit integration treats the
+damping term explicitly, which has a real numerical-stability bound (an
+independently-measured settling sweep at this project's documented default
+example found sustained, non-converging chatter starting around ratio
+`2.2`-`2.3`) - `2.0` keeps a real margin below that measured onset. A value
+above `2.0` is rejected at config load/reload, the same as any other
+out-of-range field.
+
+**That flat `2.0` ceiling is not provably stable on its own for every
+`suspensionTravel`.** The actual stability bound is travel-dependent (via
+the per-wheel natural frequency, `omega = sqrt(2*gravity/suspensionTravel)`
+- mass/loadShare cancel out of it entirely): a smaller configured
+`suspensionTravel` raises that frequency enough to destabilize a ratio well
+under `2.0` too. Config load/reload therefore also rejects any configured
+`(suspensionDampingRatio, suspensionTravel)` PAIR that would already be
+numerically unstable, using this same vehicle's own `suspensionTravel` (or
+the documented `0.3` fallback if it does not set one) - e.g. `2.0` is
+rejected at `suspensionTravel: 0.2`, even though `2.0` alone is within the
+flat range, while a lower ratio (around `1.77` or less at that same travel)
+is still accepted. The computed bound itself applies a modest (0.5%) safety
+margin below the exact linearized stability threshold - the exact threshold
+is itself a sustained, non-decaying oscillation (confirmed by sweep), not
+genuinely stable, so it is rejected too, not merely values past it. This
+never narrows or widens `suspensionTravel`'s own
+already-independently-validated `(0,1]` range by itself - an extremely
+small travel with NO `suspensionDampingRatio` configured at all is
+unaffected; that combination's own numerical behavior (even at the
+unconfigured `0.7` default) is a pre-existing property of `suspensionTravel`
+this ticket does not change or newly guard.
+
+This is purely a DAMPING change - it never touches the calibrated spring
+rate, the `travel*.5` ride-height equilibrium a wheel settles toward, or
+the static-load geometry [anti-roll](#axle-anti-roll-minecraft-519) and
+[wheel-load-share](src/main/java/io/github/brooswitminecraft/div/WheelLoadDistribution.java)
+already apply; an asymmetric axle's heavier and lighter wheels still settle
+at the same equilibrium height with a shared configured ratio, only the
+approach speed/overshoot differs between them (each keeps its own
+geometry-derived spring/damper magnitude - this setting only scales the
+ratio, not the absolute rate).
+
+Explicitly interacts with the opt-in experimental effective-mass damping
+candidate (`-Ddiv.experimentalEffectiveMassDamping`,
+[`PhysicsBridge.effectiveMassDamper`](src/main/java/io/github/brooswitminecraft/div/PhysicsBridge.java)):
+whichever basis actually computes a wheel's damper this tick - the shared
+per-share formula above, or that candidate's own per-contact effective-mass
+formula - both use this SAME configured ratio, never a second hardcoded
+`0.7`. A configured `suspensionDampingRatio` therefore never silently stops
+applying depending on whether that unrelated, separately-opt-in candidate
+happens to be enabled for a given run.
+
+```json
+{
+  "vehicles": {
+    "examplepack:ordinary_car": {
+      "suspensionDampingRatio": 0.85
     }
   }
 }
