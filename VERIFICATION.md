@@ -1734,3 +1734,45 @@ reload) across both vehicle categories - not merely a compiled, never-run
 fixture. MINECRAFT-527 (filed separately) tracks the real production
 defect this process discovered; fixing that production behavior is
 explicitly out of this ticket's own scope.
+
+**Second independent rereview (head `a6d4314`, comment 53897) and fixes.**
+Three further gaps found on the already-6/6 head: (1) the INVALID-retention
+check asserted `Overrides.resolved(key)` only AFTER this probe's own disk
+repair had already rewritten the file back to the valid values and after a
+further 35-tick `OBSERVE_INVALID` window had elapsed - during which
+`OverridesHotReload`'s own background mtime poll could independently
+re-read and reapply the (already-repaired) file, so the assertion risked
+proving only that the repair itself worked, not that the REJECTED reload
+had actually preserved the live state. Moved the assertion to immediately
+after the rejection is confirmed, before any repair or further ticks (kept
+a second assertion at the window's own end too, now correctly documented
+as proving retention PERSISTS through the window rather than being the
+only evidence). (2) `applyValidConfig` logged `vehiclesUpdatedLive` without
+asserting on it - now requires exactly `1` (this scenario's own still-
+active body; scenarios are strictly sequential, so no other vehicle is
+alive to update). (3) `waitTerrain`'s chunk-ownership tracking inferred
+"this probe forced it" from "it was unloaded", but unloaded and
+not-already-forced are different things (loading is deferred/async, so an
+unloaded chunk can already carry someone else's force-ticket) - now checks
+`ServerLevel.getForcedChunks()` directly before forcing, so
+`chunksForcedByThisProbe` (and therefore `releaseChunksOnce`) only ever
+contains coordinates this probe itself actually added a ticket for.
+
+Re-verified after all three fixes: `gradle --offline compileJava/test
+--rerun-tasks` - `BUILD SUCCESSFUL`, 605 tests, 0 failures, 0 errors
+(unchanged). Live run 6 (`/tmp/m526-live-run6.log`, 2026-11-14 ~05:37-05:43
+UTC): `ALL SCENARIOS FINISHED - 6/6 PASSED` again, confirming the fixes
+didn't regress the already-passing behavior.
+
+Remaining disclosed, accepted limitations (same review, not further
+addressed this pass - noted rather than silently claimed covered): the
+`accelProxy` roll/yaw metric is a matrix-component second difference, not
+a true angular acceleration - it remains orientation/rate-dependent to
+some degree even confined to `RESPONSE_SAMPLE_TICKS`, so its claims are
+about relative magnitude/direction of response, not a calibrated physical
+quantity. This probe also cannot assert on `PhysicsBridge.Body`'s own
+internal stepper selection directly (that state is package-private) -
+`ACTIVATION_DEFAULT`'s dispatch evidence is the vertical-speed-vs-free-fall
+proxy only, not a direct read of which stepper ran. Extending either would
+need a new PhysicsBridge-side read-only diagnostic hook, which is outside
+this ticket's own scope (no production code changes).

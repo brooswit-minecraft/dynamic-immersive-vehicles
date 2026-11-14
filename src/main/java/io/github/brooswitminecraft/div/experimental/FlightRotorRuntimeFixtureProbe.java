@@ -244,12 +244,22 @@ public final class FlightRotorRuntimeFixtureProbe {
  private static void waitTerrain(ServerLevel level) {
   terrainWaitTicksElapsed++;
   var chunkSource = level.getChunkSource();
+  // Review finding: "unloaded" and "not already forced" are NOT the same thing - a chunk can sit
+  // unloaded on this exact tick while still carrying another owner's own force-ticket (loading is
+  // deferred/async). Checking getChunkNow()==null alone to decide whether THIS probe owns the
+  // coordinate it is about to force would misattribute an existing ticket as its own, and then
+  // wrongly release someone else's ticket in releaseChunksOnce. level.getForcedChunks() is the
+  // actual ground truth of which coordinates already carry a force-ticket right now.
+  var alreadyForced = level.getForcedChunks();
   boolean allLoaded = true;
   for (int dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS && allLoaded; dx++)
    for (int dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++)
     if (chunkSource.getChunkNow(CHUNK_X + dx, CHUNK_Z + dz) == null) {
-     level.setChunkForced(CHUNK_X + dx, CHUNK_Z + dz, true);
-     chunksForcedByThisProbe.add(chunkKey(CHUNK_X + dx, CHUNK_Z + dz));
+     int cx = CHUNK_X + dx, cz = CHUNK_Z + dz;
+     if (!alreadyForced.contains(net.minecraft.world.level.ChunkPos.asLong(cx, cz))) {
+      level.setChunkForced(cx, cz, true);
+      chunksForcedByThisProbe.add(chunkKey(cx, cz));
+     }
      allLoaded = false;
     }
   // Every WAIT_TERRAIN exit (success below, or the timeout below) now funnels through
@@ -709,8 +719,10 @@ public final class FlightRotorRuntimeFixtureProbe {
      }
      s.lastValidRollAccel = rollAccel; s.lastValidYawAccel = yawAccel;
     } else { // next == Phase.DONE: the INVALID window just finished
-     // Deterministic, not physics-derived (see liveResolvedRepresentativeField's own doc) -
-     // directly reads back what the rejected reload actually left resolved in memory.
+     // Second-stage check: applyInvalidConfig already asserted this immediately after the
+     // rejection itself (before any disk repair or background reload could confound it - see
+     // its own doc); re-asserting here additionally proves retention PERSISTS through the whole
+     // OBSERVE_INVALID window, including across OverridesHotReload's own periodic mtime poll.
      double expected = validFieldsFor(s.kind).get(s.kind == Kind.FIXED_WING ? "liftSlope" : "cyclicAuthorityScale");
      Double actual = liveResolvedRepresentativeField(s.kind, PACK_ID + ":" + s.systemName);
      if (actual == null || Math.abs(actual - expected) > 1e-9) {
@@ -718,7 +730,7 @@ public final class FlightRotorRuntimeFixtureProbe {
         + " does not match the VALID value=" + expected + " - the rejected invalid edit corrupted or reverted the live config");
       return;
      }
-     LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " INVALID-vs-VALID retention PASSED - live-resolved representative field still=" + actual
+     LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " INVALID-vs-VALID retention still PASSED at window end - live-resolved representative field still=" + actual
        + " (physical accelProxy this window, for reference only: " + rollAccel + " vs prior VALID window's " + s.lastValidRollAccel + ")");
     }
    }
@@ -737,6 +749,14 @@ public final class FlightRotorRuntimeFixtureProbe {
   var report = PhysicsBridge.reloadOverrides();
   if (!report.configResult().success()) {
    fail(s, "VALID live-reload unexpectedly FAILED to apply: " + report.configResult().message() + " - this is itself a finding, not expected scenario behavior");
+   return;
+  }
+  // Review finding: assert the reload actually reached this scenario's own live body, not just
+  // that the config parsed - exactly one vehicle (this scenario's own still-active one) should
+  // have been live-updated, since no other scenario's vehicle is alive at this point (strictly
+  // sequential scenarios - see this file's class doc).
+  if (report.vehiclesUpdatedLive() != 1) {
+   fail(s, "VALID live-reload reported vehiclesUpdatedLive=" + report.vehiclesUpdatedLive() + " (expected exactly 1 - this scenario's own still-active body) - the reload may not have actually reached the live body");
    return;
   }
   LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " VALID config written and reloaded live (no respawn): " + report.configResult().message()
@@ -760,13 +780,28 @@ public final class FlightRotorRuntimeFixtureProbe {
    return;
   }
   LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " INVALID config correctly REJECTED, last-known-good (the VALID config above) retained in memory: " + report.configResult().message());
+  // Review finding: assert retention IMMEDIATELY here, before anything else touches the config -
+  // doing the on-disk repair first (as an earlier revision did) and asserting only after the
+  // following OBSERVE_INVALID window risked the assertion only ever seeing state THIS repair
+  // itself had just (re)written, or risked OverridesHotReload's own background 100-tick mtime
+  // poll re-reading the file in between and reapplying the valid values independently - neither
+  // would actually prove the REJECTED reload itself preserved the live state.
+  Double resolvedValue = liveResolvedRepresentativeField(s.kind, PACK_ID + ":" + s.systemName);
+  double expectedValidValue = validFieldsFor(s.kind).get(s.kind == Kind.FIXED_WING ? "liftSlope" : "cyclicAuthorityScale");
+  if (resolvedValue == null || Math.abs(resolvedValue - expectedValidValue) > 1e-9) {
+   fail(s, "INVALID live-reload retention check failed IMMEDIATELY after rejection - live-resolved representative field=" + resolvedValue
+     + " does not match the VALID value=" + expectedValidValue + " - the rejected reload itself corrupted or reverted the live config");
+   return;
+  }
+  LOGGER.info("[DIV flightRotorFixture] scenario=" + s.label + " retention confirmed immediately after rejection - live-resolved representative field=" + resolvedValue);
   // Review finding (2): the file ON DISK still carries this invalid entry (Overrides.reload only
   // ever swaps its in-memory maps, never touches the file) - Overrides.reload validates the
   // WHOLE config as one unit, so leaving this invalid entry in place would poison every LATER
   // scenario's own mergeVehicleOverrideAndWrite/reloadOverrides call (including a different
-  // Kind's), not just this one. Immediately repair this key back to the known-VALID fields on
-  // disk (a plain write, not a reload - the in-memory state is already correct and must not be
-  // touched again) so the file stays globally valid for everything that runs after this.
+  // Kind's), not just this one. Repair this key back to the known-VALID fields on disk now, AFTER
+  // the retention assertion above (a plain write, not a reload - the in-memory state is already
+  // correct and must not be touched again) so the file stays globally valid for everything that
+  // runs after this.
   if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, validFieldsFor(s.kind))) {
    fail(s, "FAILED to repair the on-disk config back to the VALID entry after the invalid-reload check - a later scenario's own reload could now fail for an unrelated reason");
    return;
