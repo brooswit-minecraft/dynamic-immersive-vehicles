@@ -47,12 +47,20 @@ package io.github.brooswitminecraft.div;
  * together, which is both well-defined for any wheel count and matches how a real front/rear
  * drive-bias knob is described even on a multi-axle vehicle.
  *
- * <p><b>Conservation.</b> Returned shares always sum to exactly 1.0 (biasFront + (1-biasFront)),
- * by construction - never a renormalized approximation - so the caller's whole drive-force budget
- * is preserved exactly regardless of wheel count or axle split. A wheel that is not grounded this
- * tick (no contact) simply does not receive its share this tick, the same conservative,
- * unredistributed loss every other per-wheel budget (suspension, brake) already accepts for a
- * missing contact - this class only computes the geometric share, it never looks at contact state.
+ * <p><b>Conservation.</b> Returned shares always sum to {@code 1.0} to within ordinary floating-
+ * point tolerance (biasFront + (1-biasFront)) - never a renormalized approximation of a
+ * materially different quantity - so the caller's whole drive-force budget is preserved to that
+ * same tolerance regardless of wheel count or axle split. This is deliberately a floating-point-
+ * tolerance claim, not a byte-exact-arithmetic one (John's review, comment 53855): the biased
+ * branch's own division (biasFront/frontCount, (1-biasFront)/rearCount) is ordinary floating-
+ * point arithmetic with no exact-equality requirement attached to it - only {@link #shareRatios}'
+ * own unset/degenerate FALLBACK case carries the stricter byte-exact {@code 1.0} requirement (see
+ * that method's own doc for why, and {@code DriveBiasDistributionTest}'s own tolerant {@code
+ * assertEquals(1.0, sum, 1e-9)} assertions for the biased case, never a tolerance-0 exact check
+ * there). A wheel that is not grounded this tick (no contact) simply does not receive its share
+ * this tick, the same conservative, unredistributed loss every other per-wheel budget
+ * (suspension, brake) already accepts for a missing contact - this class only computes the
+ * geometric share, it never looks at contact state.
  *
  * <p><b>Bounded/conservative fallback.</b> {@code null} {@code biasFront} (the field's own
  * documented "operator never configured this" state - see {@code Overrides.Tuning#driveBiasFront})
@@ -81,7 +89,9 @@ public final class DriveBiasDistribution {
   * is the resolved {@code Overrides.Tuning#driveBiasFront} value - {@code null} means "unset",
   * {@code 0.0} sends the entire drive budget to the rear group, {@code 1.0} sends it entirely to
   * the front group, {@code 0.5} is the neutral/even axle split. Returns one share per wheel,
-  * always finite, non-negative, and summing to exactly 1.0. */
+  * always finite, non-negative, and summing to {@code 1.0} within ordinary floating-point
+  * tolerance (see this class's own "Conservation" doc above for why that is a deliberate
+  * tolerance claim, not a byte-exact one, for the biased case). */
  public static double[] shares(double[] z, Double biasFront) {
   int n = z.length;
   double[] evenShares = new double[n];
