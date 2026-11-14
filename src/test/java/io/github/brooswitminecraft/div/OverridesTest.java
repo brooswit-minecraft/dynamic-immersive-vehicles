@@ -76,6 +76,7 @@ class OverridesTest {
   assertEquals(20.0, r.cyclicLimitDegrees, "cyclicLimitDegrees' fallback matches RotorForces' own prior hardcoded 20-degree clamp");
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
+  assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -90,6 +91,7 @@ class OverridesTest {
   assertNotNull(r.antiRollStiffness);
   assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
+  assertNotNull(r.suspensionDampingRatio);
  }
 
  // MINECRAFT-519: antiRollStiffness - dimensionless 0 (off, the FALLBACK) to 1 (fully-rigid-bar)
@@ -313,6 +315,46 @@ class OverridesTest {
 
  @Test void brakeBiasFrontIsRejectedOnAPartOverride() {
   var part = new Overrides.Tuning(); part.brakeBiasFront = 0.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ @Test void driveBiasFrontOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.driveBiasFront = -0.01;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.driveBiasFront = 1.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var allRear = new Overrides.Tuning(); allRear.driveBiasFront = 0.0; // inclusive extreme, unlike lateralGripMultiplier
+  assertDoesNotThrow(allRear::validate);
+  var allFront = new Overrides.Tuning(); allFront.driveBiasFront = 1.0;
+  assertDoesNotThrow(allFront::validate);
+  var inRange = new Overrides.Tuning(); inRange.driveBiasFront = 0.65;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void driveBiasFrontHasNoFallbackAndStaysNullWhenNeverConfigured() {
+  // Unlike driveForce/friction/etc., driveBiasFront must stay null when nothing at any
+  // precedence level sets it - PhysicsBridge/DriveBiasDistribution rely on literal null (not a
+  // 0.5 fallback) to mean "no operator bias at all" (the exact pre-ticket behavior).
+  assertNull(Overrides.resolved("packid:not_configured").driveBiasFront);
+  assertNull(Overrides.defaultTuning().driveBiasFront);
+ }
+
+ @Test void driveBiasFrontParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.driveBiasFront = 0.65;
+   Overrides.setForTest(java.util.Map.of("packid:drive_bias_vehicle", override));
+   assertEquals(0.65, Overrides.resolved("packid:drive_bias_vehicle").driveBiasFront,
+     "an explicit operator override must be used instead of staying null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+  var packMetadata = new Overrides.Tuning(); packMetadata.driveBiasFront = 0.4;
+  assertEquals(0.4, Overrides.resolved("packid:not_configured", packMetadata, null, null).driveBiasFront,
+    "with no operator override, pack DIV metadata must still be used over staying null");
+ }
+
+ @Test void driveBiasFrontIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.driveBiasFront = 0.5;
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
  }
 
@@ -757,5 +799,113 @@ class OverridesTest {
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }
+ }
+
+ // MINECRAFT-523: suspensionDampingRatio - dimensionless, strictly positive, capped at 2.0
+ // damping ratio PhysicsBridge.suspensionDamper/suspensionDamperForShare/effectiveMassDamper
+ // already apply; 0.7 (FALLBACK) reproduces the exact prior hardcoded constant. The 2.0 cap
+ // (review finding, ticket comment 53827) keeps a real margin below the measured ~2.2-2.3
+ // numerical-instability onset Body.stepGround's explicit-damping-term integration has at this
+ // project's documented default example config - see validate()'s own doc and
+ // PhysicsBridgeSuspensionDampingRatioTest's stability sweep.
+
+ @Test void suspensionDampingRatioOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.suspensionDampingRatio = 0.0; // never valid - an undamped oscillator
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.suspensionDampingRatio = -0.7;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.suspensionDampingRatio = 2.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nan = new Overrides.Tuning(); nan.suspensionDampingRatio = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nan::validate);
+  var criticallyDamped = new Overrides.Tuning(); criticallyDamped.suspensionDampingRatio = 1.0;
+  assertDoesNotThrow(criticallyDamped::validate);
+  var upperBound = new Overrides.Tuning(); upperBound.suspensionDampingRatio = 2.0; // inclusive upper bound is allowed
+  assertDoesNotThrow(upperBound::validate);
+  var nearZero = new Overrides.Tuning(); nearZero.suspensionDampingRatio = 0.01; // exclusive lower bound - just above zero is allowed
+  assertDoesNotThrow(nearZero::validate);
+ }
+
+ @Test void suspensionDampingRatioParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.suspensionDampingRatio = 1.4;
+   Overrides.setForTest(java.util.Map.of("packid:stiff_damper_vehicle", override));
+   assertEquals(1.4, Overrides.resolved("packid:stiff_damper_vehicle").suspensionDampingRatio,
+     "an explicit operator override must take precedence over the 0.7 fallback");
+
+   var packMetadata = new Overrides.Tuning(); packMetadata.suspensionDampingRatio = 0.9;
+   assertEquals(0.9, Overrides.resolved("packid:not_configured", packMetadata, null, null).suspensionDampingRatio,
+     "pack metadata must win over the flat fallback when no operator override exists");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void suspensionDampingRatioIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.suspensionDampingRatio = 1.0;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ @Test void suspensionDampingRatioIsInheritedThroughExtends() {
+  try {
+   var template = new Overrides.Tuning(); template.suspensionDampingRatio = 0.5;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "soft-damper";
+   Overrides.setForTest(java.util.Map.of("soft-damper", template), java.util.Map.of("packid:inherits_damping", child), java.util.Map.of());
+   assertEquals(0.5, Overrides.resolved("packid:inherits_damping").suspensionDampingRatio,
+     "a child entry leaving suspensionDampingRatio unset must inherit its template's own value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-523 review (comments 53839/53840): the flat 2.0 ceiling alone is not provably
+ // stable at every suspensionTravel - a smaller configured travel raises the per-wheel natural
+ // frequency enough to destabilize ratios well under 2.0 too (confirmed by an independent
+ // settling sweep reproducing the reviewer's own numbers exactly - see
+ // PhysicsBridgeSuspensionDampingRatioTest). validate() now also rejects a configured
+ // (suspensionDampingRatio, suspensionTravel) PAIR whenever it would already be numerically
+ // unstable under Body.stepGround's own integration, not just an out-of-[0,2.0]-range ratio.
+
+ @Test void suspensionDampingRatioIsRejectedWhenUnstableForItsOwnConfiguredSuspensionTravel() {
+  // At travel=0.2 (well within suspensionTravel's own independently-valid (0,1] range), ratio
+  // 2.0 is within the flat [0,2.0] range but was independently confirmed (sweep) to never
+  // converge - must still be rejected by the travel-aware check.
+  var unstablePair = new Overrides.Tuning(); unstablePair.suspensionTravel = 0.2; unstablePair.suspensionDampingRatio = 2.0;
+  assertThrows(IllegalArgumentException.class, unstablePair::validate,
+    "ratio 2.0 at travel 0.2 is numerically unstable (confirmed by sweep) and must be rejected even though 2.0 alone is in range");
+  // A ratio comfortably below that travel's own stability bound (~1.776) must still validate.
+  var stablePair = new Overrides.Tuning(); stablePair.suspensionTravel = 0.2; stablePair.suspensionDampingRatio = 1.6;
+  assertDoesNotThrow(stablePair::validate,
+    "ratio 1.6 at travel 0.2 is below that travel's own stability bound and must still be accepted");
+  // The documented default travel (0.7 ratio, no suspensionTravel override at all) must remain
+  // exactly as valid as before this review fix - the cross-field check must not retune defaults.
+  var defaultRatioNoTravelOverride = new Overrides.Tuning(); defaultRatioNoTravelOverride.suspensionDampingRatio = 0.7;
+  assertDoesNotThrow(defaultRatioNoTravelOverride::validate,
+    "the documented 0.7 default, with no suspensionTravel override, must remain valid against the assumed 0.3 fallback travel");
+  // An extremely small travel's own existing (0,1]-range validity is untouched by this field -
+  // this check only ever REJECTS an unstable ratio for that travel, never widens or narrows
+  // suspensionTravel's own accepted range.
+  var tinyTravelNoRatio = new Overrides.Tuning(); tinyTravelNoRatio.suspensionTravel = 0.02;
+  assertDoesNotThrow(tinyTravelNoRatio::validate,
+    "suspensionTravel alone, with no suspensionDampingRatio configured at all, must be unaffected by this cross-field check");
+ }
+
+ /**
+  * Review finding (comment 53844): the underlying linearized stability condition is a STRICT
+  * inequality - at the computed bound EXACTLY, the integration sustains a non-decaying
+  * oscillation (confirmed by an independent sweep: ratio 1.7758240724699157 at travel 0.2
+  * alternates .093125/.106875 around a .1 target forever, never converging), so a naive
+  * non-strict comparison would wrongly accept it. validate() must reject the exact boundary
+  * too, not merely values strictly past it.
+  */
+ @Test void suspensionDampingRatioAtTheExactComputedStabilityBoundaryIsStillRejected() {
+  double exactBoundaryRatioAtTravelPoint2 = 1.7758240724699157;
+  var atExactBoundary = new Overrides.Tuning(); atExactBoundary.suspensionTravel = 0.2; atExactBoundary.suspensionDampingRatio = exactBoundaryRatioAtTravelPoint2;
+  assertThrows(IllegalArgumentException.class, atExactBoundary::validate,
+    "the exact computed stability boundary itself is a sustained non-decaying oscillation (confirmed by sweep), not actually stable, and must be rejected");
+  // Comfortably below the boundary (the margin applied) must still validate.
+  var justBelowBoundary = new Overrides.Tuning(); justBelowBoundary.suspensionTravel = 0.2; justBelowBoundary.suspensionDampingRatio = exactBoundaryRatioAtTravelPoint2*0.99;
+  assertDoesNotThrow(justBelowBoundary::validate,
+    "a ratio comfortably below the computed boundary (confirmed by sweep to actually converge) must still be accepted");
  }
 }

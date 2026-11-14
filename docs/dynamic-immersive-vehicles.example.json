@@ -15,7 +15,8 @@
       "driveForce": 8000.0,
       "brakeForce": 12000.0,
       "maxSteerDegrees": 30.0,
-      "antiRollStiffness": 0.4
+      "antiRollStiffness": 0.4,
+      "suspensionDampingRatio": 0.85
     },
     "examplepack:helicopter": {
       "massKg": 2200.0,
@@ -27,6 +28,10 @@
     "examplepack:front_biased_car": {
       "brakeForce": 12000.0,
       "brakeBiasFront": 0.7
+    },
+    "examplepack:rear_drive_biased_car": {
+      "driveForce": 9000.0,
+      "driveBiasFront": 0.2
     },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
