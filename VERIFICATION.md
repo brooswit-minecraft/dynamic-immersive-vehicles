@@ -1658,10 +1658,59 @@ test for the biased case.
 
 Same local slot-lock coordination (claimed 2026-11-14T04:26:01Z, released
 2026-11-14T04:27:10Z, no concurrent process observed). `/tmp/gradle-8.14/
-bin/gradle --offline clean build test --console=plain` against the fixed
-head - `BUILD SUCCESSFUL` in 1m 9s, 8 tasks (8 executed, a true clean this
-time). The real JUnit XML reports total **630 tests**, 0 skipped, 0
-failures, 0 errors (14 from `DriveBiasDistributionTest`, 7 from
-`ServiceDriveBiasTest`, plus every pre-existing test unchanged alongside
-them). `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was
-produced again.
+bin/gradle --offline clean build test --console=plain` against commit
+`e33c4a6cccceade1d37876d3fc5be69fa9b17e98` - `BUILD SUCCESSFUL` in 1m 9s, 8
+tasks (8 executed, a true clean this time). The real JUnit XML reports
+total **630 tests**, 0 skipped, 0 failures, 0 errors (14 from
+`DriveBiasDistributionTest`, 7 from `ServiceDriveBiasTest`, plus every
+pre-existing test unchanged alongside them).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
+again.
+
+**Second review round (comment 53838) and fix.** John's review found two
+things: (1) my own prior "no native driven-wheel metadata exists" claim
+was wrong - `PartEngine#linkedWheels`/`#drivenWheels` are real native
+`List<PartGroundDevice>` fields (confirmed via `javap` against the pinned
+`mts.jar`); corrected to the narrower, still-true claim that
+`PhysicsBridge`'s existing pre-ticket code never reads them (confirmed:
+zero references anywhere in this package), so this ticket's own bounded
+axle-split scope is unaffected - it preserves that existing choice rather
+than newly filtering by native drivetrain membership. (2) Three concrete
+test-strengthening asks, all addressed: the missing-contact test now
+asserts a magnitude reduction (three-wheel result strictly below a
+four-wheel reference, not merely a direction check); a new skid-steer
+composition test verifies `driveForcePerWheel*skidSteerMultiplier*
+driveShareRatio` composes exactly, solved as four independent single-
+contact calls (a combined multi-contact call was tried first and failed -
+see below - because cross-contact coupling within one pass gives a
+later-processed wheel a tiny nonzero rolling-resistance term even
+starting from rest, which is correct solver behavior, not a composition
+bug, but contaminates an exact per-wheel product check); and an explicit
+comment distinguishes the biased branch's deliberate floating-point
+tolerance from `shareRatios`' own exact-1.0 contract.
+
+**Self-caught test defect, fixed before the final build.** The first
+version of the new skid-steer composition test solved all four wheels
+together in one `solveFriction` call and asserted each wheel's output
+equaled the exact product - this failed (`expected 560.0 but was
+560.1848888888888`) because the solver processes contacts sequentially
+within a pass, so wheel 1's own rolling-resistance term saw a tiny nonzero
+residual speed left over from wheel 0's own impulse earlier in the same
+pass. Root-caused via direct inspection of `solveFriction`'s own loop
+order, confirmed this is intended cross-contact coupling (not a defect in
+`driveShareRatio` itself), and fixed the TEST (not the production code) by
+solving each wheel as an independent single-contact call instead.
+
+Local slot-lock coordination (claimed 2026-11-14T04:40:19Z, released
+2026-11-14T04:41:07Z; a concurrent `gradle --offline clean build test`
+FAILED attempt before this one - at the test-only stage, from the flawed
+combined-contact test above - was this session's own, not a conflict with
+another owner). `/tmp/gradle-8.14/bin/gradle --offline clean build test
+--console=plain` against commit `ee999d0...` (this ticket's current PR
+#24 head) - `BUILD SUCCESSFUL` in 47s, 8 tasks (8 executed). The real
+JUnit XML reports total **631 tests**, 0 skipped, 0 failures, 0 errors (8
+from `ServiceDriveBiasTest`, up from 7 - the new skid-steer composition
+test - plus every other test unchanged).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
+again. Slot released immediately after; M526 claimed it next per the
+stated order.
