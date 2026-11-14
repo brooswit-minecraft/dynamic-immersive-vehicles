@@ -30,6 +30,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   // John's review (comment 53751) flagged that this test exercised every pre-existing live-safe
   // field but never changed/asserted these.
   fresh.cyclicLimitDegrees = 12.0; fresh.cyclicAuthorityScale = 1.4; fresh.yawAuthorityScale = 0.6;
+  // MINECRAFT-523: suspensionDampingRatio must go through this same live-mutation path too.
+  fresh.suspensionDampingRatio = 1.1;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
@@ -39,9 +41,23 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(12.0, target.stallAngleDegrees); assertEquals(5.0, target.liftSlope); assertEquals(4.0, target.controlSurfaceSlope);
   assertEquals(0.65, target.brakeBiasFront);
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
+  assertEquals(1.1, target.suspensionDampingRatio);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale"),
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio"),
     new TreeSet<>(applied));
+ }
+
+ @Test void removingASuspensionDampingRatioOverrideLiveAppliesBackDownToItsDocumentedDefault() {
+  // Same "revert to documented default on removal" requirement as the rotor fields above - an
+  // operator who removes a previously-configured suspensionDampingRatio entry must see the live
+  // vehicle actually settle back to 0.7, not get stuck at its last explicit value.
+  var target = Overrides.defaultTuning();
+  target.suspensionDampingRatio = 1.3;
+  var fresh = Overrides.defaultTuning(); // no override at all -> FALLBACK default (0.7)
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(0.7, target.suspensionDampingRatio, "must revert to the documented 0.7 default once the override is removed");
+  assertTrue(applied.contains("suspensionDampingRatio"), "the revert-to-default must itself be reported as an applied live change");
  }
 
  @Test void removingARotorFieldOverrideLiveAppliesBackDownToItsDocumentedDefault() {
