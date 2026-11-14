@@ -74,6 +74,14 @@ public final class HitchRotationFrameProbe {
  private static boolean terminal = false, cleanedUp = false;
  private static int chunkWaitTicksElapsed = 0, activationTicksElapsed = 0, ticksRemaining = 0;
  private static int[] chunkCoords;
+ // Review 53866: requestChunks must not blindly assume IT was the one that forced this chunk -
+ // another already-running ticket (or the world itself) may have a legitimate, pre-existing
+ // force-load ticket on the exact same coordinates, and cleanup unforcing it would remove THEIR
+ // ownership, not this probe's. Captured from ServerLevel.setChunkForced's own return value
+ // (decompiled net/minecraft/server/level/ServerLevel.java: returns true only when its internal
+ // LongSet.add(...) actually changed the set, i.e. the chunk was NOT already in it) rather than
+ // a separate getForcedChunks() check-then-act, which would race between the check and the act.
+ private static boolean chunkForcedByProbe = false;
  private static BoxPhysicsObject boxTowing, boxTowed;
  private static GenericConstraintConfiguration config;
  private static PhysicsConstraintHandle joint;
@@ -124,20 +132,27 @@ public final class HitchRotationFrameProbe {
   ticksRemaining--;
   if (ticksRemaining == 0) {
    logConclusion();
-   cleanup(level);
-   terminal = true;
+   finishTerminal(level);
   }
  }
 
- /** Single terminal-failure path (review's explicit ask): logs once, then permanently stops -
-  * {@code terminal=true} makes every subsequent {@code maybeRun} call an immediate no-op, so a
-  * chunk/create failure can never re-enter {@code !boxesCreated} and retry. Always cleans up
-  * whatever this probe itself already created before marking terminal. */
+ /** Single terminal-failure path (review's explicit ask): logs once, then permanently stops. */
  private static void fail(ServerLevel level, String message, RuntimeException cause) {
   if (cause != null) LOGGER.error("[DIV hitchRotationFrameProbe] FAILED - " + message, cause);
   else LOGGER.error("[DIV hitchRotationFrameProbe] FAILED - " + message);
-  cleanup(level);
-  terminal = true;
+  finishTerminal(level);
+ }
+
+ /** Review 53866's explicit ask: {@code terminal=true} must happen even if {@code cleanup}
+  * itself throws, or a chunk/create failure whose cleanup throws would leave {@code terminal}
+  * false and {@code boxesCreated} false - exactly the retry-forever bug this round's first fix
+  * was supposed to close. {@code finally} guarantees it unconditionally. */
+ private static void finishTerminal(ServerLevel level) {
+  try {
+   cleanup(level);
+  } finally {
+   terminal = true;
+  }
  }
 
  /** Idempotent (guarded by {@code cleanedUp}) - removes ONLY this probe's own joint/boxes and
@@ -151,8 +166,11 @@ public final class HitchRotationFrameProbe {
   if (joint != null && joint.isValid()) joint.remove();
   if (boxTowing != null && boxTowing.isActive()) physics.removeObject(boxTowing);
   if (boxTowed != null && boxTowed.isActive()) physics.removeObject(boxTowed);
-  if (chunkCoords != null) level.setChunkForced(chunkCoords[0], chunkCoords[1], false);
-  LOGGER.info("[DIV hitchRotationFrameProbe] cleaned up probe joint/boxes and released its own forced chunk");
+  // Only release the chunk-forcing ticket if THIS probe is the one that added it - see
+  // chunkForcedByProbe's own doc comment for why (another owner's pre-existing ticket on the
+  // same coordinates must survive this probe's cleanup).
+  if (chunkCoords != null && chunkForcedByProbe) level.setChunkForced(chunkCoords[0], chunkCoords[1], false);
+  LOGGER.info("[DIV hitchRotationFrameProbe] cleaned up probe joint/boxes" + (chunkForcedByProbe ? " and released its own forced chunk" : " - chunk was already forced by another owner, left untouched"));
  }
 
  private static boolean activate(ServerLevel level) {
@@ -184,8 +202,10 @@ public final class HitchRotationFrameProbe {
  private static void requestChunks(ServerLevel level) {
   int chunkX = Math.floorDiv(6000, 16), chunkZ = Math.floorDiv(6000, 16);
   chunkCoords = new int[]{chunkX, chunkZ};
-  level.setChunkForced(chunkX, chunkZ, true);
-  LOGGER.info("[DIV hitchRotationFrameProbe] requested chunk (" + chunkX + "," + chunkZ + ")");
+  // setChunkForced's own return value IS the ownership capture (see chunkForcedByProbe's doc) -
+  // true only when this call actually added the ticket, false if one already existed.
+  chunkForcedByProbe = level.setChunkForced(chunkX, chunkZ, true);
+  LOGGER.info("[DIV hitchRotationFrameProbe] requested chunk (" + chunkX + "," + chunkZ + ") forcedByProbe=" + chunkForcedByProbe);
  }
 
  private static boolean chunksActuallyLoaded(ServerLevel level) {
