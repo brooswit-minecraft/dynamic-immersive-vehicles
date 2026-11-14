@@ -62,6 +62,43 @@ class HitchJointTest {
   assertEquals(0, transformed.z, 1e-9);
  }
 
+ @Test void hookupOnlyRotationComposesWithNativeSignNotInverted() {
+  // Review 53832/task-review-opus 53835's own worked example: a hookup-only +30-degree rot,
+  // identity hitch rot, identity towing orientation. IV's native composition (decompiled
+  // EntityVehicleF_Physics.getForcesAndMotions) is Q_towed = Q_towing * R_hitch * R_hookup =
+  // identity * identity * R_hookup = R_hookup (plain +30 degrees). Sable's own joint enforces
+  // Q_towed = Q_towing * local_frame1 * inverse(local_frame2) - PhysicsBridge.createHitch
+  // passes local_frame1 = R_hitch (identity here) and local_frame2 = inverse(R_hookup), so
+  // Sable's formula collapses to identity * identity * inverse(inverse(R_hookup)) = R_hookup -
+  // the correct +30, not the -30 a naive direct pass-through of R_hookup would have produced.
+  var hookupRot = new RotationMatrix().rotateY(30);
+  var localFrame1 = HitchJoint.localJointFrame(null);
+  var localFrame2 = HitchJoint.localJointFrame(hookupRot).invert();
+  var sableEnforced = new Quaterniond(localFrame1).mul(new Quaterniond(localFrame2).invert());
+  var expectedNative = HitchJoint.localJointFrame(hookupRot);
+  double angleDiff = new Quaterniond(sableEnforced).invert().mul(expectedNative).angle();
+  assertEquals(0, angleDiff, 1e-9);
+ }
+
+ @Test void nonIdentityRotationsOnBothEndsMatchNativeComposition() {
+  // Same derivation as above, generalized to non-identity towing/hitch/hookup rotations on
+  // all three (not just the single-axis illustrative case) - the sign-distinguishing coverage
+  // review 53832 asked for beyond the one worked example.
+  var towingRot = new RotationMatrix().rotateY(15).rotateX(10);
+  var hitchRot = new RotationMatrix().rotateZ(-8);
+  var hookupRot = new RotationMatrix().rotateY(30).rotateX(5);
+
+  var qTowing = HitchJoint.localJointFrame(towingRot);
+  var localFrame1 = HitchJoint.localJointFrame(hitchRot);
+  var localFrame2 = HitchJoint.localJointFrame(hookupRot).invert();
+
+  var sableEnforced = new Quaterniond(qTowing).mul(new Quaterniond(localFrame1)).mul(new Quaterniond(localFrame2).invert());
+  var native_ = new Quaterniond(qTowing).mul(HitchJoint.localJointFrame(hitchRot)).mul(HitchJoint.localJointFrame(hookupRot));
+
+  double angleDiff = new Quaterniond(sableEnforced).invert().mul(native_).angle();
+  assertEquals(0, angleDiff, 1e-6);
+ }
+
  @Test void ordinaryConnectionLocksOnlyLinearAxes() {
   var axes = HitchJoint.lockedAxes(false, false);
   assertEquals(java.util.Set.of(ConstraintJointAxis.LINEAR_X, ConstraintJointAxis.LINEAR_Y, ConstraintJointAxis.LINEAR_Z), axes);

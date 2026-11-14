@@ -689,11 +689,28 @@ public final class PhysicsBridge {
   * {@code TwoBodyLifecycle.create}'s own joint) rather than the world-space points this method
   * previously computed via {@code HitchJoint.anchorWorldPosition}. {@code local_frame1}/
   * {@code local_frame2} are LOCAL joint-frame rotations, not an echo of each body's own world
-  * orientation (also confirmed wrong by the same finding) - but review 53817 caught that this is
-  * NOT simply "always identity" either: the pinned IV24 {@code JSONConnection.rot} field is
-  * explicitly documented as mattering for a mounted/restricted connection's locked pitch/yaw/roll
-  * axes, so each side's own connection {@code rot} (identity when unset - see
-  * {@code HitchJoint.localJointFrame}) is honored instead of being discarded.
+  * orientation (also confirmed wrong by the same finding) - but review 53817/53832 caught that
+  * this is NOT simply "always identity" either, and that a naive direct pass-through of each
+  * side's own {@code rot} gets the SIGN wrong for a mounted/restricted connection:
+  *
+  * <p>Sable's fixed/restricted joint enforces coincidence of each side's own local frame in
+  * world space - {@code Q_towing * local_frame1 == Q_towed * local_frame2}, i.e.
+  * {@code Q_towed = Q_towing * local_frame1 * inverse(local_frame2)} (review 53832's own stated
+  * relation for this constraint, independently exercised by {@code HitchRotationFrameProbe}
+  * below). The pinned IV24 jar's OWN native composition - decompiled directly from
+  * {@code EntityVehicleF_Physics.getForcesAndMotions}'s mounted/restricted branch (consecutive
+  * {@code rotation.set(towingEntity.orientation); rotation.multiply(hitchConnection.rot);
+  * rotation.multiply(hookupConnection.rot)} calls, where {@code RotationMatrix.multiply(other)}
+  * is ordinary {@code this = this*other} composition) - is instead
+  * {@code Q_towed = Q_towing * R_hitch * R_hookup}, with NO inverse on the hookup side. Passing
+  * {@code R_hookup} straight into {@code local_frame2} (this method's first MINECRAFT-525 cut)
+  * therefore produced {@code Q_towing * R_hitch * inverse(R_hookup)} - the WRONG sign for any
+  * non-identity hookup rotation (review's own worked example: a hookup-only +30&deg; rotation
+  * came out -30&deg;). Setting {@code local_frame2 = inverse(R_hookup)} instead makes Sable's own
+  * formula collapse to {@code Q_towing * R_hitch * inverse(inverse(R_hookup))
+  * = Q_towing * R_hitch * R_hookup} - matching native exactly. The hitch side needed no such
+  * correction: it is the FIRST term in both the native composition and Sable's own formula, so
+  * {@code local_frame1 = R_hitch} directly was already right.
   *
   * <p>Known, pre-existing, NOT fixed here (bounded per review 53817's "handle supported endpoints
   * correctly or explicitly bound unsupported cases"): {@code connection.hitchConnection}/
@@ -714,7 +731,7 @@ public final class PhysicsBridge {
   var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center,
     new Vector3d(connection.hookupConnection.pos.x, connection.hookupConnection.pos.y, connection.hookupConnection.pos.z), new Vector3d());
   var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset,
-    HitchJoint.localJointFrame(connection.hitchConnection.rot), HitchJoint.localJointFrame(connection.hookupConnection.rot),
+    HitchJoint.localJointFrame(connection.hitchConnection.rot), HitchJoint.localJointFrame(connection.hookupConnection.rot).invert(),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
   return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
  }

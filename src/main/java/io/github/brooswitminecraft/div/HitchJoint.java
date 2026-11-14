@@ -36,8 +36,9 @@ public final class HitchJoint {
   return dest.set(localOffset).sub(bodyCenter);
  }
  /**
-  * {@code GenericConstraintConfiguration}'s {@code local_frame1}/{@code local_frame2} for one
-  * hitch connection. Review finding (comment 53817): the decompiled, pinned IV24
+  * Converts one hitch connection's {@code JSONConnection.rot} to a joml {@code Quaterniond},
+  * for use as one side of {@code GenericConstraintConfiguration}'s {@code local_frame1}/
+  * {@code local_frame2}. Review finding (comment 53817): the decompiled, pinned IV24
   * {@code JSONConnection.rot} field is explicitly documented as "Used on mounted and restricted
   * connections. Has no effect on other connections" - so an ordinary (unmounted, unrestricted)
   * connection correctly stays IDENTITY regardless of {@code rot} (nothing is locked for it, so
@@ -47,6 +48,11 @@ public final class HitchJoint {
   * (unset in the pack JSON) still means identity - the field's own documented default. Uses the
   * exact same {@code RotationMatrix}-&gt;{@code Quaterniond} conversion already established for a
   * vehicle's own world orientation in {@code PhysicsBridge.Body}'s constructor.
+  *
+  * <p>MINECRAFT-525 review 53832: this converter alone is NOT the full fix for the hookup side -
+  * {@code PhysicsBridge.createHitch}'s own doc comment derives why {@code local_frame2} must be
+  * this method's result INVERTED (not passed straight through) to match IV's native rotation
+  * composition. {@code local_frame1} (the hitch side) needs no such inversion.
   */
  public static Quaterniond localJointFrame(RotationMatrix rot) {
   if (rot == null) return new Quaterniond();

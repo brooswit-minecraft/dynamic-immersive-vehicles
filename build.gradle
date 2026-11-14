@@ -140,6 +140,12 @@ neoForge {
    if (System.getenv('DIV_DIRECTIONAL_GROUND_SURFACE_PROBE') == 'true') {
     jvmArgument('-Ddiv.experimentalDirectionalGroundSurfaceProbe=true')
    }
+   // MINECRAFT-525 review (comment 53817/53832): opt-in hitch rotation-frame composition
+   // probe - same gating pattern as every other probe above; OFF for every normal
+   // `gradle runServer`.
+   if (System.getenv('DIV_HITCH_ROTATION_FRAME_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalHitchRotationFrameProbe=true')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
