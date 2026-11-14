@@ -1560,3 +1560,82 @@ touches the same `Overrides.java`/`PhysicsBridge.java` regions before this
 PR merges, another integration-and-rereview round will be needed the same
 way this one was, and this ticket's own PR will need to check for that
 before merging, not assume it's already been accounted for here.
+
+## Fixed-wing/rotorcraft real-runtime regression fixtures (MINECRAFT-526)
+
+Closes the disclosed gap both MINECRAFT-521 (PR #19: "No live
+`EntityVehicleF_Physics`/Sable runtime fixture exists in this repo -
+`stepFlight`'s actual force/torque application is not unit-testable") and
+MINECRAFT-522 (PR #17: "In-game helicopter feel/calibration - not run this
+pass") carried in their own test plans. `FlightForcesTest`/`RotorForcesTest`
+already prove the pure math correct in isolation; nothing before this
+ticket exercised the actual live decision `PhysicsBridge.Body.step` makes -
+dispatching a real spawned vehicle to `stepFlight`/`stepRotor` via the
+`VehicleMovementMixin`/`VehicleForcesMixin` seam, against a real
+`Overrides`-resolved `tuning` object on a live Sable body.
+
+Adds `experimental/FlightRotorRuntimeFixtureProbe.java`: opt-in
+(`-Ddiv.experimentalFlightRotorRuntimeFixtureProbe=true`), dev/isolated-
+host-only, OFF by default - the same convention every other probe in this
+package already uses (`BrakeSweepProbe`, `TurnComparisonProbe`, etc.). Runs
+6 scenarios strictly sequentially (one fixed-wing, one rotorcraft, times
+three roles): `*-activation-default` (proves the vehicle is actually
+PhysicsBridge-managed and dispatched to the correct stepper - a
+misdispatched vehicle would simply free-fall at `g`=9.81 m/s^2 with no
+corrective force, trivially distinguishable from the damped response an
+engaged `stepFlight`/`stepRotor` actually produces - and logs that response
+as the unconfigured/FALLBACK baseline), `*-configured` (an operator
+override already in place at spawn - `liftSlope`/`controlSurfaceSlope` for
+fixed-wing, `cyclicLimitDegrees`/`cyclicAuthorityScale`/`yawAuthorityScale`
+for rotorcraft - re-runs the identical control input and logs the same
+metrics for comparison against the baseline), and `*-live-reload` (starts
+unconfigured, observes a baseline window, then calls the exact production
+hot-reload entrypoint `PhysicsBridge.reloadOverrides()` - the same one
+`OverridesHotReload` calls on its own mtime-poll - against a VALID edit to
+the live config file for this same still-active vehicle with no respawn,
+observes the response change in place, then calls it again against an
+INVALID edit (`liftSlope=-1` / `cyclicLimitDegrees=0`, both out of
+`Overrides.Tuning#validate`'s own range) and logs whether the VALID
+response was retained unchanged rather than falling back to FALLBACK or
+breaking).
+
+No block platform is built (unlike every ground-domain probe) - flight/
+rotor scenarios need no solid ground, only the chunk grid above to be
+loaded/generated. Writes to the shared
+`run/config/dynamic-immersive-vehicles.json` are read-merge-write (never a
+blind overwrite, so nothing an operator or another fixture already has
+there is lost) and the file's pre-probe content is snapshotted and restored
+verbatim once all scenarios finish - deterministic, bounded cleanup, same
+requirement this ticket's own scope names explicitly.
+
+**What this proves:** the dispatch/live-field-application seam actually
+works end to end on a real spawned vehicle, for both vehicle categories,
+across all four of this ticket's named cases (activation, default
+response, configured response, valid/invalid live reload). **What this
+does NOT prove:** that the resulting flight/hover feel is well-tuned,
+realistic, or calibrated - same disclosed limit `BrakeSweepProbe` itself
+already carries for ground feel, and no change to any production force
+model, default, or precedence/validation behavior is made by this ticket.
+
+**Evidence actually gathered this pass:** this file compiles against the
+real `mts.jar`/Sable/Sable Companion/joml/this repo's exact pinned NeoForge
+classpath (`gradle --offline compileJava`, `BUILD SUCCESSFUL`, rerun from
+clean with `--rerun-tasks`), and the full existing suite still passes
+unmodified: `gradle --offline test --rerun-tasks` - `BUILD SUCCESSFUL`, the
+real JUnit XML reports **605 tests**, 0 skipped, 0 failures, 0 errors
+(unchanged from the pre-existing combined head above - this ticket adds no
+new unit tests of its own, since the probe's entire point is exercising the
+one thing a plain JUnit test structurally cannot: a live
+`EntityVehicleF_Physics`/Sable runtime). **Disclosed limit, same category
+every prior flight/rotor ticket has carried:** this probe has NOT yet been
+run against an actual live dev server (hosted CI remains billing-blocked
+per this file's own repeated note, and no live Minecraft server/world is
+available in this engineering pass) - the scenario speeds/tilt angles/
+bounds chosen are reasoned from this repo's own force-model formulas
+(documented inline at each constant in the probe itself) to stay within the
+same loaded-chunk/world-generation budget `BrakeSweepProbe`'s own review
+history (53327/53330) already proved safe, not an empirically live-tuned
+value. An operator doing the first live run should treat a watchdog timeout
+or an out-of-bounds failure as a signal to shrink the observe-window tick
+counts or speeds further, the same iterative process that review history
+already went through for the ground domain.
