@@ -1714,3 +1714,51 @@ test - plus every other test unchanged).
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
 again. Slot released immediately after; M526 claimed it next per the
 stated order.
+
+**Third review round (comment 53855) - acceptance pending integration,
+plus a doc-wording fix.** Independent technical review accepted head
+`6484196` (631 tests: exact-unset ratios, native-metadata correction,
+missing-contact magnitude and isolated skid-multiplier tests all found
+sound) but withheld formal approval pending two things: (1)
+`DriveBiasDistribution`'s own "Conservation" doc overclaimed the BIASED
+branch's own conservation as exact arithmetic ("never a renormalized
+approximation") - only `shareRatios`' unset/degenerate FALLBACK case
+actually carries a byte-exact requirement; fixed (`f3cd160`, doc-only, no
+logic change) to state the biased branch's own division is ordinary
+floating-point arithmetic with a tolerance claim, matching what the tests
+already assert (`assertEquals(..., 1e-9)`, never tolerance-0). (2)
+MINECRAFT-523's own damping PR #22 (`f3d7f8a`) had formal approval and was
+instructed to land on `main` first, with this ticket then required to
+integrate the merged `main`, preserve both tickets' schema/ground changes,
+and present a final combined head for formal approval - rather than
+approving/merging an intermediate head that would go stale the moment
+PR #22 landed.
+
+**Integration.** Confirmed PR #22 merged to `main` at `46fc2fb` (merge
+commit; `f3d7f8a` is its own head). `git fetch origin && git merge
+origin/main --no-edit` into this branch produced conflicts in
+`README.md`, `Overrides.java`, `PhysicsBridge.java`, and
+`PhysicsBridgeLiveOverrideApplicationTest.java` - the same shared-schema
+regions (`Tuning` field declarations, `validate()`/
+`validateSupportedForPart()`/`copy()`/`mergeOntoParent()`/`resolveFields()`,
+`applyLiveSafeFields`, the live-safe-field list in both code and prose,
+and the config-reference table) every prior multi-ticket integration in
+this file has hit. Resolved by hand, keeping BOTH tickets' fields side by
+side everywhere (this ticket's `driveBiasFront`/`driveShareRatio`
+alongside MINECRAFT-523's `suspensionDampingRatio`/stability-bound
+validation) - nothing dropped from either side. `OverridesTest.java` and
+`docs/dynamic-immersive-vehicles.example.json` merged cleanly with no
+conflicts. Merge commit `9f4e737dd18b2e48dc5f292ef4baff11cbc55d64`.
+
+Local slot-lock coordination (claimed 2026-11-14T04:51:01Z, released
+2026-11-14T04:51:42Z; no concurrent process observed - M526 had already
+released at 04:48:07Z per its own entry in the shared slot log).
+`/tmp/gradle-8.14/bin/gradle --offline clean build test --console=plain`
+against the merge commit `9f4e737dd18b2e48dc5f292ef4baff11cbc55d64` -
+`BUILD SUCCESSFUL` in 40s, 8 tasks (8 executed). The real JUnit XML
+reports total **645 tests**, 0 skipped, 0 failures, 0 errors (this
+ticket's 631 plus MINECRAFT-523's own 14 net-new tests from `main`, all
+exercised together for the first time at this combined head).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
+again. This is the final combined head presented for formal approval -
+`9f4e737dd18b2e48dc5f292ef4baff11cbc55d64`.
