@@ -1639,3 +1639,24 @@ value. An operator doing the first live run should treat a watchdog timeout
 or an out-of-bounds failure as a signal to shrink the observe-window tick
 counts or speeds further, the same iterative process that review history
 already went through for the ground domain.
+
+**Self-review correction (head `fe415f8` -> this head).** Two required
+fixes found by review before `wroosbit`'s substantive pass: (1)
+`waitTerrain` forced a 13x13 chunk grid via `setChunkForced(..., true)` but
+no path ever unforced it - both the normal-completion and terrain-timeout
+paths left all 169 chunks permanently forced. (2) Once
+`writeInitialConfigOnce` had snapshotted and started editing the shared
+`dynamic-immersive-vehicles.json`, an initial-reload failure jumped
+straight to `ALL_DONE` and a `mergeVehicleOverrideAndWrite` write failure
+was only logged, not treated as a reason to stop - both bypassed
+restoration and could leave the probe's own test overrides in the shared
+config. Fixed by adding a `RELEASE_CHUNKS` terminal phase (unconditionally
+unforces the whole grid - a no-op for any coordinate never actually
+forced) that every path now funnels through via `RESTORE_CONFIG`
+(`configWasWritten` tracks whether anything was actually written, so a
+failure before the first write correctly skips restoration instead of
+restoring a snapshot that was never taken); `mergeVehicleOverrideAndWrite`
+now returns a success boolean every caller checks before proceeding to
+reload/run. Re-verified after the fix: `gradle --offline compileJava
+--rerun-tasks` - `BUILD SUCCESSFUL`; `gradle --offline test --rerun-tasks`
+- `BUILD SUCCESSFUL`, 605 tests, 0 failures, 0 errors (unchanged).

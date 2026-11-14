@@ -133,7 +133,7 @@ public final class FlightRotorRuntimeFixtureProbe {
  private enum Kind { FIXED_WING, ROTOR }
  private enum Role { ACTIVATION_DEFAULT, CONFIGURED, LIVE_RELOAD }
  private enum Phase { SPAWNING, SETTLE, OBSERVE, OBSERVE_BASELINE, APPLY_VALID, OBSERVE_VALID, APPLY_INVALID, OBSERVE_INVALID, DONE, FAILED }
- private enum GlobalPhase { WAIT_TERRAIN, WRITE_INITIAL_CONFIG, RUN_SCENARIOS, RESTORE_CONFIG, ALL_DONE }
+ private enum GlobalPhase { WAIT_TERRAIN, WRITE_INITIAL_CONFIG, RUN_SCENARIOS, RESTORE_CONFIG, RELEASE_CHUNKS, ALL_DONE }
 
  private static final class Scenario {
   final String label, systemName; final Kind kind; final Role role;
@@ -160,6 +160,12 @@ public final class FlightRotorRuntimeFixtureProbe {
  // requirement this ticket's own scope names explicitly).
  private static String originalConfigContent;
  private static boolean originalConfigExisted;
+ // True from the moment writeInitialConfigOnce's snapshot succeeds - every exit from that point
+ // on (success, a later write/reload failure, or a scenario failure) MUST pass through
+ // RESTORE_CONFIG before ALL_DONE. Before the snapshot succeeds, nothing has been written, so
+ // restoreConfigOnce's own check of this flag correctly no-ops instead of restoring a snapshot
+ // that was never taken.
+ private static boolean configWasWritten = false;
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -168,6 +174,7 @@ public final class FlightRotorRuntimeFixtureProbe {
    case WRITE_INITIAL_CONFIG -> writeInitialConfigOnce();
    case RUN_SCENARIOS -> runScenarios(level);
    case RESTORE_CONFIG -> restoreConfigOnce();
+   case RELEASE_CHUNKS -> releaseChunksOnce(level);
    case ALL_DONE -> {}
   }
  }
@@ -182,10 +189,15 @@ public final class FlightRotorRuntimeFixtureProbe {
      level.setChunkForced(CHUNK_X + dx, CHUNK_Z + dz, true);
      allLoaded = false;
     }
+  // Every WAIT_TERRAIN exit (success below, or the timeout below) now funnels through
+  // RESTORE_CONFIG -> RELEASE_CHUNKS rather than jumping straight to ALL_DONE, so a chunk forced
+  // on an earlier tick of this same loop (even one abandoned by a timeout) is still released -
+  // see releaseChunksOnce, which unconditionally unforces the whole grid rather than tracking
+  // exactly which coordinates were forced (unforcing an already-unforced coordinate is a no-op).
   if (allLoaded) { globalPhase = GlobalPhase.WRITE_INITIAL_CONFIG; return; }
   if (terrainWaitTicksElapsed > MAX_TERRAIN_WAIT_TICKS) {
    LOGGER.error("[DIV flightRotorFixture] FAILED - terrain chunk grid never finished loading");
-   globalPhase = GlobalPhase.ALL_DONE;
+   globalPhase = GlobalPhase.RESTORE_CONFIG;
   }
  }
 
@@ -198,7 +210,10 @@ public final class FlightRotorRuntimeFixtureProbe {
   * WITHOUT disturbing any other entry already present, and writes the result back - never a
   * blind full-file overwrite, so nothing an operator (or another probe/regression fixture) has
   * already configured on this shared file is lost. */
- private static void mergeVehicleOverrideAndWrite(String key, Map<String, Double> fields) {
+ /** @return true on a successful write, false on a failure the caller must treat as a reason to
+  * abort (routing through RESTORE_CONFIG) rather than proceeding to reload/run on a config file
+  * that may be half-written or still the pre-probe original. */
+ private static boolean mergeVehicleOverrideAndWrite(String key, Map<String, Double> fields) {
   JsonObject root;
   try {
    root = JsonParser.parseString(Files.readString(configPath())).getAsJsonObject();
@@ -213,8 +228,10 @@ public final class FlightRotorRuntimeFixtureProbe {
   try {
    Files.createDirectories(configPath().getParent());
    Files.writeString(configPath(), gson().toJson(root));
+   return true;
   } catch (IOException ex) {
    LOGGER.error("[DIV flightRotorFixture] FAILED to write config at " + configPath(), ex);
+   return false;
   }
  }
 
@@ -223,10 +240,16 @@ public final class FlightRotorRuntimeFixtureProbe {
    originalConfigExisted = Files.exists(configPath());
    originalConfigContent = originalConfigExisted ? Files.readString(configPath()) : null;
   } catch (IOException ex) {
+   // Nothing has been written yet (the snapshot read itself is what failed) - configWasWritten
+   // stays false, so restoreConfigOnce correctly treats this as a no-op rather than restoring a
+   // snapshot that was never taken.
    LOGGER.error("[DIV flightRotorFixture] FAILED to snapshot existing config before writing - aborting rather than risk losing it", ex);
-   globalPhase = GlobalPhase.ALL_DONE;
+   globalPhase = GlobalPhase.RESTORE_CONFIG;
    return;
   }
+  // From here on this probe is about to modify the shared config file - every subsequent exit,
+  // success or failure, MUST pass through RESTORE_CONFIG (never ALL_DONE directly).
+  configWasWritten = true;
   var packSpeedFactors = ConfigSystem.settings.general.packSpeedFactors.value;
   var packVehicleScales = ConfigSystem.settings.general.packVehicleScales.value;
   packSpeedFactors.putIfAbsent(PACK_ID, 1.0);
@@ -236,15 +259,21 @@ public final class FlightRotorRuntimeFixtureProbe {
   // and LIVE_RELOAD's own systemNames are deliberately absent from the file at this point, so
   // Overrides.resolved(...) falls through to FALLBACK for them exactly like an unconfigured real
   // vehicle (LIVE_RELOAD writes its own entry live, mid-scenario - see applyValidConfig below).
-  mergeVehicleOverrideAndWrite(PACK_ID + ":" + "fw-configured",
-    Map.of("liftSlope", 9.5, "controlSurfaceSlope", 9.5));
-  mergeVehicleOverrideAndWrite(PACK_ID + ":" + "rotor-configured",
-    Map.of("cyclicLimitDegrees", 35.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0));
+  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + "fw-configured",
+      Map.of("liftSlope", 9.5, "controlSurfaceSlope", 9.5))) {
+   globalPhase = GlobalPhase.RESTORE_CONFIG;
+   return;
+  }
+  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + "rotor-configured",
+      Map.of("cyclicLimitDegrees", 35.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0))) {
+   globalPhase = GlobalPhase.RESTORE_CONFIG;
+   return;
+  }
   var report = PhysicsBridge.reloadOverrides();
   LOGGER.info("[DIV flightRotorFixture] initial CONFIGURED overrides written and reloaded: " + report.configResult().message());
   if (!report.configResult().success()) {
    LOGGER.error("[DIV flightRotorFixture] FAILED - the initial CONFIGURED-scenario override file itself failed to validate: " + report.configResult().message());
-   globalPhase = GlobalPhase.ALL_DONE;
+   globalPhase = GlobalPhase.RESTORE_CONFIG;
    return;
   }
   LOGGER.info("[DIV flightRotorFixture] running " + scenarios.size() + " scenarios sequentially: "
@@ -536,7 +565,10 @@ public final class FlightRotorRuntimeFixtureProbe {
   Map<String, Double> fields = s.kind == Kind.FIXED_WING
     ? Map.of("liftSlope", 9.5, "controlSurfaceSlope", 9.5)
     : Map.of("cyclicLimitDegrees", 35.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0);
-  mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, fields);
+  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, fields)) {
+   fail(s, "FAILED to write the VALID config to disk - aborting this scenario rather than reloading a possibly-stale file");
+   return;
+  }
   var report = PhysicsBridge.reloadOverrides();
   if (!report.configResult().success()) {
    fail(s, "VALID live-reload unexpectedly FAILED to apply: " + report.configResult().message() + " - this is itself a finding, not expected scenario behavior");
@@ -556,7 +588,10 @@ public final class FlightRotorRuntimeFixtureProbe {
   Map<String, Double> fields = s.kind == Kind.FIXED_WING
     ? Map.of("liftSlope", -1.0, "controlSurfaceSlope", 9.5)
     : Map.of("cyclicLimitDegrees", 0.0, "cyclicAuthorityScale", 4.0, "yawAuthorityScale", 3.0);
-  mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, fields);
+  if (!mergeVehicleOverrideAndWrite(PACK_ID + ":" + s.systemName, fields)) {
+   fail(s, "FAILED to write the INVALID config to disk - aborting this scenario rather than reloading a possibly-stale file");
+   return;
+  }
   var report = PhysicsBridge.reloadOverrides();
   if (report.configResult().success()) {
    fail(s, "INVALID live-reload unexpectedly SUCCEEDED (should have been rejected, retaining the prior VALID config) - this is a regression finding, not expected scenario behavior: " + report.configResult().message());
@@ -569,15 +604,38 @@ public final class FlightRotorRuntimeFixtureProbe {
   s.windowStartVerticalSpeed = verticalSpeedMps(s);
  }
 
+ /** Reached from every terminal path once this probe might have touched the shared config file
+  * (success, a terrain timeout, a snapshot/write/reload failure, or a scenario failure) - see
+  * {@code configWasWritten}'s own doc. Always advances to {@link GlobalPhase#RELEASE_CHUNKS}
+  * next, so the forced-chunk cleanup below runs unconditionally regardless of how this probe
+  * exited. */
  private static void restoreConfigOnce() {
-  try {
-   if (originalConfigExisted) Files.writeString(configPath(), originalConfigContent);
-   else Files.deleteIfExists(configPath());
-  } catch (IOException ex) {
-   LOGGER.error("[DIV flightRotorFixture] FAILED to restore original config at " + configPath() + " - manual cleanup needed", ex);
+  if (configWasWritten) {
+   try {
+    if (originalConfigExisted) Files.writeString(configPath(), originalConfigContent);
+    else Files.deleteIfExists(configPath());
+   } catch (IOException ex) {
+    LOGGER.error("[DIV flightRotorFixture] FAILED to restore original config at " + configPath() + " - manual cleanup needed", ex);
+   }
+   var report = PhysicsBridge.reloadOverrides();
+   LOGGER.info("[DIV flightRotorFixture] original config restored and reloaded: " + report.configResult().message());
+  } else {
+   LOGGER.info("[DIV flightRotorFixture] no config was ever written by this probe run - nothing to restore");
   }
-  var report = PhysicsBridge.reloadOverrides();
-  LOGGER.info("[DIV flightRotorFixture] all scenarios finished; original config restored and reloaded: " + report.configResult().message());
+  globalPhase = GlobalPhase.RELEASE_CHUNKS;
+ }
+
+ /** Unconditionally unforces the entire WAIT_TERRAIN grid - including any coordinate that was
+  * never actually forced (a plain no-op for those), so this needs no separate tracking of which
+  * specific coordinates WAIT_TERRAIN forced before a possible timeout. Always the last real step
+  * before ALL_DONE, reached from every terminal path via {@link #restoreConfigOnce} - a forced
+  * chunk left behind (review finding on the first version of this file) would otherwise persist
+  * in the saved world indefinitely. */
+ private static void releaseChunksOnce(ServerLevel level) {
+  for (int dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++)
+   for (int dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++)
+    level.setChunkForced(CHUNK_X + dx, CHUNK_Z + dz, false);
+  LOGGER.info("[DIV flightRotorFixture] released every forced chunk in the WAIT_TERRAIN grid - ALL_DONE");
   globalPhase = GlobalPhase.ALL_DONE;
  }
 }
