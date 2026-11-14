@@ -522,6 +522,12 @@ after changes.
       "propellerForce": 6000.0,
       "angularWaterDrag": 0.0,
       "maxSteerDegrees": 30.0
+    },
+    "examplepack:ordinary_plane": {
+      "driveForce": 9000.0,
+      "stallAngleDegrees": 15.0,
+      "liftSlope": 6.283185307179586,
+      "controlSurfaceSlope": 6.283185307179586
     }
   }
 }
@@ -577,6 +583,29 @@ scale (no unpowered free torque). A copyable example is also
 available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
 
+The three fields above a fixed-wing aircraft or blimp specifically uses -
+`stallAngleDegrees`, `liftSlope`, and `controlSurfaceSlope` (MINECRAFT-521) -
+are ignored by a ground or rotorcraft vehicle (a rotorcraft has no wing/
+control-surface model for them to act on; see the rotor bullet above):
+
+| Field | Units | Valid range | Default (unconfigured) |
+| --- | --- | --- | --- |
+| `stallAngleDegrees` | degrees | `(0, 45]` | `15.0` |
+| `liftSlope` | per radian of angle of attack | `(0, 10]` | `6.283185307179586` (`2*pi`) |
+| `controlSurfaceSlope` | per radian of aileron/elevator/rudder deflection | `(0, 10]` | `6.283185307179586` (`2*pi`) |
+
+`stallAngleDegrees` is the hard cutoff angle of attack beyond which wing
+lift stops growing (a simplified thin-airfoil model, not a literal
+post-stall/spin simulation - see the fixed-wing bullet above); `liftSlope`
+is how steeply lift grows with angle of attack below that cutoff; and
+`controlSurfaceSlope` is the separate, independently-tunable per-radian
+authority of the aileron/elevator/rudder control surfaces themselves (no
+longer tied to the wing's own `liftSlope`). None of the three has any
+effect on a blimp's buoyancy/ballast or on a rotorcraft's rotor lift/
+cyclic/yaw authority - only on a fixed-wing vehicle's own wing lift and
+control-surface torque. Every field above the documented default (the exact
+prior hardcoded behavior) is omittable independently of the other two.
+
 ### Part overrides, templates, and `extends`
 
 Alongside `vehicles`, the config accepts two more top-level maps:
@@ -627,8 +656,9 @@ break anything already running.
 A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
-`propellerForce`, `angularWaterDrag`, `cyclicLimitDegrees`,
-`cyclicAuthorityScale`, `yawAuthorityScale`, `brakeBiasFront`. Fields baked in at vehicle construction - `massKg`,
+`propellerForce`, `angularWaterDrag`, `stallAngleDegrees`, `liftSlope`,
+`controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
+`yawAuthorityScale`, `brakeBiasFront`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
