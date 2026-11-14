@@ -151,7 +151,11 @@ neoForge {
    // own "_OFF" variant already does for its own comparison baseline.
    if (System.getenv('DIV_FLIGHT_ROTOR_RUNTIME_FIXTURE_PROBE') == 'true') {
     jvmArgument('-Ddiv.experimentalFlightRotorRuntimeFixtureProbe=true')
-    jvmArgument('-Ddiv.experimentalTwoBodyChassis=false')
+    // MINECRAFT-527 (merged to main, PR #25) fixed the real production defect this ticket's own
+    // live runs discovered: PhysicsBridge.Body.useTwoBody now excludes any non-GROUND stepper
+    // automatically, regardless of the global flag's own value - so this probe no longer needs
+    // to force the flag off. Left at its real default (unset/true) so this probe now validates
+    // the actual production default, not an isolated workaround.
     jvmArgument('-Ddiv.debugGroundContact=true')
    }
   }

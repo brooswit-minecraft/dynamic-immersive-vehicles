@@ -2021,3 +2021,25 @@ exercised together for the first time at this combined head).
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
 again. This is the final combined head presented for formal approval -
 `9f4e737dd18b2e48dc5f292ef4baff11cbc55d64`.
+
+**MINECRAFT-527 landed on main (PR #25) - removed this ticket's own workaround,
+validated the real production fix instead.** `PhysicsBridge.Body.useTwoBody`
+now excludes any non-GROUND stepper (and any buoyancy-applying one)
+automatically, regardless of the global `experimentalTwoBodyChassis`
+property's own value - exactly the fix review 53878/comment history on this
+ticket called for. Merged current `main` (`df6e5db`) into this branch
+(clean auto-merge, no conflicts); removed this probe's own
+`-Ddiv.experimentalTwoBodyChassis=false` override from its `build.gradle`
+gate, since it is no longer necessary - the real, unmodified default now
+correctly routes flight/rotor vehicles to one-body.
+
+Re-verified: `gradle --offline compileJava/test --rerun-tasks` - `BUILD
+SUCCESSFUL`, 648 tests, 0 failures, 0 errors (further net-new tests from
+main's own M527 merge). Live run 8 (`/tmp/m526-live-run8.log`, 2026-11-14
+~06:18-06:23 UTC, shared-slot flock) with the override REMOVED: `ALL
+SCENARIOS FINISHED - 6/6 PASSED`, and the per-vehicle `chassisReceipt`
+diagnostic lines confirm `experimentalTwoBodyChassis=true` - the real,
+unmodified production default - for every scenario, not a forced-off test
+isolation flag. This is now the strongest evidence this ticket can offer:
+the real production default, unmodified, correctly manages fixed-wing and
+rotorcraft vehicles end to end.
