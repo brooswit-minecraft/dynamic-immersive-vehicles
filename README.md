@@ -548,6 +548,19 @@ there. The parking brake and the separate analog handbrake are both
 unaffected by this bias - it only redistributes the adjustable service-
 brake pedal's own budget.
 
+`driveBiasFront` (optional, 0.0-1.0) splits `driveForce`'s total budget
+between the front and rear axle, instead of evenly across every wheel -
+same geometric front/rear axle grouping, same conservation, and the same
+unset/degenerate-layout fallback to the even split as `brakeBiasFront`
+above (see that field's own paragraph for the full reasoning, and
+[`DriveBiasDistribution`](src/main/java/io/github/brooswitminecraft/div/DriveBiasDistribution.java)
+for the implementation). `0.0` sends the whole drive budget to the rear
+axle, `1.0` sends it all to the front axle, `0.5` is the neutral even axle
+split. Leaving it unset is a strict no-op: driveForce is still split evenly
+across every wheel exactly as before this option existed. This is a
+geometric budget split only - not a differential, not traction control,
+and not a gear-ratio simulation.
+
 `massKg` is optional; omit it to use IV's calculated vehicle mass. The four
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
@@ -658,7 +671,7 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
-`yawAuthorityScale`, `brakeBiasFront`. Fields baked in at vehicle construction - `massKg`,
+`yawAuthorityScale`, `brakeBiasFront`, `driveBiasFront`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The

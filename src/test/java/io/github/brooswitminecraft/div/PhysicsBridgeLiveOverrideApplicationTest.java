@@ -26,6 +26,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.angularWaterDrag = 50.0; fresh.antiRollStiffness = 0.4;
   fresh.stallAngleDegrees = 12.0; fresh.liftSlope = 5.0; fresh.controlSurfaceSlope = 4.0;
   fresh.brakeBiasFront = 0.65;
+  fresh.driveBiasFront = 0.3;
   // MINECRAFT-522: the three new rotor fields must go through this same live-mutation path -
   // John's review (comment 53751) flagged that this test exercised every pre-existing live-safe
   // field but never changed/asserted these.
@@ -38,8 +39,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(0.4, target.antiRollStiffness);
   assertEquals(12.0, target.stallAngleDegrees); assertEquals(5.0, target.liftSlope); assertEquals(4.0, target.controlSurfaceSlope);
   assertEquals(0.65, target.brakeBiasFront);
+  assertEquals(0.3, target.driveBiasFront);
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
-  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront",
+  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
       "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale"),
     new TreeSet<>(applied));
  }

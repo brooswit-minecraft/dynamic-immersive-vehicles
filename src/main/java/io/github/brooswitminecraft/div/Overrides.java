@@ -153,6 +153,17 @@ public final class Overrides {
   // brake and the separate analog handbrake - see PhysicsBridge.perWheelBrakeMagnitude's own doc
   // for why those two never get redistributed by this bias.
   public Double brakeBiasFront;
+  // MINECRAFT-524: configurable front/rear DRIVE-force distribution, same shape as
+  // brakeBiasFront immediately above (same geometric front/rear axle grouping, same
+  // conservation, same fallback) but for tuning.driveForce's budget instead of brakeForce's -
+  // see DriveBiasDistribution's own doc for the full reasoning, deliberately mirrored field-for-
+  // field. 0.0 sends the whole drive budget to the geometric rear axle group, 1.0 sends it all
+  // to the front group, 0.5 is the neutral/even axle split. No FALLBACK entry (like
+  // brakeBiasFront) - null/unset means "no operator bias configured at all", reproducing the
+  // exact pre-ticket behavior (plain driveForce/wheelCount for every wheel), not merely a 0.5
+  // default. This is a geometric budget split only - not a differential, not traction control,
+  // and not a gear-ratio simulation (see DriveBiasDistribution's own doc).
+  public Double driveBiasFront;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -212,6 +223,10 @@ public final class Overrides {
    // lateralGripMultiplier's exclusive-zero: a brake bias of exactly 0 or 1 is a normal,
    // physically sensible configuration (e.g. a rear-brakes-only trike), not a degenerate one.
    if (brakeBiasFront != null && !(Double.isFinite(brakeBiasFront) && brakeBiasFront >= 0 && brakeBiasFront <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Same inclusive [0,1] shape as brakeBiasFront above, for the same reason: an exact 0 or 1
+   // drive bias (e.g. a front-wheel-drive-only or rear-wheel-drive-only configuration) is a
+   // normal, physically sensible setting, not a degenerate one.
+   if (driveBiasFront != null && !(Double.isFinite(driveBiasFront) && driveBiasFront >= 0 && driveBiasFront <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
   }
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
@@ -253,6 +268,7 @@ public final class Overrides {
    if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
    if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
+   if (driveBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'driveBiasFront' (vehicle-only concept - a part has no own axle position)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -296,6 +312,7 @@ public final class Overrides {
   c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.brakeBiasFront=t.brakeBiasFront;
+  c.driveBiasFront=t.driveBiasFront;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -329,6 +346,7 @@ public final class Overrides {
   m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
   m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
+  m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
   return m;
  }
  /**
@@ -515,6 +533,10 @@ public final class Overrides {
   // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
   // needs to reproduce the pre-ticket even split.
   result.brakeBiasFront = firstNonNull(override!=null?override.brakeBiasFront:null, packMetadata!=null?packMetadata.brakeBiasFront:null, ivAdapted!=null?ivAdapted.brakeBiasFront:null, physicallyDerived!=null?physicallyDerived.brakeBiasFront:null);
+  // MINECRAFT-524: same "no FALLBACK entry" shape as brakeBiasFront immediately above, for the
+  // same reason - stays null (no bias configured) unless some level actually sets it, which is
+  // exactly the signal DriveBiasDistribution needs to reproduce the pre-ticket even split.
+  result.driveBiasFront = firstNonNull(override!=null?override.driveBiasFront:null, packMetadata!=null?packMetadata.driveBiasFront:null, ivAdapted!=null?ivAdapted.driveBiasFront:null, physicallyDerived!=null?physicallyDerived.driveBiasFront:null);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

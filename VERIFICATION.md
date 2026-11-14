@@ -1560,3 +1560,78 @@ touches the same `Overrides.java`/`PhysicsBridge.java` regions before this
 PR merges, another integration-and-rereview round will be needed the same
 way this one was, and this ticket's own PR will need to check for that
 before merging, not assume it's already been accounted for here.
+
+## Configurable front/rear drive-force distribution (MINECRAFT-524, added 2026-11-13)
+
+Bounded M507 slice (the bounded-scope instruction on the ticket itself):
+inspected the native IV driven-wheel metadata first (decompiled `mts.jar`
+via `javap` - `JSONPart.JSONPartGroundDevice`/`PartWheel` have no per-wheel
+powered/drivetrain-membership field at all, only `isWheel`/`isTread`/
+`canGoFlat`/friction fields; `JSONPartDefinition.isSpare` is the one
+drive-relevant exclusion flag, and `PhysicsBridge#groundContacts` already
+excludes `isSpare` wheels from the `wheels` list `stepGround` splits the
+drive budget across). Confirmed `stepGround`'s pre-ticket behavior was
+`drive/wheels.size()` - a plain even split with no axle distinction, the
+exact `brakeForce/wheels.size()` shape MINECRAFT-520 fixed for braking.
+
+Implementation deliberately mirrors MINECRAFT-520's own
+`BrakeBiasDistribution`/`brakeBiasFront` field-for-field (same geometric
+front/rear axle grouping off each wheel's own `z` anchor, same exact-1.0
+conservation, same unset/degenerate-layout fallback to the even split):
+new `DriveBiasDistribution` class, new `Overrides.Tuning#driveBiasFront`
+(0.0-1.0, no FALLBACK entry - null means unset, rejected on `parts`
+entries since a part has no own axle position, live-hot-reloaded via
+`applyLiveSafeFields` the same as `brakeBiasFront`), and a new
+`driveShareRatio` field on `MultiContactFrictionSolver.FrictionContact`
+(default 1.0 in every existing shorter constructor, so every pre-existing
+call site - including every other ticket's own tests - is unaffected byte-
+identically) that `solveFriction`'s drive branch now multiplies into
+`driveForcePerWheel*skidSteerMultiplier`, composing with skid-steer/tracks
+the same way `brakeMagnitude` already composes for braking. Explicitly
+documented (class doc, `Overrides.Tuning#driveBiasFront`'s own comment,
+README) as a geometric budget split only - not a differential, not
+traction control, and not a gear-ratio simulation, per the ticket's own
+explicit constraint.
+
+Evidence named by the ticket: `DriveBiasDistributionTest` covers
+conservation, front/rear extremes (0.0/1.0), odd/asymmetric wheel counts,
+multi-axle lumping, reversed/ambiguous layouts, and the unset-bias/
+degenerate-layout fallback to the exact pre-ticket even split (mirrors
+`BrakeBiasDistributionTest`). `ServiceDriveBiasTest` is the real
+production-path integration against the actual
+`MultiContactFrictionSolver.solveFriction` on a representative 4-wheel
+layout: conservation across several bias values, front-only and rear-only
+drive still accelerating the vehicle forward from rest, reverse travel
+(negative `driveForcePerWheel`, mirroring the engine's own
+`Math.signum(currentGearVar)` sign flip) still accelerating backward
+regardless of bias, asymmetric (trike-like) wheel counts, and a wheel
+missing its own ground contact this tick simply losing its own share
+rather than having it redistributed to the others (mirrors
+`ServiceBrakeBiasTest`). `OverridesTest` and
+`PhysicsBridgeLiveOverrideApplicationTest` gained `driveBiasFront`
+coverage mirroring their existing `brakeBiasFront` cases (range validation
+at both inclusive extremes, no-fallback-stays-null, full precedence chain,
+part-override rejection, and live hot-reload mutation).
+
+Local slot-lock coordination (per ticket comments 53806/53810/53820/53823
+- a live multi-agent coordination exchange on this ticket itself, a shared
+cooperative `flock` on `/tmp/div-gradle-slot.lock` held for the whole
+Gradle lifetime, claimed 2026-11-14T04:17:51Z, released immediately after
+completion at 2026-11-14T04:19:04Z, no concurrent Java/Gradle process of
+another owner observed at claim time). `/tmp/gradle-8.14/bin/gradle
+--offline clean build test --console=plain`, Gradle 8.14 / JDK 21
+(Temurin), against this branch
+(`minecraft-524/front-rear-drive-force-distribution`) at head `1364dbc`
+(origin/main) - `BUILD SUCCESSFUL` in 1m 12s, 8 tasks (7 executed, 1
+up-to-date). The real JUnit XML reports total **627 tests**, 0 skipped, 0
+failures, 0 errors across the whole suite (11 from the new
+`DriveBiasDistributionTest` and 7 from the new `ServiceDriveBiasTest`,
+plus every pre-existing test run unchanged alongside them - confirming
+this change introduces no regression anywhere else in the suite, skid-
+steer/tracks and MINECRAFT-520's own brake-bias behavior included).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced.
+
+Not yet performed: in-game acceptance (real vehicle spawn with a
+configured `driveBiasFront`, observed front/rear-biased acceleration) -
+this ticket's own brief says focused engineering tests are in scope, not
+John's broad/hardware playtesting, which is explicitly out of scope here.

@@ -316,6 +316,46 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
  }
 
+ @Test void driveBiasFrontOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.driveBiasFront = -0.01;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.driveBiasFront = 1.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var allRear = new Overrides.Tuning(); allRear.driveBiasFront = 0.0; // inclusive extreme, unlike lateralGripMultiplier
+  assertDoesNotThrow(allRear::validate);
+  var allFront = new Overrides.Tuning(); allFront.driveBiasFront = 1.0;
+  assertDoesNotThrow(allFront::validate);
+  var inRange = new Overrides.Tuning(); inRange.driveBiasFront = 0.65;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void driveBiasFrontHasNoFallbackAndStaysNullWhenNeverConfigured() {
+  // Unlike driveForce/friction/etc., driveBiasFront must stay null when nothing at any
+  // precedence level sets it - PhysicsBridge/DriveBiasDistribution rely on literal null (not a
+  // 0.5 fallback) to mean "no operator bias at all" (the exact pre-ticket behavior).
+  assertNull(Overrides.resolved("packid:not_configured").driveBiasFront);
+  assertNull(Overrides.defaultTuning().driveBiasFront);
+ }
+
+ @Test void driveBiasFrontParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.driveBiasFront = 0.65;
+   Overrides.setForTest(java.util.Map.of("packid:drive_bias_vehicle", override));
+   assertEquals(0.65, Overrides.resolved("packid:drive_bias_vehicle").driveBiasFront,
+     "an explicit operator override must be used instead of staying null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+  var packMetadata = new Overrides.Tuning(); packMetadata.driveBiasFront = 0.4;
+  assertEquals(0.4, Overrides.resolved("packid:not_configured", packMetadata, null, null).driveBiasFront,
+    "with no operator override, pack DIV metadata must still be used over staying null");
+ }
+
+ @Test void driveBiasFrontIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.driveBiasFront = 0.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
  @Test void packMetadataFillsAGapBelowAMissingOperatorOverrideButAboveTheFallback() {
   var packMetadata = new Overrides.Tuning();
   packMetadata.suspensionTravel = 0.45;

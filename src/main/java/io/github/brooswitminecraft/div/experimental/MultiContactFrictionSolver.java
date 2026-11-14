@@ -70,24 +70,37 @@ public final class MultiContactFrictionSolver {
   * (MINECRAFT-504, comment 53603) is PER-WHEEL, not a single vehicle-wide scalar - a
   * front/steering wheel typically only ever carries the service-brake magnitude, while a rear
   * wheel can additionally carry the analog handbrake's own magnitude, composed by the CALLER
-  * (PhysicsBridge) before constructing this record, not by this solver. The two shorter
-  * constructors below default frictionMultiplier/rollingResistanceMultiplier to 1.0 (reproducing
-  * today's exact pre-surface values byte-identically) and, for the 5-arg form, brakeMagnitude to
-  * 0.0 (unbraked). */
+  * (PhysicsBridge) before constructing this record, not by this solver. {@code driveShareRatio}
+  * (MINECRAFT-524) is this contact's own front/rear DRIVE-budget ratio (share*wheelCount, the
+  * same "ratio" shape {@code PhysicsBridge}'s {@code brakeShareRatio}/{@code
+  * DriveBiasDistribution} already use for brake) - 1.0 (every shorter constructor below's
+  * default) is a pure no-op, reproducing today's exact uniform {@code driveForcePerWheel} for
+  * every wheel byte-identically; composed by the CALLER the same way brakeMagnitude is, never by
+  * this solver. The shorter constructors below default frictionMultiplier/
+  * rollingResistanceMultiplier to 1.0 (reproducing today's exact pre-surface values byte-
+  * identically), brakeMagnitude to 0.0 (unbraked) where not given, and driveShareRatio to 1.0
+  * (unbiased) in every one of them. */
  public record FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
-     double frictionMultiplier, double rollingResistanceMultiplier, double brakeMagnitude) {
+     double frictionMultiplier, double rollingResistanceMultiplier, double brakeMagnitude, double driveShareRatio) {
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier) {
-   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, 0.0);
+   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, 0.0, 1.0);
   }
   /** MINECRAFT-508's own 7-arg shape (explicit surface multipliers, no brake magnitude yet) -
    * defaults brakeMagnitude to 0.0 (unbraked), kept so that ticket's own existing call sites
    * need no changes. */
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
       double frictionMultiplier, double rollingResistanceMultiplier) {
-   this(point, forward, right, normal, skidSteerMultiplier, frictionMultiplier, rollingResistanceMultiplier, 0.0);
+   this(point, forward, right, normal, skidSteerMultiplier, frictionMultiplier, rollingResistanceMultiplier, 0.0, 1.0);
   }
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier, double brakeMagnitude) {
-   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, brakeMagnitude);
+   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, brakeMagnitude, 1.0);
+  }
+  /** MINECRAFT-524's own 9-arg shape (explicit drive-share ratio alongside the existing surface
+   * multipliers/brake magnitude), kept alongside the shorter constructors above so every one of
+   * this ticket's own pre-existing call sites needs no changes. */
+  public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
+      double frictionMultiplier, double rollingResistanceMultiplier, double brakeMagnitude) {
+   this(point, forward, right, normal, skidSteerMultiplier, frictionMultiplier, rollingResistanceMultiplier, brakeMagnitude, 1.0);
   }
  }
  /** One wheel's accumulated longitudinal/lateral tire force after the bounded solve. */
@@ -164,7 +177,15 @@ public final class MultiContactFrictionSolver {
      // the exact same correction lateral already got, now applied here too.
      double longitudinalEffectiveMass=contactEffectiveMass(mass,c.point(),c.forward(),inverseOrientation,inertiaBody);
      brakeIncrement=-Math.signum(speed)*Math.abs(speed)*longitudinalEffectiveMass/dt*c.skidSteerMultiplier();
-    } else { prescribedLongitudinal=driveForcePerWheel*c.skidSteerMultiplier(); brakeIncrement=0; }
+    } else {
+     // MINECRAFT-524: c.driveShareRatio() folds the configured front/rear drive-force bias into
+     // this wheel's own share of driveForcePerWheel - 1.0 (unconfigured/fallback bias - see
+     // DriveBiasDistribution#shares) is a pure no-op reproducing this exact pre-ticket formula,
+     // composing with skidSteerMultiplier exactly the way it already composed with brakeMagnitude
+     // for braking, so tracks/skid-steer are unaffected by this change.
+     prescribedLongitudinal=driveForcePerWheel*c.skidSteerMultiplier()*c.driveShareRatio();
+     brakeIncrement=0;
+    }
     double candidateBrakeConstraint=Math.max(-scaledBrakeForcePerWheel,Math.min(scaledBrakeForcePerWheel,accBrakeConstraint[i]+brakeIncrement));
     accBrakeConstraint[i]=candidateBrakeConstraint;
     double longitudinalTarget=prescribedLongitudinal+rollingResistance+candidateBrakeConstraint;
