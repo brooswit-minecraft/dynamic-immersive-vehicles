@@ -295,9 +295,11 @@ public final class PhysicsBridge {
   * by direct inspection of every {@code tuning.X} read site in this file (stepGround/stepFlight/
   * stepRotor) and in BuoyantForces.apply (waterDrag/propellerForce/angularWaterDrag):
   * suspensionTravel/friction/driveForce/brakeForce/maxSteerDegrees/lateralGripMultiplier/
-  * waterDrag/propellerForce/angularWaterDrag/stallAngleDegrees/liftSlope/controlSurfaceSlope
-  * (the last three MINECRAFT-521, stepFlight only)/cyclicLimitDegrees/cyclicAuthorityScale/
-  * yawAuthorityScale (MINECRAFT-522, stepRotor only)/brakeBiasFront. Mutating
+  * waterDrag/propellerForce/angularWaterDrag/antiRollStiffness (MINECRAFT-519 - stepGround reads
+  * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
+  * stallAngleDegrees/liftSlope/controlSurfaceSlope (MINECRAFT-521, stepFlight only)/
+  * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
+  * brakeBiasFront (MINECRAFT-520, same reasoning). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -323,6 +325,7 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.waterDrag, fresh.waterDrag)) { target.waterDrag = fresh.waterDrag; appliedOut.add("waterDrag"); }
   if (!java.util.Objects.equals(target.propellerForce, fresh.propellerForce)) { target.propellerForce = fresh.propellerForce; appliedOut.add("propellerForce"); }
   if (!java.util.Objects.equals(target.angularWaterDrag, fresh.angularWaterDrag)) { target.angularWaterDrag = fresh.angularWaterDrag; appliedOut.add("angularWaterDrag"); }
+  if (!java.util.Objects.equals(target.antiRollStiffness, fresh.antiRollStiffness)) { target.antiRollStiffness = fresh.antiRollStiffness; appliedOut.add("antiRollStiffness"); }
   if (!java.util.Objects.equals(target.stallAngleDegrees, fresh.stallAngleDegrees)) { target.stallAngleDegrees = fresh.stallAngleDegrees; appliedOut.add("stallAngleDegrees"); }
   if (!java.util.Objects.equals(target.liftSlope, fresh.liftSlope)) { target.liftSlope = fresh.liftSlope; appliedOut.add("liftSlope"); }
   if (!java.util.Objects.equals(target.controlSurfaceSlope, fresh.controlSurfaceSlope)) { target.controlSurfaceSlope = fresh.controlSurfaceSlope; appliedOut.add("controlSurfaceSlope"); }
@@ -1696,9 +1699,22 @@ public final class PhysicsBridge {
    // upperOwned (review 53272): this wheel's actual owner half when twoBodyActive, by
    // TwoBodyChassis.isUpperHalf on its own local anchor Y relative to G - NOT an assumption that
    // every wheel is lower-owned. Always false when !twoBodyActive (meaningless, unused there).
+   // wheelIndex (MINECRAFT-519): this wheel's own position in `wheels` (and therefore in
+   // loadShareX/loadShareZ below) - carried alongside the hit purely so the anti-roll pass after
+   // Phase 1 can map a hit back to that wheel's geometric pairing without re-deriving it, and so
+   // it can rebuild this record with an updated `normal` (see withNormal) after redistributing
+   // paired load. Records have no mutable fields by design - replacing the whole record, rather
+   // than mutating `normal` in place, keeps every other already-computed field (compression,
+   // localVelocity, damperUsed, ...) untouched and exactly what Phase 1 actually measured.
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
-     double skidSteerMultiplier, double brakeShareRatio, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface) {}
+     double skidSteerMultiplier, double brakeShareRatio, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface,
+     int wheelIndex) {
+    WheelHit withNormal(double newNormal) {
+     return new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,newNormal,forward,right,point,
+       skidSteerMultiplier,brakeShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
+    }
+   }
    // MINECRAFT-506: each wheel's own static load SHARE, from its horizontal (x,z) anchor
    // position relative to `center` - the same geometry already used to build `anchor` just
    // below, read once here as its own x/z pair so WheelLoadDistribution never needs a
@@ -1728,9 +1744,9 @@ public final class PhysicsBridge {
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
-    int wIdx=wheelIndex++;
-    double loadShare=loadShares[wIdx];
-    double brakeShareRatio=brakeShareRatios[wIdx];
+    int wheelIdx=wheelIndex++;
+    double loadShare=loadShares[wheelIdx];
+    double brakeShareRatio=brakeShareRatios[wheelIdx];
     double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity);
     double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring);
     double radius=wheel.getHeight()/2;
@@ -1798,7 +1814,7 @@ public final class PhysicsBridge {
     GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
       hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      brakeShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface));
+      brakeShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
    }
    // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
    // class-level correction for the full defect this closes). For the single-body path this is
@@ -1842,6 +1858,53 @@ public final class PhysicsBridge {
      // when there is nothing to own either way.
      owner=lowerCandidate;
     }
+   }
+   // MINECRAFT-519: optional, bounded axle anti-roll coupling (see AntiRoll's own doc) - runs
+   // AFTER the mixed-ownership clearing above (so a cleared/empty `hits` this tick simply has
+   // nothing to redistribute) and BEFORE every downstream consumer of WheelHit.normal() (native
+   // contact sync just below, the vertical impulse and friction-solve normal budget in Phase 2/3,
+   // and the diagnostic totalNormalLoad sum) - every one of them must see the SAME already-
+   // redistributed per-wheel load, not whatever Phase 1 computed before coupling. Pairing is
+   // geometric (loadShareX/loadShareZ, the exact same per-wheel anchor-relative-to-center frame
+   // WheelLoadDistribution already used above - no new geometry, no vehicle-ID table) over the
+   // FULL `wheels` list, independent of which wheels actually have contact this tick; only a
+   // pair where BOTH sides currently have a real hit is ever coupled (hitIndexForWheel[...]<0 for
+   // an airborne/missing/unsupported-layout partner skips that wheel entirely - see class doc's
+   // "left completely untouched" and the ticket's own "airborne/contact transitions" case).
+   // Review correction #2 (comment 53770 - over the first correction, comments 53750/53752):
+   // AntiRoll.transfer now couples DIFFERENTIAL TRAVEL (each side's own raw WheelHit.compression(),
+   // common-heave/common-velocity-neutral by construction since every wheel's calibrated rest
+   // compression is the SAME tuning.suspensionTravel*.5 regardless of its own loadShare/rate -
+   // see AntiRoll's own class doc), converted to a force via the pair's own average calibrated
+   // spring rate (suspensionSpringForShare(mass,loadShares[...],...), the SAME per-wheel rate
+   // already used above to build wheelSpring - not the earlier (and still wrong whenever the
+   // pair's rates differ) force-baseline-deviation attempt. An asymmetric axle (unequal
+   // loadShares) sitting at a genuinely common compression (no actual roll) gets ZERO transfer
+   // regardless of how different the pair's own rates are; an actual roll disturbance (a real
+   // compression difference) gets a LARGER restoring differential than the uncoupled pair would
+   // have, never a smaller one. Bypassed entirely (zero allocation, zero behavior change) when
+   // stiffness is exactly the documented 0 FALLBACK - the ticket's explicit "default zero/off
+   // preserving accepted handling" and zero/default-equivalence expectation.
+   if (!hits.isEmpty() && tuning.antiRollStiffness != null && tuning.antiRollStiffness > 0) {
+    int[] pairPartner=AntiRoll.pairPartners(loadShareX,loadShareZ);
+    int[] hitIndexForWheel=new int[wheels.size()];
+    java.util.Arrays.fill(hitIndexForWheel,-1);
+    for (int i=0;i<hits.size();i++) hitIndexForWheel[hits.get(i).wheelIndex()]=i;
+    double[] newNormal=new double[hits.size()];
+    for (int i=0;i<hits.size();i++) newNormal[i]=hits.get(i).normal();
+    for (int wi=0; wi<pairPartner.length; wi++) {
+     int partnerWi=pairPartner[wi];
+     if (partnerWi<=wi) continue; // unpaired (-1), or already handled from the partner's own side
+     int hi=hitIndexForWheel[wi], hj=hitIndexForWheel[partnerWi];
+     if (hi<0 || hj<0) continue; // one or both sides not actually grounded this tick - leave both alone
+     double normalA=hits.get(hi).normal(), normalB=hits.get(hj).normal();
+     double rateA=suspensionSpringForShare(mass,loadShares[wi],tuning.suspensionTravel,gravity);
+     double rateB=suspensionSpringForShare(mass,loadShares[partnerWi],tuning.suspensionTravel,gravity);
+     double t=AntiRoll.transfer(hits.get(hi).compression(),hits.get(hj).compression(),rateA,rateB,normalA,normalB,tuning.antiRollStiffness);
+     newNormal[hi]=normalA+t;
+     newNormal[hj]=normalB-t;
+    }
+    for (int i=0;i<hits.size();i++) if (newNormal[i]!=hits.get(i).normal()) hits.set(i,hits.get(i).withNormal(newNormal[i]));
    }
    // Native contact-ownership sync (ticket comment 53182/53182-correction): confirmed by reading
    // the real pinned MTS source (not inferred from naming) that PartEngine.update() - which DOES

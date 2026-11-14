@@ -106,6 +106,18 @@ public final class Overrides {
   // own doc): a genuinely combined high-demand tick (e.g. hard braking mid-turn) can still see
   // the shared radial projection reduce achieved longitudinal force somewhat.
   public Double lateralGripMultiplier;
+  // MINECRAFT-519: optional, bounded axle anti-roll coupling (see AntiRoll's own doc for the
+  // geometric pairing and the exact differential-travel transfer math) - a dimensionless 0 ("no
+  // coupling at all", the documented FALLBACK, exact byte-identical default/zero equivalence) to
+  // 1 (the maximum supported restoring-transfer strength) coupling strength. This AMPLIFIES the
+  // pair's existing roll-induced load difference (a real anti-roll bar's own effect) - it does
+  // NOT equalize the two loads, and with unequal calibrated spring rates (an asymmetric axle) it
+  // cannot generally equalize them even at 1.0 (review correction, comment 53781: an earlier
+  // version of this doc wrongly described 1.0 as "full equalization"). 0 is the FALLBACK
+  // deliberately (ticket's "default zero/off preserving accepted handling") - unlike
+  // suspensionTravel/friction/etc. this feature did not exist before this ticket, so there is no
+  // prior shared non-zero number to preserve, only "no effect at all" to preserve exactly.
+  public Double antiRollStiffness;
   // MINECRAFT-521: bounded fixed-wing lift/stall-cap and control-authority tuning, consumed by
   // PhysicsBridge.stepFlight via FlightForces.liftCoefficient/controlSurfaceForce. stallAngleDegrees
   // is the hard stall cutoff (degrees) FlightForces.liftCoefficient clamps angle of attack to;
@@ -170,6 +182,13 @@ public final class Overrides {
    // Never above 1: this knob is explicitly for REDUCING lateral grip (John's own "less grip...
    // so it slides"), not for granting more lateral authority than the real friction circle.
    if (lateralGripMultiplier != null && !(Double.isFinite(lateralGripMultiplier) && lateralGripMultiplier > 0 && lateralGripMultiplier <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Inclusive 0 (the FALLBACK/off value, explicitly valid to set - an operator may want to
+   // state "no anti-roll" explicitly rather than merely omit the field) through inclusive 1 (the
+   // maximum supported restoring-transfer strength) - see AntiRoll's own doc for why 1 is a real,
+   // meaningful upper bound rather than an arbitrary cap. NOT "full equalization" of the pair's
+   // loads (review correction, comment 53781) - this amplifies their existing roll-induced
+   // difference, and with unequal calibrated rates cannot generally equalize them at any setting.
+   if (antiRollStiffness != null && !(Double.isFinite(antiRollStiffness) && antiRollStiffness >= 0 && antiRollStiffness <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Bounded well short of a literal post-stall simulation (ticket's own "do not claim full
    // post-stall spin/soft-body simulation" constraint): 45deg keeps this a genuine hard stall
    // CAP, never a config path to effectively disabling stall at all.
@@ -226,6 +245,7 @@ public final class Overrides {
     throw new IllegalArgumentException("part overrides do not support selfRight* fields (no part-level consumer yet)");
    if (upperMassFraction != null) throw new IllegalArgumentException("part overrides do not support 'upperMassFraction' (no part-level consumer yet)");
    if (lateralGripMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'lateralGripMultiplier' (no part-level consumer yet)");
+   if (antiRollStiffness != null) throw new IllegalArgumentException("part overrides do not support 'antiRollStiffness' (no part-level consumer yet)");
    if (stallAngleDegrees != null) throw new IllegalArgumentException("part overrides do not support 'stallAngleDegrees' (no part-level consumer yet)");
    if (liftSlope != null) throw new IllegalArgumentException("part overrides do not support 'liftSlope' (no part-level consumer yet)");
    if (controlSurfaceSlope != null) throw new IllegalArgumentException("part overrides do not support 'controlSurfaceSlope' (no part-level consumer yet)");
@@ -254,6 +274,7 @@ public final class Overrides {
   FALLBACK.upperMassFraction=0.5;
   FALLBACK.lateralGripMultiplier=1.0;
   FALLBACK.angularWaterDrag=0.0;
+  FALLBACK.antiRollStiffness=0.0;
   FALLBACK.stallAngleDegrees=FlightForces.DEFAULT_STALL_ANGLE_DEGREES;
   FALLBACK.liftSlope=FlightForces.DEFAULT_LIFT_SLOPE;
   FALLBACK.controlSurfaceSlope=FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE;
@@ -271,6 +292,7 @@ public final class Overrides {
   c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   c.angularWaterDrag=t.angularWaterDrag;
+  c.antiRollStiffness=t.antiRollStiffness;
   c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.brakeBiasFront=t.brakeBiasFront;
@@ -299,6 +321,7 @@ public final class Overrides {
   m.upperMassFraction = child.upperMassFraction!=null?child.upperMassFraction:parent.upperMassFraction;
   m.lateralGripMultiplier = child.lateralGripMultiplier!=null?child.lateralGripMultiplier:parent.lateralGripMultiplier;
   m.angularWaterDrag = child.angularWaterDrag!=null?child.angularWaterDrag:parent.angularWaterDrag;
+  m.antiRollStiffness = child.antiRollStiffness!=null?child.antiRollStiffness:parent.antiRollStiffness;
   m.stallAngleDegrees = child.stallAngleDegrees!=null?child.stallAngleDegrees:parent.stallAngleDegrees;
   m.liftSlope = child.liftSlope!=null?child.liftSlope:parent.liftSlope;
   m.controlSurfaceSlope = child.controlSurfaceSlope!=null?child.controlSurfaceSlope:parent.controlSurfaceSlope;
@@ -481,6 +504,7 @@ public final class Overrides {
   result.selfRightFadeEndDegrees = firstNonNull(override!=null?override.selfRightFadeEndDegrees:null, packMetadata!=null?packMetadata.selfRightFadeEndDegrees:null, ivAdapted!=null?ivAdapted.selfRightFadeEndDegrees:null, physicallyDerived!=null?physicallyDerived.selfRightFadeEndDegrees:null);
   result.upperMassFraction = firstNonNull(override!=null?override.upperMassFraction:null, packMetadata!=null?packMetadata.upperMassFraction:null, ivAdapted!=null?ivAdapted.upperMassFraction:null, physicallyDerived!=null?physicallyDerived.upperMassFraction:null, FALLBACK.upperMassFraction);
   result.lateralGripMultiplier = firstNonNull(override!=null?override.lateralGripMultiplier:null, packMetadata!=null?packMetadata.lateralGripMultiplier:null, ivAdapted!=null?ivAdapted.lateralGripMultiplier:null, physicallyDerived!=null?physicallyDerived.lateralGripMultiplier:null, FALLBACK.lateralGripMultiplier);
+  result.antiRollStiffness = firstNonNull(override!=null?override.antiRollStiffness:null, packMetadata!=null?packMetadata.antiRollStiffness:null, ivAdapted!=null?ivAdapted.antiRollStiffness:null, physicallyDerived!=null?physicallyDerived.antiRollStiffness:null, FALLBACK.antiRollStiffness);
   result.stallAngleDegrees = firstNonNull(override!=null?override.stallAngleDegrees:null, packMetadata!=null?packMetadata.stallAngleDegrees:null, ivAdapted!=null?ivAdapted.stallAngleDegrees:null, physicallyDerived!=null?physicallyDerived.stallAngleDegrees:null, FALLBACK.stallAngleDegrees);
   result.liftSlope = firstNonNull(override!=null?override.liftSlope:null, packMetadata!=null?packMetadata.liftSlope:null, ivAdapted!=null?ivAdapted.liftSlope:null, physicallyDerived!=null?physicallyDerived.liftSlope:null, FALLBACK.liftSlope);
   result.controlSurfaceSlope = firstNonNull(override!=null?override.controlSurfaceSlope:null, packMetadata!=null?packMetadata.controlSurfaceSlope:null, ivAdapted!=null?ivAdapted.controlSurfaceSlope:null, physicallyDerived!=null?physicallyDerived.controlSurfaceSlope:null, FALLBACK.controlSurfaceSlope);

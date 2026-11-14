@@ -656,7 +656,7 @@ break anything already running.
 A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
-`propellerForce`, `angularWaterDrag`, `stallAngleDegrees`, `liftSlope`,
+`propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
 `yawAuthorityScale`, `brakeBiasFront`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
@@ -664,6 +664,52 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 respawn) the vehicle to pick up a changed value for one of those. The
 reload log names exactly which changed fields, if any, fell into this
 "needs respawn" set, rather than claiming everything applied.
+
+### Axle anti-roll (MINECRAFT-519)
+
+Optional, per-vehicle `antiRollStiffness` - a dimensionless `0.0` (the
+default/fallback, no coupling at all - byte-identical to every vehicle's
+behavior before this feature existed) coupling strength for a genuinely
+RESTORING anti-roll bar between a left/right pair of wheels on the SAME
+axle: it amplifies the pair's roll-induced load difference (the same
+direction a stiffer real anti-roll bar does), it does not equalize their
+raw loads. It runs after each wheel's own independently-computed suspension
+load (static load share, spring, damper, compression, the existing
+per-wheel ground solve - see [`WheelLoadDistribution`](src/main/java/io/github/brooswitminecraft/div/WheelLoadDistribution.java)),
+and derives the coupling from each side's DIFFERENTIAL TRAVEL (raw
+suspension compression), not its load - every wheel's calibrated rest
+compression is the same regardless of its own static share, so a true
+common-mode heave/bounce (both sides moving the same real distance) or a
+common sink velocity produces zero transfer, even though an asymmetric
+axle's (COM off-center between the pair) two wheels legitimately run
+different spring rates and therefore different loads for that same shared
+compression. The travel difference is converted to a force via the pair's
+own average calibrated spring rate before being applied. The rest of the
+solve (friction budget, drive/brake, native sync) then sees that
+already-redistributed load like any other.
+
+Axle/side pairing is purely geometric - two wheels pair iff they share the
+same longitudinal anchor and sit on strictly opposite sides of the chassis
+centerline (see [`AntiRoll`](src/main/java/io/github/brooswitminecraft/div/AntiRoll.java)
+for the exact rule) - never a vehicle-ID table. Any other layout at that
+axle (a single wheel, three or more sharing it, a centered skid-steer wheel,
+two wheels on the same side) is left completely uncoupled. A wheel whose
+paired partner is airborne (or otherwise has no contact) this tick is also
+left untouched - there is no real partner load to redistribute with. The
+one equal-and-opposite transfer is always bounded against whichever side is
+actually donating load this tick (never an independent per-side clamp), so
+neither side can go negative, and the pair's total load is always exactly
+conserved.
+
+```json
+{
+  "vehicles": {
+    "examplepack:ordinary_car": {
+      "antiRollStiffness": 0.4
+    }
+  }
+}
+```
 
 ### Ground-surface tire response (MINECRAFT-508)
 
