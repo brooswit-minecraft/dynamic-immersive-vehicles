@@ -47,17 +47,27 @@ final class BuoyantBody implements VehicleBody {
   box = new BoxPhysicsObject(new Pose3d(position, q, new Vector3d(), new Vector3d(1)), half, mass);
   var physics = SubLevelContainer.getContainer(level).physicsSystem();
   physics.addObject(box);
+  var inherited = PhysicsBridge.pendingInheritedVelocity.get(v);
   RigidBodyHandle h;
   try {
    h = RigidBodyHandle.of(level, box);
-   h.addLinearAndAngularVelocity(new Vector3d(v.motion.x, v.motion.y, v.motion.z).mul(v.speedFactor * 20), new Vector3d());
+   if (inherited == null) {
+    h.addLinearAndAngularVelocity(new Vector3d(v.motion.x, v.motion.y, v.motion.z).mul(v.speedFactor * 20), new Vector3d());
+   } else {
+    var velocity = inherited.velocityAt(position);
+    h.addLinearAndAngularVelocity(velocity, new Vector3d(inherited.angularVelocity()));
+   }
   } catch (RuntimeException ex) {
    physics.removeObject(box);
    throw ex;
   }
   handle = h;
+  if (inherited != null) PhysicsBridge.pendingInheritedVelocity.consumeOnSuccess(v);
  }
 
+ public PhysicsBridge.InheritedRigidBodyVelocity captureReplacementState(EntityVehicleF_Physics v) {
+  return PhysicsBridge.captureReplacementState(v, box, handle, center, false, 0);
+ }
  public Object level() { return level; }
  public void remove() { var c = SubLevelContainer.getContainer(level); if (c != null) c.physicsSystem().removeObject(box); }
  public Overrides.Tuning tuning() { return tuning; }

@@ -212,14 +212,17 @@ public final class PhysicsBridge {
   * once the chassis center (and so each half's own lever arm) shifts.
   *
   * <p>Populated by {@link #active} immediately before deactivating a Body for a confirmed
-  * {@code chassisBoundsChanged} rebuild (never for an ordinary fresh spawn, and never for a
-  * category change via {@link #replaceIfCategoryChanged} - that path has this SAME pre-existing
-  * limitation, flagged, not fixed here, since it is a separate, pre-existing issue this ticket
-  * did not introduce and was not asked to fix). Consumed (removed) exactly once by the next
-  * {@code Body} constructor for this same vehicle, so a normal subsequent spawn is never affected
+  * {@code chassisBoundsChanged} rebuild or a mode/category transition (never for an
+  * ordinary activation). Retained across construction failure, then consumed once by the next
+  * successful Body or BuoyantBody constructor for this same vehicle, so a normal subsequent spawn is never affected
   * by a stale leftover entry.
   */
- private record InheritedRigidBodyVelocity(Vector3d angularVelocity, Vector3d referenceLinearVelocity, Vector3d referencePosition) {}
+ record InheritedRigidBodyVelocity(Vector3d angularVelocity, Vector3d referenceLinearVelocity, Vector3d referencePosition) {
+  Vector3d velocityAt(org.joml.Vector3dc point) {
+   return new Vector3d(referenceLinearVelocity).add(new Vector3d(angularVelocity)
+     .cross(new Vector3d(point).sub(referencePosition)));
+  }
+ }
  /**
   * Ticket 53390's explicit "extract small replacement-state lifecycle seam and unit-test
   * get/retain-on-failure/consume-on-success/cleanup" - generic over {@code K}/{@code V} (same
@@ -250,7 +253,7 @@ public final class PhysicsBridge {
    */
   void removeIf(java.util.function.Predicate<K> predicate) { pending.keySet().removeIf(predicate); }
  }
- private static final PendingReplacementState<EntityVehicleF_Physics, InheritedRigidBodyVelocity> pendingInheritedVelocity = new PendingReplacementState<>();
+ static final PendingReplacementState<EntityVehicleF_Physics, InheritedRigidBodyVelocity> pendingInheritedVelocity = new PendingReplacementState<>();
  // Vehicle definitions whose chassis geometry failed to build a Sable body once already;
  // keyed by the shared JSON definition object (one per packID:systemName, not per entity), so a
  // bad content-pack definition is retried, and logged, once rather than every tick for every
@@ -457,8 +460,35 @@ public final class PhysicsBridge {
   * underwater-propeller pass) is provable without a live entity/Sable runtime - see
   * {@code PhysicsBridgeStepperTest}. */
  record TickPlan(Stepper stepper, boolean appliesBuoyancy) {}
+ /** Only the ground force path supports the split chassis. Explicit opt-out still wins. */
+ static boolean useTwoBody(boolean enabled, TickPlan plan) {
+  return enabled && plan.stepper() == Stepper.GROUND && !plan.appliesBuoyancy();
+ }
  static TickPlan planTick(boolean flight, boolean floatCapable, List<JSONPart.JSONPartPropeller> installedPropellers) {
   return new TickPlan(selectStepper(flight, installedPropellers), floatCapable);
+ }
+ static InheritedRigidBodyVelocity captureReplacementState(EntityVehicleF_Physics v,
+   BoxPhysicsObject box, RigidBodyHandle handle, Vector3d center, boolean twoBodyActive, double halfHeight) {
+   box.updatePose();
+   // Preserve the latest native pose as well as velocity, even if no entity step has synced it.
+   var replacementPose = box.getPose();
+   var replacementOrientation = new Quaterniond(replacementPose.orientation());
+   var replacementCenter = new Vector3d(replacementPose.position());
+   if (twoBodyActive)
+    replacementCenter.set(io.github.brooswitminecraft.div.experimental.TwoBodyChassis.vehicleWorldPositionFromLowerBody(
+      replacementCenter, replacementOrientation, halfHeight));
+   var replacementOrigin = replacementCenter.sub(replacementOrientation.transform(new Vector3d(center)));
+   v.position.set(replacementOrigin.x, replacementOrigin.y, replacementOrigin.z);
+   Matrix3d replacementMatrix = new Matrix3d().set(replacementOrientation);
+   var orientation = v.orientation;
+   orientation.m00=replacementMatrix.m00(); orientation.m01=replacementMatrix.m10(); orientation.m02=replacementMatrix.m20();
+   orientation.m10=replacementMatrix.m01(); orientation.m11=replacementMatrix.m11(); orientation.m12=replacementMatrix.m21();
+   orientation.m20=replacementMatrix.m02(); orientation.m21=replacementMatrix.m12(); orientation.m22=replacementMatrix.m22();
+   orientation.convertToAngles();
+   return new InheritedRigidBodyVelocity(
+     handle.getAngularVelocity(new Vector3d()),
+     handle.getLinearVelocity(new Vector3d()),
+     new Vector3d(box.getPose().position()));
  }
  /**
   * {@code registry.activateOnce} deliberately reuses an already-active body without
@@ -499,36 +529,15 @@ public final class PhysicsBridge {
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   if (brokenDefinitions.contains(definition)) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "brokenDefinition:"+key); return deactivate(v); }
   if (!ground && !floating) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "ineligible:"+key); return deactivate(v); }
-  replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, old -> { hitches.release(v); old.remove(); });
-  // Ticket 53379/53383's explicit priority: a vehicle whose parts are installed/removed AFTER
-  // this Body already successfully constructed must have its chassis envelope refreshed - not
-  // permanently locked in at whatever was active the moment construction first succeeded. Same
-  // discard-and-let-the-next-activateOrClassify-call-reconstruct pattern replaceIfCategoryChanged
-  // already uses above (continuity comes from the VEHICLE's own position/motion fields, which
-  // step() already writes back position/linear motion every tick regardless of category, but
-  // review 53385/53388 correctly found that alone is NOT sufficient - angular velocity and each
-  // half's own distinct point velocity need their own explicit, correct capture/transfer below;
-  // treating this as already covered by the existing category-change precedent was itself an
-  // overclaim, now corrected.
-  if (registry.get(v) instanceof Body existingBody && existingBody.chassisBoundsChanged(v)) {
-   // Review 53385: capture the REAL current rigid-body state before removal - angular velocity
-   // and a reference point/linear-velocity pair (the lower half, tightly joint-coupled to the
-   // upper half so its own velocity is a reasonable single reference for the whole assembly,
-   // not an independent per-half capture - documented simplification, not full joint-compliance
-   // modeling) - so the next Body construction for this vehicle can correctly reseed both new
-   // halves' velocities via v_new=v_reference+omega x (newPoint-referencePoint), not silently
-   // zero the vehicle's own actual rotation.
-   //
-   // Review 53388: box.updatePose() forces the Java-side cached pose to resync from the live
-   // native Rapier state before reading position() - getPose() alone can otherwise return a
-   // value cached from a previous sync point, inconsistent with the velocity read immediately
-   // below from the SAME native body at the current moment; this keeps position and velocity as
-   // one mutually consistent snapshot rather than two different ticks' worth of state.
-   existingBody.box.updatePose();
-   pendingInheritedVelocity.stage(v, new InheritedRigidBodyVelocity(
-     existingBody.handle.getAngularVelocity(new Vector3d()),
-     existingBody.handle.getLinearVelocity(new Vector3d()),
-     new Vector3d(existingBody.box.getPose().position())));
+  replaceIfCategoryChanged(registry, v, ground, existing -> existing instanceof Body, old -> { pendingInheritedVelocity.stage(v, old.captureReplacementState(v)); hitches.release(v); old.remove(); });
+  // Geometry and installed-part mode changes replace the existing native assembly before
+  // activation. Capture current native pose/velocity first; never run two force owners.
+  if (registry.get(v) instanceof Body existingBody && (existingBody.chassisBoundsChanged(v)
+      || existingBody.twoBodyActive != useTwoBody(Body.EXPERIMENTAL_TWO_BODY_CHASSIS,
+          planTick(Classification.isFlightVehicle(definition), hasFloatDevice(installedGroundDevices), installedPropellers)))) {
+   // Lower-half rigid motion is the assembly reference (the fixed joint constrains both
+   // halves). Re-seed each new center with v + omega x offset, retaining state on failure.
+   pendingInheritedVelocity.stage(v, existingBody.captureReplacementState(v));
    var old = registry.deactivate(v);
    if (old != null) { hitches.release(v); old.remove(); }
   }
@@ -1519,7 +1528,11 @@ public final class PhysicsBridge {
      +" experimentalEffectiveMassDamping="+EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
      +" experimentalTwoBodyChassis="+EXPERIMENTAL_TWO_BODY_CHASSIS
      +" nativeInertia=unavailable (Sable 2.0.5's BoxPhysicsObject exposes no native inertia/mass-properties query API - confirmed by its decompiled source; see ticket comment history)");
-   twoBodyActive=EXPERIMENTAL_TWO_BODY_CHASSIS;
+   twoBodyActive=useTwoBody(EXPERIMENTAL_TWO_BODY_CHASSIS,
+     planTick(flight, hasFloatDevice(v), installedPropellers(v)));
+   if (DEBUG_GROUND_CONTACT) LOGGER.info("[DIV debugGroundContact] chassisMode entity="+v.uniqueUUID
+     +" key="+v.definition.packID+":"+v.definition.systemName+" twoBodyActive="+twoBodyActive
+     +" plan="+planTick(flight, hasFloatDevice(v), installedPropellers(v)));
    Vector3d initialVelocity=new Vector3d(v.motion.x,v.motion.y,v.motion.z).mul(v.speedFactor*20);
    // Review 53385: consumed (removed) at most once per construction - a genuinely fresh spawn
    // (no entry) keeps today's exact prior behavior (initialVelocity from v.motion, zero angular)
@@ -1548,10 +1561,8 @@ public final class PhysicsBridge {
     var bodies=TwoBodyLifecycle.create(level,position,q,half,mass,config);
     try {
      if (inherited != null) {
-      Vector3d lowerVel=new Vector3d(inherited.referenceLinearVelocity()).add(new Vector3d(inherited.angularVelocity())
-        .cross(new Vector3d(bodies.lowerBox().getPose().position()).sub(inherited.referencePosition())));
-      Vector3d upperVel=new Vector3d(inherited.referenceLinearVelocity()).add(new Vector3d(inherited.angularVelocity())
-        .cross(new Vector3d(bodies.upperBox().getPose().position()).sub(inherited.referencePosition())));
+      Vector3d lowerVel=inherited.velocityAt(bodies.lowerBox().getPose().position());
+      Vector3d upperVel=inherited.velocityAt(bodies.upperBox().getPose().position());
       bodies.lowerHandle().addLinearAndAngularVelocity(lowerVel,new Vector3d(inherited.angularVelocity()));
       bodies.upperHandle().addLinearAndAngularVelocity(upperVel,new Vector3d(inherited.angularVelocity()));
      } else {
@@ -1584,8 +1595,7 @@ public final class PhysicsBridge {
     try {
      h=RigidBodyHandle.of(level,box);
      if (inherited != null) {
-      Vector3d seededVel=new Vector3d(inherited.referenceLinearVelocity()).add(new Vector3d(inherited.angularVelocity())
-        .cross(new Vector3d(box.getPose().position()).sub(inherited.referencePosition())));
+      Vector3d seededVel=inherited.velocityAt(box.getPose().position());
       h.addLinearAndAngularVelocity(seededVel,new Vector3d(inherited.angularVelocity()));
      } else {
       h.addLinearAndAngularVelocity(initialVelocity,new Vector3d());
@@ -1658,6 +1668,9 @@ public final class PhysicsBridge {
    r.m10=m.m01();r.m11=m.m11();r.m12=m.m21();
    r.m20=m.m02();r.m21=m.m12();r.m22=m.m22();r.convertToAngles();
    v.motion.set(velocity.x,velocity.y,velocity.z).scale(1/(20*v.speedFactor));
+  }
+  public InheritedRigidBodyVelocity captureReplacementState(EntityVehicleF_Physics v) {
+   return PhysicsBridge.captureReplacementState(v, box, handle, center, twoBodyActive, halfExtents.y);
   }
   private boolean stepGround(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d angular, Vector3d velocity, Vector3d up) {
    double rawDrive=0;

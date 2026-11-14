@@ -96,12 +96,13 @@ public final class TwoBodyLifecycle {
   var config2 = new GenericConstraintConfiguration(
     TwoBodyChassis.jointAnchorLocalInUpperBody(halfHeightB), TwoBodyChassis.jointAnchorLocalInLowerBody(halfHeightB),
     new Quaterniond(), new Quaterniond(), HitchJoint.lockedAxes(true, false));
-  PhysicsConstraintHandle joint;
+  PhysicsConstraintHandle joint = null;
   try {
    joint = physics.getPipeline().addConstraint(upperBox, lowerBox, config2);
    if (joint == null || !joint.isValid()) throw new IllegalStateException("two-body fixed joint construction failed or returned invalid");
    joint.setContactsEnabled(false);
   } catch (RuntimeException ex) {
+   removeJoint(joint);
    // Review 53272: attempt BOTH removals even if the first one itself throws - an exception
    // from removing upperBox must not prevent the attempt to remove lowerBox too.
    removeBoth(physics, upperBox, lowerBox);
@@ -110,15 +111,19 @@ public final class TwoBodyLifecycle {
   return new Bodies(upperBox, lowerBox, upperHandle, lowerHandle, joint);
  }
 
- /** Removes both half-bodies (the joint itself does not need separate removal - Sable's own
-  * contract, same as every other constraint in this file, is that a constraint becomes invalid
-  * once either of its bodies is removed; nothing here has ever called {@code joint.remove()}
-  * explicitly, matching how {@code HitchRegistry} tears down a hitch solely by letting the
-  * trailer/towing body itself be removed). */
+ /** Explicitly retire the constraint before its bodies. Live mode-transition validation on
+  * Sable 2.0.5 found the native joint handle could remain valid after both boxes were removed. */
  public static void remove(ServerLevel level, Bodies bodies) {
   var container = SubLevelContainer.getContainer(level);
   if (container == null) return;
+  removeJoint(bodies.joint());
   removeBoth(container.physicsSystem(), bodies.upperBox(), bodies.lowerBox());
+ }
+
+ private static void removeJoint(PhysicsConstraintHandle joint) {
+  if (joint == null) return;
+  try { if (joint.isValid()) joint.remove(); }
+  catch (RuntimeException ex) { LOGGER.error("[DIV twoBodyLifecycle] failed to remove fixed joint", ex); }
  }
 
  /** Review 53272's explicit "ensure cleanup attempts both halves even if removing one fails" -

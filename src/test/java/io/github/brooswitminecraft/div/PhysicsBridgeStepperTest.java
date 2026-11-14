@@ -17,6 +17,42 @@ import static org.junit.jupiter.api.Assertions.*;
  * the literal code {@code Body.step} calls, not a parallel stand-in.
  */
 class PhysicsBridgeStepperTest {
+ @Test void replacementPointVelocityPreservesRotatingAssemblyMotionWithoutMutatingSnapshot() {
+  var angular = new org.joml.Vector3d(0, 0, 2);
+  var linear = new org.joml.Vector3d(3, 4, 5);
+  var reference = new org.joml.Vector3d(10, 20, 30);
+  var snapshot = new PhysicsBridge.InheritedRigidBodyVelocity(angular, linear, reference);
+  assertEquals(new org.joml.Vector3d(1, 4, 5), snapshot.velocityAt(new org.joml.Vector3d(10, 21, 30)));
+  assertEquals(new org.joml.Vector3d(5, 4, 5), snapshot.velocityAt(new org.joml.Vector3d(10, 19, 30)));
+  assertEquals(new org.joml.Vector3d(3, 4, 5), snapshot.velocityAt(reference));
+  assertEquals(new org.joml.Vector3d(0, 0, 2), angular);
+  assertEquals(new org.joml.Vector3d(3, 4, 5), linear);
+  assertEquals(new org.joml.Vector3d(10, 20, 30), reference);
+ }
+
+ @Test void splitChassisOnlySupportsPureGroundAndHonorsOptOut() {
+  for (var mode : PhysicsBridge.Stepper.values()) {
+   for (boolean buoyancy : new boolean[]{false, true}) {
+    var plan = new PhysicsBridge.TickPlan(mode, buoyancy);
+    assertEquals(mode == PhysicsBridge.Stepper.GROUND && !buoyancy, PhysicsBridge.useTwoBody(true, plan));
+    assertFalse(PhysicsBridge.useTwoBody(false, plan));
+   }
+  }
+ }
+ @Test void installedRotorAndFloatChangesRequireSingleBodyUntilRemoved() {
+  var props = new ArrayList<JSONPart.JSONPartPropeller>();
+  var devices = new ArrayList<JSONPart.JSONPartGroundDevice>();
+  devices.add(wheel());
+  assertTrue(PhysicsBridge.useTwoBody(true, PhysicsBridge.planTick(false, PhysicsBridge.hasFloatDevice(devices), props)));
+  props.add(rotor());
+  assertFalse(PhysicsBridge.useTwoBody(true, PhysicsBridge.planTick(false, PhysicsBridge.hasFloatDevice(devices), props)));
+  devices.add(pontoon());
+  props.clear();
+  assertFalse(PhysicsBridge.useTwoBody(true, PhysicsBridge.planTick(false, PhysicsBridge.hasFloatDevice(devices), props)));
+  devices.remove(1);
+  assertTrue(PhysicsBridge.useTwoBody(true, PhysicsBridge.planTick(false, PhysicsBridge.hasFloatDevice(devices), props)));
+ }
+
  private static JSONPart.JSONPartPropeller rotor() {
   var p = new JSONPart.JSONPartPropeller();
   p.isRotor = true;
