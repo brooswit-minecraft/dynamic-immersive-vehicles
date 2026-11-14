@@ -683,14 +683,22 @@ public final class PhysicsBridge {
    return false;
   }
  }
+ /**
+  * MINECRAFT-525: {@code pos1}/{@code pos2} are the confirmed BODY-LOCAL anchor offsets (ticket
+  * comment 53256/53243's real-native-source-plus-empirical-probe finding, already applied to
+  * {@code TwoBodyLifecycle.create}'s own joint) rather than the world-space points this method
+  * previously computed via {@code HitchJoint.anchorWorldPosition} - that call echoed each body's
+  * own world orientation into {@code orientation1}/{@code orientation2} too, which the same
+  * finding confirmed is wrong: those are LOCAL joint-frame rotations, not a world-orientation
+  * echo, so identity (impose no extra twist, matching {@code TwoBodyLifecycle}) is passed for
+  * both instead. No body pose/position is needed here at all any more.
+  */
  private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
-  var towingPose = towing.box.getPose();
-  var trailerPose = trailer.box.getPose();
-  var hitchPos = HitchJoint.anchorWorldPosition(towingPose.position(), towingPose.orientation(), towing.center,
+  var hitchOffset = HitchJoint.anchorLocalOffset(towing.center,
     new Vector3d(connection.hitchConnection.pos.x, connection.hitchConnection.pos.y, connection.hitchConnection.pos.z), new Vector3d());
-  var hookupPos = HitchJoint.anchorWorldPosition(trailerPose.position(), trailerPose.orientation(), trailer.center,
+  var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center,
     new Vector3d(connection.hookupConnection.pos.x, connection.hookupConnection.pos.y, connection.hookupConnection.pos.z), new Vector3d());
-  var config = new GenericConstraintConfiguration(hitchPos, hookupPos, towingPose.orientation(), trailerPose.orientation(),
+  var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset, new Quaterniond(), new Quaterniond(),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
   return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
  }
@@ -1143,8 +1151,9 @@ public final class PhysicsBridge {
   // TwoBodyChassis.vehicleWorldPositionFromLowerBody rather than reading the lower body's own
   // center directly) and construction/cleanup are the other two-body-aware call sites. Uses the
   // body-local/identity joint convention CONFIRMED by both the real native source (comment 53256)
-  // AND a live anchor-frame probe run (comment 53273) - not createHitch's own (separately
-  // flagged, un-fixed) world-space/echoed-orientation convention. Non-ground stepper modes
+  // AND a live anchor-frame probe run (comment 53273) - the same convention createHitch itself
+  // now uses too (MINECRAFT-525, formerly a separately-flagged world-space/echoed-orientation
+  // bug). Non-ground stepper modes
   // (flight/rotor) and towing are explicitly unsupported for a two-body vehicle for now (review's
   // "preserve non-ground modes and towing boundaries") - see step()'s own guard.
   // Ticket 53310/53312: this test-build candidate (branch minecraft-503/shared-ground-support,
