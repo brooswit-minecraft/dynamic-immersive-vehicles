@@ -70,6 +70,9 @@ class OverridesTest {
   assertEquals(0.5, r.hullFillFactor); assertEquals(400.0, r.waterDrag); assertEquals(6000.0, r.propellerForce);
   assertEquals(0.0, r.angularWaterDrag, "angularWaterDrag's fallback is 0 - no rotational damping term unless configured");
   assertEquals(0.0, r.antiRollStiffness, "antiRollStiffness's fallback is 0 - no axle anti-roll coupling unless configured");
+  assertEquals(FlightForces.DEFAULT_STALL_ANGLE_DEGREES, r.stallAngleDegrees, "stallAngleDegrees falls back to FlightForces's own previously-hardcoded 15deg");
+  assertEquals(FlightForces.DEFAULT_LIFT_SLOPE, r.liftSlope, 1e-9, "liftSlope falls back to FlightForces's own previously-hardcoded 2*pi");
+  assertEquals(FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE, r.controlSurfaceSlope, 1e-9, "controlSurfaceSlope falls back to the same previously-hardcoded 2*pi");
   assertEquals(20.0, r.cyclicLimitDegrees, "cyclicLimitDegrees' fallback matches RotorForces' own prior hardcoded 20-degree clamp");
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
@@ -85,6 +88,7 @@ class OverridesTest {
   assertNotNull(r.hullFillFactor); assertNotNull(r.waterDrag); assertNotNull(r.propellerForce);
   assertNotNull(r.angularWaterDrag);
   assertNotNull(r.antiRollStiffness);
+  assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
  }
 
@@ -205,6 +209,71 @@ class OverridesTest {
  @Test void angularWaterDragIsRejectedOnAPartOverride() {
   var part = new Overrides.Tuning(); part.angularWaterDrag = 10.0;
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ // MINECRAFT-521: stallAngleDegrees/liftSlope/controlSurfaceSlope - bounded fixed-wing lift/
+ // stall-cap and control-authority tuning, consumed by PhysicsBridge.stepFlight.
+
+ @Test void stallAngleDegreesOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.stallAngleDegrees = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.stallAngleDegrees = -5.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.stallAngleDegrees = 45.001;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.stallAngleDegrees = 45.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.stallAngleDegrees = 12.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void liftSlopeOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.liftSlope = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.liftSlope = -1.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.liftSlope = 10.001;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.liftSlope = 10.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.liftSlope = 4.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void controlSurfaceSlopeOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.controlSurfaceSlope = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.controlSurfaceSlope = -1.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.controlSurfaceSlope = 10.001;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.controlSurfaceSlope = 10.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.controlSurfaceSlope = 3.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void fixedWingFieldsParticipateInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.stallAngleDegrees = 20.0; override.liftSlope = 5.0; override.controlSurfaceSlope = 4.0;
+   Overrides.setForTest(java.util.Map.of("packid:glider", override));
+   var r = Overrides.resolved("packid:glider");
+   assertEquals(20.0, r.stallAngleDegrees, "an explicit operator override must take precedence over the documented fallback");
+   assertEquals(5.0, r.liftSlope, 1e-9);
+   assertEquals(4.0, r.controlSurfaceSlope, 1e-9);
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void fixedWingFieldsAreRejectedOnAPartOverride() {
+  var stall = new Overrides.Tuning(); stall.stallAngleDegrees = 12.0;
+  assertThrows(IllegalArgumentException.class, stall::validateSupportedForPart);
+  var lift = new Overrides.Tuning(); lift.liftSlope = 4.0;
+  assertThrows(IllegalArgumentException.class, lift::validateSupportedForPart);
+  var control = new Overrides.Tuning(); control.controlSurfaceSlope = 4.0;
+  assertThrows(IllegalArgumentException.class, control::validateSupportedForPart);
  }
 
  @Test void brakeBiasFrontOutOfRangeFailsValidation() {
@@ -639,4 +708,54 @@ class OverridesTest {
  // doc) - reload()'s actual per-field validation/extends-chain/last-known-good logic is already
  // exercised indirectly above via the extends/cycle/precedence tests against readAndValidate's
  // shared helper, minus only the file-I/O wrapper itself.
+
+ // MINECRAFT-521 self-review: the ticket explicitly requires "invalid reload retaining last-good
+ // values" as a regression, not merely Tuning.validate() throwing in isolation. Overrides.apply(
+ // Supplier<Config>) (package-private test seam reload() itself now delegates through - see its
+ // own doc) runs the real validate-then-swap-or-reject logic with no file I/O/Gson needed, the
+ // same substitution GroundSurfaceOverridesTest already uses for its own loader's equivalent gap.
+
+ @Test void invalidReloadRetainsThePriorGoodStallAngleLiftSlopeAndControlSurfaceSlope() {
+  try {
+   var good = new Overrides.Tuning();
+   good.stallAngleDegrees = 20.0; good.liftSlope = 5.0; good.controlSurfaceSlope = 4.0;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(20.0, Overrides.resolved("packid:glider").stallAngleDegrees);
+   assertEquals(5.0, Overrides.resolved("packid:glider").liftSlope, 1e-9);
+   assertEquals(4.0, Overrides.resolved("packid:glider").controlSurfaceSlope, 1e-9);
+
+   var invalid = new Overrides.Tuning();
+   invalid.stallAngleDegrees = 90.0; invalid.liftSlope = -1.0; invalid.controlSurfaceSlope = 999.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload for these fields must be rejected, not silently applied");
+
+   assertEquals(20.0, Overrides.resolved("packid:glider").stallAngleDegrees,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(5.0, Overrides.resolved("packid:glider").liftSlope, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(4.0, Overrides.resolved("packid:glider").controlSurfaceSlope, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void invalidReloadViaAThrowingParseAlsoRetainsThePriorGoodValues() {
+  // The other half of the substitution GroundSurfaceOverridesTest already established: a
+  // configSupplier that throws (standing in for a real malformed-JSON parse failure) must be
+  // rejected exactly like a validation failure, never treated differently.
+  try {
+   var good = new Overrides.Tuning(); good.stallAngleDegrees = 12.0;
+   Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider2", good), java.util.Map.of()));
+   assertEquals(12.0, Overrides.resolved("packid:glider2").stallAngleDegrees);
+
+   var badResult = Overrides.apply(() -> { throw new RuntimeException("malformed json"); });
+   assertFalse(badResult.success());
+   assertEquals(12.0, Overrides.resolved("packid:glider2").stallAngleDegrees,
+     "a throwing parse must retain the prior good state, same as a validation failure does");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
 }

@@ -118,6 +118,16 @@ public final class Overrides {
   // suspensionTravel/friction/etc. this feature did not exist before this ticket, so there is no
   // prior shared non-zero number to preserve, only "no effect at all" to preserve exactly.
   public Double antiRollStiffness;
+  // MINECRAFT-521: bounded fixed-wing lift/stall-cap and control-authority tuning, consumed by
+  // PhysicsBridge.stepFlight via FlightForces.liftCoefficient/controlSurfaceForce. stallAngleDegrees
+  // is the hard stall cutoff (degrees) FlightForces.liftCoefficient clamps angle of attack to;
+  // liftSlope is the wing's own per-radian lift-curve slope; controlSurfaceSlope is the
+  // independently-tunable per-radian aileron/elevator/rudder authority slope (previously the same
+  // hardcoded constant as liftSlope - see FlightForces's own doc). None of these affect a
+  // rotorcraft (stepRotor has no wing/control-surface model to apply them to) or a ground vehicle.
+  public Double stallAngleDegrees;
+  public Double liftSlope;
+  public Double controlSurfaceSlope;
   // MINECRAFT-522: rotorcraft-only cyclic/yaw tuning, mirroring RotorForces.cyclicTilt's own
   // bounded-clamp contract and RotorForces.cyclicTorque/yawTorque's new authority-scale overloads
   // - see those methods' own docs. cyclicLimitDegrees bounds how far EACH AXIS (pitch and roll
@@ -179,6 +189,14 @@ public final class Overrides {
    // loads (review correction, comment 53781) - this amplifies their existing roll-induced
    // difference, and with unequal calibrated rates cannot generally equalize them at any setting.
    if (antiRollStiffness != null && !(Double.isFinite(antiRollStiffness) && antiRollStiffness >= 0 && antiRollStiffness <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Bounded well short of a literal post-stall simulation (ticket's own "do not claim full
+   // post-stall spin/soft-body simulation" constraint): 45deg keeps this a genuine hard stall
+   // CAP, never a config path to effectively disabling stall at all.
+   if (stallAngleDegrees != null && !(Double.isFinite(stallAngleDegrees) && stallAngleDegrees > 0 && stallAngleDegrees <= 45)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Bounded generously around the thin-airfoil-theory default (2*pi ~= 6.283) - finite, positive,
+   // never so large it produces an absurd lift/control force from a tiny angle/deflection.
+   if (liftSlope != null && !(Double.isFinite(liftSlope) && liftSlope > 0 && liftSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (controlSurfaceSlope != null && !(Double.isFinite(controlSurfaceSlope) && controlSurfaceSlope > 0 && controlSurfaceSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    // MINECRAFT-522: bounded the same way the class doc on RotorForces.MAX_CYCLIC_LIMIT_DEGREES
    // explains - a real rotor disk cannot be tilted onto its edge, so even an operator-configured
    // limit is capped there, never just "whatever value was typed".
@@ -228,6 +246,9 @@ public final class Overrides {
    if (upperMassFraction != null) throw new IllegalArgumentException("part overrides do not support 'upperMassFraction' (no part-level consumer yet)");
    if (lateralGripMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'lateralGripMultiplier' (no part-level consumer yet)");
    if (antiRollStiffness != null) throw new IllegalArgumentException("part overrides do not support 'antiRollStiffness' (no part-level consumer yet)");
+   if (stallAngleDegrees != null) throw new IllegalArgumentException("part overrides do not support 'stallAngleDegrees' (no part-level consumer yet)");
+   if (liftSlope != null) throw new IllegalArgumentException("part overrides do not support 'liftSlope' (no part-level consumer yet)");
+   if (controlSurfaceSlope != null) throw new IllegalArgumentException("part overrides do not support 'controlSurfaceSlope' (no part-level consumer yet)");
    if (cyclicLimitDegrees != null) throw new IllegalArgumentException("part overrides do not support 'cyclicLimitDegrees' (no part-level consumer yet)");
    if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
@@ -240,7 +261,10 @@ public final class Overrides {
   * Values/units/provenance unchanged from the shared numbers this ticket's physics work has
   * always used: driveForce 8000N, brakeForce 12000N, suspensionTravel 0.3m, friction mu=1.0
   * (dimensionless), maxSteerDegrees 30deg, hullFillFactor 0.5 (dimensionless), waterDrag 400
-  * (solver-internal units), propellerForce 6000N. MINECRAFT-522: cyclicLimitDegrees 20deg and
+  * (solver-internal units), propellerForce 6000N. MINECRAFT-521: stallAngleDegrees/liftSlope/
+  * controlSurfaceSlope fall back to {@link FlightForces}'s own DEFAULT_* constants - the exact
+  * values that class previously hardcoded, so an unconfigured fixed-wing vehicle flies
+  * byte-identically to before this ticket. MINECRAFT-522: cyclicLimitDegrees 20deg and
   * cyclicAuthorityScale/yawAuthorityScale 1.0 (unit scaling) reproduce RotorForces' own prior
   * hardcoded constant/behavior exactly - see that class's doc. */
  private static final Tuning FALLBACK = new Tuning();
@@ -251,6 +275,9 @@ public final class Overrides {
   FALLBACK.lateralGripMultiplier=1.0;
   FALLBACK.angularWaterDrag=0.0;
   FALLBACK.antiRollStiffness=0.0;
+  FALLBACK.stallAngleDegrees=FlightForces.DEFAULT_STALL_ANGLE_DEGREES;
+  FALLBACK.liftSlope=FlightForces.DEFAULT_LIFT_SLOPE;
+  FALLBACK.controlSurfaceSlope=FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE;
   FALLBACK.cyclicLimitDegrees=20.0;
   FALLBACK.cyclicAuthorityScale=1.0;
   FALLBACK.yawAuthorityScale=1.0;
@@ -266,6 +293,7 @@ public final class Overrides {
   c.upperMassFraction=t.upperMassFraction; c.lateralGripMultiplier=t.lateralGripMultiplier;
   c.angularWaterDrag=t.angularWaterDrag;
   c.antiRollStiffness=t.antiRollStiffness;
+  c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.brakeBiasFront=t.brakeBiasFront;
   return c;
@@ -294,6 +322,9 @@ public final class Overrides {
   m.lateralGripMultiplier = child.lateralGripMultiplier!=null?child.lateralGripMultiplier:parent.lateralGripMultiplier;
   m.angularWaterDrag = child.angularWaterDrag!=null?child.angularWaterDrag:parent.angularWaterDrag;
   m.antiRollStiffness = child.antiRollStiffness!=null?child.antiRollStiffness:parent.antiRollStiffness;
+  m.stallAngleDegrees = child.stallAngleDegrees!=null?child.stallAngleDegrees:parent.stallAngleDegrees;
+  m.liftSlope = child.liftSlope!=null?child.liftSlope:parent.liftSlope;
+  m.controlSurfaceSlope = child.controlSurfaceSlope!=null?child.controlSurfaceSlope:parent.controlSurfaceSlope;
   m.cyclicLimitDegrees = child.cyclicLimitDegrees!=null?child.cyclicLimitDegrees:parent.cyclicLimitDegrees;
   m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
@@ -356,7 +387,11 @@ public final class Overrides {
   * extends} may reference (see {@link #effective}); {@code vehicles} is unchanged from before
   * this ticket; {@code parts} is new, keyed identically to {@code vehicles} but for a PART's own
   * identity (see {@link #resolvedPart}'s doc for the exact key shape) rather than a vehicle's. */
- private record Config(Map<String,Tuning> templates, Map<String,Tuning> vehicles, Map<String,Tuning> parts) {}
+ // Package-private, not private (MINECRAFT-521 self-review) - lets OverridesTest construct a
+ // Config directly for Overrides.apply(Supplier<Config>)'s own test seam (see its doc), without
+ // needing Gson or a live FML config file to drive an invalid-reload-retains-last-known-good
+ // regression through.
+ record Config(Map<String,Tuning> templates, Map<String,Tuning> vehicles, Map<String,Tuning> parts) {}
  private static Map<String,Tuning> templates = Map.of();
  private static Map<String,Tuning> vehicles = Map.of();
  private static Map<String,Tuning> parts = Map.of();
@@ -470,6 +505,9 @@ public final class Overrides {
   result.upperMassFraction = firstNonNull(override!=null?override.upperMassFraction:null, packMetadata!=null?packMetadata.upperMassFraction:null, ivAdapted!=null?ivAdapted.upperMassFraction:null, physicallyDerived!=null?physicallyDerived.upperMassFraction:null, FALLBACK.upperMassFraction);
   result.lateralGripMultiplier = firstNonNull(override!=null?override.lateralGripMultiplier:null, packMetadata!=null?packMetadata.lateralGripMultiplier:null, ivAdapted!=null?ivAdapted.lateralGripMultiplier:null, physicallyDerived!=null?physicallyDerived.lateralGripMultiplier:null, FALLBACK.lateralGripMultiplier);
   result.antiRollStiffness = firstNonNull(override!=null?override.antiRollStiffness:null, packMetadata!=null?packMetadata.antiRollStiffness:null, ivAdapted!=null?ivAdapted.antiRollStiffness:null, physicallyDerived!=null?physicallyDerived.antiRollStiffness:null, FALLBACK.antiRollStiffness);
+  result.stallAngleDegrees = firstNonNull(override!=null?override.stallAngleDegrees:null, packMetadata!=null?packMetadata.stallAngleDegrees:null, ivAdapted!=null?ivAdapted.stallAngleDegrees:null, physicallyDerived!=null?physicallyDerived.stallAngleDegrees:null, FALLBACK.stallAngleDegrees);
+  result.liftSlope = firstNonNull(override!=null?override.liftSlope:null, packMetadata!=null?packMetadata.liftSlope:null, ivAdapted!=null?ivAdapted.liftSlope:null, physicallyDerived!=null?physicallyDerived.liftSlope:null, FALLBACK.liftSlope);
+  result.controlSurfaceSlope = firstNonNull(override!=null?override.controlSurfaceSlope:null, packMetadata!=null?packMetadata.controlSurfaceSlope:null, ivAdapted!=null?ivAdapted.controlSurfaceSlope:null, physicallyDerived!=null?physicallyDerived.controlSurfaceSlope:null, FALLBACK.controlSurfaceSlope);
   result.cyclicLimitDegrees = firstNonNull(override!=null?override.cyclicLimitDegrees:null, packMetadata!=null?packMetadata.cyclicLimitDegrees:null, ivAdapted!=null?ivAdapted.cyclicLimitDegrees:null, physicallyDerived!=null?physicallyDerived.cyclicLimitDegrees:null, FALLBACK.cyclicLimitDegrees);
   result.cyclicAuthorityScale = firstNonNull(override!=null?override.cyclicAuthorityScale:null, packMetadata!=null?packMetadata.cyclicAuthorityScale:null, ivAdapted!=null?ivAdapted.cyclicAuthorityScale:null, physicallyDerived!=null?physicallyDerived.cyclicAuthorityScale:null, FALLBACK.cyclicAuthorityScale);
   result.yawAuthorityScale = firstNonNull(override!=null?override.yawAuthorityScale:null, packMetadata!=null?packMetadata.yawAuthorityScale:null, ivAdapted!=null?ivAdapted.yawAuthorityScale:null, physicallyDerived!=null?physicallyDerived.yawAuthorityScale:null, FALLBACK.yawAuthorityScale);
@@ -515,17 +553,19 @@ public final class Overrides {
  private static Gson gson() { return new GsonBuilder().setPrettyPrinting().create(); }
  private static Path configPath() { return FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json"); }
  /**
-  * Parses and fully validates {@code path} into a {@link Config} - every entry in {@code
-  * templates}/{@code vehicles}/{@code parts} (field-range validation via {@link Tuning#validate})
-  * AND every entry's own {@code extends} chain (unknown target / cycle, via {@link #effective},
-  * eagerly resolved once per entry here so a bad chain fails at load/reload time, not on some
-  * later vehicle's first tick - ticket 53518's "invalid/unknown values" requirement). Never
-  * mutates {@link #templates}/{@link #vehicles}/{@link #parts} itself - {@link #load} and
-  * {@link #reload} each decide separately what to do with a successful parse, and specifically
-  * how to react to a failure (throw vs. keep the last-known-good maps and report it).
+  * Fully validates an already-parsed {@link Config} - every entry in {@code templates}/{@code
+  * vehicles}/{@code parts} (field-range validation via {@link Tuning#validate}) AND every entry's
+  * own {@code extends} chain (unknown target / cycle, via {@link #effective}, eagerly resolved
+  * once per entry here so a bad chain fails at load/reload time, not on some later vehicle's
+  * first tick - ticket 53518's "invalid/unknown values" requirement). Never mutates {@link
+  * #templates}/{@link #vehicles}/{@link #parts} itself - {@link #load} and {@link #apply} each
+  * decide separately what to do with a successful validation, and specifically how to react to a
+  * failure (throw vs. keep the last-known-good maps and report it). The parse-independent half of
+  * the original combined method (MINECRAFT-521 self-review) - factored out so {@link #apply} can
+  * run this exact same validation against a test-supplied {@link Config} with no file I/O/Gson
+  * involved at all; see {@link #readAndValidate} for what still wraps this with the actual parse.
   */
- private static Config readAndValidate(Path path) throws IOException {
-  Config config = gson().fromJson(Files.readString(path), Config.class);
+ private static Config validateConfig(Config config) {
   if (config == null || config.vehicles() == null) throw new IllegalArgumentException("missing vehicles map");
   Map<String,Tuning> templatesRead = config.templates() != null ? config.templates() : Map.of();
   Map<String,Tuning> vehiclesRead = config.vehicles();
@@ -555,6 +595,40 @@ public final class Overrides {
    merged.validateSupportedForPart(); // review 53556: reject an inert (unsupported) part field loudly
   }
   return new Config(templatesRead, vehiclesRead, partsRead);
+ }
+ /** Parses {@code path} then runs it through {@link #validateConfig} - the checked-exception path
+  * {@link #load} uses directly (a broken fresh-install file must fail loudly at startup). */
+ private static Config readAndValidate(Path path) throws IOException {
+  Config config = gson().fromJson(Files.readString(path), Config.class);
+  return validateConfig(config);
+ }
+ /**
+  * Test-only seam (MINECRAFT-521 self-review: the ticket requires an actual invalid-reload-
+  * retains-last-known-good regression, not only {@code Tuning.validate()} throwing in isolation) -
+  * the exact same validate-then-swap-or-reject logic {@link #reload} uses, against a caller-
+  * supplied {@link Config} instead of one parsed from {@link #configPath}'s file, so a plain unit
+  * test can install a known-good state, "reload" an invalid one, and assert the known-good state
+  * was retained - with no live FML config directory or Gson needed at all. {@code configSupplier}
+  * throwing (standing in for a real parse failure, the same substitution
+  * {@code GroundSurfaceOverridesTest} already uses for its own loader) is treated exactly like a
+  * validation failure: last-known-good, never a partial/garbage apply.
+  */
+ static ReloadResult apply(java.util.function.Supplier<Config> configSupplier) {
+  try {
+   Config config = validateConfig(configSupplier.get());
+   templates = Map.copyOf(config.templates());
+   vehicles = Map.copyOf(config.vehicles());
+   parts = Map.copyOf(config.parts());
+   return ReloadResult.ok(vehicles.size(), parts.size());
+  } catch (RuntimeException ex) {
+   // No configPath() call here (self-review fix): apply() is also the test seam, called directly
+   // against a caller-supplied Config/Supplier with no live FML config directory at all -
+   // configPath() itself throws (FMLPaths.CONFIGDIR.get() is null outside a real FML runtime) if
+   // referenced from this generic message, masking the real validation failure with an unrelated
+   // NPE. ex's own message already names what actually went wrong; reload()'s caller only ever
+   // needs that, not a restated path it already knows (it's the one who called reload()).
+   return ReloadResult.failed("Cannot reload: " + ex.getMessage());
+  }
  }
  static void load() {
   Path path = configPath();
@@ -588,8 +662,8 @@ public final class Overrides {
  }
  /**
   * Non-throwing hot-reload (ticket 53518/MINECRAFT-505's core ask) - re-reads and fully
-  * validates {@link #configPath}'s current contents via the SAME {@link #readAndValidate} path
-  * {@link #load} uses, but on ANY failure (missing/malformed JSON, an out-of-range field, an
+  * validates {@link #configPath}'s current contents via {@link #apply}, the same validation
+  * {@link #load}'s own {@link #readAndValidate} runs, but on ANY failure (missing/malformed JSON, an out-of-range field, an
   * unknown {@code extends} target, a cycle) leaves {@link #templates}/{@link #vehicles}/
   * {@link #parts} completely untouched - last-known-good, per the ticket's explicit "retain
   * last-known-good on errors" requirement - and returns a {@link ReloadResult} describing the
@@ -602,16 +676,20 @@ public final class Overrides {
   * method only ever changes what a FUTURE {@link #resolved}/{@link #resolvedPart} call sees.
   */
  public static ReloadResult reload() {
-  Path path = configPath();
-  try {
-   Config config = readAndValidate(path);
-   templates = Map.copyOf(config.templates());
-   vehicles = Map.copyOf(config.vehicles());
-   parts = Map.copyOf(config.parts());
-   return ReloadResult.ok(vehicles.size(), parts.size());
-  } catch (IOException | RuntimeException ex) {
-   return ReloadResult.failed("Cannot reload " + path + ": " + ex.getMessage());
-  }
+  // Delegates to the test-seam apply() above (MINECRAFT-521 self-review) - identical
+  // validate-then-swap-or-reject behavior, just reached through the real file instead of a
+  // caller-supplied Config. A checked IOException from the parse itself (e.g. the file was
+  // deleted between calls) must still produce the same last-known-good failure apply() already
+  // gives a RuntimeException - apply()'s Supplier<Config> contract has no checked-exception
+  // channel, so it is converted to UncheckedIOException here and unwrapped into apply()'s normal
+  // RuntimeException catch, not raised past this method.
+  return apply(() -> {
+   try {
+    return gson().fromJson(Files.readString(configPath()), Config.class);
+   } catch (IOException ex) {
+    throw new java.io.UncheckedIOException(ex);
+   }
+  });
  }
  /** Outcome of a {@link #reload} call - {@code success} false means the previous
   * templates/vehicles/parts maps are UNCHANGED (last-known-good), never partially applied. */
