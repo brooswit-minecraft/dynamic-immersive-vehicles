@@ -2570,6 +2570,26 @@ MINECRAFT-532's own merged work, confirming no regression from either
 side of the merge). `gradle --offline build -q` succeeded again; jar
 SHA-256 `9355b64a4dc682ffa9ca9351627f6267603c2f0009a95e02807f786ceb9bde60`.
 
+**Second reconciliation (review findings, Jira comments 54089/54091;
+John's coordination comment 54086).** Accepted `main` advanced again
+while the previous reconciliation's review was in flight, through
+MINECRAFT-533's own per-axle toe-alignment merge
+(`c2fa1e37e90438da3d7e6b87482dbe6341f4d1a9`, PR #33) - the prior
+reconciled head (`fc4fd48`) only integrated as far as `d5fb9ad` and so
+omitted M533's already-accepted work, even though `git merge-tree`
+itself reported clean (no code conflict - this was a staleness/evidence
+gap, not a conflict). Merged `origin/main` again: this merge auto-
+resolved with ZERO conflicts in any file (`Overrides.java`,
+`PhysicsBridge.java`, `VERIFICATION.md` all auto-merged cleanly) -
+M533's own `axleToeDistribution`/`AxleToeDistribution` additions and
+this ticket's `rollingResistance` work remain in disjoint regions, same
+additive-schema-coordination property the first reconciliation already
+demonstrated for M532. Full suite re-run after this second
+reconciliation: **741 tests**, 0 skipped, 0 failures, 0 errors (722 of
+the prior reconciled state + 19 from MINECRAFT-533's own merged work).
+`gradle --offline build -q` succeeded again; jar SHA-256
+`f272eedb061f57e0b1ee21a6fd887452da22c6e8c39c86080a049cdbc3194be3`.
+
 ## Contact-aware axle drive-force sharing (MINECRAFT-532, added 2026-11-15)
 
 Bounded deliverable: opt-in redistribution of a wheel's own already-assigned
