@@ -36,6 +36,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   // MINECRAFT-536: parasiticDragMultiplier/oswaldEfficiency must go through this same
   // live-mutation path too.
   fresh.parasiticDragMultiplier = 1.3; fresh.oswaldEfficiency = 0.65;
+  // MINECRAFT-533: toeFrontDegrees/toeRearDegrees must go through this same live-mutation path.
+  fresh.toeFrontDegrees = 2.5; fresh.toeRearDegrees = -1.5;
   // MINECRAFT-532: axleDriveForceSharing must go through this same live-mutation path too.
   fresh.axleDriveForceSharing = true;
   List<String> applied = new ArrayList<>();
@@ -50,9 +52,10 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
   assertEquals(1.1, target.suspensionDampingRatio);
   assertEquals(1.3, target.parasiticDragMultiplier); assertEquals(0.65, target.oswaldEfficiency);
+  assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
   assertEquals(true, target.axleDriveForceSharing);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","axleDriveForceSharing"),
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing"),
     new TreeSet<>(applied));
  }
 
@@ -101,6 +104,20 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.0, target.yawAuthorityScale, "must revert to unit scaling once the override is removed");
   assertTrue(applied.containsAll(List.of("cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale")),
     "the revert-to-default must itself be reported as an applied live change");
+ }
+
+ @Test void removingAToeOverrideLiveAppliesBackDownToTheUnconfiguredNullNoOp() {
+  // Same "no FALLBACK entry" shape as brakeBiasFront/driveBiasFront - an operator who removes a
+  // previously-configured toe entry must see the live vehicle actually go back to null (no toe
+  // applied), not get stuck at its last explicit value.
+  var target = Overrides.defaultTuning();
+  target.toeFrontDegrees = 3.0; target.toeRearDegrees = -2.0;
+  var fresh = Overrides.defaultTuning(); // no override at all -> stays null, same as unconfigured
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertNull(target.toeFrontDegrees, "must revert to unconfigured (null, no toe applied) once the override is removed");
+  assertNull(target.toeRearDegrees, "must revert to unconfigured (null, no toe applied) once the override is removed");
+  assertTrue(applied.containsAll(List.of("toeFrontDegrees","toeRearDegrees")), "the revert-to-unconfigured must itself be reported as an applied live change");
  }
 
  @Test void unchangedFieldsAreNotReportedAsApplied() {
