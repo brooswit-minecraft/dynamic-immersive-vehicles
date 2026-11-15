@@ -2599,15 +2599,16 @@ scope.
 
 **Evidence gathered this pass:** `/tmp/gradle-8.14/bin/gradle --offline
 --no-daemon clean test build`, flock-protected on the shared
-`/tmp/div-gradle-slot.lock` (never unlinked) - `BUILD SUCCESSFUL`, the
-real JUnit XML reports **696 tests**, 0 skipped, 0 failures, 0 errors (9
-net-new unit tests beyond the existing suite, no regressions). Jar
-SHA-256 `4a086af080bde4e8e49f4bfd749f41500356d3196badaf54f8b3637408d7fbbe`.
-The real-Sable `DirectionalWaterDragProbe` run itself (an opt-in
-`gradle runServer` pass, distinct from the unit-test evidence above) is
-not yet performed in this pass - same disclosed-limitation shape as other
-sibling tickets' own opt-in runtime probes when only unit-level evidence
-has been gathered so far; it remains available on request before Done.
+`/tmp/div-gradle-slot.lock` (never unlinked), at this exact head
+(reconciled onto accepted main through MINECRAFT-532/533/534/536) -
+`BUILD SUCCESSFUL`, the real JUnit XML reports **784 tests**, 0 skipped,
+0 failures, 0 errors. Jar SHA-256
+`67c455a6d63bc7205984f6378e0800182b09992d9206d145b2df05039e085d59`. The
+real-Sable `DirectionalWaterDragProbe` run itself (an opt-in
+`gradle runServer` pass, distinct from the unit-test evidence above) WAS
+performed this pass - see "Three live-discovered defects" and "Actual
+probe run results" above: all 7 scenarios `COMPLETE`, zero `FAILED`,
+all four comparisons PASS.
 
 ## Installed-tire rolling resistance overrides (MINECRAFT-534, added 2026-11-15)
 
