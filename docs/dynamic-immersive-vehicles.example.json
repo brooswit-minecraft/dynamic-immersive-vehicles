@@ -24,7 +24,8 @@
       "driveForce": 9000.0,
       "cyclicLimitDegrees": 15.0,
       "cyclicAuthorityScale": 1.3,
-      "yawAuthorityScale": 0.8
+      "yawAuthorityScale": 0.8,
+      "rotorAngularDampingCoefficient": 2.5
     },
     "examplepack:front_biased_car": {
       "brakeForce": 12000.0,

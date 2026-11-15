@@ -142,6 +142,17 @@ public final class Overrides {
   public Double cyclicLimitDegrees;
   public Double cyclicAuthorityScale;
   public Double yawAuthorityScale;
+  // MINECRAFT-537: optional, rotorcraft-only bounded angular-rate damping - see
+  // RotorForces.angularDampingTorque's own doc for the full dissipative-drag model and the
+  // no-reversal/no-free-torque contract, and PhysicsBridge.stepRotor for how it is ADDED to (never
+  // substituted for) the existing cyclic/yaw control torque above. 0.0 (FALLBACK below) is the
+  // documented off value - RotorForces.angularDampingTorque already returns exactly 0 for a
+  // non-positive coefficient, so an unconfigured rotorcraft's torque is byte-identical to before
+  // this ticket. Deliberately independent of cyclicLimitDegrees/cyclicAuthorityScale/
+  // yawAuthorityScale (MINECRAFT-522) - this only ever opposes the body's OWN existing angular
+  // velocity, never the pilot's cyclic/yaw input, so it cannot be mistaken for (or substitute for)
+  // auto-level, a hover autopilot, or cyclic response filtering.
+  public Double rotorAngularDampingCoefficient;
   // MINECRAFT-520: configurable front/rear SERVICE-brake distribution - 0.0 sends the whole
   // tuning.brakeForce budget to the geometric rear axle group, 1.0 sends it all to the front
   // group, 0.5 is the neutral/even axle split. No FALLBACK entry (like selfRight*/massKg/
@@ -266,6 +277,13 @@ public final class Overrides {
    // capped at 5x to keep this a tuning knob, not a way to grant unbounded attitude/yaw torque.
    if (cyclicAuthorityScale != null && !(Double.isFinite(cyclicAuthorityScale) && cyclicAuthorityScale > 0 && cyclicAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (yawAuthorityScale != null && !(Double.isFinite(yawAuthorityScale) && yawAuthorityScale > 0 && yawAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-537: inclusive 0 (the FALLBACK/off value, explicitly valid to set, same reasoning
+   // antiRollStiffness's own inclusive-zero bound above uses) through
+   // RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT - see that constant's own doc for why this cap is
+   // a usability/sanity ceiling rather than a load-bearing safety bound (RotorForces.
+   // angularDampingTorque's own no-reversal clamp is unconditionally safe for any finite,
+   // non-negative coefficient).
+   if (rotorAngularDampingCoefficient != null && !(Double.isFinite(rotorAngularDampingCoefficient) && rotorAngularDampingCoefficient >= 0 && rotorAngularDampingCoefficient <= io.github.brooswitminecraft.div.RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Inclusive at both ends (0.0 all-rear, 1.0 all-front are the documented, legitimate
    // extremes - see BrakeBiasDistributionTest's own front/rear-extreme coverage), unlike
    // lateralGripMultiplier's exclusive-zero: a brake bias of exactly 0 or 1 is a normal,
@@ -423,6 +441,7 @@ public final class Overrides {
    if (cyclicLimitDegrees != null) throw new IllegalArgumentException("part overrides do not support 'cyclicLimitDegrees' (no part-level consumer yet)");
    if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
+   if (rotorAngularDampingCoefficient != null) throw new IllegalArgumentException("part overrides do not support 'rotorAngularDampingCoefficient' (vehicle-only concept - no part-level consumer yet)");
    if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (driveBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'driveBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (suspensionDampingRatio != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatio' (no part-level consumer yet)");
@@ -455,6 +474,12 @@ public final class Overrides {
   FALLBACK.cyclicLimitDegrees=20.0;
   FALLBACK.cyclicAuthorityScale=1.0;
   FALLBACK.yawAuthorityScale=1.0;
+  // MINECRAFT-537: 0.0 is a true no-op - RotorForces.angularDampingTorque returns exactly 0 for a
+  // non-positive coefficient - so an unconfigured rotorcraft's torque is byte-identical to before
+  // this ticket (there was no prior angular-rate damping term at all to preserve, unlike
+  // cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale above, which preserve a prior
+  // non-zero hardcoded behavior).
+  FALLBACK.rotorAngularDampingCoefficient=0.0;
   // MINECRAFT-523: the exact ratio PhysicsBridge.suspensionDamper/suspensionDamperForShare/
   // effectiveMassDamper previously hardcoded - an unconfigured vehicle settles byte-identically
   // to before this ticket.
@@ -477,6 +502,7 @@ public final class Overrides {
   c.antiRollStiffness=t.antiRollStiffness;
   c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
+  c.rotorAngularDampingCoefficient=t.rotorAngularDampingCoefficient;
   c.brakeBiasFront=t.brakeBiasFront;
   c.driveBiasFront=t.driveBiasFront;
   c.suspensionDampingRatio=t.suspensionDampingRatio;
@@ -513,6 +539,7 @@ public final class Overrides {
   m.cyclicLimitDegrees = child.cyclicLimitDegrees!=null?child.cyclicLimitDegrees:parent.cyclicLimitDegrees;
   m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
+  m.rotorAngularDampingCoefficient = child.rotorAngularDampingCoefficient!=null?child.rotorAngularDampingCoefficient:parent.rotorAngularDampingCoefficient;
   m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
   m.suspensionDampingRatio = child.suspensionDampingRatio!=null?child.suspensionDampingRatio:parent.suspensionDampingRatio;
@@ -699,6 +726,7 @@ public final class Overrides {
   result.cyclicLimitDegrees = firstNonNull(override!=null?override.cyclicLimitDegrees:null, packMetadata!=null?packMetadata.cyclicLimitDegrees:null, ivAdapted!=null?ivAdapted.cyclicLimitDegrees:null, physicallyDerived!=null?physicallyDerived.cyclicLimitDegrees:null, FALLBACK.cyclicLimitDegrees);
   result.cyclicAuthorityScale = firstNonNull(override!=null?override.cyclicAuthorityScale:null, packMetadata!=null?packMetadata.cyclicAuthorityScale:null, ivAdapted!=null?ivAdapted.cyclicAuthorityScale:null, physicallyDerived!=null?physicallyDerived.cyclicAuthorityScale:null, FALLBACK.cyclicAuthorityScale);
   result.yawAuthorityScale = firstNonNull(override!=null?override.yawAuthorityScale:null, packMetadata!=null?packMetadata.yawAuthorityScale:null, ivAdapted!=null?ivAdapted.yawAuthorityScale:null, physicallyDerived!=null?physicallyDerived.yawAuthorityScale:null, FALLBACK.yawAuthorityScale);
+  result.rotorAngularDampingCoefficient = firstNonNull(override!=null?override.rotorAngularDampingCoefficient:null, packMetadata!=null?packMetadata.rotorAngularDampingCoefficient:null, ivAdapted!=null?ivAdapted.rotorAngularDampingCoefficient:null, physicallyDerived!=null?physicallyDerived.rotorAngularDampingCoefficient:null, FALLBACK.rotorAngularDampingCoefficient);
   // No FALLBACK entry (mirrors selfRight*/enabled/massKg above) - stays null unless some level
   // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
   // needs to reproduce the pre-ticket even split.

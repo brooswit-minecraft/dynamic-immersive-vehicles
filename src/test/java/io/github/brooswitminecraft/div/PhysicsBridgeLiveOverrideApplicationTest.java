@@ -33,6 +33,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.cyclicLimitDegrees = 12.0; fresh.cyclicAuthorityScale = 1.4; fresh.yawAuthorityScale = 0.6;
   // MINECRAFT-523: suspensionDampingRatio must go through this same live-mutation path too.
   fresh.suspensionDampingRatio = 1.1;
+  // MINECRAFT-537: rotorAngularDampingCoefficient must go through this same live-mutation path too.
+  fresh.rotorAngularDampingCoefficient = 3.5;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
@@ -44,8 +46,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(0.3, target.driveBiasFront);
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
   assertEquals(1.1, target.suspensionDampingRatio);
+  assertEquals(3.5, target.rotorAngularDampingCoefficient);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio"),
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","rotorAngularDampingCoefficient"),
     new TreeSet<>(applied));
  }
 
@@ -78,6 +81,20 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.0, target.yawAuthorityScale, "must revert to unit scaling once the override is removed");
   assertTrue(applied.containsAll(List.of("cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale")),
     "the revert-to-default must itself be reported as an applied live change");
+ }
+
+ @Test void removingARotorAngularDampingCoefficientOverrideLiveAppliesBackDownToOffDefault() {
+  // MINECRAFT-537: same "revert to documented default on removal" requirement as the
+  // MINECRAFT-522 rotor fields above - an operator who previously configured this and then
+  // removes that config entry entirely must see the live vehicle actually fall back to the
+  // documented off default (0.0) on the next reload, the zero/off-parity hot-reload requirement.
+  var target = Overrides.defaultTuning();
+  target.rotorAngularDampingCoefficient = 3.5;
+  var fresh = Overrides.defaultTuning(); // no override at all -> FALLBACK default (0.0)
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(0.0, target.rotorAngularDampingCoefficient, "must revert to the documented off (0.0) default once the override is removed");
+  assertTrue(applied.contains("rotorAngularDampingCoefficient"), "the revert-to-default must itself be reported as an applied live change");
  }
 
  @Test void unchangedFieldsAreNotReportedAsApplied() {
