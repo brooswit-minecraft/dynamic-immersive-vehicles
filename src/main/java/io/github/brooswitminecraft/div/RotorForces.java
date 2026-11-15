@@ -112,4 +112,63 @@ public final class RotorForces {
  public static double rotorRadiusMeters(double diameterInches) {
   return diameterInches * 0.0254 / 2;
  }
+
+ /** Sane configuration ceiling on {@code Overrides.Tuning#rotorAngularDampingCoefficient}
+  * (MINECRAFT-537). Unlike {@link #MAX_CYCLIC_LIMIT_DEGREES} or an authority scale, this is NOT
+  * load-bearing for safety by itself - {@link #angularDampingTorque}'s own no-reversal clamp
+  * already bounds one tick's damping impulse to at most the axis's existing angular momentum
+  * REGARDLESS of how large the coefficient is, so no finite coefficient can ever inject energy
+  * or destabilize the body. The cap exists only so a config value stays a meaningful dial rather
+  * than an arbitrary huge number that does nothing extra (every coefficient at or above the point
+  * where a tick's damping is already fully clamped to "stop this axis dead" is indistinguishable
+  * from every other coefficient at or above that point) and to keep {@code validate()} rejecting
+  * a plainly mistyped value (e.g. a stray extra digit) the same way the other authority-style
+  * fields above do. */
+ public static final double MAX_ANGULAR_DAMPING_COEFFICIENT = 1000.0;
+
+ /**
+  * Bounded, dissipative angular-rate damping torque about ONE body-local rotational axis
+  * (MINECRAFT-537) - NOT auto-level, NOT a hover autopilot, and NOT cyclic-input filtering: the
+  * only inputs are the body's OWN current angular velocity and inertia about this axis, never the
+  * pilot's control input, so this can only ever oppose/reduce rotation already present, never add
+  * net rotational energy or substitute for the pilot's actual cyclic/yaw torque (see
+  * {@code PhysicsBridge.stepRotor}'s own doc for how this is combined with, not instead of, the
+  * existing cyclic/yaw control torques).
+  *
+  * <p>Modeled as linear (viscous) drag: {@code torque = -coefficient * inertiaAxis *
+  * angularVelocityAxis}, scaling with this axis's own moment of inertia the same way linear drag
+  * scales with mass - so a light, easily-spun axis is not damped identically to a heavy one for
+  * the same coefficient. This is the real-world powered/unpowered drag semantics the ticket asks
+  * for: friction/windage drag on a rotor's gearbox and hub opposes shaft rotation whether the
+  * engine is driving it or not, and does so proportionally to the rotating assembly's own inertia
+  * - it grants no free control torque of its own (zero input angular velocity gives zero torque).
+  *
+  * <p>Clamped so a single tick's damping impulse ({@code torque * dt}) can never remove more
+  * angular momentum about this axis than the axis already has - i.e. it can bring this axis's
+  * rotation to exactly zero in one tick but never past zero into the opposite direction
+  * ("no-reversal"): flipping the sign of an existing angular velocity is itself a net energy
+  * INJECTION (the body would now be spinning the other way under a term whose entire premise is
+  * removing energy), which is physically backward for a drag term and is exactly the instability
+  * an unbounded proportional damping torque could otherwise produce at a large coefficient or a
+  * large/variable {@code dt}. The bound is {@code inertiaAxis * |angularVelocityAxis| / dt},
+  * which holds at ANY dt (including the "extreme dt" stability requirement) and ANY coefficient
+  * (including {@link #MAX_ANGULAR_DAMPING_COEFFICIENT}) - see this method's own no-reversal unit
+  * tests.
+  *
+  * @param angularVelocityAxis this axis's current angular velocity component, rad/s
+  * @param inertiaAxis this axis's own moment of inertia (body-frame diagonal), kg*m^2 - must be
+  *                     strictly positive, same contract as every other moment-of-inertia
+  *                     consumer in this codebase (e.g. {@code PhysicsBridge.effectiveMassDamper})
+  * @param dampingCoefficient per-second viscous drag strength, {@code >= 0}; {@code 0} (the
+  *                            documented {@code Overrides.Tuning} FALLBACK) returns exactly 0 -
+  *                            the zero/off-parity requirement
+  * @param dt the physics tick length this torque will be integrated over (as an impulse,
+  *           {@code torque*dt}), consistent with every other torque in {@code PhysicsBridge}
+  */
+ public static double angularDampingTorque(double angularVelocityAxis, double inertiaAxis, double dampingCoefficient, double dt) {
+  if (!(dampingCoefficient > 0) || !(dt > 0) || !(inertiaAxis > 0) || angularVelocityAxis == 0) return 0;
+  double unbounded = -dampingCoefficient * inertiaAxis * angularVelocityAxis;
+  double maxMagnitude = inertiaAxis * Math.abs(angularVelocityAxis) / dt;
+  return Math.max(-maxMagnitude, Math.min(maxMagnitude, unbounded));
+ }
 }

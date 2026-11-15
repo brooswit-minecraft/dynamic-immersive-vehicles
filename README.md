@@ -59,7 +59,11 @@ each vehicle from IV's own definition at the moment it is needed:
   configurable per vehicle (`cyclicLimitDegrees`, `cyclicAuthorityScale`,
   `yawAuthorityScale` - MINECRAFT-522); unconfigured, they default to the
   model's original 20-degree clamp and 1.0 (unit) scaling - see
-  [Configuration](#configuration) below. See
+  [Configuration](#configuration) below. An optional, independent, bounded
+  angular-rate damping torque (`rotorAngularDampingCoefficient` -
+  MINECRAFT-537) can additionally be configured on top of this - a
+  dissipative drag opposing the body's own existing roll/pitch/yaw rate
+  (never the pilot's cyclic/yaw input), off by default. See
   [`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
   for the exact model and its stated simplifications (no translational-lift
   efficiency gain in forward flight, no retreating-blade stall, no
@@ -513,7 +517,8 @@ after changes.
     "examplepack:helicopter": {
       "cyclicLimitDegrees": 15.0,
       "cyclicAuthorityScale": 1.3,
-      "yawAuthorityScale": 0.8
+      "yawAuthorityScale": 0.8,
+      "rotorAngularDampingCoefficient": 2.5
     },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
@@ -660,7 +665,29 @@ total-disk-angle bound, and
 `cyclicAuthorityScale`/`yawAuthorityScale` multiply the already thrust-gated
 cyclic attitude torque and yaw/anti-torque authority respectively - 1.0 is a
 no-op, and a zero-thrust rotor still produces zero torque regardless of
-scale (no unpowered free torque). A copyable example is also
+scale (no unpowered free torque).
+
+`rotorAngularDampingCoefficient` (MINECRAFT-537, rotorcraft only, finite,
+`[0, 1000]`, default `0.0` - off) is a separate, optional, bounded
+angular-rate damping torque ADDED to (never replacing) the cyclic/yaw
+control torque above. It is a dissipative viscous-drag term, proportional
+to this body's own current angular velocity about each axis and that
+axis's own moment of inertia (the real-world analogue: rotor gearbox/hub
+friction and windage drag opposing shaft rotation whether the engine is
+driving it or not) - it reads only the body's own existing angular
+velocity, never the pilot's cyclic/yaw input, so it is deliberately NOT
+auto-level, NOT a hover autopilot, and NOT cyclic-input filtering, and
+cannot substitute for the pilot's own control authority. Per-tick, it is
+clamped so it can slow a given axis's rotation to exactly zero but never
+reverse its direction ("no-reversal") - a real drag term can only remove
+rotational energy, never inject it by overshooting past zero - so it stays
+stable at any `dt` and any coefficient up to the documented cap. `0.0`
+reproduces the model's exact prior behavior (no angular-rate damping term
+at all). See
+[`RotorForces#angularDampingTorque`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
+for the full model.
+
+A copyable example is also
 available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
 
@@ -739,7 +766,7 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
-`yawAuthorityScale`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
+`yawAuthorityScale`, `rotorAngularDampingCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
 `suspensionSpringMultiplier`, `toeFrontDegrees`, `toeRearDegrees`, `axleDriveForceSharing`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise

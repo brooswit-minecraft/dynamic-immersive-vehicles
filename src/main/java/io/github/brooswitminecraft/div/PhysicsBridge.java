@@ -361,6 +361,8 @@ public final class PhysicsBridge {
   * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
   * stallAngleDegrees/liftSlope/controlSurfaceSlope (MINECRAFT-521, stepFlight only)/
   * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
+  * rotorAngularDampingCoefficient (MINECRAFT-537, stepRotor only - read fresh every tick via
+  * rotorAngularDampingTorque, same as the MINECRAFT-522 fields immediately above)/
   * brakeBiasFront (MINECRAFT-520, same reasoning)/driveBiasFront (MINECRAFT-524, same reasoning -
   * stepGround reads tuning.driveBiasFront fresh every tick via DriveBiasDistribution#shareRatios)/
   * suspensionDampingRatio (MINECRAFT-523, stepGround reads tuning.suspensionDampingRatio fresh
@@ -408,6 +410,10 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.cyclicLimitDegrees, fresh.cyclicLimitDegrees)) { target.cyclicLimitDegrees = fresh.cyclicLimitDegrees; appliedOut.add("cyclicLimitDegrees"); }
   if (!java.util.Objects.equals(target.cyclicAuthorityScale, fresh.cyclicAuthorityScale)) { target.cyclicAuthorityScale = fresh.cyclicAuthorityScale; appliedOut.add("cyclicAuthorityScale"); }
   if (!java.util.Objects.equals(target.yawAuthorityScale, fresh.yawAuthorityScale)) { target.yawAuthorityScale = fresh.yawAuthorityScale; appliedOut.add("yawAuthorityScale"); }
+  // MINECRAFT-537: stepRotor reads tuning.rotorAngularDampingCoefficient fresh every tick via
+  // rotorAngularDampingTorque, same "no separate cached field" shape as cyclicLimitDegrees/
+  // cyclicAuthorityScale/yawAuthorityScale immediately above.
+  if (!java.util.Objects.equals(target.rotorAngularDampingCoefficient, fresh.rotorAngularDampingCoefficient)) { target.rotorAngularDampingCoefficient = fresh.rotorAngularDampingCoefficient; appliedOut.add("rotorAngularDampingCoefficient"); }
   if (!java.util.Objects.equals(target.brakeBiasFront, fresh.brakeBiasFront)) { target.brakeBiasFront = fresh.brakeBiasFront; appliedOut.add("brakeBiasFront"); }
   if (!java.util.Objects.equals(target.driveBiasFront, fresh.driveBiasFront)) { target.driveBiasFront = fresh.driveBiasFront; appliedOut.add("driveBiasFront"); }
   if (!java.util.Objects.equals(target.suspensionDampingRatio, fresh.suspensionDampingRatio)) { target.suspensionDampingRatio = fresh.suspensionDampingRatio; appliedOut.add("suspensionDampingRatio"); }
@@ -1330,6 +1336,38 @@ public final class PhysicsBridge {
   double damperCandidate = 2*Math.sqrt(spring*effectiveMass)*dampingRatio;
   if (!Double.isFinite(damperCandidate) || damperCandidate<0) return new EffectiveMassDamperResult(fallbackDamper, effectiveMass);
   return new EffectiveMassDamperResult(damperCandidate, effectiveMass);
+ }
+ /**
+  * MINECRAFT-537: assembles {@link RotorForces#angularDampingTorque}'s per-axis result into one
+  * WORLD-frame torque vector, the same shape {@code Body.stepRotor} already assembles its
+  * cyclic/yaw control torque in (roll along {@code forward}, pitch along {@code right}, yaw along
+  * {@code up} - unit vectors that are this body's own local X/Y/Z axes already rotated into world
+  * space by this tick's orientation), so it can simply be added to that existing torque before
+  * the single shared {@code handle.applyTorqueImpulse(torque.mul(DT))} call - never a second,
+  * competing impulse application.
+  *
+  * <p>{@code angularVelocity} is WORLD-frame (straight off {@code handle.getAngularVelocity}),
+  * so each axis's own component is recovered by dotting it with that axis's own world-frame unit
+  * vector ({@code right}/{@code up}/{@code forward} are mutually orthonormal - this is an exact
+  * projection, not an approximation) before being paired with {@code inertiaBody}'s matching
+  * BODY-frame diagonal component - {@code inertiaBody.x} is this box's moment of inertia about its
+  * own local X axis (which {@code right} IS, already expressed in world space: {@code right ==
+  * up.cross(forward) == q.transform(1,0,0)} for any pure rotation q, since cross products commute
+  * with rotation), {@code .y} about local Y ({@code up == q.transform(0,1,0)}), {@code .z} about
+  * local Z ({@code forward == q.transform(0,0,1)}) - the exact same axis/inertia-component pairing
+  * {@code effectiveMassDamper}'s own {@code contactEffectiveMass} call relies on elsewhere in this
+  * class. This intentionally uses the single body's own {@code inertiaBody} (never {@code
+  * aggregateInertiaBody}) - {@code stepRotor} does not branch on {@code twoBodyActive} for any of
+  * its other torque/impulse application today (see its own class doc), so this follows that same
+  * established single-handle pattern rather than introducing two-body awareness nothing else in
+  * this method has yet.
+  */
+ static Vector3d rotorAngularDampingTorque(Vector3d angularVelocity, Vector3d forward, Vector3d right, Vector3d up,
+     Vector3d inertiaBody, double dampingCoefficient, double dt) {
+  double torqueRight = RotorForces.angularDampingTorque(angularVelocity.dot(right), inertiaBody.x, dampingCoefficient, dt);
+  double torqueUp = RotorForces.angularDampingTorque(angularVelocity.dot(up), inertiaBody.y, dampingCoefficient, dt);
+  double torqueForward = RotorForces.angularDampingTorque(angularVelocity.dot(forward), inertiaBody.z, dampingCoefficient, dt);
+  return new Vector3d(right).mul(torqueRight).fma(torqueUp, up).fma(torqueForward, forward);
  }
  private static final class Body implements VehicleBody {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
@@ -2791,6 +2829,17 @@ public final class PhysicsBridge {
    * {@link RotorForces#yawTorque(double,double,double,double)}). All three default to the exact
    * prior behavior (20deg/1.0/1.0) via {@link Overrides#resolved} when unconfigured, and are
    * read live off this tick's {@code tuning} the same way {@code driveForce} already is.
+   *
+   * <p>MINECRAFT-537: {@code tuning.rotorAngularDampingCoefficient} additionally ADDS (never
+   * replaces) a bounded, dissipative angular-rate damping torque on top of the cyclic/yaw control
+   * torque above, via {@link #rotorAngularDampingTorque} / {@link
+   * RotorForces#angularDampingTorque} - independent of, and composed with, the MINECRAFT-522
+   * fields immediately above. It opposes only this body's OWN current angular velocity (read
+   * fresh from {@code handle.getAngularVelocity} every tick, never the pilot's cyclic/yaw input),
+   * so it is deliberately NOT auto-level, NOT a hover autopilot, and NOT cyclic-input filtering -
+   * it cannot substitute for the pilot's own control authority. 0.0 (the FALLBACK) is a true
+   * no-op, so an unconfigured rotorcraft's torque - and the resulting
+   * {@code handle.applyTorqueImpulse} below - is byte-identical to before this ticket.
    */
   private boolean stepRotor(EntityVehicleF_Physics v, Quaterniond q, Vector3d up, List<JSONPart.JSONPartPropeller> installedPropellers) {
    var motorized = v.definition.motorized;
@@ -2821,6 +2870,17 @@ public final class PhysicsBridge {
    double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
    double yawTorque=RotorForces.yawTorque(rudderDeflection,thrust,tailArm,tuning.yawAuthorityScale);
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
+   // MINECRAFT-537: tuning.rotorAngularDampingCoefficient is read live off this tick's tuning
+   // object, same as cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale above - see
+   // applyLiveSafeFields. ADDED to (never substituted for) the pilot's own cyclic/yaw control
+   // torque just assembled above - it only ever opposes this body's OWN current angular velocity
+   // (read fresh here, not cached), so it cannot be mistaken for auto-level/hover-autopilot/
+   // cyclic-input filtering. Overrides.resolved always fills this from FALLBACK (0.0) when
+   // unconfigured, and RotorForces.angularDampingTorque returns exactly 0 for a non-positive
+   // coefficient, so an unconfigured rotorcraft's torque - and therefore handle.applyTorqueImpulse
+   // below - is byte-identical to before this ticket.
+   Vector3d angularVelocity=handle.getAngularVelocity(new Vector3d());
+   torque.add(rotorAngularDampingTorque(angularVelocity,forward,right,up,inertiaBody,tuning.rotorAngularDampingCoefficient,DT));
    handle.applyTorqueImpulse(torque.mul(DT));
    applyTowingCompensation(v);
    return true;
