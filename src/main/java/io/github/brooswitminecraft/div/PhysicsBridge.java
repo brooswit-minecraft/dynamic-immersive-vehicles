@@ -2647,14 +2647,13 @@ public final class PhysicsBridge {
    double sideslip=Math.atan2(lateralSpeed,Math.abs(forwardSpeed));
    double liftCoeff=FlightForces.liftCoefficient(angleOfAttack,tuning.stallAngleDegrees,tuning.liftSlope);
    double aspectRatio=motorized.wingArea>0 ? (motorized.wingSpan*motorized.wingSpan)/motorized.wingArea : 0;
-   // MINECRAFT-536: tuning.parasiticDragMultiplier scales the native-derived parasitic budget
-   // (unchanged Math.max(0.02,motorized.dragCoefficient) floor, preserved exactly) - 1.0
-   // (FALLBACK) is a pure no-op, same "multiplier against an existing calibrated/native value"
-   // shape suspensionSpringMultiplier already established. tuning.oswaldEfficiency replaces
-   // FlightForces' own previously-hardcoded 0.8 induced-efficiency constant - see that method's
-   // own doc.
-   double parasiticDrag=Math.max(0.02,motorized.dragCoefficient)*tuning.parasiticDragMultiplier;
-   double dragCoeff=FlightForces.dragCoefficient(liftCoeff,parasiticDrag,aspectRatio,tuning.oswaldEfficiency);
+   // MINECRAFT-536 (review correction): the Math.max(0.02,native) floor, tuning.
+   // parasiticDragMultiplier, and tuning.oswaldEfficiency are now all applied INSIDE
+   // FlightForces.dragCoefficient itself, gated on aspectRatio>0 there - a blimp/no-wing
+   // vehicle (aspectRatio<=0) must see its parasitic drag completely unaffected by a configured
+   // multiplier, same preservation requirement liftSlope/controlSurfaceSlope already honor by
+   // having no rotorcraft consumer at all. See that method's own doc for the exact gating.
+   double dragCoeff=FlightForces.dragCoefficient(liftCoeff,motorized.dragCoefficient,aspectRatio,tuning.parasiticDragMultiplier,tuning.oswaldEfficiency);
    double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
    double lift=FlightForces.aeroForce(liftCoeff,motorized.wingArea,dynamicPressure);
    double drag=FlightForces.aeroForce(dragCoeff,referenceArea,dynamicPressure);

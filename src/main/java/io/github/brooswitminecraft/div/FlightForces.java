@@ -59,18 +59,27 @@ public final class FlightForces {
  }
 
  /**
-  * Parasitic plus induced drag coefficient. {@code aspectRatio <= 0} (no wing, e.g. a blimp hull)
-  * skips the induced term entirely and returns just the parasitic coefficient - {@code
-  * oswaldEfficiency} has nothing to act on either, in that case, so it is simply unused rather
-  * than risking a spurious divide-by-zero. {@code parasiticDrag} is the caller's already-
-  * resolved budget (native {@code motorized.dragCoefficient}, floored and multiplier-scaled by
-  * {@link Overrides.Tuning#parasiticDragMultiplier} - see {@code PhysicsBridge.stepFlight}'s own
-  * call site); {@code oswaldEfficiency} is the resolved, bounded {@link
-  * Overrides.Tuning#oswaldEfficiency} (see {@link #DEFAULT_OSWALD_EFFICIENCY} for the
-  * unconfigured fallback) - this method itself has no implicit default of its own for either.
+  * Parasitic plus induced drag coefficient. {@code nativeDragCoefficient} is IV's own raw
+  * {@code motorized.dragCoefficient} - this method applies the existing {@code Math.max(0.02,
+  * ...)} floor itself (previously done by the caller; moved here, MINECRAFT-536 review, so the
+  * floor-plus-multiplier-plus-aspect-gating logic below is covered by a plain unit test rather
+  * than only by {@code PhysicsBridge.stepFlight}'s own untestable live call site).
+  *
+  * <p>{@code aspectRatio <= 0} (no wing, e.g. a blimp hull) returns just the floored native
+  * value, UNSCALED by {@code parasiticDragMultiplier} - this ticket's fixed-wing-only scope
+  * requires preserving a non-fixed-wing/blimp vehicle's parasitic drag exactly, so the multiplier
+  * (and {@code oswaldEfficiency}, which has nothing to act on either in this branch) is simply
+  * never consulted when there is no wing, rather than risking a spurious divide-by-zero or an
+  * out-of-scope behavior change. Only a positive-aspect-ratio fixed wing gets the multiplier
+  * applied (to the floored value) and the induced term added. {@code parasiticDragMultiplier}/
+  * {@code oswaldEfficiency} are the resolved, bounded {@link Overrides.Tuning#parasiticDragMultiplier}/
+  * {@link Overrides.Tuning#oswaldEfficiency} (see their own FALLBACK docs for the unconfigured
+  * values) - this method itself has no implicit default of its own for either.
   */
- public static double dragCoefficient(double liftCoefficient, double parasiticDrag, double aspectRatio, double oswaldEfficiency) {
-  if (aspectRatio <= 0) return parasiticDrag;
+ public static double dragCoefficient(double liftCoefficient, double nativeDragCoefficient, double aspectRatio, double parasiticDragMultiplier, double oswaldEfficiency) {
+  double flooredParasiticDrag = Math.max(0.02, nativeDragCoefficient);
+  if (aspectRatio <= 0) return flooredParasiticDrag;
+  double parasiticDrag = flooredParasiticDrag * parasiticDragMultiplier;
   double induced = (liftCoefficient * liftCoefficient) / (Math.PI * aspectRatio * oswaldEfficiency);
   return parasiticDrag + induced;
  }

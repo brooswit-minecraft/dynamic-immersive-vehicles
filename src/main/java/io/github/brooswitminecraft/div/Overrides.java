@@ -130,15 +130,18 @@ public final class Overrides {
   public Double controlSurfaceSlope;
   // MINECRAFT-536: bounded fixed-wing parasitic/induced drag tuning, consumed by
   // PhysicsBridge.stepFlight via FlightForces.dragCoefficient. parasiticDragMultiplier scales
-  // the existing native-derived parasitic budget (PhysicsBridge's own Math.max(0.02,
-  // motorized.dragCoefficient) floor, unchanged) - 1.0 (FALLBACK) is a pure no-op against that
-  // floored native value, same "multiplier against an existing calibrated/native number" shape
-  // suspensionSpringMultiplier already established, not a replacement for it. oswaldEfficiency
-  // replaces FlightForces' own previously-hardcoded 0.8 induced-drag efficiency constant - see
-  // FlightForces.DEFAULT_OSWALD_EFFICIENCY/dragCoefficient's own doc. Neither affects a blimp
-  // (FlightForces.dragCoefficient's own aspectRatio<=0 branch never reaches oswaldEfficiency at
-  // all, and a blimp's parasiticDragMultiplier still only scales its own parasitic term, exactly
-  // as before) or a rotorcraft (stepRotor has no drag-coefficient model to apply either to).
+  // the existing native-derived parasitic budget (FlightForces.dragCoefficient's own internal
+  // Math.max(0.02,motorized.dragCoefficient) floor, unchanged) - 1.0 (FALLBACK) is a pure no-op
+  // against that floored native value, same "multiplier against an existing calibrated/native
+  // number" shape suspensionSpringMultiplier already established, not a replacement for it.
+  // oswaldEfficiency replaces FlightForces' own previously-hardcoded 0.8 induced-drag efficiency
+  // constant - see FlightForces.DEFAULT_OSWALD_EFFICIENCY/dragCoefficient's own doc. Review
+  // correction: NEITHER field affects a blimp or other no-wing vehicle at all -
+  // FlightForces.dragCoefficient's own aspectRatio<=0 branch returns the floored native value
+  // completely UNSCALED by parasiticDragMultiplier (and never reaches oswaldEfficiency either) -
+  // this ticket's fixed-wing-only scope requires that vehicle's parasitic drag be preserved
+  // exactly, not merely still-scaled-by-something. Also unreachable for a rotorcraft (stepRotor
+  // has no drag-coefficient model to apply either field to).
   public Double parasiticDragMultiplier;
   public Double oswaldEfficiency;
   // MINECRAFT-522: rotorcraft-only cyclic/yaw tuning, mirroring RotorForces.cyclicTilt's own
