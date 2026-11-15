@@ -58,7 +58,9 @@
       "driveForce": 9000.0,
       "stallAngleDegrees": 15.0,
       "liftSlope": 6.283185307179586,
-      "controlSurfaceSlope": 6.283185307179586
+      "controlSurfaceSlope": 6.283185307179586,
+      "parasiticDragMultiplier": 1.0,
+      "oswaldEfficiency": 0.8
     },
     "examplepack:sporty_car": {
       "extends": "sporty-base",

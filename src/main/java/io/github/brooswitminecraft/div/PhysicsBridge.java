@@ -369,11 +369,13 @@ public final class PhysicsBridge {
   * every tick via suspensionDamper/suspensionDamperForShare/effectiveMassDamper, same as every
   * other field in this list)/suspensionSpringMultiplier (MINECRAFT-528, stepGround reads
   * tuning.suspensionSpringMultiplier fresh every tick via suspensionSpring/
-  * suspensionSpringForShare, same as every other field in this list)/axleDriveForceSharing
-  * (MINECRAFT-532, stepGround reads tuning.axleDriveForceSharing fresh every tick via
-  * AxleDriveForceSharing#shareRatios, same as every other field in this list)/rollingResistance
-  * (MINECRAFT-534, stepGround reads tuning.rollingResistance fresh every tick at the
-  * FrictionContact-construction call site, same as every other field in this list). Mutating
+  * suspensionSpringForShare, same as every other field in this list)/parasiticDragMultiplier/
+  * oswaldEfficiency (MINECRAFT-536, stepFlight only, same reasoning as stallAngleDegrees/
+  * liftSlope/controlSurfaceSlope above)/axleDriveForceSharing (MINECRAFT-532, stepGround reads
+  * tuning.axleDriveForceSharing fresh every tick via AxleDriveForceSharing#shareRatios, same as
+  * every other field in this list)/rollingResistance (MINECRAFT-534, stepGround reads
+  * tuning.rollingResistance fresh every tick at the FrictionContact-construction call site, same
+  * as every other field in this list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -421,6 +423,11 @@ public final class PhysicsBridge {
   // suspensionSpring/suspensionSpringForShare, same "no separate cached field" shape as
   // suspensionDampingRatio immediately above.
   if (!java.util.Objects.equals(target.suspensionSpringMultiplier, fresh.suspensionSpringMultiplier)) { target.suspensionSpringMultiplier = fresh.suspensionSpringMultiplier; appliedOut.add("suspensionSpringMultiplier"); }
+  // MINECRAFT-536: stepFlight reads tuning.parasiticDragMultiplier/tuning.oswaldEfficiency fresh
+  // every tick, same "no separate cached field" shape as stallAngleDegrees/liftSlope/
+  // controlSurfaceSlope immediately above - both are safe to hot-mutate in place.
+  if (!java.util.Objects.equals(target.parasiticDragMultiplier, fresh.parasiticDragMultiplier)) { target.parasiticDragMultiplier = fresh.parasiticDragMultiplier; appliedOut.add("parasiticDragMultiplier"); }
+  if (!java.util.Objects.equals(target.oswaldEfficiency, fresh.oswaldEfficiency)) { target.oswaldEfficiency = fresh.oswaldEfficiency; appliedOut.add("oswaldEfficiency"); }
   // MINECRAFT-533: stepGround reads tuning.toeFrontDegrees/toeRearDegrees fresh every tick via
   // AxleToeDistribution.toeRadians, same "no separate cached field" shape as maxSteerDegrees/
   // brakeBiasFront/driveBiasFront above - no respawn needed for either field.
@@ -2775,7 +2782,13 @@ public final class PhysicsBridge {
    double sideslip=Math.atan2(lateralSpeed,Math.abs(forwardSpeed));
    double liftCoeff=FlightForces.liftCoefficient(angleOfAttack,tuning.stallAngleDegrees,tuning.liftSlope);
    double aspectRatio=motorized.wingArea>0 ? (motorized.wingSpan*motorized.wingSpan)/motorized.wingArea : 0;
-   double dragCoeff=FlightForces.dragCoefficient(liftCoeff,Math.max(0.02,motorized.dragCoefficient),aspectRatio);
+   // MINECRAFT-536 (review correction): the Math.max(0.02,native) floor, tuning.
+   // parasiticDragMultiplier, and tuning.oswaldEfficiency are now all applied INSIDE
+   // FlightForces.dragCoefficient itself, gated on aspectRatio>0 there - a blimp/no-wing
+   // vehicle (aspectRatio<=0) must see its parasitic drag completely unaffected by a configured
+   // multiplier, same preservation requirement liftSlope/controlSurfaceSlope already honor by
+   // having no rotorcraft consumer at all. See that method's own doc for the exact gating.
+   double dragCoeff=FlightForces.dragCoefficient(liftCoeff,motorized.dragCoefficient,aspectRatio,tuning.parasiticDragMultiplier,tuning.oswaldEfficiency);
    double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
    double lift=FlightForces.aeroForce(liftCoeff,motorized.wingArea,dynamicPressure);
    double drag=FlightForces.aeroForce(dragCoeff,referenceArea,dynamicPressure);
