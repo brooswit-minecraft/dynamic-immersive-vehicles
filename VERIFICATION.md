@@ -2231,6 +2231,36 @@ AND the prior good 1.7 override is retained, not the invalid value or the
 vehicle's flat fallback. Full suite re-run after adding this test:
 **663 tests**, 0 skipped, 0 failures, 0 errors (662 + this 1 net-new case).
 
+**Post-merge (2026-11-15).** Merged PR #28 into `main` at merge commit
+`f16ea38665f410b0984f7e43e7d299f7ccca525a` (review approved at exact head
+`c31ecfed09989f710ece87dcd550cf99e33ffcb6`, verified via `gh pr view
+--json headRefOid,reviews` immediately before merging - the approval's own
+recorded commit matched current head, no stale-approval risk). Post-merge
+hosted CI (GitHub Actions run 43735826463, triggered by the merge push)
+failed with all 5 jobs showing zero steps executed - "The job was not
+started because recent account payments have failed or your spending
+limit needs to be increased." This is the same pre-existing, already-
+disclosed hosted-CI billing blockage every prior DIV ticket on this repo
+has hit (most recently MINECRAFT-531's own merge, run 43732973812,
+identical failure mode), not something introduced by or fixable from this
+change. Retained exact-head local evidence stands in its place: a fresh
+`gradle clean test build --offline` at the merged head (flock-protected on
+`/tmp/div-gradle-slot.lock`) reproduced **663 tests**, 0 skipped, 0
+failures, 0 errors, and produced
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
+checksum
+`3181553d82fe76d21e26add899952e999d0d5d0477b02cd085f3c48b30ed3c0e`.
+
+No separate release/deployment workflow exists in this repo beyond the
+billing-blocked CI above (no `release.yml`, no tag-based release job) for
+a change of this kind (an internal part-override/friction-composition
+change, no version bump) - the same conclusion MINECRAFT-531's own merge
+reached immediately before it. Per this ticket's own explicit scope ("Do
+not interrupt or deploy to running Zippy; delivery coordinated
+separately... User owns broad physical playtesting and it is not a
+completion gate"), Zippy deployment and broad playtesting are not
+performed here and are not this task's completion gate.
+
 ## Ground-surface config hot-reload (MINECRAFT-531)
 
 Bounded deliverable: wire the already-implemented, already-non-throwing/
