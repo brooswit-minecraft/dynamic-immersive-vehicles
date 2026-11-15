@@ -325,6 +325,32 @@ public final class PhysicsBridge {
   return (partOverride != null && partOverride.friction != null) ? partOverride.friction : vehicleFriction;
  }
  /**
+  * MINECRAFT-534 (installed-tire rolling resistance overrides): the rolling-resistance
+  * counterpart to {@link #tirePartFriction} immediately above, same exact deliberate vehicle/
+  * part precedence and "replace, not stack/multiply" semantics - an explicit part-level {@code
+  * rollingResistance} override, if THIS SPECIFIC installed tire part has one, REPLACES the
+  * vehicle's own resolved {@code rollingResistance} for that one wheel's contact outright;
+  * otherwise the vehicle's already-resolved value is used completely unchanged, so an
+  * installation with no {@code parts} rollingResistance entries at all behaves byte-identically
+  * to before this ticket. {@code partKey} is resolved fresh from {@code stepGround}'s own wheel
+  * loop every tick (never cached at vehicle-construction time), the same {@code
+  * packID+":"+systemName} key shape {@link #tirePartFriction} uses. {@code
+  * Overrides.effectivePartOverride} (unlike {@code resolvedPart}) returns {@code null} - never
+  * the flat documented fallback - for a field the part says nothing about, which is exactly the
+  * signal needed to tell "no override" apart from "override explicitly set it".
+  *
+  * <p>Independent of grip - this is a SEPARATE field from {@code friction}/{@code
+  * tirePartFriction}, so an installed tire can override one without the other. Callers must
+  * apply this ONLY to a wheel that actually has ground contact this tick (same {@code stepGround}
+  * {@code HitResult.Type.MISS} continue {@link #tirePartFriction}'s own doc describes) - a
+  * phantom/spare/airborne tire's configured override can never contribute any rolling-resistance
+  * change, matching this ticket's explicit "no airborne/spare tire influence" requirement.
+  */
+ static double tirePartRollingResistance(String partKey, double vehicleRollingResistance) {
+  var partOverride = Overrides.effectivePartOverride(partKey);
+  return (partOverride != null && partOverride.rollingResistance != null) ? partOverride.rollingResistance : vehicleRollingResistance;
+ }
+ /**
   * Which {@code Overrides.Tuning} fields a currently-active {@code Body}/{@code BuoyantBody}
   * already re-reads fresh from its own live {@code tuning} object every tick/call, rather than
   * caching into a separate field at construction time (ticket 53518/MINECRAFT-505) - confirmed
@@ -343,7 +369,9 @@ public final class PhysicsBridge {
   * tuning.suspensionSpringMultiplier fresh every tick via suspensionSpring/
   * suspensionSpringForShare, same as every other field in this list)/axleDriveForceSharing
   * (MINECRAFT-532, stepGround reads tuning.axleDriveForceSharing fresh every tick via
-  * AxleDriveForceSharing#shareRatios, same as every other field in this list). Mutating
+  * AxleDriveForceSharing#shareRatios, same as every other field in this list)/rollingResistance
+  * (MINECRAFT-534, stepGround reads tuning.rollingResistance fresh every tick at the
+  * FrictionContact-construction call site, same as every other field in this list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -362,6 +390,10 @@ public final class PhysicsBridge {
  static void applyLiveSafeFields(Overrides.Tuning target, Overrides.Tuning fresh, java.util.List<String> appliedOut) {
   if (!java.util.Objects.equals(target.suspensionTravel, fresh.suspensionTravel)) { target.suspensionTravel = fresh.suspensionTravel; appliedOut.add("suspensionTravel"); }
   if (!java.util.Objects.equals(target.friction, fresh.friction)) { target.friction = fresh.friction; appliedOut.add("friction"); }
+  // MINECRAFT-534: stepGround reads tuning.rollingResistance fresh every tick (at the
+  // FrictionContact-construction call site), same "no separate cached field" shape as friction
+  // immediately above.
+  if (!java.util.Objects.equals(target.rollingResistance, fresh.rollingResistance)) { target.rollingResistance = fresh.rollingResistance; appliedOut.add("rollingResistance"); }
   if (!java.util.Objects.equals(target.driveForce, fresh.driveForce)) { target.driveForce = fresh.driveForce; appliedOut.add("driveForce"); }
   if (!java.util.Objects.equals(target.brakeForce, fresh.brakeForce)) { target.brakeForce = fresh.brakeForce; appliedOut.add("brakeForce"); }
   if (!java.util.Objects.equals(target.maxSteerDegrees, fresh.maxSteerDegrees)) { target.maxSteerDegrees = fresh.maxSteerDegrees; appliedOut.add("maxSteerDegrees"); }
@@ -2364,14 +2396,34 @@ public final class PhysicsBridge {
    // (its WheelHit was never built - see the HitResult.Type.MISS continue above), so an
    // airborne/phantom tire's configured override can never contribute any grip, matching this
    // ticket's explicit "no phantom/airborne contribution" requirement.
+   // MINECRAFT-534: FrictionContact.rollingResistanceMultiplier is likewise reused (not a new
+   // record component) to also carry THIS WHEEL'S own installed tire part's rolling-resistance
+   // override, composed MULTIPLICATIVELY with the existing ground-surface
+   // rollingResistanceMultiplier - but, UNLIKE tireGripRatio immediately above, NOT as a ratio
+   // divided back out against tuning.rollingResistance: solveFriction has no separate "vehicle
+   // baseline" parameter for rolling resistance the way it does for friction (friction.friction
+   // is passed to solveFriction directly and multiplied by frictionMultiplier INSIDE the solver -
+   // see solveFriction's own `friction*c.frictionMultiplier()` - so frictionMultiplier only ever
+   // needs to carry the DEVIATION from that already-applied baseline). rollingResistanceMultiplier
+   // has no such separately-applied baseline anywhere in MultiContactFrictionSolver - it is the
+   // SOLE scalar multiplying the solver's fixed k=20 formula - so this slot must carry the FULL
+   // resolved per-wheel value outright, review finding (PR #30/Jira comment 54071): dividing by
+   // tuning.rollingResistance here (an earlier version of this code did) silently cancelled any
+   // configured vehicle-level value back to 1.0 whenever no part override existed, and produced
+   // surface*(part/vehicle) instead of surface*part when a part override DID exist - contradicting
+   // this ticket's own declared "replace, not multiply" part precedence. tirePartRollingResistance
+   // already returns exactly the right fully-resolved value either way (the part's own override,
+   // or - when absent - the vehicle's own resolved tuning.rollingResistance unchanged, itself
+   // FALLBACK 1.0 when unconfigured), so no division is needed or correct here.
    var contacts=hits.stream().map(h->{
     double wheelBrakeMagnitude = perWheelBrakeMagnitude(h.wheel().placementDefinition.turnsWithSteer,
       v.parkingBrakeVar.isActive, brakeMagnitude, handbrakeMagnitudeThisTick, h.brakeShareRatio());
     String tireKey = h.wheel().definition.packID+":"+h.wheel().definition.systemName;
     double tireGripRatio = tirePartFriction(tireKey, tuning.friction)/tuning.friction;
+    double tireRollingResistance = tirePartRollingResistance(tireKey, tuning.rollingResistance);
     return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude,h.driveShareRatio());
+     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier()*tireRollingResistance,wheelBrakeMagnitude,h.driveShareRatio());
    }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,

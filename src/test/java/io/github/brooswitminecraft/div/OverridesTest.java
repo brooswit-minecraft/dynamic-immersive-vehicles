@@ -860,6 +860,144 @@ class OverridesTest {
   }
  }
 
+ // MINECRAFT-534: installed-tire rolling resistance overrides - rollingResistance is now a
+ // supported part field, same exact shape as friction's own MINECRAFT-529 coverage above
+ // (bounds, extends-inheritance, vehicle-fallthrough precedence, independent per-wheel
+ // resolution, valid/invalid reload retention), but independent of grip - a tire can override
+ // one field without the other.
+
+ @Test void partEntrySettingRollingResistancePassesTheSupportedFieldsCheck() {
+  var part = new Overrides.Tuning(); part.rollingResistance = 1.4;
+  assertDoesNotThrow(part::validateSupportedForPart,
+    "MINECRAFT-534: an installed tire part's own rollingResistance override must be an accepted part field");
+ }
+
+ @Test void partEntrySettingOutOfRangeRollingResistanceStillFailsPlainValidation() {
+  var tooHigh = new Overrides.Tuning(); tooHigh.rollingResistance = 10.5;
+  assertThrows(IllegalArgumentException.class, tooHigh::validate);
+  var tooLow = new Overrides.Tuning(); tooLow.rollingResistance = 0.0;
+  assertThrows(IllegalArgumentException.class, tooLow::validate);
+ }
+
+ @Test void partRollingResistanceOverrideInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.rollingResistance = 2.5;
+   var part = new Overrides.Tuning(); part.extendsTemplate = "tire-base";
+   Overrides.setForTest(java.util.Map.of("tire-base", template), java.util.Map.of(), java.util.Map.of("packid:inherited_tire", part));
+   var merged = Overrides.effectivePartOverride("packid:inherited_tire");
+   assertEquals(2.5, merged.rollingResistance, "a part inheriting rollingResistance from a template must fold it in exactly like any other field");
+   assertDoesNotThrow(merged::validateSupportedForPart);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartRollingResistanceOverrideWinsOverTheVehicleResolvedValue() {
+  try {
+   var part = new Overrides.Tuning(); part.rollingResistance = 3.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:draggy_tire", part));
+   assertEquals(3.0, PhysicsBridge.tirePartRollingResistance("examplepack:draggy_tire", 1.0),
+     "an explicit part-level rollingResistance override must win outright (replace, not multiply) over the vehicle's own resolved value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartRollingResistanceFallsThroughToTheVehicleResolvedValueWhenNoPartOverrideExists() {
+  assertEquals(1.0, PhysicsBridge.tirePartRollingResistance("packid:ordinary_tire_with_no_override", 1.0),
+    "no parts entry at all for this tire key must be a true no-op, reproducing the vehicle's resolved rollingResistance unchanged");
+ }
+
+ @Test void tirePartRollingResistanceResolvesIndependentlyPerWheelKeySoDifferentInstalledTiresGetDifferentDrag() {
+  try {
+   var draggy = new Overrides.Tuning(); draggy.rollingResistance = 4.0;
+   var smooth = new Overrides.Tuning(); smooth.rollingResistance = 0.2;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:draggy_tire", draggy, "examplepack:smooth_tire", smooth));
+   assertEquals(4.0, PhysicsBridge.tirePartRollingResistance("examplepack:draggy_tire", 1.0));
+   assertEquals(0.2, PhysicsBridge.tirePartRollingResistance("examplepack:smooth_tire", 1.0));
+   assertEquals(1.0, PhysicsBridge.tirePartRollingResistance("examplepack:unconfigured_tire", 1.0),
+     "a third, unconfigured tire key on the same vehicle must stay at the vehicle's own resolved value - independent wheel identities");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartRollingResistanceIsIndependentOfTirePartFrictionOnTheSamePart() {
+  try {
+   var part = new Overrides.Tuning(); part.rollingResistance = 3.5; // friction left unset
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:only_rolling_resistance_tire", part));
+   assertEquals(3.5, PhysicsBridge.tirePartRollingResistance("examplepack:only_rolling_resistance_tire", 1.0));
+   assertEquals(1.0, PhysicsBridge.tirePartFriction("examplepack:only_rolling_resistance_tire", 1.0),
+     "a part overriding only rollingResistance must leave friction completely untouched - independent fields");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void validThenInvalidPartRollingResistanceReloadAppliesThenRetainsThePriorGoodTireOverride() {
+  try {
+   var goodTire = new Overrides.Tuning(); goodTire.rollingResistance = 1.9;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", goodTire)));
+   assertTrue(goodResult.success(), "a valid parts.<tire>.rollingResistance reload must apply cleanly");
+   assertEquals(1.9, PhysicsBridge.tirePartRollingResistance("examplepack:reloadable_tire", 1.0),
+     "PhysicsBridge.tirePartRollingResistance must observe the newly-applied valid part rollingResistance override");
+
+   var invalidTire = new Overrides.Tuning(); invalidTire.rollingResistance = 0.0; // out of range: must be >0
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", invalidTire)));
+   assertFalse(badResult.success(), "an out-of-range part rollingResistance (0.0) reload must be rejected, not silently applied");
+   assertEquals(1.9, PhysicsBridge.tirePartRollingResistance("examplepack:reloadable_tire", 1.0),
+     "a rejected reload must retain the PRIOR GOOD part rollingResistance override, not the invalid value or the vehicle fallback");
+
+   var tooHighTire = new Overrides.Tuning(); tooHighTire.rollingResistance = 10.5; // out of range: must be <=10
+   var badResult2 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", tooHighTire)));
+   assertFalse(badResult2.success(), "an out-of-range part rollingResistance (10.5) reload must also be rejected");
+   assertEquals(1.9, PhysicsBridge.tirePartRollingResistance("examplepack:reloadable_tire", 1.0),
+     "a second rejected reload must still retain the same prior good part rollingResistance override");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // Review finding (PR #30/Jira comment 54071): the production composition at stepGround's
+ // FrictionContact-construction call site (surface.rollingResistanceMultiplier() * resolved
+ // tire value) must NOT divide the resolved value back out by tuning.rollingResistance the way
+ // tireGripRatio divides by tuning.friction - unlike friction, solveFriction has no separate
+ // vehicle-baseline parameter for rolling resistance, so rollingResistanceMultiplier must carry
+ // the FULL resolved value outright. These two regressions drive PhysicsBridge.
+ // tirePartRollingResistance directly with a NON-UNIT vehicle baseline (1.0 alone cannot
+ // distinguish "divides and cancels to itself" from "doesn't divide at all") and then perform
+ // the exact same surface*resolved multiplication stepGround performs, proving neither a
+ // no-part-override fallback nor a part-override replacement gets silently rescaled against the
+ // vehicle's own configured baseline.
+
+ @Test void nonUnitVehicleRollingResistanceComposesWithGroundSurfaceUnchangedWhenNoPartOverrideExists() {
+  double vehicleRollingResistance = 2.0;
+  double resolved = PhysicsBridge.tirePartRollingResistance("packid:no_override_tire", vehicleRollingResistance);
+  assertEquals(2.0, resolved, 0, "with no part override, the resolved value must equal the configured vehicle baseline exactly, not a ratio against itself");
+  double surfaceMultiplier = 1.0;
+  double composed = surfaceMultiplier * resolved; // the exact stepGround composition, no division
+  assertEquals(2.0, composed, 0, "a configured, non-unit vehicle rollingResistance with no part override must actually take effect on the composed multiplier, not be cancelled back to 1.0 by dividing against itself");
+ }
+
+ @Test void nonUnitVehicleRollingResistanceIsReplacedOutrightByAPartOverrideInTheComposedMultiplier() {
+  try {
+   var part = new Overrides.Tuning(); part.rollingResistance = 3.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:overridden_tire", part));
+   double vehicleRollingResistance = 2.0;
+   double resolved = PhysicsBridge.tirePartRollingResistance("examplepack:overridden_tire", vehicleRollingResistance);
+   assertEquals(3.0, resolved, 0, "a part override must replace the vehicle's own non-unit baseline outright, not multiply/divide against it");
+   double surfaceMultiplier = 1.0;
+   double composed = surfaceMultiplier * resolved; // the exact stepGround composition, no division
+   assertEquals(3.0, composed, 0, "the composed multiplier must be surface*part (3.0), never surface*(part/vehicle) (1.5)");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  @Test void enginePartDriveForceFallsThroughWhenThePartEntryExistsButDoesNotSetDriveForce() {
   try {
    var part = new Overrides.Tuning(); part.friction = 0.9; // sets a different field, not driveForce

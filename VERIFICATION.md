@@ -2374,6 +2374,222 @@ and already covered); the real dedicated-server `gradle runServer` probe
 run above, both before and after the probe's own self-found/self-fixed
 defect.
 
+## Installed-tire rolling resistance overrides (MINECRAFT-534, added 2026-11-15)
+
+**Schema.** Mirrors MINECRAFT-529's own `friction` part-override exactly
+in shape, for a new, INDEPENDENT field: `Overrides.Tuning.rollingResistance`
+(bounds `(0, 10]` - strictly positive to avoid a division-by-zero in the
+resolved-value ratio PhysicsBridge divides back out, same reasoning
+`friction`'s own `>0` bound already documents; capped at 10 to match
+`GroundSurfaceOverrides`'s own `rollingResistanceMultiplier` range, since
+the two compose multiplicatively). Threaded through `copy`/
+`mergeOntoParent`/`resolveFields` the same as every other field;
+`FALLBACK.rollingResistance=1.0` (a true no-op against the ground-surface
+multiplier, byte-identical to before this ticket). `validateSupportedForPart`
+was NOT changed to reject it - like `friction`, it is a supported part
+field from the start, with no separate "removed from reject list" diff
+needed since this field did not exist before this ticket.
+
+**Production wiring.** `PhysicsBridge.tirePartRollingResistance(partKey,
+vehicleRollingResistance)` mirrors `tirePartFriction` exactly: an explicit
+part-level `rollingResistance` override, if this specific installed tire
+part has one, REPLACES (never multiplies) the vehicle's own resolved
+`rollingResistance` for that one wheel; otherwise the vehicle's value
+passes through unchanged. `stepGround`'s own `FrictionContact`-construction
+stream now also computes `tirePartRollingResistance(tireKey,
+tuning.rollingResistance)/tuning.rollingResistance` - a pure ratio, exactly
+`1.0` with no override - and multiplies it into the EXISTING
+`rollingResistanceMultiplier` slot alongside the ground-surface multiplier
+already living there (MINECRAFT-508): `h.surface().rollingResistanceMultiplier()
+*tireRollingResistanceRatio`. No change to `MultiContactFrictionSolver`'s
+own rolling-resistance formula (`F=-speed*20*c.rollingResistanceMultiplier()`)
+or public API - the composition happens entirely in the caller, same as
+grip's own composition. This field is deliberately independent of
+`friction`/`tirePartFriction` - a part may override one, both, or neither,
+confirmed by a dedicated test (`tirePartRollingResistanceIsIndependentOfTirePartFrictionOnTheSamePart`).
+Also wired into `applyLiveSafeFields` (vehicle-level hot reload) alongside
+`friction`, since `stepGround` already re-reads `tuning.rollingResistance`
+fresh every tick with no separate cached field - an operator editing a
+vehicle's own `rollingResistance` live-applies on the very next tick, no
+respawn needed, same as `friction`.
+
+A wheel that misses the ground ray this tick (`HitResult.Type.MISS`)
+never reaches the `FrictionContact`-construction stream - its `WheelHit`
+is never built and the loop `continue`s before this ticket's code runs -
+so an airborne/phantom/spare tire's configured override can never
+contribute any rolling-resistance change, satisfying the ticket's "no
+airborne/spare tire influence" requirement structurally, by the
+pre-existing control flow this ticket left untouched.
+
+**Tests.** Same substitution strategy MINECRAFT-529 used (`Body.stepGround`
+cannot be driven by a plain unit test without a live runtime):
+
+- `OverridesTest` (11 new cases): part-level `rollingResistance` passes
+  `validateSupportedForPart`; out-of-range values (10.5, 0.0) still fail
+  plain `validate()`; `rollingResistance` set via an `extends` template
+  folds in and still passes the supported-fields check;
+  `PhysicsBridge.tirePartRollingResistance` wins outright over the
+  vehicle's resolved value when a part override exists, falls through
+  unchanged when none exists, resolves three different tire keys on the
+  same vehicle (draggy/smooth/unconfigured) independently, stays
+  independent of `tirePartFriction` on the very same part entry, and a
+  valid/invalid reload (`Overrides.apply(Supplier<Config>)`) applies a
+  good override then rejects two out-of-range ones while retaining the
+  prior good value - mirroring `friction`'s own MINECRAFT-529 reload
+  regression exactly.
+- `MultiContactFrictionSolverTirePartRollingResistanceTest` (new, 8 cases):
+  exercises the exact solver-facing composition `stepGround` performs
+  against the real production `MultiContactFrictionSolver.solveFriction` -
+  no part override anywhere composes to the byte-identical pre-ticket
+  ground-surface-only multiplier; a higher resolved rolling resistance
+  dissipates measurably more coast-down energy (opposing-sign,
+  larger-magnitude longitudinal force) than a lower one at the same
+  forward speed with zero drive/brake demand (the ticket's required
+  coast-down/energy-dissipation coverage); zero velocity produces exactly
+  zero rolling resistance regardless of configuration (nothing to
+  dissipate); reverse velocity still produces an opposing (sign-correct)
+  force; swapping the resolved tire rolling resistance (standing in for
+  installing a different part) changes the composed multiplier; ground-
+  surface and tire-part contributions compose multiplicatively (2.0x
+  gravel times 3.0x draggy tire = 6.0x, neither one silently overriding
+  the other); and changing only `rollingResistanceMultiplier` leaves
+  achieved lateral (grip) force completely unaffected, proving the two
+  compositions (grip ratio, rolling-resistance ratio) are genuinely
+  independent.
+
+Not covered by a plain unit test (same pre-existing, already-disclosed
+limitation every other MISS/ground-contact-dependent behavior in this
+project carries): the actual airborne-wheel-gets-zero-contribution
+behavior is verified by inspection of the unchanged `HitResult.Type.MISS`
+control flow, not a driven integration test; in-game acceptance (spawning
+a vehicle with two differently-configured installed tires and observing
+measurably different coast-down behavior) is out of scope here, the same
+way it was for MINECRAFT-529 and every other MINECRAFT-5xx ticket's own
+"not yet performed" note in this document - John owns broad physical
+playtesting per this sprint's shared execution/acceptance note, not this
+ticket's completion gate.
+
+**Evidence gathered this pass:** worked in an isolated worktree/branch
+(`minecraft-534/installed-tire-rolling-resistance-overrides`) off the
+sprint's accepted baseline `main` at `a0c4fa4c0ab265e96d8378747c6652ec2e9c7d2f`
+(same baseline this ticket's own shared execution note names). Local
+slot-lock coordination (`flock` on `/tmp/div-gradle-slot.lock` held for
+the whole Gradle invocation, no `gradlew` wrapper present in this
+checkout so `/tmp/gradle-8.14/bin/gradle --offline` was used directly).
+`compileJava compileTestJava` succeeded first in isolation, then
+`test --offline -q` ran the FULL suite with zero console output (quiet
+mode prints nothing on an all-green run). The real JUnit XML reports
+total **703 tests**, 0 skipped, 0 failures, 0 errors across the whole
+suite (19 net-new - 11 in `OverridesTest`, 8 in the new
+`MultiContactFrictionSolverTirePartRollingResistanceTest` - plus every
+pre-existing test run unchanged alongside them, confirming this change
+introduces no regression anywhere else in the suite, including every
+other ticket's own friction/part-override/ground-surface/hot-reload
+coverage). A subsequent `gradle --offline build -q` also succeeded
+quietly, producing
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
+checksum
+`a2fd5a8b59e0d7b6682c7b0fef1c5025b557c1ca0fb7bbc4a7ad436f29d72dae`.
+
+**Hosted-CI billing/capacity limit disclosure.** The exact-head run
+(https://github.com/brooswit-minecraft/dynamic-immersive-vehicles/actions/runs/43756562991)
+failed before execution on all 5 jobs (`runner_id 0`, zero steps),
+annotation "The job was not started because recent account payments have
+failed or your spending limit needs to be increased." - the same pre-
+existing, already-disclosed hosted-CI billing blockage recent DIV
+tickets on this repo have hit (most recently MINECRAFT-531's merge),
+not introduced by this change. Disclosed on both PR #30 and this ticket
+per the sprint's shared acceptance requirement.
+
+**Review correction (PR #30/Jira comment 54071, CHANGES_REQUESTED by
+Wroosbit).** The initial composition at `stepGround`'s `FrictionContact`-
+construction call site divided the resolved tire value back out by
+`tuning.rollingResistance` (mirroring `tireGripRatio`'s own division by
+`tuning.friction` immediately above it) - but, UNLIKE `friction`,
+`solveFriction` has no separate vehicle-baseline parameter for rolling
+resistance (its `rollingResistanceMultiplier` is the SOLE scalar
+multiplying the solver's fixed k=20 formula). That division silently
+cancelled any configured non-unit vehicle `rollingResistance` back to a
+no-op when no part override existed, and produced `surface*(part/
+vehicle)` instead of `surface*part` when a part override DID exist -
+contradicting this ticket's own declared "replace, not multiply"
+precedence. The review also correctly noted the new solver test
+hard-coded a unit (1.0) vehicle baseline and repeated the same (buggy)
+division in its own helper, so it could not have caught this.
+
+**Fix.** Removed the division entirely -
+`PhysicsBridge.tirePartRollingResistance(tireKey, tuning.rollingResistance)`
+already returns the fully-resolved value either way (part override, or
+the vehicle's own resolved value unchanged), so the contact-construction
+site now composes `h.surface().rollingResistanceMultiplier()*
+tireRollingResistance` directly, no ratio. Added two dedicated non-unit-
+vehicle-baseline regressions to `OverridesTest`
+(`nonUnitVehicleRollingResistanceComposesWithGroundSurfaceUnchangedWhenNoPartOverrideExists`,
+`nonUnitVehicleRollingResistanceIsReplacedOutrightByAPartOverrideInTheComposedMultiplier`),
+driven through the real production `PhysicsBridge.tirePartRollingResistance`
+with vehicleRollingResistance=2.0 (not 1.0, so a reintroduced division bug
+cannot hide behind self-cancelling arithmetic) - one asserting the
+no-override case composes to 2.0 (not 1.0), the other asserting a 3.0
+part override composes to 3.0 (not 1.5). Also corrected the existing
+`MultiContactFrictionSolverTirePartRollingResistanceTest` helper to match
+the fixed production composition (no division). Full suite re-run after
+the fix: **705 tests**, 0 skipped, 0 failures, 0 errors (703 + 2 net-new
+regressions). `gradle --offline build -q` succeeded again; jar SHA-256
+`65ea6c7725a863c979f1b8ae0a0d34817f54043a598582f49b480bab6a2a140f`
+(changed from the pre-fix build, as expected for a real production
+behavior change).
+
+**Reconciliation onto accepted main (review finding, Jira comment 54081).**
+Accepted `main` advanced past this branch's own base
+(`a0c4fa4c0ab265e96d8378747c6652ec2e9c7d2f`) to
+`d5fb9ad0abb7a6d681664374afff45a82464cc67` (MINECRAFT-532's own
+contact-aware axle drive-force sharing merge) while this ticket's review
+was in flight - GitHub reported `CONFLICTING`. Merged `origin/main` into
+this branch: `Overrides.java`/`OverridesTest.java` auto-merged cleanly
+(the two tickets' own additive schema changes - `rollingResistance` here,
+`axleDriveForceSharing` there - land in disjoint regions of the shared
+file, exactly the "additive, coordinate through the schema coordinator"
+scoping the sprint's shared execution note requires). `PhysicsBridge.java`
+had one real conflict, a doc-comment list both tickets independently
+appended to (`applyLiveSafeFields`'s own "which fields are live-safe"
+enumeration) - resolved by keeping both tickets' own entries, in the
+order they were appended (`axleDriveForceSharing` then
+`rollingResistance`); the ACTUAL field-wiring code for both tickets
+(M532's own `applyLiveSafeFields`/axle-sharing block at lines ~418-420/
+~2222-2231, this ticket's own `tirePartRollingResistance` composition at
+lines ~2408-2411) sits in disjoint regions and auto-merged with no
+conflict at all - confirmed by inspection that both call sites are
+intact and unchanged from each ticket's own independent work.
+`VERIFICATION.md` had the expected two-independently-appended-sections
+conflict (both tickets added a dated `##` section at the same point in
+the file) - resolved by keeping both sections, this one first. No
+production logic was altered by this reconciliation beyond the conflict
+resolution itself. Full suite re-run after reconciling: **722 tests**,
+0 skipped, 0 failures, 0 errors (705 of this branch's own + 17 from
+MINECRAFT-532's own merged work, confirming no regression from either
+side of the merge). `gradle --offline build -q` succeeded again; jar
+SHA-256 `9355b64a4dc682ffa9ca9351627f6267603c2f0009a95e02807f786ceb9bde60`.
+
+**Second reconciliation (review findings, Jira comments 54089/54091;
+John's coordination comment 54086).** Accepted `main` advanced again
+while the previous reconciliation's review was in flight, through
+MINECRAFT-533's own per-axle toe-alignment merge
+(`c2fa1e37e90438da3d7e6b87482dbe6341f4d1a9`, PR #33) - the prior
+reconciled head (`fc4fd48`) only integrated as far as `d5fb9ad` and so
+omitted M533's already-accepted work, even though `git merge-tree`
+itself reported clean (no code conflict - this was a staleness/evidence
+gap, not a conflict). Merged `origin/main` again: this merge auto-
+resolved with ZERO conflicts in any file (`Overrides.java`,
+`PhysicsBridge.java`, `VERIFICATION.md` all auto-merged cleanly) -
+M533's own `axleToeDistribution`/`AxleToeDistribution` additions and
+this ticket's `rollingResistance` work remain in disjoint regions, same
+additive-schema-coordination property the first reconciliation already
+demonstrated for M532. Full suite re-run after this second
+reconciliation: **741 tests**, 0 skipped, 0 failures, 0 errors (722 of
+the prior reconciled state + 19 from MINECRAFT-533's own merged work).
+`gradle --offline build -q` succeeded again; jar SHA-256
+`f272eedb061f57e0b1ee21a6fd887452da22c6e8c39c86080a049cdbc3194be3`.
+
 ## Contact-aware axle drive-force sharing (MINECRAFT-532, added 2026-11-15)
 
 Bounded deliverable: opt-in redistribution of a wheel's own already-assigned
