@@ -783,6 +783,42 @@ class OverridesTest {
   }
  }
 
+ // Review finding (PR #28 comment, MINECRAFT-529): the ticket explicitly requires "valid/invalid
+ // reload" coverage for installed tire friction overrides, not merely PhysicsBridge.tirePartFriction
+ // exercised against a map installed directly via setForTest - that only proves the precedence
+ // logic, not that a REAL reload (Overrides.apply(Supplier<Config>), the exact seam reload()
+ // itself delegates through) actually swaps in a valid parts.<tire>.friction value and rejects
+ // an invalid one while retaining the prior good override, the same "invalid reload retains
+ // last-known-good" regression already covered for stallAngleDegrees/liftSlope/controlSurfaceSlope
+ // above. Mirrors that test's exact structure, substituting a parts entry for a vehicles entry.
+
+ @Test void validThenInvalidPartFrictionReloadAppliesThenRetainsThePriorGoodTireOverride() {
+  try {
+   var goodTire = new Overrides.Tuning(); goodTire.friction = 1.7;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", goodTire)));
+   assertTrue(goodResult.success(), "a valid parts.<tire>.friction reload must apply cleanly");
+   assertEquals(1.7, PhysicsBridge.tirePartFriction("examplepack:reloadable_tire", 1.0),
+     "PhysicsBridge.tirePartFriction must observe the newly-applied valid part friction override");
+
+   var invalidTire = new Overrides.Tuning(); invalidTire.friction = 0.0; // out of range: friction must be >0
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", invalidTire)));
+   assertFalse(badResult.success(), "an out-of-range part friction (0.0) reload must be rejected, not silently applied");
+   assertEquals(1.7, PhysicsBridge.tirePartFriction("examplepack:reloadable_tire", 1.0),
+     "a rejected reload must retain the PRIOR GOOD part friction override, not the invalid value or the vehicle fallback");
+
+   var tooHighTire = new Overrides.Tuning(); tooHighTire.friction = 3.5; // out of range: friction must be <=3
+   var badResult2 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", tooHighTire)));
+   assertFalse(badResult2.success(), "an out-of-range part friction (3.5) reload must also be rejected");
+   assertEquals(1.7, PhysicsBridge.tirePartFriction("examplepack:reloadable_tire", 1.0),
+     "a second rejected reload must still retain the same prior good part friction override");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  @Test void partEntryInheritingAnUnsupportedFieldThroughExtendsStillFailsTheSupportedFieldsCheck() {
   try {
    var template = new Overrides.Tuning(); template.brakeForce = 1000.0; // not supported for a part

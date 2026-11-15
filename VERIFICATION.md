@@ -2213,6 +2213,24 @@ confirming this change introduces no regression anywhere else in the
 suite, including every other ticket's own friction/part-override/ground-
 surface coverage).
 
+**Valid/invalid reload regression (review finding, PR #28).** The tests
+above exercise `PhysicsBridge.tirePartFriction`'s precedence directly
+against a map installed via `Overrides.setForTest` - real, but not the
+same claim as a genuine RELOAD actually swapping in a new part override
+or rejecting a bad one. Added
+`validThenInvalidPartFrictionReloadAppliesThenRetainsThePriorGoodTireOverride`
+(`OverridesTest`), mirroring the existing stallAngleDegrees/liftSlope/
+controlSurfaceSlope "invalid reload retains last-known-good" regression's
+exact structure, over `Overrides.apply(Supplier<Config>)` - the real
+validate-then-swap-or-reject path `reload()` itself delegates through,
+with no file I/O/Gson needed: applies a valid `parts.<tire>.friction`
+(1.7) and asserts `PhysicsBridge.tirePartFriction` observes it; then
+applies an invalid one (0.0, then separately 3.5 - both already-documented
+out-of-range values for `friction`) and asserts each reload is rejected
+AND the prior good 1.7 override is retained, not the invalid value or the
+vehicle's flat fallback. Full suite re-run after adding this test:
+**663 tests**, 0 skipped, 0 failures, 0 errors (662 + this 1 net-new case).
+
 ## Ground-surface config hot-reload (MINECRAFT-531)
 
 Bounded deliverable: wire the already-implemented, already-non-throwing/
