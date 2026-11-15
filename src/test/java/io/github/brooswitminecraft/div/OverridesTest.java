@@ -76,6 +76,7 @@ class OverridesTest {
   assertEquals(20.0, r.cyclicLimitDegrees, "cyclicLimitDegrees' fallback matches RotorForces' own prior hardcoded 20-degree clamp");
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
+  assertEquals(0.0, r.rotorAngularDampingCoefficient, "rotorAngularDampingCoefficient's fallback is 0 - no angular-rate damping term at all unless configured (MINECRAFT-537 zero/off parity)");
   assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertEquals(1.0, r.suspensionSpringMultiplier, "suspensionSpringMultiplier's fallback is a pure no-op - an unconfigured vehicle's calibrated spring rate is unchanged");
   assertEquals(1.0, r.parasiticDragMultiplier, "parasiticDragMultiplier's fallback is a pure no-op - an unconfigured vehicle's native-derived parasitic drag budget is unchanged");
@@ -94,6 +95,7 @@ class OverridesTest {
   assertNotNull(r.antiRollStiffness);
   assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
+  assertNotNull(r.rotorAngularDampingCoefficient);
   assertNotNull(r.suspensionDampingRatio);
   assertNotNull(r.suspensionSpringMultiplier);
   assertNotNull(r.parasiticDragMultiplier); assertNotNull(r.oswaldEfficiency);
@@ -186,6 +188,76 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, cyclicScale::validateSupportedForPart);
   var yawScale = new Overrides.Tuning(); yawScale.yawAuthorityScale = 1.5;
   assertThrows(IllegalArgumentException.class, yawScale::validateSupportedForPart);
+ }
+
+ // MINECRAFT-537: rotorAngularDampingCoefficient - bounded, optional, rotorcraft-only angular-rate
+ // damping torque, independent of the MINECRAFT-522 cyclic/yaw authority fields above.
+
+ @Test void rotorAngularDampingCoefficientOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.rotorAngularDampingCoefficient = -0.1;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.rotorAngularDampingCoefficient = RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT + 0.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nonFinite = new Overrides.Tuning(); nonFinite.rotorAngularDampingCoefficient = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nonFinite::validate);
+  var zero = new Overrides.Tuning(); zero.rotorAngularDampingCoefficient = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zero::validate);
+  var atCap = new Overrides.Tuning(); atCap.rotorAngularDampingCoefficient = RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT; // the cap itself is allowed
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.rotorAngularDampingCoefficient = 5.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void rotorAngularDampingCoefficientParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.rotorAngularDampingCoefficient = 4.5;
+   Overrides.setForTest(java.util.Map.of("packid:damped_rotor_vehicle", override));
+   assertEquals(4.5, Overrides.resolved("packid:damped_rotor_vehicle").rotorAngularDampingCoefficient,
+     "an explicit operator override must take precedence over the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAngularDampingCoefficientInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.rotorAngularDampingCoefficient = 2.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "damping-base"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("damping-base", template), java.util.Map.of("packid:inherited_damping", child), java.util.Map.of());
+   assertEquals(2.0, Overrides.resolved("packid:inherited_damping").rotorAngularDampingCoefficient,
+     "a field the child never set must inherit the template's value, same as every other tuning field");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAngularDampingCoefficientIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.rotorAngularDampingCoefficient = 1.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart,
+    "this is a vehicle-only concept - a rotorcraft part has no own angular-damping consumer");
+ }
+
+ @Test void validThenInvalidRotorAngularDampingReloadAppliesThenRetainsThePriorGoodOverride() {
+  // Same "invalid reload retains last-known-good" structure as the part-friction/stall-angle
+  // regressions elsewhere in this file - exercises the REAL Overrides.apply(Supplier<Config>)
+  // seam, not merely setForTest, so a bad edit mid-session cannot silently corrupt an
+  // already-good rotor damping configuration.
+  try {
+   var goodHelicopter = new Overrides.Tuning(); goodHelicopter.rotorAngularDampingCoefficient = 3.0;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_helicopter", goodHelicopter), java.util.Map.of()));
+   assertTrue(goodResult.success(), "a valid rotorAngularDampingCoefficient reload must apply cleanly");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_helicopter").rotorAngularDampingCoefficient);
+
+   var invalidHelicopter = new Overrides.Tuning(); invalidHelicopter.rotorAngularDampingCoefficient = -1.0; // out of range
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_helicopter", invalidHelicopter), java.util.Map.of()));
+   assertFalse(badResult.success(), "a negative rotorAngularDampingCoefficient reload must be rejected, not silently applied");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_helicopter").rotorAngularDampingCoefficient,
+     "a rejected reload must retain the PRIOR GOOD rotorAngularDampingCoefficient, not the invalid value or the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
  }
 
  // MINECRAFT-518: angularWaterDrag - rotational water-drag torque coefficient for a floating
@@ -939,6 +1011,144 @@ class OverridesTest {
    var merged = Overrides.effective(part);
    assertThrows(IllegalArgumentException.class, merged::validateSupportedForPart,
      "a part must not be able to smuggle an unsupported field in through extends");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-534: installed-tire rolling resistance overrides - rollingResistance is now a
+ // supported part field, same exact shape as friction's own MINECRAFT-529 coverage above
+ // (bounds, extends-inheritance, vehicle-fallthrough precedence, independent per-wheel
+ // resolution, valid/invalid reload retention), but independent of grip - a tire can override
+ // one field without the other.
+
+ @Test void partEntrySettingRollingResistancePassesTheSupportedFieldsCheck() {
+  var part = new Overrides.Tuning(); part.rollingResistance = 1.4;
+  assertDoesNotThrow(part::validateSupportedForPart,
+    "MINECRAFT-534: an installed tire part's own rollingResistance override must be an accepted part field");
+ }
+
+ @Test void partEntrySettingOutOfRangeRollingResistanceStillFailsPlainValidation() {
+  var tooHigh = new Overrides.Tuning(); tooHigh.rollingResistance = 10.5;
+  assertThrows(IllegalArgumentException.class, tooHigh::validate);
+  var tooLow = new Overrides.Tuning(); tooLow.rollingResistance = 0.0;
+  assertThrows(IllegalArgumentException.class, tooLow::validate);
+ }
+
+ @Test void partRollingResistanceOverrideInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.rollingResistance = 2.5;
+   var part = new Overrides.Tuning(); part.extendsTemplate = "tire-base";
+   Overrides.setForTest(java.util.Map.of("tire-base", template), java.util.Map.of(), java.util.Map.of("packid:inherited_tire", part));
+   var merged = Overrides.effectivePartOverride("packid:inherited_tire");
+   assertEquals(2.5, merged.rollingResistance, "a part inheriting rollingResistance from a template must fold it in exactly like any other field");
+   assertDoesNotThrow(merged::validateSupportedForPart);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartRollingResistanceOverrideWinsOverTheVehicleResolvedValue() {
+  try {
+   var part = new Overrides.Tuning(); part.rollingResistance = 3.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:draggy_tire", part));
+   assertEquals(3.0, PhysicsBridge.tirePartRollingResistance("examplepack:draggy_tire", 1.0),
+     "an explicit part-level rollingResistance override must win outright (replace, not multiply) over the vehicle's own resolved value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartRollingResistanceFallsThroughToTheVehicleResolvedValueWhenNoPartOverrideExists() {
+  assertEquals(1.0, PhysicsBridge.tirePartRollingResistance("packid:ordinary_tire_with_no_override", 1.0),
+    "no parts entry at all for this tire key must be a true no-op, reproducing the vehicle's resolved rollingResistance unchanged");
+ }
+
+ @Test void tirePartRollingResistanceResolvesIndependentlyPerWheelKeySoDifferentInstalledTiresGetDifferentDrag() {
+  try {
+   var draggy = new Overrides.Tuning(); draggy.rollingResistance = 4.0;
+   var smooth = new Overrides.Tuning(); smooth.rollingResistance = 0.2;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:draggy_tire", draggy, "examplepack:smooth_tire", smooth));
+   assertEquals(4.0, PhysicsBridge.tirePartRollingResistance("examplepack:draggy_tire", 1.0));
+   assertEquals(0.2, PhysicsBridge.tirePartRollingResistance("examplepack:smooth_tire", 1.0));
+   assertEquals(1.0, PhysicsBridge.tirePartRollingResistance("examplepack:unconfigured_tire", 1.0),
+     "a third, unconfigured tire key on the same vehicle must stay at the vehicle's own resolved value - independent wheel identities");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartRollingResistanceIsIndependentOfTirePartFrictionOnTheSamePart() {
+  try {
+   var part = new Overrides.Tuning(); part.rollingResistance = 3.5; // friction left unset
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:only_rolling_resistance_tire", part));
+   assertEquals(3.5, PhysicsBridge.tirePartRollingResistance("examplepack:only_rolling_resistance_tire", 1.0));
+   assertEquals(1.0, PhysicsBridge.tirePartFriction("examplepack:only_rolling_resistance_tire", 1.0),
+     "a part overriding only rollingResistance must leave friction completely untouched - independent fields");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void validThenInvalidPartRollingResistanceReloadAppliesThenRetainsThePriorGoodTireOverride() {
+  try {
+   var goodTire = new Overrides.Tuning(); goodTire.rollingResistance = 1.9;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", goodTire)));
+   assertTrue(goodResult.success(), "a valid parts.<tire>.rollingResistance reload must apply cleanly");
+   assertEquals(1.9, PhysicsBridge.tirePartRollingResistance("examplepack:reloadable_tire", 1.0),
+     "PhysicsBridge.tirePartRollingResistance must observe the newly-applied valid part rollingResistance override");
+
+   var invalidTire = new Overrides.Tuning(); invalidTire.rollingResistance = 0.0; // out of range: must be >0
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", invalidTire)));
+   assertFalse(badResult.success(), "an out-of-range part rollingResistance (0.0) reload must be rejected, not silently applied");
+   assertEquals(1.9, PhysicsBridge.tirePartRollingResistance("examplepack:reloadable_tire", 1.0),
+     "a rejected reload must retain the PRIOR GOOD part rollingResistance override, not the invalid value or the vehicle fallback");
+
+   var tooHighTire = new Overrides.Tuning(); tooHighTire.rollingResistance = 10.5; // out of range: must be <=10
+   var badResult2 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", tooHighTire)));
+   assertFalse(badResult2.success(), "an out-of-range part rollingResistance (10.5) reload must also be rejected");
+   assertEquals(1.9, PhysicsBridge.tirePartRollingResistance("examplepack:reloadable_tire", 1.0),
+     "a second rejected reload must still retain the same prior good part rollingResistance override");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // Review finding (PR #30/Jira comment 54071): the production composition at stepGround's
+ // FrictionContact-construction call site (surface.rollingResistanceMultiplier() * resolved
+ // tire value) must NOT divide the resolved value back out by tuning.rollingResistance the way
+ // tireGripRatio divides by tuning.friction - unlike friction, solveFriction has no separate
+ // vehicle-baseline parameter for rolling resistance, so rollingResistanceMultiplier must carry
+ // the FULL resolved value outright. These two regressions drive PhysicsBridge.
+ // tirePartRollingResistance directly with a NON-UNIT vehicle baseline (1.0 alone cannot
+ // distinguish "divides and cancels to itself" from "doesn't divide at all") and then perform
+ // the exact same surface*resolved multiplication stepGround performs, proving neither a
+ // no-part-override fallback nor a part-override replacement gets silently rescaled against the
+ // vehicle's own configured baseline.
+
+ @Test void nonUnitVehicleRollingResistanceComposesWithGroundSurfaceUnchangedWhenNoPartOverrideExists() {
+  double vehicleRollingResistance = 2.0;
+  double resolved = PhysicsBridge.tirePartRollingResistance("packid:no_override_tire", vehicleRollingResistance);
+  assertEquals(2.0, resolved, 0, "with no part override, the resolved value must equal the configured vehicle baseline exactly, not a ratio against itself");
+  double surfaceMultiplier = 1.0;
+  double composed = surfaceMultiplier * resolved; // the exact stepGround composition, no division
+  assertEquals(2.0, composed, 0, "a configured, non-unit vehicle rollingResistance with no part override must actually take effect on the composed multiplier, not be cancelled back to 1.0 by dividing against itself");
+ }
+
+ @Test void nonUnitVehicleRollingResistanceIsReplacedOutrightByAPartOverrideInTheComposedMultiplier() {
+  try {
+   var part = new Overrides.Tuning(); part.rollingResistance = 3.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:overridden_tire", part));
+   double vehicleRollingResistance = 2.0;
+   double resolved = PhysicsBridge.tirePartRollingResistance("examplepack:overridden_tire", vehicleRollingResistance);
+   assertEquals(3.0, resolved, 0, "a part override must replace the vehicle's own non-unit baseline outright, not multiply/divide against it");
+   double surfaceMultiplier = 1.0;
+   double composed = surfaceMultiplier * resolved; // the exact stepGround composition, no division
+   assertEquals(3.0, composed, 0, "the composed multiplier must be surface*part (3.0), never surface*(part/vehicle) (1.5)");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }
