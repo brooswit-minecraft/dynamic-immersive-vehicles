@@ -561,6 +561,20 @@ across every wheel exactly as before this option existed. This is a
 geometric budget split only - not a differential, not traction control,
 and not a gear-ratio simulation.
 
+`axleDriveForceSharing` (optional, boolean, default `false`/unset) opts a
+vehicle into contact-aware redistribution of a wheel's own drive-force
+share to its grounded same-axle wheel(s) whenever that wheel has no ground
+contact this tick - the budget `driveBiasFront` (or the plain even split,
+if unset) already assigned that axle stays exactly the same total; this
+only changes how it's split among that axle's currently-grounded wheels,
+weighted by their own real measured contact load (never by wheel angular
+velocity/slip). It never moves budget between the front and rear axle
+groups. Leaving it unset is a strict no-op: an airborne wheel's share is
+simply unused, exactly as before this option existed. See
+[`AxleDriveForceSharing`](src/main/java/io/github/brooswitminecraft/div/AxleDriveForceSharing.java)
+for the implementation; this is not a limited-slip differential, wheel-spin
+simulation, or traction control.
+
 `suspensionDampingRatio` (optional, dimensionless, strictly positive and
 capped at `2.0`) is the per-wheel critical-damping-ratio multiplier
 `suspensionSpringForShare`'s own paired damping formula applies - previously
@@ -726,7 +740,7 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
 `yawAuthorityScale`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
-`suspensionSpringMultiplier`, `toeFrontDegrees`, `toeRearDegrees`. Fields baked in at vehicle construction - `massKg`,
+`suspensionSpringMultiplier`, `toeFrontDegrees`, `toeRearDegrees`, `axleDriveForceSharing`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The

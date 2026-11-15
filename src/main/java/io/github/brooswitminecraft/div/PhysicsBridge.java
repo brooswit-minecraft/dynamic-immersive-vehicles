@@ -341,7 +341,9 @@ public final class PhysicsBridge {
   * every tick via suspensionDamper/suspensionDamperForShare/effectiveMassDamper, same as every
   * other field in this list)/suspensionSpringMultiplier (MINECRAFT-528, stepGround reads
   * tuning.suspensionSpringMultiplier fresh every tick via suspensionSpring/
-  * suspensionSpringForShare, same as every other field in this list). Mutating
+  * suspensionSpringForShare, same as every other field in this list)/axleDriveForceSharing
+  * (MINECRAFT-532, stepGround reads tuning.axleDriveForceSharing fresh every tick via
+  * AxleDriveForceSharing#shareRatios, same as every other field in this list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -386,6 +388,9 @@ public final class PhysicsBridge {
   // brakeBiasFront/driveBiasFront above - no respawn needed for either field.
   if (!java.util.Objects.equals(target.toeFrontDegrees, fresh.toeFrontDegrees)) { target.toeFrontDegrees = fresh.toeFrontDegrees; appliedOut.add("toeFrontDegrees"); }
   if (!java.util.Objects.equals(target.toeRearDegrees, fresh.toeRearDegrees)) { target.toeRearDegrees = fresh.toeRearDegrees; appliedOut.add("toeRearDegrees"); }
+  // MINECRAFT-532: stepGround reads tuning.axleDriveForceSharing fresh every tick via
+  // AxleDriveForceSharing#shareRatios, same "no separate cached field" shape as driveBiasFront.
+  if (!java.util.Objects.equals(target.axleDriveForceSharing, fresh.axleDriveForceSharing)) { target.axleDriveForceSharing = fresh.axleDriveForceSharing; appliedOut.add("axleDriveForceSharing"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
@@ -1970,6 +1975,13 @@ public final class PhysicsBridge {
      return new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,newNormal,forward,right,point,
        skidSteerMultiplier,brakeShareRatio,driveShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
     }
+    // MINECRAFT-532: lets the post-Phase-1 axle drive-force-sharing pass (below) rebuild this
+    // record with a redistributed driveShareRatio - same "replace the whole record" shape as
+    // withNormal immediately above, for the same reason.
+    WheelHit withDriveShareRatio(double newDriveShareRatio) {
+     return new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,
+       skidSteerMultiplier,brakeShareRatio,newDriveShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
+    }
    }
    // MINECRAFT-506: each wheel's own static load SHARE, from its horizontal (x,z) anchor
    // position relative to `center` - the same geometry already used to build `anchor` just
@@ -2186,6 +2198,24 @@ public final class PhysicsBridge {
      newNormal[hj]=normalB-t;
     }
     for (int i=0;i<hits.size();i++) if (newNormal[i]!=hits.get(i).normal()) hits.set(i,hits.get(i).withNormal(newNormal[i]));
+   }
+   // MINECRAFT-532: opt-in contact-aware axle drive-force sharing - deliberately AFTER the
+   // anti-roll pass above, so the per-wheel `load` this consults is the FINAL, already-
+   // redistributed contact load, not Phase 1's pre-anti-roll value. Builds grounded/load arrays
+   // over the FULL wheel count (not just `hits`) so AxleDriveForceSharing's own axle grouping
+   // sees every wheel's true contact state, including an airborne wheel's (grounded=false,
+   // load irrelevant) - see that class's own doc for the full redistribution/fallback reasoning.
+   // Bypassed entirely (hits left exactly as DriveBiasDistribution assigned them, no behavior
+   // change) when tuning.axleDriveForceSharing is not explicitly true, the documented default.
+   if (!hits.isEmpty() && Boolean.TRUE.equals(tuning.axleDriveForceSharing)) {
+    boolean[] wheelGrounded=new boolean[wheels.size()];
+    double[] wheelLoad=new double[wheels.size()];
+    for (var h : hits) { wheelGrounded[h.wheelIndex()]=true; wheelLoad[h.wheelIndex()]=h.normal(); }
+    double[] sharedDriveShareRatios=AxleDriveForceSharing.shareRatios(loadShareZ,driveShareRatios,wheelGrounded,wheelLoad,true);
+    for (int i=0;i<hits.size();i++) {
+     double newRatio=sharedDriveShareRatios[hits.get(i).wheelIndex()];
+     if (newRatio!=hits.get(i).driveShareRatio()) hits.set(i,hits.get(i).withDriveShareRatio(newRatio));
+    }
    }
    // Native contact-ownership sync (ticket comment 53182/53182-correction): confirmed by reading
    // the real pinned MTS source (not inferred from naming) that PartEngine.update() - which DOES

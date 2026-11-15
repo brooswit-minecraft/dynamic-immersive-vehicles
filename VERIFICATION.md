@@ -2374,6 +2374,101 @@ and already covered); the real dedicated-server `gradle runServer` probe
 run above, both before and after the probe's own self-found/self-fixed
 defect.
 
+## Contact-aware axle drive-force sharing (MINECRAFT-532, added 2026-11-15)
+
+Bounded deliverable: opt-in redistribution of a wheel's own already-assigned
+drive-force share (`DriveBiasDistribution#shareRatios`' output) to its
+grounded same-axle wheel(s), whenever that wheel has no ground contact this
+tick, weighted by each grounded wheel's own real measured suspension
+contact load (`WheelHit.normal()`, AFTER MINECRAFT-519's anti-roll
+redistribution) - never wheel angular velocity/slip, and never across the
+front/rear axle boundary. This is explicitly NOT a limited-slip
+differential, wheel-spin simulation, or traction control, per the ticket's
+own stated constraint.
+
+New isolated, Minecraft-type-free helper class `AxleDriveForceSharing`
+(mirrors `DriveBiasDistribution`'s own shape: same `AXLE_EPSILON`/max-`z`
+front-row classification, "lump every non-front row into one rear group"
+convention). `shareRatios(z, driveShareRatio, grounded, load, enabled)`:
+disabled (default) returns a defensive copy of `driveShareRatio` completely
+unchanged - byte-identical to the pre-ticket allocation; enabled
+redistributes WITHIN each axle group independently (front and rear total
+assigned ratio both exactly conserved), weighting grounded wheels by real
+load and sending an airborne wheel's own ratio to `0`; an axle with no
+grounded wheel carrying positive load at all (every wheel airborne, or
+every grounded wheel reporting exactly zero load) is left completely
+untouched rather than fabricating a split with nothing real to weight it
+by.
+
+New `Overrides.Tuning#axleDriveForceSharing` (`Boolean`, no FALLBACK entry -
+null/false is the documented no-op default, same "unset means untouched"
+shape as `driveBiasFront`/`brakeBiasFront`; rejected on `parts` entries, a
+vehicle-only axle concept). Wired into `PhysicsBridge.stepGround` as a new
+post-Phase-1 pass placed immediately AFTER the existing MINECRAFT-519
+anti-roll block (so the `load` it consults is the final, already-
+redistributed contact load) and before the native contact-ownership sync:
+builds `grounded`/`load` arrays over the full wheel count from `hits`, calls
+`AxleDriveForceSharing.shareRatios`, and rebuilds each `WheelHit` with its
+new ratio via the new `WheelHit.withDriveShareRatio` (mirrors the existing
+`withNormal` record-replacement shape). Re-read live every tick via
+`applyLiveSafeFields`, same as `driveBiasFront`. No change to
+`MultiContactFrictionSolver.FrictionContact`'s own shape - only which
+`driveShareRatio` value a `WheelHit` carries before the solver composes it
+with `driveForcePerWheel*skidSteerMultiplier`, same as before this ticket.
+
+**Evidence named by the ticket:** `AxleDriveForceSharingTest` (pure-math
+core) covers disabled no-op (byte-identical, independently-allocated
+copy), equal contacts (no change from an already-even split), an
+asymmetric-load split (weighted exactly by real measured load, each
+axle's own total conserved), one wheel airborne (its share moves only to
+its grounded same-axle mate, the other axle completely untouched),
+zero/all-airborne and all-grounded-zero-load fallback (left untouched
+rather than dividing by zero or fabricating a split), an asymmetric
+(trike-like) wheel-count layout, and 500 randomized trials asserting every
+ratio stays finite/non-negative and each axle's own total assigned ratio
+is exactly conserved. `AxleDriveForceSharingIntegrationTest` is the real
+production-path integration against `MultiContactFrictionSolver
+.solveFriction` (mirrors `ServiceDriveBiasTest`'s own solver-level shape):
+enabling sharing measurably recovers acceleration an airborne wheel's
+share would otherwise lose versus the disabled default; disabled
+reproduces the exact pre-ticket unredistributed-loss outcome; reverse
+travel still accelerates correctly (and still shows the same recovered-
+acceleration effect) with the sign flip applied at the `driveForcePerWheel`
+call site, unaffected by this ratio composition; and the redistributed
+ratio composes multiplicatively with skid-steer's own per-wheel
+multiplier, neither overriding the other. `OverridesTest` and
+`PhysicsBridgeLiveOverrideApplicationTest` gained `axleDriveForceSharing`
+coverage mirroring their existing `driveBiasFront` cases (no-fallback-
+stays-null, full precedence chain, part-override rejection, live hot-
+reload mutation).
+
+Schema coordination (ticket comments 54060/54063 - a live multi-agent
+coordination exchange on this ticket itself, which this owner coordinates
+as the designated schema coordinator for the concurrent M532-537 sprint):
+this ticket's own additive `Overrides.Tuning` region (one new field, one
+new independent helper class, one new post-Phase-1 `PhysicsBridge.stepGround`
+pass) was posted before any of M533-537 landed their own fields, along with
+a proposed ticket-number merge-sequencing convention for the remaining five.
+
+Local slot-lock coordination (per this ticket's own shared cooperative
+`flock` on `/tmp/div-gradle-slot.lock`, held for the whole Gradle lifetime,
+never unlinked or bypassed). `gradle --offline compileJava compileTestJava
+test --console=plain` against this branch
+(`minecraft-532/contact-aware-axle-drive-force-sharing`) at head (origin/main
+`a0c4fa4` unchanged at this ticket's start) - `BUILD SUCCESSFUL` in 49s. The
+real JUnit XML reports total **705 tests**, 0 skipped, 0 failures, 0 errors
+across the whole suite (10 from the new `AxleDriveForceSharingTest`, 4 from
+the new `AxleDriveForceSharingIntegrationTest`, plus every pre-existing
+test - including every other ticket's own drive/brake/anti-roll/suspension
+behavior - run unchanged alongside them, confirming no regression).
+
+Not yet performed: in-game acceptance (a real vehicle spawn with
+`axleDriveForceSharing` configured, observed recovered acceleration with
+one wheel genuinely airborne over uneven terrain) - this ticket's own brief
+says focused engineering tests are in scope, not John's broad/hardware
+playtesting, which is explicitly out of scope here. Hosted CI remains
+limited by the disclosed billing/capacity constraint (see other tickets'
+own entries above); this pass relies on the local evidence above.
 ## Per-axle toe alignment (MINECRAFT-533, added 2026-11-15)
 
 Bounded M507 slice. Inspected the named seams first:
@@ -2452,3 +2547,42 @@ Not yet performed: in-game acceptance (real vehicle spawn with configured
 `toeFrontDegrees`/`toeRearDegrees`, observed grip/stability effect) - this
 ticket's own brief says focused engineering tests are in scope, not John's
 broad/hardware playtesting, which is explicitly out of scope here.
+
+**Reconciliation onto M532 (CHANGES_REQUESTED, review comment, added
+2026-11-15).** Main advanced from this ticket's a0c4fa4 baseline to
+`d5fb9ad` via MINECRAFT-532 (contact-aware axle drive-force sharing),
+making PR #33 `mergeable=false`/`mergeable_state=dirty`, exactly as the
+reviewer's merge-tree reproduction found. Merged `origin/main` into this
+branch; conflicts were confined to the explicitly-coordinated shared
+schema/contact seam (`Overrides.java` field declarations/validation/part-
+rejection/copy/merge/resolve, `PhysicsBridge.applyLiveSafeFields`,
+`PhysicsBridgeLiveOverrideApplicationTest`'s combined-fields case) plus
+doc/example-JSON append points (README.md, VERIFICATION.md, the example
+config) - every conflict was two independent field additions sitting on
+adjacent lines, resolved by keeping both sides (M532's
+`axleDriveForceSharing` plumbing alongside M533's
+`toeFrontDegrees`/`toeRearDegrees` plumbing), never dropping either
+feature's own logic. `PhysicsBridge.stepGround` itself merged cleanly with
+no conflict: M533's toe offset folds into `steer` at the existing
+`~1960`-area wheel-hit construction loop, while M532's own post-contact
+drive-force redistribution (gated on `Boolean.TRUE.equals(tuning.
+axleDriveForceSharing)`) runs later in the same method against the already-
+built `hits` list - two genuinely distinct regions, confirming the
+ticket's own "independent helper classes and distinct force regions"
+coordination held.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` against the
+reconciled head (`minecraft-533/per-axle-toe-alignment` merged with
+`origin/main` @ `d5fb9ad`) - `BUILD SUCCESSFUL`. The real JUnit XML
+reports total **724 tests**, 0 skipped, 0 failures, 0 errors across the
+whole suite - M532's own `AxleDriveForceSharingTest`/
+`AxleDriveForceSharingIntegrationTest`/`OverridesTest` additions and
+M533's `AxleToeDistributionTest`/`ToeAlignmentContactIntegrationTest`
+additions both present and passing together, confirming no regression in
+either direction.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `65dd7fb988eaa35a954e739d6b2722a026b4b53b5aa5fcd02220b6e25d80da03`)
+was produced.

@@ -226,6 +226,15 @@ public final class Overrides {
   public Double toeFrontDegrees;
   // Same shape as toeFrontDegrees immediately above, for the geometric rear axle group instead.
   public Double toeRearDegrees;
+  // MINECRAFT-532: opt-in contact-aware axle drive-force sharing - see AxleDriveForceSharing's
+  // own doc for the full redistribution reasoning. null/false (the documented default) is a
+  // byte-identical no-op: unset reproduces the exact pre-ticket per-wheel drive allocation,
+  // same "unset means untouched" shape driveBiasFront/brakeBiasFront already use, not merely a
+  // conservative default value. true opts a vehicle INTO redistributing an airborne wheel's own
+  // now-unusable drive share to its grounded same-axle wheel(s), weighted by their real measured
+  // contact load - never across the front/rear axle boundary. Re-read live every tick by
+  // PhysicsBridge.stepGround, same as driveBiasFront - see PhysicsBridge.applyLiveSafeFields.
+  public Boolean axleDriveForceSharing;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -451,6 +460,7 @@ public final class Overrides {
    if (suspensionSpringMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'suspensionSpringMultiplier' (vehicle-only concept - no part-level consumer yet)");
    if (toeFrontDegrees != null) throw new IllegalArgumentException("part overrides do not support 'toeFrontDegrees' (vehicle-only concept - a part has no own axle position)");
    if (toeRearDegrees != null) throw new IllegalArgumentException("part overrides do not support 'toeRearDegrees' (vehicle-only concept - a part has no own axle position)");
+   if (axleDriveForceSharing != null) throw new IllegalArgumentException("part overrides do not support 'axleDriveForceSharing' (vehicle-only concept - a part has no own axle position)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -507,6 +517,7 @@ public final class Overrides {
   c.suspensionSpringMultiplier=t.suspensionSpringMultiplier;
   c.toeFrontDegrees=t.toeFrontDegrees;
   c.toeRearDegrees=t.toeRearDegrees;
+  c.axleDriveForceSharing=t.axleDriveForceSharing;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -545,6 +556,7 @@ public final class Overrides {
   m.suspensionSpringMultiplier = child.suspensionSpringMultiplier!=null?child.suspensionSpringMultiplier:parent.suspensionSpringMultiplier;
   m.toeFrontDegrees = child.toeFrontDegrees!=null?child.toeFrontDegrees:parent.toeFrontDegrees;
   m.toeRearDegrees = child.toeRearDegrees!=null?child.toeRearDegrees:parent.toeRearDegrees;
+  m.axleDriveForceSharing = child.axleDriveForceSharing!=null?child.axleDriveForceSharing:parent.axleDriveForceSharing;
   return m;
  }
  /**
@@ -742,6 +754,9 @@ public final class Overrides {
   // the signal AxleToeDistribution needs to reproduce the pre-ticket zero-offset behavior.
   result.toeFrontDegrees = firstNonNull(override!=null?override.toeFrontDegrees:null, packMetadata!=null?packMetadata.toeFrontDegrees:null, ivAdapted!=null?ivAdapted.toeFrontDegrees:null, physicallyDerived!=null?physicallyDerived.toeFrontDegrees:null);
   result.toeRearDegrees = firstNonNull(override!=null?override.toeRearDegrees:null, packMetadata!=null?packMetadata.toeRearDegrees:null, ivAdapted!=null?ivAdapted.toeRearDegrees:null, physicallyDerived!=null?physicallyDerived.toeRearDegrees:null);
+  // MINECRAFT-532: no FALLBACK entry (mirrors brakeBiasFront/driveBiasFront above) - stays null
+  // (treated as "off", see AxleDriveForceSharing's own doc) unless some level actually sets it.
+  result.axleDriveForceSharing = firstNonNullBoolean(override!=null?override.axleDriveForceSharing:null, packMetadata!=null?packMetadata.axleDriveForceSharing:null, ivAdapted!=null?ivAdapted.axleDriveForceSharing:null, physicallyDerived!=null?physicallyDerived.axleDriveForceSharing:null);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}
