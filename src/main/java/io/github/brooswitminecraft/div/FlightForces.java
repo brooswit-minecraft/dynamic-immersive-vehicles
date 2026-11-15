@@ -28,6 +28,15 @@ public final class FlightForces {
  /** Per-radian control-surface deflection authority - previously the same constant as the wing's
   * own lift slope; now independently tunable (see {@link #controlSurfaceForce}). */
  public static final double DEFAULT_CONTROL_SURFACE_SLOPE = 2 * Math.PI;
+ /**
+  * MINECRAFT-536: the induced-drag term's Oswald efficiency factor was previously hardcoded
+  * here, inside {@link #dragCoefficient}; it is now a caller-supplied {@link
+  * Overrides.Tuning#oswaldEfficiency} instead, the same "class picks no implicit default of its
+  * own" shape MINECRAFT-521 already established for stallAngleDegrees/liftSlope/
+  * controlSurfaceSlope. This constant IS that field's own documented FALLBACK - byte-identical
+  * to the old hardcoded 0.8 for an unconfigured vehicle.
+  */
+ public static final double DEFAULT_OSWALD_EFFICIENCY = 0.8;
  private static final double GRAVITY = 9.81;
 
  /** Dynamic pressure q = 1/2 * rho * v^2, the common scale factor for every aerodynamic force. */
@@ -50,12 +59,27 @@ public final class FlightForces {
  }
 
  /**
-  * Parasitic plus induced drag coefficient. {@code aspectRatio <= 0} (no wing, e.g. a blimp hull)
-  * skips the induced term entirely and returns just the parasitic coefficient.
+  * Parasitic plus induced drag coefficient. {@code nativeDragCoefficient} is IV's own raw
+  * {@code motorized.dragCoefficient} - this method applies the existing {@code Math.max(0.02,
+  * ...)} floor itself (previously done by the caller; moved here, MINECRAFT-536 review, so the
+  * floor-plus-multiplier-plus-aspect-gating logic below is covered by a plain unit test rather
+  * than only by {@code PhysicsBridge.stepFlight}'s own untestable live call site).
+  *
+  * <p>{@code aspectRatio <= 0} (no wing, e.g. a blimp hull) returns just the floored native
+  * value, UNSCALED by {@code parasiticDragMultiplier} - this ticket's fixed-wing-only scope
+  * requires preserving a non-fixed-wing/blimp vehicle's parasitic drag exactly, so the multiplier
+  * (and {@code oswaldEfficiency}, which has nothing to act on either in this branch) is simply
+  * never consulted when there is no wing, rather than risking a spurious divide-by-zero or an
+  * out-of-scope behavior change. Only a positive-aspect-ratio fixed wing gets the multiplier
+  * applied (to the floored value) and the induced term added. {@code parasiticDragMultiplier}/
+  * {@code oswaldEfficiency} are the resolved, bounded {@link Overrides.Tuning#parasiticDragMultiplier}/
+  * {@link Overrides.Tuning#oswaldEfficiency} (see their own FALLBACK docs for the unconfigured
+  * values) - this method itself has no implicit default of its own for either.
   */
- public static double dragCoefficient(double liftCoefficient, double parasiticDrag, double aspectRatio) {
-  if (aspectRatio <= 0) return parasiticDrag;
-  double oswaldEfficiency = 0.8;
+ public static double dragCoefficient(double liftCoefficient, double nativeDragCoefficient, double aspectRatio, double parasiticDragMultiplier, double oswaldEfficiency) {
+  double flooredParasiticDrag = Math.max(0.02, nativeDragCoefficient);
+  if (aspectRatio <= 0) return flooredParasiticDrag;
+  double parasiticDrag = flooredParasiticDrag * parasiticDragMultiplier;
   double induced = (liftCoefficient * liftCoefficient) / (Math.PI * aspectRatio * oswaldEfficiency);
   return parasiticDrag + induced;
  }
