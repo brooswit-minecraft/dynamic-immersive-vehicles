@@ -49,7 +49,8 @@
       "waterDrag": 400.0,
       "propellerForce": 6000.0,
       "angularWaterDrag": 0.0,
-      "maxSteerDegrees": 30.0
+      "maxSteerDegrees": 30.0,
+      "marineSteerDegrees": 20.0
     },
     "examplepack:knife_hull_boat": {
       "massKg": 900.0,

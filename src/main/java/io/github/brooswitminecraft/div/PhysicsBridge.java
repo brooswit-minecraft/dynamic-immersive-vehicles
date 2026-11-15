@@ -377,7 +377,9 @@ public final class PhysicsBridge {
   * stepGround reads tuning.axleDriveForceSharing fresh every tick via
   * AxleDriveForceSharing#shareRatios, same as every other field in this list)/rollingResistance
   * (MINECRAFT-534, stepGround reads tuning.rollingResistance fresh every tick at the
-  * FrictionContact-construction call site, same as every other field in this list). Mutating
+  * FrictionContact-construction call site, same as every other field in this list)/
+  * marineSteerDegrees (MINECRAFT-544, BuoyantForces.apply reads tuning.marineSteerDegrees fresh
+  * every tick for propeller thrust direction, same as maxSteerDegrees itself). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -403,6 +405,9 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.driveForce, fresh.driveForce)) { target.driveForce = fresh.driveForce; appliedOut.add("driveForce"); }
   if (!java.util.Objects.equals(target.brakeForce, fresh.brakeForce)) { target.brakeForce = fresh.brakeForce; appliedOut.add("brakeForce"); }
   if (!java.util.Objects.equals(target.maxSteerDegrees, fresh.maxSteerDegrees)) { target.maxSteerDegrees = fresh.maxSteerDegrees; appliedOut.add("maxSteerDegrees"); }
+  // MINECRAFT-544: BuoyantForces.apply reads tuning.marineSteerDegrees fresh every tick, same
+  // "no separate cached field" shape as maxSteerDegrees immediately above.
+  if (!java.util.Objects.equals(target.marineSteerDegrees, fresh.marineSteerDegrees)) { target.marineSteerDegrees = fresh.marineSteerDegrees; appliedOut.add("marineSteerDegrees"); }
   if (!java.util.Objects.equals(target.lateralGripMultiplier, fresh.lateralGripMultiplier)) { target.lateralGripMultiplier = fresh.lateralGripMultiplier; appliedOut.add("lateralGripMultiplier"); }
   if (!java.util.Objects.equals(target.waterDrag, fresh.waterDrag)) { target.waterDrag = fresh.waterDrag; appliedOut.add("waterDrag"); }
   if (!java.util.Objects.equals(target.propellerForce, fresh.propellerForce)) { target.propellerForce = fresh.propellerForce; appliedOut.add("propellerForce"); }

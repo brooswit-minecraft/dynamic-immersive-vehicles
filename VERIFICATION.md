@@ -3057,3 +3057,115 @@ either direction.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `65dd7fb988eaa35a954e739d6b2722a026b4b53b5aa5fcd02220b6e25d80da03`)
 was produced.
+
+# Verification, 2026-11-15 (MINECRAFT-544: independent marine propeller steering limit)
+
+New `Overrides.Tuning#marineSteerDegrees` (optional, bounded `0`-`60`
+degrees, same range as `maxSteerDegrees`) is an independent water-propeller
+steering limit, consumed only by `BuoyantForces.apply`'s existing
+rudder-driven `steer`/`forward` computation (float-only hulls via
+`BuoyantBody`, and the water side of an amphibious vehicle via
+`PhysicsBridge.Body` - the one shared call site, per `BuoyantForces`' own
+class doc) - never ground wheel steering, which stays on
+`PhysicsBridge.stepGround`'s own `tuning.maxSteerDegrees` read, completely
+untouched by this ticket. Deliberately has NO flat `FALLBACK` entry (unlike
+`maxSteerDegrees` itself) - `Overrides.resolveFields` instead falls
+`marineSteerDegrees` through to THIS SAME resolved entry's own
+`maxSteerDegrees` whenever every other precedence level (operator
+override, pack metadata, IV-adapted, physically-derived) has nothing to
+say, so an unconfigured vehicle's propeller thrust direction is
+byte-identical to before this ticket, including when `maxSteerDegrees`
+itself is non-default. Rejected on a `parts` entry (vehicle-only concept,
+no part-level consumer, same as `maxSteerDegrees`). Participates in the
+full `extends`-template inheritance chain identically to every other
+simple field. Re-read live every tick by `BuoyantForces.apply` - wired into
+`PhysicsBridge.applyLiveSafeFields` alongside `maxSteerDegrees` itself, so
+a reload applies without respawning any active vehicle.
+
+Engine linkage (`PartEngineAccessor.div$linkedPropellers`), per-engine
+thrust allocation (`Buoyancy.signedPropellerDrive`), the shared-thrust-
+budget denominator (`Buoyancy.isPropellerOperational`/
+`perOperationalPropellerForce`), neutral-transmission behavior (an engine
+not `running` contributes nothing to `drivenBy`, unchanged), reverse
+pitch/thrust (`Buoyancy.propellerThrust`'s own sign handling, unchanged),
+and submersion gating (the `point.y <= waterSurfaceAt(...)` check,
+unchanged) are all untouched - this ticket only changes which configured
+angle the resulting thrust vector is rotated by, nothing about whether or
+how much thrust exists. Buoyancy-region code (float sampling, directional/
+angular water drag) is completely unmodified, so water drag and propulsion
+budgets (`waterDrag`/`propellerForce`/`angularWaterDrag`) are unaffected,
+per the ticket's own float-only hitch coordination note.
+
+Evidence named by the ticket:
+- **Fallback** - `OverridesTest.marineSteerDegreesInheritsTheResolvedMaxSteerDegreesWhenUnconfigured`:
+  an unconfigured vehicle resolves `marineSteerDegrees` to the flat 30deg
+  `maxSteerDegrees` fallback, AND (second case) to a vehicle's own
+  overridden `maxSteerDegrees` (42deg) when only `maxSteerDegrees` - not
+  `marineSteerDegrees` - is configured, proving the inheritance is a true
+  per-entry fallback, not a second hardcoded constant.
+- **Configured limit** - `marineSteerDegreesExplicitOverrideWinsOverTheInheritedMaxSteerDegrees`:
+  with both fields explicitly set to different values (42/15), each
+  resolves independently - `maxSteerDegrees` is never dragged along with a
+  configured `marineSteerDegrees`, and vice versa.
+  `marineSteerDegreesParticipatesInTheFullPrecedenceChain` covers pack-
+  metadata-level configuration over the inherited value;
+  `marineSteerDegreesOutOfRangeFailsValidation` covers the bound (reject
+  `0.0`/`60.01`, accept `45.0`/the `60.0` ceiling).
+- **Reverse** - unaffected by construction: `steer` only rotates the
+  forward thrust axis the already-existing, untouched
+  `Buoyancy.propellerThrust`/`signedPropellerDrive` reverse-sign logic
+  pushes along; no new code path exists for reverse, so the existing
+  propeller reverse-thrust coverage in `BuoyancyTest` continues to apply
+  unchanged.
+- **Amphibian separation** - proven structurally, not just asserted: the
+  one `BuoyantForces.apply` call site is shared by `BuoyantBody` (float-
+  only) and `PhysicsBridge.Body` (amphibious), while `stepGround`'s wheel
+  `steer` computation (a different method entirely, a different field
+  read) is the ONLY ground-steering code path and was not modified at
+  all - an amphibious vehicle's wheel steering literally cannot read
+  `marineSteerDegrees`, and its water-propeller steering literally cannot
+  read anything but `tuning.marineSteerDegrees`.
+- **Validation/templates** - `marineSteerDegreesIsRejectedOnAPartOverride`
+  (part-level rejection) and `marineSteerDegreesIsInheritedThroughAnExtendsTemplate`
+  (extends-chain inheritance).
+- **Live reload/removal** - `PhysicsBridgeLiveOverrideApplicationTest.everyTickReadFieldIsAppliedLiveAndMutatesTheTargetInPlace`
+  (now exercises `marineSteerDegrees`, and asserts it in the full applied-
+  fields set) and the new
+  `removingAMarineSteerDegreesOverrideLiveAppliesBackDownToTheInheritedMaxSteerDegrees`
+  (an operator removing a previously-configured `marineSteerDegrees`
+  override, while `maxSteerDegrees` itself also changes in the same
+  reload, must see the live vehicle's propeller steering fall back to
+  inheriting that fresh `maxSteerDegrees` - not get stuck at its last
+  explicit value, and not stay pinned to the OLD `maxSteerDegrees`).
+
+Coordinated with the float-only hitch owner (MINECRAFT-545) per the
+ticket's own instruction by confining every change to `Overrides.java`'s
+existing field-declaration/validate/validateSupportedForPart/copy/
+mergeOntoParent/resolveFields sections (the same shared seam every sibling
+ticket in this sprint already touches, each on its own field), plus
+`BuoyantForces.apply`'s existing `steer` line and
+`PhysicsBridge.applyLiveSafeFields` - no buoyancy-region sampling, water-
+drag, or propulsion-budget code was touched.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline build` against this
+branch (`minecraft-544/marine-propeller-steering-limit`) at head `4ee035a`
+(origin/main, the pinned baseline for this sprint) - `BUILD SUCCESSFUL`.
+The real JUnit XML reports total **792 tests**, 0 skipped, 0 failures, 0
+errors across the whole suite (every pre-existing test run unchanged
+alongside the new `marineSteerDegrees` coverage, confirming no regression
+anywhere else, propeller/buoyancy/ground-steering paths included).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `a3738348eba1e5cc57497340bd3ff5e2128a5c9c2ae7512550beb9ed2024a7a8`)
+was produced.
+
+Not yet performed: in-game acceptance (real vehicle/boat spawn with a
+configured `marineSteerDegrees` distinct from `maxSteerDegrees`, observed
+rudder/propeller-thrust-direction divergence from wheel steering on an
+amphibious vehicle) - this ticket's own brief says focused engineering
+tests are in scope, John's broad/hardware playtesting is explicitly out of
+scope here. Hosted CI billing/spend-capacity restriction (ticket comment
+53620, reconfirmed by every sibling ticket this sprint) still blocks every
+hosted job from starting - this local build/test run is offered in its
+place, same as every sibling ticket in this sprint.

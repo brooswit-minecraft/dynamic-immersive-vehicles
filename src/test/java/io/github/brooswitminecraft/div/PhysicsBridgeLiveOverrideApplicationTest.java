@@ -23,6 +23,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   var fresh = Overrides.defaultTuning();
   fresh.suspensionTravel = 0.5; fresh.friction = 1.5; fresh.driveForce = 9000.0; fresh.brakeForce = 13000.0;
   fresh.maxSteerDegrees = 35.0; fresh.lateralGripMultiplier = 0.7; fresh.waterDrag = 450.0; fresh.propellerForce = 7000.0;
+  // MINECRAFT-544: marineSteerDegrees must go through this same live-mutation path too.
+  fresh.marineSteerDegrees = 18.0;
   fresh.angularWaterDrag = 50.0; fresh.antiRollStiffness = 0.4;
   fresh.stallAngleDegrees = 12.0; fresh.liftSlope = 5.0; fresh.controlSurfaceSlope = 4.0;
   fresh.brakeBiasFront = 0.65;
@@ -52,6 +54,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
   assertEquals(13000.0, target.brakeForce); assertEquals(35.0, target.maxSteerDegrees); assertEquals(0.7, target.lateralGripMultiplier);
   assertEquals(450.0, target.waterDrag); assertEquals(7000.0, target.propellerForce); assertEquals(50.0, target.angularWaterDrag);
+  assertEquals(18.0, target.marineSteerDegrees);
   assertEquals(0.4, target.antiRollStiffness);
   assertEquals(12.0, target.stallAngleDegrees); assertEquals(5.0, target.liftSlope); assertEquals(4.0, target.controlSurfaceSlope);
   assertEquals(0.65, target.brakeBiasFront);
@@ -63,7 +66,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
   assertEquals(true, target.axleDriveForceSharing);
   assertEquals(2.5, target.longitudinalWaterDragMultiplier); assertEquals(0.4, target.lateralWaterDragMultiplier); assertEquals(3.0, target.verticalWaterDragMultiplier);
-  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
+  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","marineSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
       "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing",
       "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier"),
     new TreeSet<>(applied));
@@ -159,6 +162,21 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.0, target.verticalWaterDragMultiplier, "must revert to the documented no-op 1.0 default once the override is removed");
   assertTrue(applied.containsAll(List.of("longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier")),
     "the revert-to-default must itself be reported as an applied live change");
+ }
+
+ @Test void removingAMarineSteerDegreesOverrideLiveAppliesBackDownToTheInheritedMaxSteerDegrees() {
+  // MINECRAFT-544: marineSteerDegrees has no flat FALLBACK of its own - an operator who removes a
+  // previously-configured marineSteerDegrees entry must see the live vehicle's propeller steering
+  // actually fall back to inheriting that SAME (possibly also-configured) maxSteerDegrees, not
+  // get stuck at its last explicit value.
+  var target = Overrides.defaultTuning();
+  target.maxSteerDegrees = 40.0; target.marineSteerDegrees = 12.0;
+  var fresh = Overrides.resolved("packid:not_configured"); // no marineSteerDegrees override -> inherits maxSteerDegrees (30.0 FALLBACK here)
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(30.0, target.marineSteerDegrees, "must revert to inheriting the resolved maxSteerDegrees (the FALLBACK, 30.0) once the override is removed");
+  assertEquals(30.0, target.maxSteerDegrees, "fresh's own maxSteerDegrees (the FALLBACK) must also apply live, same as any other reload");
+  assertTrue(applied.containsAll(List.of("marineSteerDegrees","maxSteerDegrees")), "the revert-to-inherited must itself be reported as an applied live change");
  }
 
  @Test void unchangedFieldsAreNotReportedAsApplied() {
