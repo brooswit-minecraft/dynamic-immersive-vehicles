@@ -931,8 +931,39 @@ class OverridesTest {
   assertDoesNotThrow(noOp::validate);
   var upperBound = new Overrides.Tuning(); upperBound.suspensionSpringMultiplier = 4.0; // inclusive upper bound is allowed
   assertDoesNotThrow(upperBound::validate);
-  var nearZero = new Overrides.Tuning(); nearZero.suspensionSpringMultiplier = 0.01; // exclusive lower bound - just above zero is allowed
-  assertDoesNotThrow(nearZero::validate);
+ }
+
+ /**
+  * Review finding (comment 53996): the configured lower range was not physically bounded by
+  * available suspension travel - the prior test's own {@code nearZero = 0.01} was wrongly
+  * accepted as valid, even though its equilibrium ({@code (travel*.5)/0.01} = 15 blocks at the
+  * documented 0.3 default travel) is nowhere near reachable under
+  * {@code PhysicsBridge}'s own travel-bounded compression clamp - damping supplies no static
+  * support at zero velocity, so it cannot make up that shortfall at rest. The lower bound is now
+  * a strict {@code 0.5} - see {@code suspensionSpringMultiplier}'s own doc for the full
+  * {@code (travel*.5)/m < travel} derivation (travel cancels out entirely, so this bound holds
+  * regardless of whatever {@code suspensionTravel} is actually configured).
+  */
+ @Test void suspensionSpringMultiplierAtOrBelowTheReachableEquilibriumLowerBoundFailsValidation() {
+  var oldlyAcceptedNearZero = new Overrides.Tuning(); oldlyAcceptedNearZero.suspensionSpringMultiplier = 0.01;
+  assertThrows(IllegalArgumentException.class, oldlyAcceptedNearZero::validate,
+    "0.01 must now be rejected - its equilibrium is nowhere near reachable under any valid suspensionTravel");
+  var exactlyAtBound = new Overrides.Tuning(); exactlyAtBound.suspensionSpringMultiplier = 0.5;
+  assertThrows(IllegalArgumentException.class, exactlyAtBound::validate,
+    "0.5 exactly means the equilibrium IS suspensionTravel - fully bottomed out, not a working suspension, and must be rejected same as suspensionDampingRatio's own exact-boundary rejection");
+  var justBelowBound = new Overrides.Tuning(); justBelowBound.suspensionSpringMultiplier = 0.49;
+  assertThrows(IllegalArgumentException.class, justBelowBound::validate);
+  var justAboveBound = new Overrides.Tuning(); justAboveBound.suspensionSpringMultiplier = 0.51;
+  assertDoesNotThrow(justAboveBound::validate,
+    "just above the bound must remain accepted - this is a genuine lower bound, not a disguised ban on softer-than-default springs");
+  // The bound holds regardless of suspensionTravel - confirming the travel-cancels-out claim at
+  // a travel other than the documented 0.3 default.
+  var belowBoundAtDifferentTravel = new Overrides.Tuning(); belowBoundAtDifferentTravel.suspensionTravel = 0.6; belowBoundAtDifferentTravel.suspensionSpringMultiplier = 0.49;
+  assertThrows(IllegalArgumentException.class, belowBoundAtDifferentTravel::validate,
+    "0.49 must still be rejected at a different suspensionTravel - the bound is independent of travel");
+  var aboveBoundAtDifferentTravel = new Overrides.Tuning(); aboveBoundAtDifferentTravel.suspensionTravel = 0.6; aboveBoundAtDifferentTravel.suspensionSpringMultiplier = 0.51;
+  assertDoesNotThrow(aboveBoundAtDifferentTravel::validate,
+    "0.51 must still be accepted at a different suspensionTravel - the bound is independent of travel");
  }
 
  @Test void suspensionSpringMultiplierParticipatesInTheFullPrecedenceChain() {

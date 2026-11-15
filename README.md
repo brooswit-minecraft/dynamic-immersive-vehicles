@@ -579,15 +579,19 @@ value never silently disappears depending on whether that candidate happens
 to be active. See [Suspension damping ratio](#suspension-damping-ratio-minecraft-523)
 below for the full math and a worked example.
 
-`suspensionSpringMultiplier` (optional, dimensionless, strictly positive and
-flat-capped at `4.0`) uniformly scales the calibrated per-wheel SPRING rate
-itself (`suspensionSpring`/`suspensionSpringForShare`), previously never
-configurable at all. `1.0` is a pure no-op, reproducing the exact prior
-calibrated rate byte-identically. Unlike `suspensionDampingRatio` above, this
-is NOT a settling-behavior-only knob - it moves the static ride-height
-equilibrium: a value above `1.0` (stiffer) settles to LESS compression
-(rides higher); below `1.0` (softer) settles to MORE compression (rides
-lower, and far enough can approach bottoming out against `suspensionTravel`).
+`suspensionSpringMultiplier` (optional, dimensionless, strictly above `0.5`
+and flat-capped at `4.0`) uniformly scales the calibrated per-wheel SPRING
+rate itself (`suspensionSpring`/`suspensionSpringForShare`), previously
+never configurable at all. `1.0` is a pure no-op, reproducing the exact
+prior calibrated rate byte-identically. Unlike `suspensionDampingRatio`
+above, this is NOT a settling-behavior-only knob - it moves the static
+ride-height equilibrium: a value above `1.0` (stiffer) settles to LESS
+compression (rides higher); below `1.0` (softer) settles to MORE
+compression (rides lower). The `0.5` lower bound is not a soft
+recommendation - at or below it the equilibrium compression would be at or
+past `suspensionTravel` itself (fully bottomed out, with no static rest
+position damping can supply), independent of whatever `suspensionTravel` is
+actually configured.
 See [Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528)
 below for the full math, the ride-height consequence, and the combined
 stability guard it shares with `suspensionDampingRatio`.
@@ -835,7 +839,7 @@ happens to be enabled for a given run.
 ### Suspension spring stiffness (MINECRAFT-528)
 
 Optional, per-vehicle `suspensionSpringMultiplier` - a dimensionless,
-strictly positive, `4.0`-capped multiplier
+strictly-above-`0.5`, `4.0`-capped multiplier
 [`PhysicsBridge.suspensionSpringForShare`](src/main/java/io/github/brooswitminecraft/div/PhysicsBridge.java)
 (and its non-share-based counterpart `suspensionSpring`) apply to each
 wheel's own calibrated static-load spring rate, uniformly: `spring =
@@ -853,8 +857,21 @@ balance point sits, to `(suspensionTravel * .5) / m`:
 - `m > 1.0` (a stiffer spring) settles to LESS compression - the vehicle
   rides HIGHER, a harder/sportier setup.
 - `m < 1.0` (a softer spring) settles to MORE compression - the vehicle
-  rides LOWER, a plusher/softer setup, and taken far enough approaches
-  bottoming out against `suspensionTravel`'s own ceiling.
+  rides LOWER, a plusher/softer setup.
+
+**The `0.5` lower bound is load-bearing, not a style preference.** Damping
+supplies no static support at zero velocity, so the spring alone must be
+able to hold the wheel's real static load at some compression strictly
+below `suspensionTravel` (the hard ceiling the raycast length and
+`TireForces.suspension`'s own geometry enforce). Substituting the
+equilibrium formula above, `(suspensionTravel * .5) / m < suspensionTravel`
+reduces to `m > 0.5` - with `suspensionTravel` cancelling out entirely, so
+this bound holds regardless of whatever `suspensionTravel` a vehicle
+actually configures. At or below `0.5` there is no reachable static rest
+position at all - config load/reload rejects it outright, the same as any
+other out-of-range field (and, same as `suspensionDampingRatio`'s own
+exact-boundary rejection, `0.5` itself is rejected too: it is already fully
+bottomed out, not a working suspension).
 
 Load-share geometry and anti-roll conservation are both preserved exactly:
 every per-wheel call site that computes a calibrated spring rate (the main

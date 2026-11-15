@@ -146,4 +146,83 @@ class PhysicsBridgeSuspensionSpringMultiplierTest {
   assertEquals(equilibrium, lateWindowMin, 1e-3, "a validated in-range multiplier must have actually CONVERGED by the late window, not just approached once early");
   assertEquals(equilibrium, lateWindowMax, 1e-3, "a validated in-range multiplier must STAY converged through the late window, not drift back away from equilibrium");
  }
+
+ /**
+  * Review finding (comment 53996): the only production settling coverage exercised a single
+  * stiff-side multiplier (1.8); the lower (soft) end - where {@code Overrides.Tuning}'s own
+  * {@code suspensionSpringMultiplier} doc now derives a hard {@code 0.5} floor from the SAME
+  * equilibrium formula this test exercises - had none. Covers a genuinely bounded, non-
+  * oscillating settling response just above that floor, across more than one
+  * {@code suspensionTravel}/{@code suspensionDampingRatio} combination. Every ratio below is
+  * AT OR ABOVE 1.0 (critical damping or overdamped) deliberately - a ratio below 1.0 (including
+  * the unconfigured 0.7 default) is UNDERDAMPED BY DESIGN (see suspensionDampingRatio's own
+  * doc) and is EXPECTED to overshoot; "must not overshoot" is only ever a valid assertion at or
+  * above critical damping, the same choice {@code PhysicsBridgeSuspensionDampingRatioTest}'s own
+  * no-overshoot evidence test makes (ratio 1.8, never the 0.7 default).
+  */
+ @Test void aMultiplierJustAboveTheReachableEquilibriumLowerBoundStillProducesABoundedSettlingResponseAcrossTravelAndRatioCombinations() {
+  double mass=1500, gravity=11, loadShare=0.25;
+  int ticks=3000;
+  // (travel, multiplier, dampingRatio) triples, each comfortably inside Overrides.Tuning's own
+  // validated range for that exact pairing (confirmed against maxStableSuspensionDampingRatio's
+  // own formula before writing this test) - the soft end (multiplier just above 0.5) combined
+  // with both critical damping and a materially overdamped ratio, at more than one travel.
+  double[][] cases = {
+    {0.3, 0.6, 1.0},
+    {0.3, 0.55, 1.5},
+    {0.2, 0.55, 1.0},
+  };
+  for (double[] c : cases) {
+   double travel=c[0], multiplier=c[1], dampingRatio=c[2];
+   double spring=PhysicsBridge.suspensionSpringForShare(mass, loadShare, travel, gravity, multiplier);
+   double damper=PhysicsBridge.suspensionDamperForShare(mass, loadShare, spring, dampingRatio);
+   double equilibrium=(travel*.5)/multiplier;
+   assertTrue(equilibrium < travel, "test setup sanity: this case's own equilibrium must sit strictly below its own travel - travel="+travel+" multiplier="+multiplier);
+   double[] trace=settleTrace(mass, loadShare, gravity, spring, damper, ticks);
+   double max=java.util.Arrays.stream(trace).max().getAsDouble();
+   assertTrue(max <= equilibrium + 1e-4,
+     "travel="+travel+" multiplier="+multiplier+" ratio="+dampingRatio+" must not overshoot its own equilibrium - max observed "+max);
+   double lateWindowMin=Double.MAX_VALUE, lateWindowMax=-Double.MAX_VALUE;
+   for (int t=ticks-300;t<ticks;t++) { lateWindowMin=Math.min(lateWindowMin, trace[t]); lateWindowMax=Math.max(lateWindowMax, trace[t]); }
+   assertEquals(equilibrium, lateWindowMin, 1e-3, "travel="+travel+" multiplier="+multiplier+" ratio="+dampingRatio+" must have actually CONVERGED by the late window");
+   assertEquals(equilibrium, lateWindowMax, 1e-3, "travel="+travel+" multiplier="+multiplier+" ratio="+dampingRatio+" must STAY converged through the late window");
+  }
+ }
+
+ /**
+  * Review finding (comment 53996), the physical justification itself, independent of
+  * {@code Overrides.Tuning#validate}'s own rejection: AT OR BELOW the {@code 0.5} boundary, the
+  * formula's own claimed equilibrium ({@code (travel*.5)/multiplier}) is AT OR PAST
+  * {@code suspensionTravel} itself. This single-wheel settling harness (unlike real production
+  * play) has no raycast/contact-loss ceiling built in, so it mathematically settles AT that
+  * claimed value regardless of whether it exceeds {@code suspensionTravel} - which is exactly
+  * the point: a real wheel's raycast length is hard-capped at {@code radius+suspensionTravel}
+  * (see {@code PhysicsBridge.stepGround}), so a real wheel can never actually reach a
+  * compression past {@code suspensionTravel} the way this harness's own idealized point-mass
+  * oscillator can - it loses ground contact entirely first. The claimed equilibrium settling
+  * PAST {@code suspensionTravel} here is therefore direct evidence that it is physically
+  * unreachable in the real, travel-limited model, not merely a large-but-attainable number.
+  */
+ @Test void atOrBelowTheLowerBoundTheClaimedEquilibriumExceedsSuspensionTravelItself() {
+  double mass=1500, gravity=11, loadShare=0.25, travel=0.3;
+  int ticks=2000;
+
+  double atBoundary=0.5;
+  double claimedEquilibriumAtBoundary=(travel*.5)/atBoundary;
+  assertEquals(travel, claimedEquilibriumAtBoundary, 1e-12,
+    "the formula's own claimed equilibrium AT exactly the 0.5 boundary must equal suspensionTravel itself - the exact 'fully bottomed out' case, zero remaining travel");
+
+  double belowBoundary=0.3;
+  double claimedEquilibriumBelowBoundary=(travel*.5)/belowBoundary;
+  assertTrue(claimedEquilibriumBelowBoundary > travel,
+    "below the boundary the formula's own claimed equilibrium must exceed suspensionTravel itself");
+  double spring=PhysicsBridge.suspensionSpringForShare(mass, loadShare, travel, gravity, belowBoundary);
+  double damper=PhysicsBridge.suspensionDamperForShare(mass, loadShare, spring, 0.7);
+  double[] trace=settleTrace(mass, loadShare, gravity, spring, damper, ticks);
+  double lateWindowMin=Double.MAX_VALUE, lateWindowMax=-Double.MAX_VALUE;
+  for (int t=ticks-300;t<ticks;t++) { lateWindowMin=Math.min(lateWindowMin, trace[t]); lateWindowMax=Math.max(lateWindowMax, trace[t]); }
+  assertEquals(claimedEquilibriumBelowBoundary, lateWindowMin, 1e-3,
+    "below the 0.5 boundary, this idealized point-mass harness settles EXACTLY at the formula's own claimed equilibrium - which this test's own setup sanity above already proved exceeds suspensionTravel, confirming a real (travel-limited) wheel could never actually reach it");
+  assertEquals(claimedEquilibriumBelowBoundary, lateWindowMax, 1e-3);
+ }
 }

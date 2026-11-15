@@ -190,11 +190,20 @@ public final class Overrides {
   // (PhysicsBridge.suspensionSpring's own doc - compression balances gravity at exactly
   // travel*.5 for the CALIBRATED rate), so scaling it moves that equilibrium. A multiplier m
   // settles to compression (travel*.5)/m instead: m>1 (stiffer) sits HIGHER (less compression,
-  // a harder/sportier ride), m<1 (softer) sits LOWER (more compression, a plusher/softer ride,
-  // and - taken far enough - closer to bottoming out against suspensionTravel's own ceiling).
-  // Strictly positive (a zero/negative spring is not a suspension at all - the same reasoning
-  // suspensionDampingRatio's own strictly-positive bound uses), capped at 4.0 as a documentable
-  // flat ceiling; the REAL stability guard is the travel/damping-ratio-aware cross-field check
+  // a harder/sportier ride), m<1 (softer) sits LOWER (more compression, a plusher/softer ride).
+  // Review finding: m<=0.5 is not merely "soft" - it is PHYSICALLY UNREACHABLE. Equilibrium
+  // (travel*.5)/m must stay strictly below suspensionTravel itself (the hard compression ceiling
+  // PhysicsBridge's raycast length and TireForces.suspension's own geometry enforce; damping
+  // supplies no static support at zero velocity, so it cannot make up a shortfall at rest) -
+  // algebraically (travel*.5)/m < travel reduces to m > 0.5, independent of suspensionTravel's
+  // own configured value entirely (the travel cancels out). At or below 0.5 the wheel has no
+  // static rest position short of fully bottomed out (zero remaining travel, and strictly below
+  // 0.5 the vehicle's real weight permanently exceeds what the spring can ever support at rest,
+  // regardless of travel) - rejected here, not merely documented as a caveat. Lower-bounded at
+  // a strict 0.5 (never inclusive, same "reject the exact boundary too" reasoning
+  // suspensionDampingRatio's own STABILITY_MARGIN uses - 0.5 exactly is already fully bottomed,
+  // not a working suspension), capped at 4.0 as a documentable flat ceiling on the stiff end;
+  // the REAL stability guard on the stiff end is the travel/damping-ratio-aware cross-field check
   // below (see maxStableSuspensionDampingRatio's own doc, now generalized to take this
   // multiplier too) - scaling the spring raises the per-wheel natural frequency by sqrt(m),
   // which can destabilize Body.stepGround's explicit-damping-term integration exactly the same
@@ -275,11 +284,15 @@ public final class Overrides {
    // every travel on its own; the real, travel-dependent bound below is what actually guards
    // stability.
    if (suspensionDampingRatio != null && !(Double.isFinite(suspensionDampingRatio) && suspensionDampingRatio > 0 && suspensionDampingRatio <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
-   // MINECRAFT-528: same strictly-positive reasoning as suspensionDampingRatio immediately
-   // above (a zero/negative spring is not a suspension at all), flat-capped at 4.0 as a
-   // documentable ceiling - see suspensionSpringMultiplier's own doc for why the real stability
-   // guard is the combined cross-field check below, not this flat range alone.
-   if (suspensionSpringMultiplier != null && !(Double.isFinite(suspensionSpringMultiplier) && suspensionSpringMultiplier > 0 && suspensionSpringMultiplier <= 4.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Review finding: strictly positive is not enough - a multiplier at or below 0.5 is
+   // physically unreachable at rest regardless of suspensionTravel (see suspensionSpringMultiplier's
+   // own doc for the full "(travel*.5)/m < travel reduces to m > 0.5, travel cancels out"
+   // derivation), so the lower bound is a strict 0.5 (the exact boundary itself is already fully
+   // bottomed out, not a working suspension - rejected too, same "reject the exact boundary"
+   // reasoning suspensionDampingRatio's own STABILITY_MARGIN uses), flat-capped at 4.0 on the
+   // stiff end as a documentable ceiling - the real stiff-end stability guard is the combined
+   // cross-field check below, not this flat range alone.
+   if (suspensionSpringMultiplier != null && !(Double.isFinite(suspensionSpringMultiplier) && suspensionSpringMultiplier > 0.5 && suspensionSpringMultiplier <= 4.0)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Review finding (comments 53839/53840): the flat 2.0 ceiling above only proves stable at
    // this project's documented default suspensionTravel (0.3) - Body.stepGround's own explicit-
    // damping-term integration has a REAL, travel-dependent stability bound (confirmed against an
