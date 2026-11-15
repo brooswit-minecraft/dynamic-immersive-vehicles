@@ -2082,3 +2082,133 @@ to this ticket, not shared repository state.
 
 `gradle --offline compileJava/test --rerun-tasks` after this fix: `BUILD
 SUCCESSFUL`, 648 tests, 0 failures, 0 errors (unchanged).
+
+## Installed tire-specific grip overrides (MINECRAFT-529, added 2026-11-15)
+
+Extends the existing part-override contract (`Overrides.parts`,
+`Overrides.resolvedPart`/`effectivePartOverride`, MINECRAFT-505) so an
+installed tire/ground-device PART can override its own contact grip, not
+only the whole-car `friction` field - the bounded deliverable this ticket
+names. Deliberately reused `friction` itself as the part-level field name
+(rather than inventing a new one): it is already Gson-mapped, already
+range-validated (`friction>0 && friction<=3` in `Tuning.validate()`), and
+avoids any field-name collision risk with the three sibling tickets
+(M528/M530/M531) working the same shared files concurrently this sprint.
+The only schema change is deleting the one `throw` line in
+`Tuning.validateSupportedForPart()` that previously rejected a part-level
+`friction` entry outright - every other unsupported-field rejection in
+that method is untouched, and `friction`'s bounds/`extends`-inheritance
+machinery were already fully wired for every other field, so no new
+validation code was needed at all.
+
+**Production wiring.** `PhysicsBridge.tirePartFriction(partKey,
+vehicleFriction)` mirrors `enginePartDriveForce` (MINECRAFT-505) exactly
+in spirit and in precedence: an explicit part-level `friction` override,
+if this specific installed tire part has one, REPLACES (never multiplies)
+the vehicle's own resolved `friction` for that one wheel; otherwise the
+vehicle's value passes through completely unchanged. `stepGround`'s own
+`FrictionContact`-construction stream (immediately before the
+`MultiContactFrictionSolver.solveFriction` call) now computes, per wheel,
+`tireKey = wheel.definition.packID+":"+wheel.definition.systemName` (the
+same key shape `enginePartDriveForce`'s own call site already uses for
+`engine.definition`) and composes `tirePartFriction(tireKey,
+tuning.friction)/tuning.friction` - a pure ratio that is exactly `1.0`
+(a true no-op) whenever no part override is set - multiplicatively into
+the EXISTING `frictionMultiplier` slot on `FrictionContact`, alongside
+the ground-surface multiplier already living there (MINECRAFT-508):
+`h.surface().frictionMultiplier()*tireGripRatio`. No new record
+component, no change to `MultiContactFrictionSolver`'s public API/
+constructors - confirmed deliberately to avoid touching the one file
+M531 (shared reload entry point) and M530 (hitch) are also working this
+sprint, and to avoid breaking any existing `FrictionContact`-constructing
+test. Doc comments on `FrictionContact`'s own class doc and on the
+`stepGround` composition site were updated to make explicit that this
+slot now carries BOTH ground-surface and tire-part contributions
+multiplicatively, so a future reader isn't confused into treating it as
+ground-surface-only.
+
+This reads each wheel's own currently-installed part key fresh every
+tick inside `stepGround`'s existing per-wheel loop (never cached at
+vehicle-construction time, and never routed through
+`applyLiveSafeFields` - that mechanism only ever operates on vehicle-
+level `Tuning`, confirmed by inspection before writing any code here;
+part-level overrides were already being read live and uncached for
+`enginePartDriveForce`, and this field needs nothing different). A wheel
+that misses the ground ray this tick (`HitResult.Type.MISS`) never
+reaches the `FrictionContact`-construction stream at all - its
+`WheelHit` is never built, `wheel.contactThisTick` is set `false`, and
+the loop `continue`s before anything in this ticket's new code runs - so
+an airborne/phantom/spare tire's configured override can never
+contribute any grip, satisfying the ticket's explicit "no phantom/
+airborne contribution" requirement structurally, by the pre-existing
+control flow this ticket left untouched.
+
+**Tests.** `Body.stepGround` itself cannot be driven by a plain unit test
+without a live Minecraft/IV/Sable runtime (`PhysicsBridgeWheelLoadShare
+SimulationTest`'s own doc explains why every PhysicsBridge-level test in
+this project already substitutes the real production pure-function path
+instead of a live runtime) - the same substitution strategy is used here:
+
+- `OverridesTest` (6 new cases): part-level `friction` now passes
+  `validateSupportedForPart` (previously threw); every other
+  previously-rejected field (`brakeForce`/`selfRightStrength`/`massKg`)
+  still throws; an out-of-range part-level `friction` (3.5, 0.0) still
+  fails plain `validate()` - the bounds check runs before
+  `validateSupportedForPart` ever sees the merged entry, so no new/
+  different bound was introduced; `friction` set via an `extends`
+  template still folds in and still passes the supported-fields check;
+  `PhysicsBridge.tirePartFriction` wins outright over the vehicle's
+  resolved value when a part override exists, falls through unchanged
+  when none exists, and resolves three different tire keys on the same
+  vehicle (grippy/slick/unconfigured) to three independently correct
+  values in one test - the ticket's "independent wheel identities"
+  requirement at the `Overrides`/`PhysicsBridge` boundary. One
+  pre-existing test (`partEntrySettingAnUnsupportedFieldFailsTheSupported
+  FieldsCheck`) that asserted `friction` throws was updated to assert a
+  still-genuinely-unsupported field (`massKg`) instead, since `friction`
+  throwing is no longer the correct behavior this ticket intentionally
+  changes; one pre-existing test (`partEntryInheritingAnUnsupportedField
+  ThroughExtendsStillFailsTheSupportedFieldsCheck`) that used `friction`
+  as its "still-unsupported-through-extends" example was switched to
+  `brakeForce` for the same reason - no other existing assertion anywhere
+  in the suite depended on `friction` being rejected on a part.
+- `MultiContactFrictionSolverTirePartGripTest` (new, 4 cases): exercises
+  the exact solver-facing composition `stepGround` performs (surface
+  multiplier times the resolved-tire-friction ratio) against the real
+  production `MultiContactFrictionSolver.solveFriction` - no part
+  override anywhere composes to the byte-identical pre-ticket ground-
+  surface-only multiplier; two differently-gripped tires plus an
+  unconfigured third wheel in the SAME `solveFriction` call produce
+  measurably different achieved lateral force from each other and from
+  the unconfigured wheel (mirrors `MultiContactFrictionSolverGroundSurface
+  Test`'s own "real force-consumer proof" pattern, MINECRAFT-508);
+  swapping the resolved tire friction (standing in for installing a
+  different part definition) changes the composed multiplier; ground-
+  surface and tire-part contributions compose multiplicatively (0.2 ice
+  times 0.5 slick tire = 0.1), neither one silently overriding the other.
+
+Not covered by a plain unit test (requires a live runtime, same
+limitation every other MISS/ground-contact-dependent behavior in this
+project already carries, per `PhysicsBridgeWheelLoadShareSimulationTest`'s
+own doc): the actual airborne-wheel-gets-zero-contribution behavior is
+verified by inspection of the unchanged `HitResult.Type.MISS` control
+flow (see above), not a driven integration test; in-game acceptance
+(spawning a vehicle with two differently-configured installed tires and
+observing measurably different handling) is out of scope here the same
+way it was for every other MINECRAFT-5xx ticket's own "not yet performed"
+note in this document.
+
+Local slot-lock coordination (per this ticket's own brief - `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle invocation, no
+`gradlew` wrapper present in this checkout so `/tmp/gradle-8.14/bin/gradle
+--offline` was used directly against this project's own `build.gradle`/
+`settings.gradle`/`gradle.properties`, Gradle 8.14). `compileJava`
+succeeded first in isolation, then `test --offline -q` ran the FULL suite
+with zero console output (quiet mode prints nothing on an all-green run).
+The real JUnit XML reports total **662 tests**, 0 skipped, 0 failures, 0
+errors across the whole suite (10 net-new - 6 in `OverridesTest`, 4 in
+the new `MultiContactFrictionSolverTirePartGripTest` - plus every
+pre-existing test run unchanged alongside them -
+confirming this change introduces no regression anywhere else in the
+suite, including every other ticket's own friction/part-override/ground-
+surface coverage).

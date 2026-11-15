@@ -700,8 +700,9 @@ class OverridesTest {
  }
 
  // Review finding (self-review 53556/PR comment 6854012663): "narrow the accepted part schema"
- // - a parts entry may only set driveForce today; every other field is rejected at load/reload,
- // including one reached only through extends, not silently accepted-but-ignored.
+ // - a parts entry may only set driveForce or friction (MINECRAFT-529) today; every other field
+ // is rejected at load/reload, including one reached only through extends, not silently
+ // accepted-but-ignored.
 
  @Test void partEntrySettingOnlyDriveForcePassesTheSupportedFieldsCheck() {
   var part = new Overrides.Tuning(); part.driveForce = 9500.0;
@@ -709,17 +710,82 @@ class OverridesTest {
  }
 
  @Test void partEntrySettingAnUnsupportedFieldFailsTheSupportedFieldsCheck() {
-  var frictionOverride = new Overrides.Tuning(); frictionOverride.friction = 0.9;
-  assertThrows(IllegalArgumentException.class, frictionOverride::validateSupportedForPart);
   var brakeOverride = new Overrides.Tuning(); brakeOverride.brakeForce = 1000.0;
   assertThrows(IllegalArgumentException.class, brakeOverride::validateSupportedForPart);
   var selfRightOverride = new Overrides.Tuning(); selfRightOverride.selfRightStrength = 1.0;
   assertThrows(IllegalArgumentException.class, selfRightOverride::validateSupportedForPart);
+  var massOverride = new Overrides.Tuning(); massOverride.massKg = 500.0;
+  assertThrows(IllegalArgumentException.class, massOverride::validateSupportedForPart);
+ }
+
+ // MINECRAFT-529: installed tire-specific grip overrides - friction is now a supported part
+ // field (removed from validateSupportedForPart's reject list), with the exact same bounds
+ // validate() already enforces for a vehicle-level friction (friction>0 && friction<=3), and the
+ // same extends-inheritance/precedence machinery every other part field already gets.
+
+ @Test void partEntrySettingFrictionPassesTheSupportedFieldsCheck() {
+  var part = new Overrides.Tuning(); part.friction = 1.4;
+  assertDoesNotThrow(part::validateSupportedForPart,
+    "MINECRAFT-529: an installed tire part's own friction override must be an accepted part field");
+ }
+
+ @Test void partEntrySettingOutOfRangeFrictionStillFailsPlainValidation() {
+  // validateSupportedForPart only checks WHICH fields are set, never bounds - validate() is the
+  // bounds check, and it is run (readAndValidate/validateConfig) before validateSupportedForPart
+  // ever sees the merged entry, so an out-of-range part-level friction still fails loudly.
+  var tooHigh = new Overrides.Tuning(); tooHigh.friction = 3.5;
+  assertThrows(IllegalArgumentException.class, tooHigh::validate);
+  var tooLow = new Overrides.Tuning(); tooLow.friction = 0.0;
+  assertThrows(IllegalArgumentException.class, tooLow::validate);
+ }
+
+ @Test void partFrictionOverrideInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.friction = 2.1;
+   var part = new Overrides.Tuning(); part.extendsTemplate = "tire-base";
+   Overrides.setForTest(java.util.Map.of("tire-base", template), java.util.Map.of(), java.util.Map.of("packid:inherited_tire", part));
+   var merged = Overrides.effectivePartOverride("packid:inherited_tire");
+   assertEquals(2.1, merged.friction, "a part inheriting friction from a template must fold it in exactly like any other field");
+   assertDoesNotThrow(merged::validateSupportedForPart);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartFrictionOverrideWinsOverTheVehicleResolvedValue() {
+  try {
+   var part = new Overrides.Tuning(); part.friction = 1.8;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:grippy_tire", part));
+   assertEquals(1.8, PhysicsBridge.tirePartFriction("examplepack:grippy_tire", 1.0),
+     "an explicit part-level friction override must win outright (replace, not multiply) over the vehicle's own resolved friction");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartFrictionFallsThroughToTheVehicleResolvedValueWhenNoPartOverrideExists() {
+  assertEquals(1.0, PhysicsBridge.tirePartFriction("packid:ordinary_tire_with_no_override", 1.0),
+    "no parts entry at all for this tire key must be a true no-op, reproducing the vehicle's resolved friction unchanged");
+ }
+
+ @Test void tirePartFrictionResolvesIndependentlyPerWheelKeySoDifferentInstalledTiresGetDifferentGrip() {
+  try {
+   var grippy = new Overrides.Tuning(); grippy.friction = 2.0;
+   var slick = new Overrides.Tuning(); slick.friction = 0.4;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:grippy_tire", grippy, "examplepack:slick_tire", slick));
+   assertEquals(2.0, PhysicsBridge.tirePartFriction("examplepack:grippy_tire", 1.0));
+   assertEquals(0.4, PhysicsBridge.tirePartFriction("examplepack:slick_tire", 1.0));
+   assertEquals(1.0, PhysicsBridge.tirePartFriction("examplepack:unconfigured_tire", 1.0),
+     "a third, unconfigured tire key on the same vehicle must stay at the vehicle's own resolved value - independent wheel identities");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
  }
 
  @Test void partEntryInheritingAnUnsupportedFieldThroughExtendsStillFailsTheSupportedFieldsCheck() {
   try {
-   var template = new Overrides.Tuning(); template.friction = 0.9; // not supported for a part
+   var template = new Overrides.Tuning(); template.brakeForce = 1000.0; // not supported for a part
    var part = new Overrides.Tuning(); part.extendsTemplate = "base"; part.driveForce = 9500.0;
    Overrides.setForTest(java.util.Map.of("base", template), java.util.Map.of(), java.util.Map.of());
    var merged = Overrides.effective(part);
