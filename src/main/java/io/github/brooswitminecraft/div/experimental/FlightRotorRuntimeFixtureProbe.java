@@ -847,17 +847,35 @@ public final class FlightRotorRuntimeFixtureProbe {
   * exited. */
  private static void restoreConfigOnce() {
   if (configWasWritten) {
+   boolean restoredOnDisk;
    try {
     if (originalConfigExisted) Files.writeString(configPath(), originalConfigContent);
     else Files.deleteIfExists(configPath());
+    restoredOnDisk = true;
    } catch (IOException ex) {
-    LOGGER.error("[DIV flightRotorFixture] FAILED to restore original config at " + configPath() + " - manual cleanup needed", ex);
+    // Review finding: the old code reached this catch, logged the exception, but then fell
+    // through to reloadOverrides() anyway and unconditionally logged "restored and reloaded" -
+    // reloading here would load the KNOWN-STILL-PROBE-MUTATED file (potentially re-applying this
+    // probe's own test overrides into live memory) and the log line would falsely claim a
+    // deterministic cleanup that did not happen. Treat this as its own explicit failed terminal
+    // outcome instead: do not reload, do not claim restoration, and preserve exactly what manual
+    // cleanup needs (the path, and - when the original existed - its own content so it isn't
+    // lost by a later unrelated process overwriting this still-broken file further).
+    LOGGER.error("[DIV flightRotorFixture] FAILED to restore original config at " + configPath()
+      + " - NOT reloading (would apply the known-still-probe-mutated file) - manual cleanup needed."
+      + (originalConfigExisted ? " Original content this probe is preserving for that cleanup: " + originalConfigContent : " Original file did not exist - it should be deleted."), ex);
+    restoredOnDisk = false;
    }
-   var report = PhysicsBridge.reloadOverrides();
-   LOGGER.info("[DIV flightRotorFixture] original config restored and reloaded: " + report.configResult().message());
+   if (restoredOnDisk) {
+    var report = PhysicsBridge.reloadOverrides();
+    LOGGER.info("[DIV flightRotorFixture] original config restored and reloaded: " + report.configResult().message());
+   }
   } else {
    LOGGER.info("[DIV flightRotorFixture] no config was ever written by this probe run - nothing to restore");
   }
+  // Chunk release is NOT restoration - it only ever unforces coordinates this probe itself
+  // forced (see releaseChunksOnce's own doc) and is unaffected by whether the config restore
+  // above succeeded, so it still runs unconditionally on every path, including the failure one.
   globalPhase = GlobalPhase.RELEASE_CHUNKS;
  }
 
