@@ -26,11 +26,11 @@ import org.joml.Vector3d;
  * {@code PhysicsBridge.Body}'s own constructor (addObject, then RigidBodyHandle.of, with rollback
  * on any failure before returning); the joint uses the same {@code GenericConstraintConfiguration}/
  * {@code addConstraint} call shape {@code PhysicsBridge.createHitch} already uses for trailer
- * hitches, but with the anchor/orientation CONVENTION now confirmed correct for an ordinary
+ * hitches, with the anchor/orientation CONVENTION confirmed correct for an ordinary
  * (non-sublevel) box by the real native source (ticket comment 53256: body-local
  * {@code pos1}/{@code pos2}, identity {@code orientation1}/{@code orientation2} for "no extra
- * twist") rather than the world-space/echoed-orientation convention {@code createHitch} itself
- * uses - a separate, already-flagged discrepancy in that existing code, not touched here.
+ * twist") - the same convention MINECRAFT-525 applied to {@code createHitch} itself, which
+ * previously used a world-space/echoed-orientation convention instead.
  */
 public final class TwoBodyLifecycle {
  private TwoBodyLifecycle() {}
@@ -91,8 +91,8 @@ public final class TwoBodyLifecycle {
    throw ex;
   }
   // Body-local anchors, identity local joint frame - confirmed correct for an ordinary
-  // (non-sublevel) box by the real native source (ticket comment 53256), NOT the world-space/
-  // echoed-orientation convention PhysicsBridge.createHitch itself uses for trailer hitches.
+  // (non-sublevel) box by the real native source (ticket comment 53256), the same convention
+  // MINECRAFT-525 applied to PhysicsBridge.createHitch's own trailer-hitch joint.
   var config2 = new GenericConstraintConfiguration(
     TwoBodyChassis.jointAnchorLocalInUpperBody(halfHeightB), TwoBodyChassis.jointAnchorLocalInLowerBody(halfHeightB),
     new Quaterniond(), new Quaterniond(), HitchJoint.lockedAxes(true, false));

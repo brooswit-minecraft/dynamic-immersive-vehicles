@@ -698,14 +698,55 @@ public final class PhysicsBridge {
    return false;
   }
  }
+ /**
+  * MINECRAFT-525: {@code pos1}/{@code pos2} are the confirmed BODY-LOCAL anchor offsets (ticket
+  * comment 53256/53243's real-native-source-plus-empirical-probe finding, already applied to
+  * {@code TwoBodyLifecycle.create}'s own joint) rather than the world-space points this method
+  * previously computed via {@code HitchJoint.anchorWorldPosition}. {@code local_frame1}/
+  * {@code local_frame2} are LOCAL joint-frame rotations, not an echo of each body's own world
+  * orientation (also confirmed wrong by the same finding) - but review 53817/53832 caught that
+  * this is NOT simply "always identity" either, and that a naive direct pass-through of each
+  * side's own {@code rot} gets the SIGN wrong for a mounted/restricted connection:
+  *
+  * <p>Sable's fixed/restricted joint enforces coincidence of each side's own local frame in
+  * world space - {@code Q_towing * local_frame1 == Q_towed * local_frame2}, i.e.
+  * {@code Q_towed = Q_towing * local_frame1 * inverse(local_frame2)} (review 53832's own stated
+  * relation for this constraint, independently exercised by {@code HitchRotationFrameProbe}
+  * below). The pinned IV24 jar's OWN native composition - decompiled directly from
+  * {@code EntityVehicleF_Physics.getForcesAndMotions}'s mounted/restricted branch (consecutive
+  * {@code rotation.set(towingEntity.orientation); rotation.multiply(hitchConnection.rot);
+  * rotation.multiply(hookupConnection.rot)} calls, where {@code RotationMatrix.multiply(other)}
+  * is ordinary {@code this = this*other} composition) - is instead
+  * {@code Q_towed = Q_towing * R_hitch * R_hookup}, with NO inverse on the hookup side. Passing
+  * {@code R_hookup} straight into {@code local_frame2} (this method's first MINECRAFT-525 cut)
+  * therefore produced {@code Q_towing * R_hitch * inverse(R_hookup)} - the WRONG sign for any
+  * non-identity hookup rotation (review's own worked example: a hookup-only +30&deg; rotation
+  * came out -30&deg;). Setting {@code local_frame2 = inverse(R_hookup)} instead makes Sable's own
+  * formula collapse to {@code Q_towing * R_hitch * inverse(inverse(R_hookup))
+  * = Q_towing * R_hitch * R_hookup} - matching native exactly. The hitch side needed no such
+  * correction: it is the FIRST term in both the native composition and Sable's own formula, so
+  * {@code local_frame1 = R_hitch} directly was already right.
+  *
+  * <p>Known, pre-existing, NOT fixed here (bounded per review 53817's "handle supported endpoints
+  * correctly or explicitly bound unsupported cases"): {@code connection.hitchConnection}/
+  * {@code hookupConnection}'s {@code pos}/{@code rot} are used as-is, directly in {@code towing}/
+  * {@code trailer}'s own vehicle-root-local frame. When the owning {@code towingEntity}/
+  * {@code towedEntity} is itself an {@code APart} (a connection defined on an installed part
+  * rather than the vehicle's own root JSON) rather than the vehicle itself, IV may define that
+  * part's own connection pos/rot relative to the PART's local frame, which would need composing
+  * through the part's own relative position/orientation/scale to reach vehicle-root-local space
+  * first - this method does not do that composition, matching the original (pre-MINECRAFT-525)
+  * code's behavior exactly (not a regression introduced by this ticket). A part-mounted hitch
+  * connection point is therefore unverified/unsupported; a vehicle-root-defined connection (the
+  * common case) is unaffected.
+  */
  private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
-  var towingPose = towing.box.getPose();
-  var trailerPose = trailer.box.getPose();
-  var hitchPos = HitchJoint.anchorWorldPosition(towingPose.position(), towingPose.orientation(), towing.center,
+  var hitchOffset = HitchJoint.anchorLocalOffset(towing.center,
     new Vector3d(connection.hitchConnection.pos.x, connection.hitchConnection.pos.y, connection.hitchConnection.pos.z), new Vector3d());
-  var hookupPos = HitchJoint.anchorWorldPosition(trailerPose.position(), trailerPose.orientation(), trailer.center,
+  var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center,
     new Vector3d(connection.hookupConnection.pos.x, connection.hookupConnection.pos.y, connection.hookupConnection.pos.z), new Vector3d());
-  var config = new GenericConstraintConfiguration(hitchPos, hookupPos, towingPose.orientation(), trailerPose.orientation(),
+  var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset,
+    HitchJoint.localJointFrame(connection.hitchConnection.rot), HitchJoint.localJointFrame(connection.hookupConnection.rot).invert(),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
   return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
  }
@@ -1206,8 +1247,9 @@ public final class PhysicsBridge {
   // TwoBodyChassis.vehicleWorldPositionFromLowerBody rather than reading the lower body's own
   // center directly) and construction/cleanup are the other two-body-aware call sites. Uses the
   // body-local/identity joint convention CONFIRMED by both the real native source (comment 53256)
-  // AND a live anchor-frame probe run (comment 53273) - not createHitch's own (separately
-  // flagged, un-fixed) world-space/echoed-orientation convention. Non-ground stepper modes
+  // AND a live anchor-frame probe run (comment 53273) - the same convention createHitch itself
+  // now uses too (MINECRAFT-525, formerly a separately-flagged world-space/echoed-orientation
+  // bug). Non-ground stepper modes
   // (flight/rotor) and towing are explicitly unsupported for a two-body vehicle for now (review's
   // "preserve non-ground modes and towing boundaries") - see step()'s own guard.
   // Ticket 53310/53312: this test-build candidate (branch minecraft-503/shared-ground-support,
@@ -2398,7 +2440,7 @@ public final class PhysicsBridge {
     // stepGround's own owner-resolution fix. Skip (logged once) rather than silently misapply.
     if (twoBodyActive) {
      if (!loggedTwoBodyTowingWarning) {
-      LOGGER.error("[DIV twoBodyChassis] entity="+v.uniqueUUID+" has an active towing compensation thrust - unsupported for this candidate (createHitch itself has a separate, already-flagged anchor-convention issue too); skipping this impulse.");
+      LOGGER.error("[DIV twoBodyChassis] entity="+v.uniqueUUID+" has an active towing compensation thrust - unsupported for this candidate (a real lever-arm mismatch for a two-body chassis, independent of MINECRAFT-525's now-fixed createHitch anchor/frame convention); skipping this impulse.");
       loggedTwoBodyTowingWarning=true;
      }
     } else {
