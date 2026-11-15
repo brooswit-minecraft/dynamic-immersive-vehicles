@@ -78,6 +78,9 @@ class OverridesTest {
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertEquals(1.0, r.suspensionSpringMultiplier, "suspensionSpringMultiplier's fallback is a pure no-op - an unconfigured vehicle's calibrated spring rate is unchanged");
+  assertEquals(1.0, r.longitudinalWaterDragMultiplier, "longitudinalWaterDragMultiplier's fallback is a pure no-op - an unconfigured vehicle's isotropic water drag is unchanged");
+  assertEquals(1.0, r.lateralWaterDragMultiplier, "lateralWaterDragMultiplier's fallback is a pure no-op - an unconfigured vehicle's isotropic water drag is unchanged");
+  assertEquals(1.0, r.verticalWaterDragMultiplier, "verticalWaterDragMultiplier's fallback is a pure no-op - an unconfigured vehicle's isotropic water drag is unchanged");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -94,6 +97,7 @@ class OverridesTest {
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
   assertNotNull(r.suspensionDampingRatio);
   assertNotNull(r.suspensionSpringMultiplier);
+  assertNotNull(r.longitudinalWaterDragMultiplier); assertNotNull(r.lateralWaterDragMultiplier); assertNotNull(r.verticalWaterDragMultiplier);
  }
 
  // MINECRAFT-519: antiRollStiffness - dimensionless 0 (off, the FALLBACK) to 1 (fully-rigid-bar)
@@ -1162,5 +1166,70 @@ class OverridesTest {
   saferPair.suspensionDampingRatio = 0.9; saferPair.suspensionSpringMultiplier = 2.5;
   assertDoesNotThrow(saferPair::validate,
     "a smaller ratio paired with the same spring multiplier must still be accepted when the pair is actually stable");
+ }
+
+ // MINECRAFT-535: longitudinal/lateral/verticalWaterDragMultiplier - bounded body-local
+ // directional multipliers on top of the existing isotropic waterDrag, each defaulting to the
+ // same 1.0 no-op as suspensionSpringMultiplier.
+
+ @Test void directionalWaterDragMultipliersOutOfRangeFailValidation() {
+  for (String field : new String[]{"longitudinal", "lateral", "vertical"}) {
+   var negative = new Overrides.Tuning(); setDirectionalMultiplier(negative, field, -1.0);
+   assertThrows(IllegalArgumentException.class, negative::validate, field + ": negative must be rejected");
+   var tooLarge = new Overrides.Tuning(); setDirectionalMultiplier(tooLarge, field, 5.01);
+   assertThrows(IllegalArgumentException.class, tooLarge::validate, field + ": above the flat 5.0 ceiling must be rejected");
+   var nan = new Overrides.Tuning(); setDirectionalMultiplier(nan, field, Double.NaN);
+   assertThrows(IllegalArgumentException.class, nan::validate, field + ": NaN must be rejected");
+   var zero = new Overrides.Tuning(); setDirectionalMultiplier(zero, field, 0.0); // a real, legitimate extreme - not degenerate
+   assertDoesNotThrow(zero::validate, field + ": exact 0 (no drag on this axis at all) must be allowed");
+   var upperBound = new Overrides.Tuning(); setDirectionalMultiplier(upperBound, field, 5.0);
+   assertDoesNotThrow(upperBound::validate, field + ": exact 5.0 (inclusive upper bound) must be allowed");
+   var noOp = new Overrides.Tuning(); setDirectionalMultiplier(noOp, field, 1.0);
+   assertDoesNotThrow(noOp::validate, field + ": the 1.0 fallback value must always be valid");
+  }
+ }
+
+ @Test void directionalWaterDragMultipliersParticipateInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.longitudinalWaterDragMultiplier = 2.0; override.lateralWaterDragMultiplier = 0.5; override.verticalWaterDragMultiplier = 3.0;
+   Overrides.setForTest(java.util.Map.of("packid:directional_drag_vehicle", override));
+   var r = Overrides.resolved("packid:directional_drag_vehicle");
+   assertEquals(2.0, r.longitudinalWaterDragMultiplier, "an explicit operator override must take precedence over the 1.0 fallback");
+   assertEquals(0.5, r.lateralWaterDragMultiplier);
+   assertEquals(3.0, r.verticalWaterDragMultiplier);
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void directionalWaterDragMultipliersAreRejectedOnAPartOverride() {
+  var longitudinal = new Overrides.Tuning(); longitudinal.longitudinalWaterDragMultiplier = 1.5;
+  assertThrows(IllegalArgumentException.class, longitudinal::validateSupportedForPart);
+  var lateral = new Overrides.Tuning(); lateral.lateralWaterDragMultiplier = 1.5;
+  assertThrows(IllegalArgumentException.class, lateral::validateSupportedForPart);
+  var vertical = new Overrides.Tuning(); vertical.verticalWaterDragMultiplier = 1.5;
+  assertThrows(IllegalArgumentException.class, vertical::validateSupportedForPart);
+ }
+
+ @Test void directionalWaterDragMultipliersAreInheritedThroughExtends() {
+  try {
+   var template = new Overrides.Tuning(); template.longitudinalWaterDragMultiplier = 2.5;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "slippery-hull";
+   Overrides.setForTest(java.util.Map.of("slippery-hull", template), java.util.Map.of("packid:inherits_drag", child), java.util.Map.of());
+   assertEquals(2.5, Overrides.resolved("packid:inherits_drag").longitudinalWaterDragMultiplier,
+     "a child entry leaving longitudinalWaterDragMultiplier unset must inherit its template's own value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ private static void setDirectionalMultiplier(Overrides.Tuning t, String field, double value) {
+  switch (field) {
+   case "longitudinal" -> t.longitudinalWaterDragMultiplier = value;
+   case "lateral" -> t.lateralWaterDragMultiplier = value;
+   case "vertical" -> t.verticalWaterDragMultiplier = value;
+   default -> throw new IllegalArgumentException(field);
+  }
  }
 }

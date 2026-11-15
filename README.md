@@ -82,7 +82,14 @@ each vehicle from IV's own definition at the moment it is needed:
   a direct, implicit (unconditionally stable - never overshoots or
   reverses the hull's spin, regardless of the configured value) velocity
   retention rather than a force, defaulting to 0 (no change from prior
-  behavior) unless configured. Installed non-rotor `PartPropeller`s add forward/
+  behavior) unless configured. An optional, configurable set of bounded
+  body-local directional multipliers (`longitudinalWaterDragMultiplier`/
+  `lateralWaterDragMultiplier`/`verticalWaterDragMultiplier`, MINECRAFT-535)
+  additionally lets the SAME per-float quadratic drag above resist motion
+  along the hull's own forward/sideways/vertical axes by different amounts
+  (e.g. a knife-edged hull that slices forward easily but resists sideways
+  drift) - each defaults to 1.0, a pure no-op reproducing the exact prior
+  isotropic drag force, unless configured. Installed non-rotor `PartPropeller`s add forward/
   reverse thrust, steered by the rudder input, allocated per actual
   engine-to-propeller linkage rather than one vehicle-wide signal applied to
   every installed propeller. IV exposes neither that linkage nor a
@@ -596,17 +603,23 @@ See [Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528)
 below for the full math, the ride-height consequence, and the combined
 stability guard it shares with `suspensionDampingRatio`.
 
-`massKg` is optional; omit it to use IV's calculated vehicle mass. The four
+`massKg` is optional; omit it to use IV's calculated vehicle mass. The seven
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
 fully submerged, since a real hull is not a solid box), `waterDrag`,
 `propellerForce` (split evenly across the non-rotor propellers actually
 operational this tick - linked to a running engine, active, and turning -
-not every installed propeller), and `angularWaterDrag` (an optional
+not every installed propeller), `angularWaterDrag` (an optional
 roll/pitch/yaw damping strength, 0 by default - no change from
-prior behavior unless configured) - are ignored by a ground/flight vehicle
-with no float device, and `suspensionTravel`/`friction`/`driveForce`/
-`brakeForce` are ignored by a float-only hull. `cyclicLimitDegrees` (strictly
+prior behavior unless configured), and `longitudinalWaterDragMultiplier`/
+`lateralWaterDragMultiplier`/`verticalWaterDragMultiplier` (MINECRAFT-535,
+each 0.0-5.0, default 1.0 - directional multipliers on top of `waterDrag`
+itself, letting a hull resist motion along its own body-local forward/
+sideways/vertical axes by different amounts; see
+[Directional water drag](#directional-water-drag-minecraft-535) below) -
+are ignored by a ground/flight vehicle with no float device, and
+`suspensionTravel`/`friction`/`driveForce`/`brakeForce` are ignored by a
+float-only hull. `cyclicLimitDegrees` (strictly
 positive, capped at 45, default 20), `cyclicAuthorityScale`, and
 `yawAuthorityScale` (both strictly positive, capped at 5, default 1.0) only
 apply to a rotorcraft
@@ -707,7 +720,8 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
 `yawAuthorityScale`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
-`suspensionSpringMultiplier`. Fields baked in at vehicle construction - `massKg`,
+`suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
+`verticalWaterDragMultiplier`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
@@ -912,6 +926,58 @@ unaffected by this check, same as before this ticket.
   }
 }
 ```
+
+### Directional water drag (MINECRAFT-535)
+
+Optional, per-vehicle `longitudinalWaterDragMultiplier`/
+`lateralWaterDragMultiplier`/`verticalWaterDragMultiplier` - each a
+dimensionless, `0.0`-`5.0`-bounded multiplier
+[`BuoyantForces.apply`](src/main/java/io/github/brooswitminecraft/div/BuoyantForces.java)
+applies to the SAME per-float quadratic point-velocity drag `waterDrag`
+already scales, but independently along the hull's own body-local
+longitudinal (bow/stern), lateral (port/starboard), and vertical (heave)
+axes instead of a single isotropic coefficient. `1.0` (the documented
+fallback for all three) reproduces the exact prior isotropic drag force,
+component-for-component - no change in behavior for a vehicle that never
+configures any of these three fields.
+
+Each tick, every submerged float's own point velocity (already computed in
+world frame for the existing buoyancy/drag calculation) is transformed into
+the hull's own body-local basis, each axis's component is scaled by that
+axis's own multiplier (via
+[`Buoyancy.directionalDragForce`](src/main/java/io/github/brooswitminecraft/div/Buoyancy.java)),
+and the result is transformed back to world frame before being combined
+with buoyancy into the force actually applied. Rotating the hull therefore
+rotates which world directions these three axes damp - they are always
+relative to the hull itself, never to world north/south/east/west.
+
+**Dissipative only, same as the isotropic baseline.** Every multiplier is
+bounded at `0.0` on the low end (a real, legitimate extreme - e.g. a
+keel-less hull with no lateral resistance at all - not a degenerate value)
+and `5.0` on the high end (a documentable ceiling, not an unbounded drag
+force); a negative multiplier is rejected outright, since it would flip the
+drag force to push WITH motion instead of against it, adding energy no
+water-drag model should ever add.
+
+```json
+{
+  "vehicles": {
+    "examplepack:knife_hull_boat": {
+      "longitudinalWaterDragMultiplier": 0.6,
+      "lateralWaterDragMultiplier": 2.5,
+      "verticalWaterDragMultiplier": 1.0
+    }
+  }
+}
+```
+
+This example hull slices forward with 40% less drag than the isotropic
+baseline, while resisting sideways drift 2.5x as strongly - a plausible
+sailboat/canoe-style hull shape, without any change to its buoyancy,
+propeller thrust, or the existing angular (roll/pitch/yaw) water drag from
+`angularWaterDrag` (MINECRAFT-518, see "Boats and other float-only hulls"
+above) - a hull's own roll/pitch/yaw rotation is not given separate
+coefficients by this ticket, only its translational point-velocity motion.
 
 ### Ground-surface tire response (MINECRAFT-508)
 

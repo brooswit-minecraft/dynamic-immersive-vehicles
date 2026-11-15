@@ -40,6 +40,12 @@ import java.util.Map;
  * Applied as a direct, implicit (unconditionally stable) velocity retention via {@link
  * Buoyancy#angularDragRetention} - never as an inertia-converted impulse - per review finding
  * 53679 (see that method's own doc for why an impulse-based approach was unsafe).
+ * MINECRAFT-535 further extends each float's own (translational, point-velocity) water drag
+ * from a single isotropic coefficient to bounded body-local longitudinal/lateral/vertical
+ * multipliers on top of it - see {@link Buoyancy#directionalDragForce}'s own doc; this is the
+ * linear/translational analogue sitting alongside (never replacing) the angular drag above,
+ * which was already direction-independent (roll/pitch/yaw are not given separate coefficients
+ * here, only this ticket's own longitudinal/lateral/vertical point-velocity axes).
  */
 final class BuoyantForces {
  private BuoyantForces() {}
@@ -67,9 +73,22 @@ final class BuoyantForces {
    awake = true;
    Vector3d localVelocity = new Vector3d(angular).cross(arm).add(velocity);
    double speed = localVelocity.length();
-   double dragMagnitude = Buoyancy.drag(speed, fraction, tuning.waterDrag);
    Vector3d force = new Vector3d(0, Buoyancy.buoyantForce(fraction, volumePerFloat), 0);
-   if (speed > 1e-6) force.fma(-dragMagnitude / speed, localVelocity);
+   // MINECRAFT-535: directional water drag - this point's own velocity, transformed into the
+   // hull's body-local basis (x=lateral/port-starboard, y=vertical/heave, z=longitudinal/bow-
+   // stern, matching the same basis `forward` below is built in), scaled per axis by
+   // Buoyancy.directionalDragForce before being transformed back to world frame to accumulate
+   // into `force` alongside buoyancy. tuning.longitudinal/lateral/verticalWaterDragMultiplier
+   // each default to 1.0 (Overrides.FALLBACK), which reproduces the exact prior isotropic
+   // -dragMagnitude/speed*localVelocity force component-for-component - see
+   // Buoyancy.directionalDragForce's own doc for why.
+   if (speed > 1e-6) {
+    Vector3d bodyVelocity = inverse.transform(new Vector3d(localVelocity));
+    double longitudinal = Buoyancy.directionalDragForce(speed, bodyVelocity.z, fraction, tuning.waterDrag, tuning.longitudinalWaterDragMultiplier);
+    double lateral = Buoyancy.directionalDragForce(speed, bodyVelocity.x, fraction, tuning.waterDrag, tuning.lateralWaterDragMultiplier);
+    double vertical = Buoyancy.directionalDragForce(speed, bodyVelocity.y, fraction, tuning.waterDrag, tuning.verticalWaterDragMultiplier);
+    force.add(q.transform(new Vector3d(lateral, vertical, longitudinal)));
+   }
    handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(force).mul(PhysicsBridge.DT)));
   }
   // MINECRAFT-518: rotational (roll/pitch/yaw) water drag, opposing the hull's own angular

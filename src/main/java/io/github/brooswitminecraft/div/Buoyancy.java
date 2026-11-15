@@ -24,6 +24,26 @@ public final class Buoyancy {
   return submergedFraction * dragCoefficient * speed * speed;
  }
  /**
+  * MINECRAFT-535: directional (body-local) analogue of {@link #drag} - one axis's own signed
+  * drag force component (N), opposing that axis's own point-velocity component, scaled by an
+  * axis-specific multiplier on top of the existing isotropic {@code dragCoefficient}. The
+  * isotropic force this ticket extends is exactly {@code -submergedFraction*dragCoefficient*
+  * speed*velocityComponent} for every axis (the vector form {@code -dragMagnitude/speed *
+  * localVelocity} already in production, expanded component-wise - {@code dragMagnitude} is
+  * {@code submergedFraction*dragCoefficient*speed*speed}, so {@code -dragMagnitude/speed} is
+  * {@code -submergedFraction*dragCoefficient*speed}); passing {@code axisMultiplier=1} for every
+  * axis therefore reproduces that exact isotropic force component-for-component, the "default 1
+  * preserving current scalar waterDrag" equivalence this ticket requires. Deliberately uses the
+  * FULL point speed (not the axis's own component magnitude) in every axis's own formula, same
+  * as the isotropic baseline - only the per-axis multiplier varies the strength, not the
+  * underlying quadratic-in-overall-speed shape, so this stays dissipative (opposes
+  * {@code axisVelocityComponent}'s own sign, never flips it) for any nonnegative multiplier,
+  * exactly like the isotropic baseline already is.
+  */
+ public static double directionalDragForce(double speed, double axisVelocityComponent, double submergedFraction, double dragCoefficient, double axisMultiplier) {
+  return -submergedFraction * dragCoefficient * axisMultiplier * speed * axisVelocityComponent;
+ }
+ /**
   * Per-tick retention fraction (always in (0,1]) for rotational water drag - the rotational
   * analogue of {@link #drag} for roll/pitch/yaw, applied as a direct decay on angular velocity
   * itself, never an explicit torque/impulse. MINECRAFT-518: today a floating hull gets a righting

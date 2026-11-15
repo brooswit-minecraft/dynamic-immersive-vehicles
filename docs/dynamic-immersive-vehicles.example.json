@@ -42,6 +42,16 @@
       "angularWaterDrag": 0.0,
       "maxSteerDegrees": 30.0
     },
+    "examplepack:knife_hull_boat": {
+      "massKg": 900.0,
+      "hullFillFactor": 0.5,
+      "waterDrag": 400.0,
+      "propellerForce": 6000.0,
+      "maxSteerDegrees": 30.0,
+      "longitudinalWaterDragMultiplier": 0.6,
+      "lateralWaterDragMultiplier": 2.5,
+      "verticalWaterDragMultiplier": 1.0
+    },
     "examplepack:known_bad_car": {
       "enabled": false
     },

@@ -341,7 +341,9 @@ public final class PhysicsBridge {
   * every tick via suspensionDamper/suspensionDamperForShare/effectiveMassDamper, same as every
   * other field in this list)/suspensionSpringMultiplier (MINECRAFT-528, stepGround reads
   * tuning.suspensionSpringMultiplier fresh every tick via suspensionSpring/
-  * suspensionSpringForShare, same as every other field in this list). Mutating
+  * suspensionSpringForShare, same as every other field in this list)/longitudinalWaterDrag
+  * Multiplier/lateralWaterDragMultiplier/verticalWaterDragMultiplier (MINECRAFT-535,
+  * BuoyantForces.apply reads all three fresh every tick alongside waterDrag itself). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -381,6 +383,11 @@ public final class PhysicsBridge {
   // suspensionSpring/suspensionSpringForShare, same "no separate cached field" shape as
   // suspensionDampingRatio immediately above.
   if (!java.util.Objects.equals(target.suspensionSpringMultiplier, fresh.suspensionSpringMultiplier)) { target.suspensionSpringMultiplier = fresh.suspensionSpringMultiplier; appliedOut.add("suspensionSpringMultiplier"); }
+  // MINECRAFT-535: BuoyantForces.apply reads tuning.longitudinal/lateral/verticalWaterDragMultiplier
+  // fresh every tick, same "no separate cached field" shape as waterDrag/angularWaterDrag above.
+  if (!java.util.Objects.equals(target.longitudinalWaterDragMultiplier, fresh.longitudinalWaterDragMultiplier)) { target.longitudinalWaterDragMultiplier = fresh.longitudinalWaterDragMultiplier; appliedOut.add("longitudinalWaterDragMultiplier"); }
+  if (!java.util.Objects.equals(target.lateralWaterDragMultiplier, fresh.lateralWaterDragMultiplier)) { target.lateralWaterDragMultiplier = fresh.lateralWaterDragMultiplier; appliedOut.add("lateralWaterDragMultiplier"); }
+  if (!java.util.Objects.equals(target.verticalWaterDragMultiplier, fresh.verticalWaterDragMultiplier)) { target.verticalWaterDragMultiplier = fresh.verticalWaterDragMultiplier; appliedOut.add("verticalWaterDragMultiplier"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
