@@ -77,6 +77,7 @@ class OverridesTest {
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
+  assertEquals(1.0, r.suspensionSpringMultiplier, "suspensionSpringMultiplier's fallback is a pure no-op - an unconfigured vehicle's calibrated spring rate is unchanged");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -92,6 +93,7 @@ class OverridesTest {
   assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
   assertNotNull(r.suspensionDampingRatio);
+  assertNotNull(r.suspensionSpringMultiplier);
  }
 
  // MINECRAFT-519: antiRollStiffness - dimensionless 0 (off, the FALLBACK) to 1 (fully-rigid-bar)
@@ -1009,5 +1011,156 @@ class OverridesTest {
   var justBelowBoundary = new Overrides.Tuning(); justBelowBoundary.suspensionTravel = 0.2; justBelowBoundary.suspensionDampingRatio = exactBoundaryRatioAtTravelPoint2*0.99;
   assertDoesNotThrow(justBelowBoundary::validate,
     "a ratio comfortably below the computed boundary (confirmed by sweep to actually converge) must still be accepted");
+ }
+
+ // MINECRAFT-528: suspensionSpringMultiplier - dimensionless, strictly positive, flat-capped at
+ // 4.0 multiplier on the calibrated per-wheel spring rate PhysicsBridge.suspensionSpring/
+ // suspensionSpringForShare already compute; 1.0 (FALLBACK) is a pure no-op reproducing the
+ // exact prior calibrated rate. See suspensionSpringMultiplier's own doc for why the real
+ // stability guard is the combined cross-field check below (shared with suspensionDampingRatio),
+ // not this flat range alone.
+
+ @Test void suspensionSpringMultiplierOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.suspensionSpringMultiplier = 0.0; // never valid - not a spring at all
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.suspensionSpringMultiplier = -1.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.suspensionSpringMultiplier = 4.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nan = new Overrides.Tuning(); nan.suspensionSpringMultiplier = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nan::validate);
+  var noOp = new Overrides.Tuning(); noOp.suspensionSpringMultiplier = 1.0;
+  assertDoesNotThrow(noOp::validate);
+  var upperBound = new Overrides.Tuning(); upperBound.suspensionSpringMultiplier = 4.0; // inclusive upper bound is allowed
+  assertDoesNotThrow(upperBound::validate);
+ }
+
+ /**
+  * Review finding (comment 53996): the configured lower range was not physically bounded by
+  * available suspension travel - the prior test's own {@code nearZero = 0.01} was wrongly
+  * accepted as valid, even though its equilibrium ({@code (travel*.5)/0.01} = 15 blocks at the
+  * documented 0.3 default travel) is nowhere near reachable under
+  * {@code PhysicsBridge}'s own travel-bounded compression clamp - damping supplies no static
+  * support at zero velocity, so it cannot make up that shortfall at rest. The lower bound is now
+  * a strict {@code 0.5} - see {@code suspensionSpringMultiplier}'s own doc for the full
+  * {@code (travel*.5)/m < travel} derivation (travel cancels out entirely, so this bound holds
+  * regardless of whatever {@code suspensionTravel} is actually configured).
+  */
+ @Test void suspensionSpringMultiplierAtOrBelowTheReachableEquilibriumLowerBoundFailsValidation() {
+  var oldlyAcceptedNearZero = new Overrides.Tuning(); oldlyAcceptedNearZero.suspensionSpringMultiplier = 0.01;
+  assertThrows(IllegalArgumentException.class, oldlyAcceptedNearZero::validate,
+    "0.01 must now be rejected - its equilibrium is nowhere near reachable under any valid suspensionTravel");
+  var exactlyAtBound = new Overrides.Tuning(); exactlyAtBound.suspensionSpringMultiplier = 0.5;
+  assertThrows(IllegalArgumentException.class, exactlyAtBound::validate,
+    "0.5 exactly means the equilibrium IS suspensionTravel - fully bottomed out, not a working suspension, and must be rejected same as suspensionDampingRatio's own exact-boundary rejection");
+  var justBelowBound = new Overrides.Tuning(); justBelowBound.suspensionSpringMultiplier = 0.49;
+  assertThrows(IllegalArgumentException.class, justBelowBound::validate);
+  var justAboveBound = new Overrides.Tuning(); justAboveBound.suspensionSpringMultiplier = 0.51;
+  assertDoesNotThrow(justAboveBound::validate,
+    "just above the bound must remain accepted - this is a genuine lower bound, not a disguised ban on softer-than-default springs");
+  // The bound holds regardless of suspensionTravel - confirming the travel-cancels-out claim at
+  // a travel other than the documented 0.3 default.
+  var belowBoundAtDifferentTravel = new Overrides.Tuning(); belowBoundAtDifferentTravel.suspensionTravel = 0.6; belowBoundAtDifferentTravel.suspensionSpringMultiplier = 0.49;
+  assertThrows(IllegalArgumentException.class, belowBoundAtDifferentTravel::validate,
+    "0.49 must still be rejected at a different suspensionTravel - the bound is independent of travel");
+  var aboveBoundAtDifferentTravel = new Overrides.Tuning(); aboveBoundAtDifferentTravel.suspensionTravel = 0.6; aboveBoundAtDifferentTravel.suspensionSpringMultiplier = 0.51;
+  assertDoesNotThrow(aboveBoundAtDifferentTravel::validate,
+    "0.51 must still be accepted at a different suspensionTravel - the bound is independent of travel");
+ }
+
+ @Test void suspensionSpringMultiplierParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.suspensionSpringMultiplier = 1.5;
+   Overrides.setForTest(java.util.Map.of("packid:stiff_spring_vehicle", override));
+   assertEquals(1.5, Overrides.resolved("packid:stiff_spring_vehicle").suspensionSpringMultiplier,
+     "an explicit operator override must take precedence over the 1.0 fallback");
+
+   var packMetadata = new Overrides.Tuning(); packMetadata.suspensionSpringMultiplier = 0.8;
+   assertEquals(0.8, Overrides.resolved("packid:not_configured", packMetadata, null, null).suspensionSpringMultiplier,
+     "pack metadata must win over the flat fallback when no operator override exists");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void suspensionSpringMultiplierIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.suspensionSpringMultiplier = 1.2;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ @Test void suspensionSpringMultiplierIsInheritedThroughExtends() {
+  try {
+   var template = new Overrides.Tuning(); template.suspensionSpringMultiplier = 1.3;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "stiff-spring";
+   Overrides.setForTest(java.util.Map.of("stiff-spring", template), java.util.Map.of("packid:inherits_spring", child), java.util.Map.of());
+   assertEquals(1.3, Overrides.resolved("packid:inherits_spring").suspensionSpringMultiplier,
+     "a child entry leaving suspensionSpringMultiplier unset must inherit its template's own value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void invalidReloadRetainsThePriorGoodSuspensionSpringMultiplier() {
+  try {
+   var good = new Overrides.Tuning(); good.suspensionSpringMultiplier = 1.5;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:springy", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(1.5, Overrides.resolved("packid:springy").suspensionSpringMultiplier);
+
+   var invalid = new Overrides.Tuning(); invalid.suspensionSpringMultiplier = -2.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:springy", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload must be rejected, not silently applied");
+
+   assertEquals(1.5, Overrides.resolved("packid:springy").suspensionSpringMultiplier,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-528: scaling the spring raises the same per-wheel natural frequency
+ // suspensionDampingRatio's own travel-aware cross-field check is written against (see
+ // maxStableSuspensionDampingRatio's own doc, now generalized to take the configured
+ // suspensionSpringMultiplier too) - the two fields share ONE combined stability check, so a
+ // configured multiplier can destabilize even the unconfigured 0.7 default ratio, and a
+ // configured ratio must be checked against the unconfigured 1.0 default multiplier too.
+
+ @Test void suspensionSpringMultiplierAloneCanBeRejectedForDestabilizingTheUnconfiguredDefaultRatio() {
+  // At a smaller, independently-valid suspensionTravel (0.2, same travel M523's own cross-field
+  // tests already use), the unconfigured default 0.7 ratio has much less headroom than at the
+  // documented 0.3 default - a spring multiplier within its OWN flat [0,4.0] range can still
+  // raise the natural frequency past what even that default ratio can stay stable against, with
+  // no suspensionDampingRatio override in sight.
+  var destabilizing = new Overrides.Tuning(); destabilizing.suspensionTravel = 0.2; destabilizing.suspensionSpringMultiplier = 4.0;
+  assertThrows(IllegalArgumentException.class, destabilizing::validate,
+    "a spring multiplier must be rejected when it destabilizes the unconfigured default damping ratio at this travel, even though 4.0 alone is within suspensionSpringMultiplier's own flat range");
+  // A modest multiplier at the same smaller travel must remain valid at the default ratio.
+  var modest = new Overrides.Tuning(); modest.suspensionTravel = 0.2; modest.suspensionSpringMultiplier = 2.0;
+  assertDoesNotThrow(modest::validate,
+    "a modest spring multiplier must remain valid against the unconfigured default damping ratio at this travel");
+  // An unconfigured multiplier (no suspensionSpringMultiplier field at all) must remain exactly
+  // as valid as before this ticket - this check must not retune a vehicle that never touches
+  // either field.
+  var untouched = new Overrides.Tuning();
+  assertDoesNotThrow(untouched::validate,
+    "leaving both suspensionSpringMultiplier and suspensionDampingRatio unset must be entirely unaffected by this cross-field check");
+ }
+
+ @Test void suspensionSpringMultiplierAndSuspensionDampingRatioAreCheckedTogetherAsAPair() {
+  // A ratio that is comfortably stable against the UNCONFIGURED 1.0 multiplier can still be
+  // rejected once a configured multiplier raises the natural frequency enough - the two fields
+  // must be validated as a genuine pair, not independently.
+  var ratioAloneOk = new Overrides.Tuning(); ratioAloneOk.suspensionDampingRatio = 1.8;
+  assertDoesNotThrow(ratioAloneOk::validate,
+    "ratio 1.8 alone (unconfigured 1.0 multiplier) must remain valid - unchanged from suspensionDampingRatio's own pre-528 behavior");
+  var ratioWithDestabilizingMultiplier = new Overrides.Tuning();
+  ratioWithDestabilizingMultiplier.suspensionDampingRatio = 1.8; ratioWithDestabilizingMultiplier.suspensionSpringMultiplier = 2.5;
+  assertThrows(IllegalArgumentException.class, ratioWithDestabilizingMultiplier::validate,
+    "the same ratio 1.8, once paired with a destabilizing spring multiplier, must be rejected - the two fields are one combined stability check, not two independent ones");
+  // The same multiplier, paired with a smaller/safer ratio, must still be accepted.
+  var saferPair = new Overrides.Tuning();
+  saferPair.suspensionDampingRatio = 0.9; saferPair.suspensionSpringMultiplier = 2.5;
+  assertDoesNotThrow(saferPair::validate,
+    "a smaller ratio paired with the same spring multiplier must still be accepted when the pair is actually stable");
  }
 }
