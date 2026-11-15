@@ -1,29 +1,62 @@
 package io.github.brooswitminecraft.div;
 import dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis;
-import org.joml.Quaterniondc;
+import minecrafttransportsimulator.baseclasses.RotationMatrix;
+import org.joml.Matrix3d;
+import org.joml.Quaterniond;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
 import java.util.EnumSet;
 import java.util.Set;
 
 /**
- * Pure geometry/axis-selection for a trailer hitch: where the joint anchors sit in world space,
- * and which degrees of freedom IV's own connection flags imply should be locked. Operates only
- * on plain joml types, so it needs no live entity, world, or Sable runtime to test; PhysicsBridge
- * supplies the actual body poses and JSONConnection flags.
+ * Pure geometry/axis-selection for a trailer hitch: where the joint anchors sit relative to each
+ * body's own Sable origin, which local joint-frame rotation each side imposes, and which degrees
+ * of freedom IV's own connection flags imply should be locked. Operates only on plain joml/MTS
+ * data types (no live entity, world, or Sable runtime needed to test); PhysicsBridge supplies
+ * the actual body centers and JSONConnection fields.
  */
 public final class HitchJoint {
  private HitchJoint() {}
  /**
-  * World position of a local-frame offset (e.g. a JSONConnection.pos, relative to the entity's
-  * own origin) on a body whose Sable pose center-of-mass sits at {@code bodyPosition}/
-  * {@code bodyOrientation} and whose geometric center - in that same entity-local frame - is
-  * {@code bodyCenter}, the same frame PhysicsBridge.Body already uses for its chassis bounds.
+  * {@code GenericConstraintConfiguration}'s {@code pos1}/{@code pos2} anchor for a local-frame
+  * offset (e.g. a JSONConnection.pos, relative to the entity's own origin) on a body whose
+  * geometric center - in that same entity-local frame - is {@code bodyCenter}, the same frame
+  * PhysicsBridge.Body already uses for its chassis bounds. MINECRAFT-525: confirmed by the real
+  * native source and the empirical anchor-frame probe (ticket comment 53256/53243) that Sable's
+  * ordinary (non-sublevel) box joints take {@code pos1}/{@code pos2} as BODY-LOCAL offsets
+  * (Rapier's {@code local_anchor = joint.pos - center_of_mass}, with {@code center_of_mass}
+  * falling back to zero for a plain box) - NOT world-space points, which is what the previously
+  * shipped {@code PhysicsBridge.createHitch} wrongly assumed. No orientation or body position is
+  * needed here at all; the joint-frame rotation that convention also confirmed is local (not an
+  * echo of the body's own world orientation) is supplied directly by callers as identity, the
+  * same pattern {@code TwoBodyLifecycle.create} already established for the two-body chassis
+  * joint.
   */
- public static Vector3d anchorWorldPosition(Vector3dc bodyPosition, Quaterniondc bodyOrientation, Vector3dc bodyCenter, Vector3dc localOffset, Vector3d dest) {
-  dest.set(localOffset).sub(bodyCenter);
-  bodyOrientation.transform(dest);
-  return dest.add(bodyPosition);
+ public static Vector3d anchorLocalOffset(Vector3dc bodyCenter, Vector3dc localOffset, Vector3d dest) {
+  return dest.set(localOffset).sub(bodyCenter);
+ }
+ /**
+  * Converts one hitch connection's {@code JSONConnection.rot} to a joml {@code Quaterniond},
+  * for use as one side of {@code GenericConstraintConfiguration}'s {@code local_frame1}/
+  * {@code local_frame2}. Review finding (comment 53817): the decompiled, pinned IV24
+  * {@code JSONConnection.rot} field is explicitly documented as "Used on mounted and restricted
+  * connections. Has no effect on other connections" - so an ordinary (unmounted, unrestricted)
+  * connection correctly stays IDENTITY regardless of {@code rot} (nothing is locked for it, so
+  * the local-frame choice cannot matter), but a mounted/restricted connection's {@code rot} - if
+  * authored - IS the frame {@link #lockedAxes}'s pitch/yaw/roll axis selection is actually
+  * defined against, and must be honored rather than forced to identity. {@code rot==null}
+  * (unset in the pack JSON) still means identity - the field's own documented default. Uses the
+  * exact same {@code RotationMatrix}-&gt;{@code Quaterniond} conversion already established for a
+  * vehicle's own world orientation in {@code PhysicsBridge.Body}'s constructor.
+  *
+  * <p>MINECRAFT-525 review 53832: this converter alone is NOT the full fix for the hookup side -
+  * {@code PhysicsBridge.createHitch}'s own doc comment derives why {@code local_frame2} must be
+  * this method's result INVERTED (not passed straight through) to match IV's native rotation
+  * composition. {@code local_frame1} (the hitch side) needs no such inversion.
+  */
+ public static Quaterniond localJointFrame(RotationMatrix rot) {
+  if (rot == null) return new Quaterniond();
+  return new Quaterniond().setFromNormalized(new Matrix3d(rot.m00, rot.m10, rot.m20, rot.m01, rot.m11, rot.m21, rot.m02, rot.m12, rot.m22));
  }
  /**
   * Degrees of freedom to lock for one hitch, from IV's own per-connection flags: linear motion
