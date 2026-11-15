@@ -744,12 +744,12 @@ public final class PhysicsBridge {
   */
  private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
   var hitchOffset = HitchJoint.anchorLocalOffset(towing.center,
-    connectionOffsetVehicleLocal(connection.towingEntity, connection.hitchConnection.pos), new Vector3d());
+    connectionOffsetVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.pos), new Vector3d());
   var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center,
-    connectionOffsetVehicleLocal(connection.towedEntity, connection.hookupConnection.pos), new Vector3d());
+    connectionOffsetVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.pos), new Vector3d());
   var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset,
-    connectionRotationVehicleLocal(connection.towingEntity, connection.hitchConnection.rot),
-    connectionRotationVehicleLocal(connection.towedEntity, connection.hookupConnection.rot).invert(),
+    connectionRotationVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.rot),
+    connectionRotationVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.rot).invert(),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
   return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
  }
@@ -758,24 +758,32 @@ public final class PhysicsBridge {
   * {@code owner} is the vehicle itself (the connection was already authored in that exact
   * frame), or composed through the installed part's own fields via
   * {@code HitchJoint.partConnectionOffset} when {@code owner} is an {@code APart} - the
-  * MINECRAFT-530 gap {@code createHitch}'s own doc comment names.
+  * MINECRAFT-530 gap {@code createHitch}'s own doc comment names. {@code vehicleOrientation} is
+  * the OWNING SIDE's own vehicle ({@code connection.towingVehicle}/{@code towedVehicle} -
+  * {@code towingEntity}/{@code towedEntity} unwrapped to the vehicle, per
+  * {@code TowingConnection}'s own real source), needed to correct an installed part's
+  * orientation for any nesting depth - see {@link HitchJoint#vehicleRootLocalOrientation}'s doc
+  * comment for why the raw part orientation alone (review kickback, comment 53994) is not
+  * enough.
   */
- private static Vector3d connectionOffsetVehicleLocal(AEntityE_Interactable<?> owner, Point3D connectionPos) {
+ private static Vector3d connectionOffsetVehicleLocal(RotationMatrix vehicleOrientation, AEntityE_Interactable<?> owner, Point3D connectionPos) {
   var local = new Vector3d(connectionPos.x, connectionPos.y, connectionPos.z);
   if (!(owner instanceof APart part)) return local;
+  var partOrientation = HitchJoint.vehicleRootLocalOrientation(vehicleOrientation, part.orientation);
   return HitchJoint.partConnectionOffset(new Vector3d(part.localOffset.x, part.localOffset.y, part.localOffset.z),
-    part.localOrientation, new Vector3d(part.scale.x, part.scale.y, part.scale.z), local, new Vector3d());
+    partOrientation, new Vector3d(part.scale.x, part.scale.y, part.scale.z), local, new Vector3d());
  }
  /**
   * A hitch/hookup connection's own {@code rot}, converted to vehicle-root-local: {@code
   * HitchJoint.localJointFrame}'s own plain conversion when {@code owner} is the vehicle itself,
-  * or composed with the installed part's own local orientation via
+  * or composed with the installed part's own vehicle-root-local orientation via
   * {@code HitchJoint.partConnectionRotation} when {@code owner} is an {@code APart} - the same
-  * MINECRAFT-530 gap {@link #connectionOffsetVehicleLocal} closes for position.
+  * MINECRAFT-530 gap {@link #connectionOffsetVehicleLocal} closes for position, and the same
+  * {@code vehicleOrientation} correction it needs (see its own doc comment).
   */
- private static Quaterniond connectionRotationVehicleLocal(AEntityE_Interactable<?> owner, RotationMatrix connectionRot) {
+ private static Quaterniond connectionRotationVehicleLocal(RotationMatrix vehicleOrientation, AEntityE_Interactable<?> owner, RotationMatrix connectionRot) {
   if (!(owner instanceof APart part)) return HitchJoint.localJointFrame(connectionRot);
-  return HitchJoint.partConnectionRotation(part.localOrientation, connectionRot);
+  return HitchJoint.partConnectionRotation(HitchJoint.vehicleRootLocalOrientation(vehicleOrientation, part.orientation), connectionRot);
  }
  /**
   * The portion of IV's own getRecursiveTowingThrust() a towing Sable body must still replicate
