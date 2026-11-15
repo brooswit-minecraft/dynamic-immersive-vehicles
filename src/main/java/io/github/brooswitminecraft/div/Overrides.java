@@ -139,6 +139,23 @@ public final class Overrides {
   public Double stallAngleDegrees;
   public Double liftSlope;
   public Double controlSurfaceSlope;
+  // MINECRAFT-541: bounded, independent per-axis fixed-wing control AUTHORITY, each a multiplier
+  // on top of the existing shared controlSurfaceSlope above (never a replacement for it) -
+  // FlightForces.controlSurfaceForce's own callers (PhysicsBridge.stepFlight) scale aileron/
+  // elevator/rudder deflection force by controlSurfaceSlope * the matching one of these before
+  // applying each axis' own native area and lever arm, so changing one axis's scale never
+  // touches the others, native areas, lever arms, or the shared slope baseline. Named after the
+  // existing motorized.aileronArea/elevatorArea/rudderArea fields (not roll/pitch/
+  // yawAuthorityScale) to stay unambiguous against MINECRAFT-522's rotor-only yawAuthorityScale
+  // field above - a distinct Tuning field, not a shared/renamed one. 1.0 (FALLBACK below) is a
+  // pure no-op, reproducing the exact prior shared-controlSurfaceSlope-only behavior for an
+  // unconfigured vehicle. Fixed-wing stepFlight only; unreachable for a rotorcraft (stepRotor has
+  // no aileron/elevator/rudder control-surface model) or a ground/blimp vehicle. Does not affect
+  // the existing rudderDeflection-sideslip restoring term's own geometry - only the resulting
+  // torque's magnitude, same as controlSurfaceSlope already does.
+  public Double aileronAuthorityScale;
+  public Double elevatorAuthorityScale;
+  public Double rudderAuthorityScale;
   // MINECRAFT-536: bounded fixed-wing parasitic/induced drag tuning, consumed by
   // PhysicsBridge.stepFlight via FlightForces.dragCoefficient. parasiticDragMultiplier scales
   // the existing native-derived parasitic budget (FlightForces.dragCoefficient's own internal
@@ -351,6 +368,14 @@ public final class Overrides {
    // never so large it produces an absurd lift/control force from a tiny angle/deflection.
    if (liftSlope != null && !(Double.isFinite(liftSlope) && liftSlope > 0 && liftSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (controlSurfaceSlope != null && !(Double.isFinite(controlSurfaceSlope) && controlSurfaceSlope > 0 && controlSurfaceSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-541: same strictly-positive, capped-at-5x shape as cyclicAuthorityScale/
+   // yawAuthorityScale above - a zero or negative scale would be a confusing way to disable one
+   // axis's authority entirely (controlSurfaceSlope/disabling the vehicle itself is for that),
+   // and this is a tuning multiplier against the existing controlSurfaceSlope-derived force, not
+   // a way to grant unbounded roll/pitch/yaw torque.
+   if (aileronAuthorityScale != null && !(Double.isFinite(aileronAuthorityScale) && aileronAuthorityScale > 0 && aileronAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (elevatorAuthorityScale != null && !(Double.isFinite(elevatorAuthorityScale) && elevatorAuthorityScale > 0 && elevatorAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (rudderAuthorityScale != null && !(Double.isFinite(rudderAuthorityScale) && rudderAuthorityScale > 0 && rudderAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
    // MINECRAFT-536 review correction: a merely-strictly-positive lower bound (e.g. Double.
    // MIN_VALUE) is not enough - FlightForces.dragCoefficient multiplies the floored native value
    // by this field, and while multiplication alone cannot produce Infinity the way oswaldEfficiency's
@@ -566,6 +591,9 @@ public final class Overrides {
    if (stallAngleDegrees != null) throw new IllegalArgumentException("part overrides do not support 'stallAngleDegrees' (no part-level consumer yet)");
    if (liftSlope != null) throw new IllegalArgumentException("part overrides do not support 'liftSlope' (no part-level consumer yet)");
    if (controlSurfaceSlope != null) throw new IllegalArgumentException("part overrides do not support 'controlSurfaceSlope' (no part-level consumer yet)");
+   if (aileronAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'aileronAuthorityScale' (no part-level consumer yet)");
+   if (elevatorAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'elevatorAuthorityScale' (no part-level consumer yet)");
+   if (rudderAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'rudderAuthorityScale' (no part-level consumer yet)");
    if (parasiticDragMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'parasiticDragMultiplier' (no part-level consumer yet)");
    if (oswaldEfficiency != null) throw new IllegalArgumentException("part overrides do not support 'oswaldEfficiency' (no part-level consumer yet)");
    if (cyclicLimitDegrees != null) throw new IllegalArgumentException("part overrides do not support 'cyclicLimitDegrees' (no part-level consumer yet)");
@@ -612,6 +640,12 @@ public final class Overrides {
   FALLBACK.stallAngleDegrees=FlightForces.DEFAULT_STALL_ANGLE_DEGREES;
   FALLBACK.liftSlope=FlightForces.DEFAULT_LIFT_SLOPE;
   FALLBACK.controlSurfaceSlope=FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE;
+  // MINECRAFT-541: 1.0 on every axis is a pure no-op multiplier against the existing shared
+  // controlSurfaceSlope-derived force - an unconfigured fixed-wing vehicle's roll/pitch/yaw
+  // control torque stays byte-identical to before this ticket.
+  FALLBACK.aileronAuthorityScale=1.0;
+  FALLBACK.elevatorAuthorityScale=1.0;
+  FALLBACK.rudderAuthorityScale=1.0;
   FALLBACK.cyclicLimitDegrees=20.0;
   FALLBACK.cyclicAuthorityScale=1.0;
   FALLBACK.yawAuthorityScale=1.0;
@@ -655,6 +689,7 @@ public final class Overrides {
   c.angularWaterDrag=t.angularWaterDrag;
   c.antiRollStiffness=t.antiRollStiffness;
   c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
+  c.aileronAuthorityScale=t.aileronAuthorityScale; c.elevatorAuthorityScale=t.elevatorAuthorityScale; c.rudderAuthorityScale=t.rudderAuthorityScale;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.rotorAngularDampingCoefficient=t.rotorAngularDampingCoefficient;
   c.brakeBiasFront=t.brakeBiasFront;
@@ -698,6 +733,9 @@ public final class Overrides {
   m.stallAngleDegrees = child.stallAngleDegrees!=null?child.stallAngleDegrees:parent.stallAngleDegrees;
   m.liftSlope = child.liftSlope!=null?child.liftSlope:parent.liftSlope;
   m.controlSurfaceSlope = child.controlSurfaceSlope!=null?child.controlSurfaceSlope:parent.controlSurfaceSlope;
+  m.aileronAuthorityScale = child.aileronAuthorityScale!=null?child.aileronAuthorityScale:parent.aileronAuthorityScale;
+  m.elevatorAuthorityScale = child.elevatorAuthorityScale!=null?child.elevatorAuthorityScale:parent.elevatorAuthorityScale;
+  m.rudderAuthorityScale = child.rudderAuthorityScale!=null?child.rudderAuthorityScale:parent.rudderAuthorityScale;
   m.cyclicLimitDegrees = child.cyclicLimitDegrees!=null?child.cyclicLimitDegrees:parent.cyclicLimitDegrees;
   m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
@@ -894,6 +932,9 @@ public final class Overrides {
   result.stallAngleDegrees = firstNonNull(override!=null?override.stallAngleDegrees:null, packMetadata!=null?packMetadata.stallAngleDegrees:null, ivAdapted!=null?ivAdapted.stallAngleDegrees:null, physicallyDerived!=null?physicallyDerived.stallAngleDegrees:null, FALLBACK.stallAngleDegrees);
   result.liftSlope = firstNonNull(override!=null?override.liftSlope:null, packMetadata!=null?packMetadata.liftSlope:null, ivAdapted!=null?ivAdapted.liftSlope:null, physicallyDerived!=null?physicallyDerived.liftSlope:null, FALLBACK.liftSlope);
   result.controlSurfaceSlope = firstNonNull(override!=null?override.controlSurfaceSlope:null, packMetadata!=null?packMetadata.controlSurfaceSlope:null, ivAdapted!=null?ivAdapted.controlSurfaceSlope:null, physicallyDerived!=null?physicallyDerived.controlSurfaceSlope:null, FALLBACK.controlSurfaceSlope);
+  result.aileronAuthorityScale = firstNonNull(override!=null?override.aileronAuthorityScale:null, packMetadata!=null?packMetadata.aileronAuthorityScale:null, ivAdapted!=null?ivAdapted.aileronAuthorityScale:null, physicallyDerived!=null?physicallyDerived.aileronAuthorityScale:null, FALLBACK.aileronAuthorityScale);
+  result.elevatorAuthorityScale = firstNonNull(override!=null?override.elevatorAuthorityScale:null, packMetadata!=null?packMetadata.elevatorAuthorityScale:null, ivAdapted!=null?ivAdapted.elevatorAuthorityScale:null, physicallyDerived!=null?physicallyDerived.elevatorAuthorityScale:null, FALLBACK.elevatorAuthorityScale);
+  result.rudderAuthorityScale = firstNonNull(override!=null?override.rudderAuthorityScale:null, packMetadata!=null?packMetadata.rudderAuthorityScale:null, ivAdapted!=null?ivAdapted.rudderAuthorityScale:null, physicallyDerived!=null?physicallyDerived.rudderAuthorityScale:null, FALLBACK.rudderAuthorityScale);
   result.cyclicLimitDegrees = firstNonNull(override!=null?override.cyclicLimitDegrees:null, packMetadata!=null?packMetadata.cyclicLimitDegrees:null, ivAdapted!=null?ivAdapted.cyclicLimitDegrees:null, physicallyDerived!=null?physicallyDerived.cyclicLimitDegrees:null, FALLBACK.cyclicLimitDegrees);
   result.cyclicAuthorityScale = firstNonNull(override!=null?override.cyclicAuthorityScale:null, packMetadata!=null?packMetadata.cyclicAuthorityScale:null, ivAdapted!=null?ivAdapted.cyclicAuthorityScale:null, physicallyDerived!=null?physicallyDerived.cyclicAuthorityScale:null, FALLBACK.cyclicAuthorityScale);
   result.yawAuthorityScale = firstNonNull(override!=null?override.yawAuthorityScale:null, packMetadata!=null?packMetadata.yawAuthorityScale:null, ivAdapted!=null?ivAdapted.yawAuthorityScale:null, physicallyDerived!=null?physicallyDerived.yawAuthorityScale:null, FALLBACK.yawAuthorityScale);

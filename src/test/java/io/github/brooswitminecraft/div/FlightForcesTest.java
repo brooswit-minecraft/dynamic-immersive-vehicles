@@ -196,6 +196,44 @@ class FlightForcesTest {
   assertTrue(Double.isFinite(atCap) && atCap > 0);
  }
 
+ // MINECRAFT-541: independent per-axis control authority - the 5-arg overload with an explicit
+ // operator-configured authorityScale, same "explicit authority-multiplier overload" shape as
+ // RotorForces.cyclicTorque/yawTorque's own authorityScale overload.
+
+ @Test void controlSurfaceForceWithUnitScaleMatchesTheUnscaledOverload() {
+  assertEquals(
+    FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE),
+    FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,1.0), 1e-9);
+ }
+
+ @Test void controlSurfaceForceScalesLinearlyWithAuthorityScale() {
+  double base = FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,1.0);
+  assertEquals(2*base, FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,2.0), 1e-6);
+  assertEquals(0.5*base, FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,0.5), 1e-6);
+ }
+
+ @Test void controlSurfaceForceAuthorityScaleIsIndependentOfControlSurfaceSlope() {
+  // Ticket acceptance: "changing one axis does not scale the others" - the authority scale and
+  // the shared controlSurfaceSlope are independent multiplicative factors, so doubling one must
+  // not interact with (double, cancel, or otherwise depend on) the other's own value.
+  double doubledSlopeOnly = FlightForces.controlSurfaceForce(0.1,5,50,2*FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,1.0);
+  double doubledScaleOnly = FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,2.0);
+  double base = FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,1.0);
+  assertEquals(2*base, doubledSlopeOnly, 1e-6);
+  assertEquals(2*base, doubledScaleOnly, 1e-6);
+  double both = FlightForces.controlSurfaceForce(0.1,5,50,2*FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,2.0);
+  assertEquals(4*base, both, 1e-6, "the two multipliers must compose, neither overriding the other");
+ }
+
+ @Test void controlSurfaceForceAuthorityScaleAtExtremeStaysFinite() {
+  double atCap = FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,5.0);
+  assertTrue(Double.isFinite(atCap) && atCap > 0);
+ }
+
+ @Test void controlSurfaceForceIsZeroAtZeroDeflectionRegardlessOfAuthorityScale() {
+  assertEquals(0, FlightForces.controlSurfaceForce(0,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,3.0));
+ }
+
  @Test void thrustIsZeroAtZeroThrottle() {
   assertEquals(0, FlightForces.thrust(0,10000));
  }

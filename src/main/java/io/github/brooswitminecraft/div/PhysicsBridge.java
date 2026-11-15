@@ -360,6 +360,8 @@ public final class PhysicsBridge {
   * waterDrag/propellerForce/angularWaterDrag/antiRollStiffness (MINECRAFT-519 - stepGround reads
   * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
   * stallAngleDegrees/liftSlope/controlSurfaceSlope (MINECRAFT-521, stepFlight only)/
+  * aileronAuthorityScale/elevatorAuthorityScale/rudderAuthorityScale (MINECRAFT-541, stepFlight
+  * only, same reasoning as stallAngleDegrees/liftSlope/controlSurfaceSlope immediately above)/
   * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
   * rotorAngularDampingCoefficient (MINECRAFT-537, stepRotor only - read fresh every tick via
   * rotorAngularDampingTorque, same as the MINECRAFT-522 fields immediately above)/
@@ -411,6 +413,12 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.stallAngleDegrees, fresh.stallAngleDegrees)) { target.stallAngleDegrees = fresh.stallAngleDegrees; appliedOut.add("stallAngleDegrees"); }
   if (!java.util.Objects.equals(target.liftSlope, fresh.liftSlope)) { target.liftSlope = fresh.liftSlope; appliedOut.add("liftSlope"); }
   if (!java.util.Objects.equals(target.controlSurfaceSlope, fresh.controlSurfaceSlope)) { target.controlSurfaceSlope = fresh.controlSurfaceSlope; appliedOut.add("controlSurfaceSlope"); }
+  // MINECRAFT-541: stepFlight reads tuning.aileron/elevator/rudderAuthorityScale fresh every
+  // tick, same "no separate cached field" shape as stallAngleDegrees/liftSlope/
+  // controlSurfaceSlope immediately above.
+  if (!java.util.Objects.equals(target.aileronAuthorityScale, fresh.aileronAuthorityScale)) { target.aileronAuthorityScale = fresh.aileronAuthorityScale; appliedOut.add("aileronAuthorityScale"); }
+  if (!java.util.Objects.equals(target.elevatorAuthorityScale, fresh.elevatorAuthorityScale)) { target.elevatorAuthorityScale = fresh.elevatorAuthorityScale; appliedOut.add("elevatorAuthorityScale"); }
+  if (!java.util.Objects.equals(target.rudderAuthorityScale, fresh.rudderAuthorityScale)) { target.rudderAuthorityScale = fresh.rudderAuthorityScale; appliedOut.add("rudderAuthorityScale"); }
   if (!java.util.Objects.equals(target.cyclicLimitDegrees, fresh.cyclicLimitDegrees)) { target.cyclicLimitDegrees = fresh.cyclicLimitDegrees; appliedOut.add("cyclicLimitDegrees"); }
   if (!java.util.Objects.equals(target.cyclicAuthorityScale, fresh.cyclicAuthorityScale)) { target.cyclicAuthorityScale = fresh.cyclicAuthorityScale; appliedOut.add("cyclicAuthorityScale"); }
   if (!java.util.Objects.equals(target.yawAuthorityScale, fresh.yawAuthorityScale)) { target.yawAuthorityScale = fresh.yawAuthorityScale; appliedOut.add("yawAuthorityScale"); }
@@ -2776,6 +2784,20 @@ public final class PhysicsBridge {
    * the live {@code tuning} object every tick, same as every other live-safe field below - an
    * unconfigured vehicle gets exactly {@link FlightForces}'s own previous hardcoded constants via
    * {@link Overrides}'s FALLBACK.
+   * MINECRAFT-541: {@code tuning.aileron/elevator/rudderAuthorityScale} are each passed to their
+   * own {@link FlightForces#controlSurfaceForce(double, double, double, double, double)} call
+   * below (the same "explicit authority-multiplier overload" shape {@link
+   * RotorForces#cyclicTorque(double, double, double, double)}/{@link
+   * RotorForces#yawTorque(double, double, double, double)} already established for the rotor
+   * fields above) - independently multiplying that one axis's force, never the shared {@code
+   * controlSurfaceSlope}, the native area, or the externally-applied {@code wingArm}/{@code
+   * tailArm} lever arm (all still read/applied exactly as before, unduplicated). Since the scale
+   * is folded in BEFORE the lever arm, not after, and {@code rudderDeflection-sideslip} is still
+   * computed first and passed in as this call's own deflection argument, the existing
+   * sideslip-restoring term's semantics are entirely unchanged - only the resulting yaw torque's
+   * magnitude is scaled. All three are read fresh from the live {@code tuning} object every
+   * tick, same as every other live-safe field below; FALLBACK 1.0 reproduces the exact prior
+   * controlSurfaceSlope-only torque for an unconfigured vehicle.
    */
   private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
    var motorized = v.definition.motorized;
@@ -2815,9 +2837,9 @@ public final class PhysicsBridge {
    double aileronDeflection=Math.toRadians(v.aileronInputVar.currentValue);
    double elevatorDeflection=Math.toRadians(v.elevatorInputVar.currentValue);
    double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
-   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope)*wingArm;
-   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope)*tailArm;
-   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope)*tailArm;
+   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope,tuning.aileronAuthorityScale)*wingArm;
+   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope,tuning.elevatorAuthorityScale)*tailArm;
+   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope,tuning.rudderAuthorityScale)*tailArm;
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    handle.applyTorqueImpulse(torque.mul(DT));
    applyTowingCompensation(v);

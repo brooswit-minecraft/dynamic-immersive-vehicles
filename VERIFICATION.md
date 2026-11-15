@@ -3057,3 +3057,110 @@ either direction.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `65dd7fb988eaa35a954e739d6b2722a026b4b53b5aa5fcd02220b6e25d80da03`)
 was produced.
+
+## Independent fixed-wing pitch/roll/yaw control authority (MINECRAFT-541, added 2026-11-15)
+
+Eight-item sprint coordination (MINECRAFT-539 schema/540/541/542/543/544/
+545/546, dispatched 2026-11-15, John: "sounds good! go!"); accepted baseline
+`4ee035a` (785 tests). Schema coordinator M539 was unstaffed (`agent:none`)
+with no field-name agreement published yet, so the proposed field names/
+bounds/semantics were posted on M539 itself before any shared-schema edit,
+for visibility/objection, rather than blocking indefinitely on an unstaffed
+coordinator - see that ticket's comment.
+
+`PhysicsBridge.stepFlight` previously shared one `tuning.controlSurfaceSlope`
+across aileron (roll), elevator (pitch), and rudder (yaw) control-surface
+torque, via `FlightForces.controlSurfaceForce`. Added three independent,
+bounded `Overrides.Tuning` fields - `aileronAuthorityScale`,
+`elevatorAuthorityScale`, `rudderAuthorityScale` (each strictly positive,
+capped at `5`, default `1.0` - the same bound/default shape MINECRAFT-522's
+`cyclicAuthorityScale`/`yawAuthorityScale` already established for the rotor
+analogue). Named after the existing `motorized.aileronArea`/`elevatorArea`/
+`rudderArea` fields, not `roll/pitch/yawAuthorityScale`, to stay unambiguous
+against M522's own rotor-only `yawAuthorityScale` field already on `Tuning` -
+a distinct field, never a rename or a shared one.
+
+Rather than multiplying the three already-computed torques at the
+`PhysicsBridge.stepFlight` call site (which would have left the new scale
+untestable except through a private method), `FlightForces.controlSurfaceForce`
+gained a 5-arg overload taking an explicit `authorityScale` parameter - the
+same "explicit authority-multiplier overload" shape `RotorForces.
+cyclicTorque`/`yawTorque` already established for MINECRAFT-522's rotor
+fields (a 1.0-default public overload delegating to the new one). `stepFlight`
+now passes `tuning.aileron/elevator/rudderAuthorityScale` to the matching
+call for `rollTorque`/`pitchTorque`/`yawTorque`, each still externally
+multiplied by its own unchanged `wingArm`/`tailArm` lever arm exactly as
+before. Because the scale is folded in before the lever arm, and
+`rudderDeflection - sideslip` is still computed first and passed in as that
+call's own deflection argument unchanged, the existing sideslip-restoring
+term's semantics are entirely unaffected - only each axis' resulting torque
+magnitude changes, and changing one axis's scale cannot affect another axis,
+the shared `controlSurfaceSlope` baseline, or either control surface's own
+native area/lever-arm geometry (none of that is duplicated anywhere).
+
+All three fields are validated (same strictly-positive/capped-at-5 bound as
+`cyclicAuthorityScale`/`yawAuthorityScale`), rejected on a `parts` override
+(no part-level consumer, same as `controlSurfaceSlope`), wired through the
+same precedence chain (`resolved`/`merge`/`copy`) and `extends`-template
+inheritance every other vehicle-level field already uses, and added to
+`PhysicsBridge.applyLiveSafeFields`'s live-safe set (`stepFlight` reads all
+three fresh from the live `tuning` object every tick, same as
+`controlSurfaceSlope` itself) rather than `reportFieldsNeedingRespawn`'s
+construction-cached one - a live on-disk edit or removal takes effect on an
+already-active flight body's very next tick, no respawn needed.
+
+`FlightForcesTest` covers the new overload directly: zero deflection is
+still zero force regardless of scale; the unit-scale overload matches the
+unscaled 4-arg one exactly; the scale and `controlSurfaceSlope` compose
+multiplicatively and independently (doubling either alone doubles the
+result, doubling both quadruples it, neither canceling or overriding the
+other - the ticket's own "changing one axis does not scale the others"
+acceptance, confirmed at the pure-function level the three axes share); and
+the validated extreme (scale `5.0`) stays finite. `OverridesTest` covers
+out-of-range rejection at both bounds for all three fields, that an
+override to ONE axis (e.g. `aileronAuthorityScale`) leaves the other two
+resolving to their own independent `1.0` fallback rather than picking up
+the overridden axis' value, part-override rejection, and - mirroring the
+MINECRAFT-521/536 self-review regressions - an invalid reload retaining the
+prior good per-axis values (never the invalid one or the flat fallback) AND
+a full removal (omitting the vehicle's entry entirely, not merely setting
+an invalid value) correctly falling all the way back to the flat `1.0`
+default rather than getting stuck. `PhysicsBridgeLiveOverrideApplicationTest`
+covers all three being mutated live in place by `applyLiveSafeFields`
+(added to the existing combined-fields case) and reported in its
+applied-field set, plus a dedicated revert-to-`1.0`-on-removal case
+mirroring the existing rotor-field one.
+
+Same disclosed, long-standing limitation every prior flight ticket in this
+repository has stood on (MINECRAFT-521/536's own VERIFICATION.md entries):
+no dedicated fixed-wing runtime probe exists yet to drive a real spawned
+aircraft through `stepFlight` end-to-end (`GroundSupportFixtureProbe`/
+`BuoyancyAngularDragProbe` and others already prove the ground/float-only
+pattern is buildable; building the fixed-wing analogue was assessed, in the
+MINECRAFT-521 review, as a legitimate "if practical" enhancement rather
+than a per-ticket requirement). This ticket does not newly introduce that
+gap and does not attempt to close it - `stepFlight`'s actual force/torque
+application remains exercised only at the pure-function (`FlightForcesTest`)
+and wiring/live-reload (`OverridesTest`/`PhysicsBridgeLiveOverrideApplicationTest`)
+levels, disclosed plainly rather than concealed.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain`, Gradle
+8.14 / JDK 21 (Temurin), against this branch
+(`minecraft-541/per-axis-fixed-wing-authority`) at head (accepted baseline
+`4ee035a`, unmoved since this ticket's pickup - confirmed via `git fetch
+origin` immediately before this run) - `BUILD SUCCESSFUL`. The real JUnit
+XML reports total **795 tests**, 0 skipped, 0 failures, 0 errors across the
+whole suite (10 new: 5 in `FlightForcesTest`, 4 in `OverridesTest`, 1 in
+`PhysicsBridgeLiveOverrideApplicationTest` - 785+10=795, confirming no
+regression anywhere else in the suite).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `85d2b06ed0b1ff97aa426a2eb1c6b9826b36ff52eb6838ce9faae81e8d3ec485`)
+was produced.
+
+Not yet performed: in-game/hardware acceptance (real aircraft spawn with
+configured `aileron/elevator/rudderAuthorityScale`, observed independent
+roll/pitch/yaw response) - out of scope per this repository's standing
+"user owns broad/hardware playtesting, not a completion gate" convention.

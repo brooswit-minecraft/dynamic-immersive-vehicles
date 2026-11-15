@@ -69,6 +69,9 @@
       "stallAngleDegrees": 15.0,
       "liftSlope": 6.283185307179586,
       "controlSurfaceSlope": 6.283185307179586,
+      "aileronAuthorityScale": 1.2,
+      "elevatorAuthorityScale": 1.0,
+      "rudderAuthorityScale": 0.8,
       "parasiticDragMultiplier": 1.0,
       "oswaldEfficiency": 0.8
     },

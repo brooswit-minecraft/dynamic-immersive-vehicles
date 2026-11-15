@@ -25,6 +25,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.maxSteerDegrees = 35.0; fresh.lateralGripMultiplier = 0.7; fresh.waterDrag = 450.0; fresh.propellerForce = 7000.0;
   fresh.angularWaterDrag = 50.0; fresh.antiRollStiffness = 0.4;
   fresh.stallAngleDegrees = 12.0; fresh.liftSlope = 5.0; fresh.controlSurfaceSlope = 4.0;
+  // MINECRAFT-541: the three new fixed-wing per-axis authority fields must go through this same
+  // live-mutation path too.
+  fresh.aileronAuthorityScale = 1.2; fresh.elevatorAuthorityScale = 0.8; fresh.rudderAuthorityScale = 1.4;
   fresh.brakeBiasFront = 0.65;
   fresh.driveBiasFront = 0.3;
   // MINECRAFT-522: the three new rotor fields must go through this same live-mutation path -
@@ -54,6 +57,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(450.0, target.waterDrag); assertEquals(7000.0, target.propellerForce); assertEquals(50.0, target.angularWaterDrag);
   assertEquals(0.4, target.antiRollStiffness);
   assertEquals(12.0, target.stallAngleDegrees); assertEquals(5.0, target.liftSlope); assertEquals(4.0, target.controlSurfaceSlope);
+  assertEquals(1.2, target.aileronAuthorityScale); assertEquals(0.8, target.elevatorAuthorityScale); assertEquals(1.4, target.rudderAuthorityScale);
   assertEquals(0.65, target.brakeBiasFront);
   assertEquals(0.3, target.driveBiasFront);
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
@@ -63,7 +67,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
   assertEquals(true, target.axleDriveForceSharing);
   assertEquals(2.5, target.longitudinalWaterDragMultiplier); assertEquals(0.4, target.lateralWaterDragMultiplier); assertEquals(3.0, target.verticalWaterDragMultiplier);
-  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
+  assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","aileronAuthorityScale","elevatorAuthorityScale","rudderAuthorityScale","brakeBiasFront","driveBiasFront",
       "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing",
       "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier"),
     new TreeSet<>(applied));
@@ -113,6 +117,23 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.0, target.cyclicAuthorityScale, "must revert to unit scaling once the override is removed");
   assertEquals(1.0, target.yawAuthorityScale, "must revert to unit scaling once the override is removed");
   assertTrue(applied.containsAll(List.of("cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale")),
+    "the revert-to-default must itself be reported as an applied live change");
+ }
+
+ @Test void removingAnAxisAuthorityScaleOverrideLiveAppliesBackDownToItsDocumentedDefault() {
+  // MINECRAFT-541: same "revert to documented default on removal" requirement as every other
+  // live-safe field above - an operator who previously configured these three independently and
+  // then removes that config entry entirely must see the live vehicle actually fall back to the
+  // documented 1.0 no-op default on the next reload, not get stuck at its last explicit value.
+  var target = Overrides.defaultTuning();
+  target.aileronAuthorityScale = 2.0; target.elevatorAuthorityScale = 0.3; target.rudderAuthorityScale = 4.0;
+  var fresh = Overrides.defaultTuning(); // no override at all -> FALLBACK defaults (1.0 each)
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(1.0, target.aileronAuthorityScale, "must revert to the documented no-op 1.0 default once the override is removed");
+  assertEquals(1.0, target.elevatorAuthorityScale, "must revert to the documented no-op 1.0 default once the override is removed");
+  assertEquals(1.0, target.rudderAuthorityScale, "must revert to the documented no-op 1.0 default once the override is removed");
+  assertTrue(applied.containsAll(List.of("aileronAuthorityScale","elevatorAuthorityScale","rudderAuthorityScale")),
     "the revert-to-default must itself be reported as an applied live change");
  }
 

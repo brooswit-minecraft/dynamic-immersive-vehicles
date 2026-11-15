@@ -97,7 +97,23 @@ public final class FlightForces {
   * area. Shared by aileron roll torque, elevator pitch torque, and rudder yaw torque.
   */
  public static double controlSurfaceForce(double deflectionRadians, double area, double dynamicPressure, double controlSurfaceSlope) {
-  return controlSurfaceSlope * deflectionRadians * area * dynamicPressure;
+  return controlSurfaceForce(deflectionRadians, area, dynamicPressure, controlSurfaceSlope, 1.0);
+ }
+
+ /**
+  * {@link #controlSurfaceForce(double, double, double, double)} with an explicit, independent
+  * per-axis operator-configured authority multiplier ({@code Overrides.Tuning#
+  * aileronAuthorityScale}/{@code elevatorAuthorityScale}/{@code rudderAuthorityScale},
+  * MINECRAFT-541) applied on top of the unchanged {@code controlSurfaceSlope}/area/
+  * dynamic-pressure physics - same contract as {@link RotorForces#cyclicTorque(double, double,
+  * double, double)}/{@link RotorForces#yawTorque(double, double, double, double)}: {@code 1.0}
+  * is a pure no-op reproducing the exact prior shared-{@code controlSurfaceSlope}-only force,
+  * and the caller passes each axis its own independent scale, so changing one axis's authority
+  * can never affect another axis, the shared slope, or this surface's own native area - this
+  * method does not duplicate or re-derive any of those, only multiplies the final result.
+  */
+ public static double controlSurfaceForce(double deflectionRadians, double area, double dynamicPressure, double controlSurfaceSlope, double authorityScale) {
+  return controlSurfaceSlope * deflectionRadians * area * dynamicPressure * authorityScale;
  }
 
  /** Throttle-linear thrust; this model does not account for airspeed/advance-ratio falloff. */
