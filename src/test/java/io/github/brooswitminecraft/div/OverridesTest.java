@@ -291,8 +291,16 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, zero::validate);
   var negative = new Overrides.Tuning(); negative.parasiticDragMultiplier = -1.0;
   assertThrows(IllegalArgumentException.class, negative::validate);
+  // Review finding (MINECRAFT-536, PR #31 comment 6901114578): a merely-strictly-positive lower
+  // bound let a vanishingly tiny legal value through - 0.1 is the actual documented floor now.
+  var belowFloor = new Overrides.Tuning(); belowFloor.parasiticDragMultiplier = 0.0999;
+  assertThrows(IllegalArgumentException.class, belowFloor::validate);
+  var tinyLegalUnderOldBound = new Overrides.Tuning(); tinyLegalUnderOldBound.parasiticDragMultiplier = Double.MIN_VALUE;
+  assertThrows(IllegalArgumentException.class, tinyLegalUnderOldBound::validate, "a vanishingly tiny value must be rejected, not merely 'strictly positive'");
   var tooLarge = new Overrides.Tuning(); tooLarge.parasiticDragMultiplier = 5.001;
   assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atFloor = new Overrides.Tuning(); atFloor.parasiticDragMultiplier = 0.1;
+  assertDoesNotThrow(atFloor::validate);
   var atCap = new Overrides.Tuning(); atCap.parasiticDragMultiplier = 5.0;
   assertDoesNotThrow(atCap::validate);
   var inRange = new Overrides.Tuning(); inRange.parasiticDragMultiplier = 1.3;
@@ -304,12 +312,36 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, zero::validate);
   var negative = new Overrides.Tuning(); negative.oswaldEfficiency = -0.5;
   assertThrows(IllegalArgumentException.class, negative::validate);
+  // Review finding (MINECRAFT-536, PR #31 comment 6901114578): Overrides.Tuning.validate
+  // previously accepted every finite oswaldEfficiency > 0, while FlightForces.dragCoefficient
+  // divides the induced term by it - a legal tiny value such as Double.MIN_VALUE underflows
+  // Math.PI*aspectRatio*efficiency to zero for a normal fixed wing, yielding Infinity drag/force
+  // with nonzero lift. 0.5 is the actual documented physical floor now, below every real
+  // conventional wing's Oswald efficiency.
+  var belowFloor = new Overrides.Tuning(); belowFloor.oswaldEfficiency = 0.4999;
+  assertThrows(IllegalArgumentException.class, belowFloor::validate);
+  var tinyLegalUnderOldBound = new Overrides.Tuning(); tinyLegalUnderOldBound.oswaldEfficiency = Double.MIN_VALUE;
+  assertThrows(IllegalArgumentException.class, tinyLegalUnderOldBound::validate,
+    "a vanishingly tiny value must be rejected, not merely 'strictly positive' - it would drive the induced term's denominator to a vanishing subnormal, overflowing the division to Infinity drag (confirmed directly against FlightForces.dragCoefficient below)");
   var tooLarge = new Overrides.Tuning(); tooLarge.oswaldEfficiency = 1.001;
   assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atFloor = new Overrides.Tuning(); atFloor.oswaldEfficiency = 0.5;
+  assertDoesNotThrow(atFloor::validate);
   var atCap = new Overrides.Tuning(); atCap.oswaldEfficiency = 1.0;
   assertDoesNotThrow(atCap::validate);
   var inRange = new Overrides.Tuning(); inRange.oswaldEfficiency = 0.75;
   assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void tinyLegalOswaldEfficiencyWouldHaveProducedInfiniteDragBeforeThisBoundFix() {
+  // Review finding (MINECRAFT-536, PR #31 comment 6901114578): demonstrates the actual numeric
+  // hazard the floor above closes - directly against FlightForces.dragCoefficient (the real
+  // production call site), not just Overrides.validate() in isolation. A normal fixed-wing
+  // aspect ratio (8) with Double.MIN_VALUE as the efficiency underflows the induced term's
+  // denominator to exactly 0.0, producing Infinity - confirming this was a real, not theoretical,
+  // finite-result hazard prior to the validated floor.
+  double hazardResult = FlightForces.dragCoefficient(1.0, 0.03, 8, 1.0, Double.MIN_VALUE);
+  assertTrue(Double.isInfinite(hazardResult), "confirms the exact hazard this ticket's validated oswaldEfficiency floor (0.5) now prevents from ever reaching this method in production");
  }
 
  @Test void dragTuningFieldsParticipateInTheFullPrecedenceChain() {

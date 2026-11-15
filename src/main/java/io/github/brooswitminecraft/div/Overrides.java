@@ -295,18 +295,31 @@ public final class Overrides {
    // never so large it produces an absurd lift/control force from a tiny angle/deflection.
    if (liftSlope != null && !(Double.isFinite(liftSlope) && liftSlope > 0 && liftSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (controlSurfaceSlope != null && !(Double.isFinite(controlSurfaceSlope) && controlSurfaceSlope > 0 && controlSurfaceSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
-   // MINECRAFT-536: strictly positive (a zero or negative multiplier would produce zero/
-   // negative drag - a physically nonsensical dragless or energy-adding airframe, the same
-   // "never negative/energy-adding" reasoning suspensionDampingRatio's own strictly-positive
-   // bound already uses), capped at 5.0 as a documentable ceiling keeping this a tuning knob
-   // against the existing native-derived budget, not an unbounded multiplier.
-   if (parasiticDragMultiplier != null && !(Double.isFinite(parasiticDragMultiplier) && parasiticDragMultiplier > 0 && parasiticDragMultiplier <= 5.0)) throw new IllegalArgumentException("invalid vehicle tuning");
-   // MINECRAFT-536: strictly positive (a zero efficiency divides by zero in
-   // FlightForces.dragCoefficient's induced term, producing infinite drag - never a sensible
-   // configuration) and capped at the real Oswald-efficiency ceiling, 1.0 - the ideal elliptical
-   // lift distribution is the theoretical maximum (e==1.0); no real wing exceeds it, so this is a
-   // genuine physical bound, not an arbitrary documentable one like parasiticDragMultiplier's.
-   if (oswaldEfficiency != null && !(Double.isFinite(oswaldEfficiency) && oswaldEfficiency > 0 && oswaldEfficiency <= 1.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-536 review correction: a merely-strictly-positive lower bound (e.g. Double.
+   // MIN_VALUE) is not enough - FlightForces.dragCoefficient multiplies the floored native value
+   // by this field, and while multiplication alone cannot produce Infinity the way oswaldEfficiency's
+   // division below can, a vanishingly tiny legal value is still a physically meaningless
+   // "basically zero drag" configuration this knob was never meant to express (an operator who
+   // wants that should disable physics/the vehicle instead). 0.1 is a documentable floor kept
+   // symmetric with oswaldEfficiency's own real floor immediately below, capped at 5.0 as a
+   // documentable ceiling keeping this a tuning knob against the existing native-derived budget,
+   // not an unbounded multiplier.
+   if (parasiticDragMultiplier != null && !(Double.isFinite(parasiticDragMultiplier) && parasiticDragMultiplier >= 0.1 && parasiticDragMultiplier <= 5.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-536 review correction: a merely-strictly-positive lower bound is NOT enough here -
+   // FlightForces.dragCoefficient's induced term divides by Math.PI*aspectRatio*oswaldEfficiency,
+   // and a legal tiny value like Double.MIN_VALUE drives that product to a vanishing subnormal
+   // (confirmed: ~1.24e-322 for a typical aspectRatio of 8, not exactly zero, but the division
+   // still overflows a finite lift-squared numerator to Infinity), producing Infinity drag/force
+   // with nonzero lift for any normal fixed wing - the exact "no negative
+   // drag/energy addition" and finite-result acceptance intent this ticket requires, violated in
+   // the opposite (infinite) direction. 0.5 is a genuine physical floor, not an arbitrary
+   // documentable one: real Oswald efficiency for even a poor conventional/strut-braced wing
+   // design practically never drops below roughly 0.6-0.7, so 0.5 sits comfortably below every
+   // physically sensible real-wing value while still keeping Math.PI*aspectRatio*efficiency
+   // bounded well away from the underflow-to-zero region for any sane aspect ratio - capped at
+   // the real Oswald-efficiency ceiling, 1.0 (the ideal elliptical lift distribution is the
+   // theoretical maximum; no real wing exceeds it).
+   if (oswaldEfficiency != null && !(Double.isFinite(oswaldEfficiency) && oswaldEfficiency >= 0.5 && oswaldEfficiency <= 1.0)) throw new IllegalArgumentException("invalid vehicle tuning");
    // MINECRAFT-522: bounded the same way the class doc on RotorForces.MAX_CYCLIC_LIMIT_DEGREES
    // explains - a real rotor disk cannot be tilted onto its edge, so even an operator-configured
    // limit is capped there, never just "whatever value was typed".
