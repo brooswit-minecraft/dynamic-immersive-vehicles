@@ -122,4 +122,74 @@ class HitchJointTest {
  @Test void mountedTakesPrecedenceOverRestricted() {
   assertEquals(java.util.Set.of(ConstraintJointAxis.values()), HitchJoint.lockedAxes(true, true));
  }
+
+ // MINECRAFT-530: composing an installed APart's own position/rotation/scale into the
+ // vehicle-root-local frame createHitch needs - the gap MINECRAFT-525 explicitly left
+ // unverified/unsupported (see HitchJoint.partConnectionOffset's own doc comment).
+
+ @Test void partConnectionOffsetCollapsesToRawPosWithIdentityPartFrame() {
+  // A vehicle-root-defined connection: identity orientation, zero offset, scale 1 - must be a
+  // no-op, exactly the raw pos createHitch always used pre-MINECRAFT-530.
+  var connectionLocalPos = new Vector3d(1, 0, -3);
+  var result = HitchJoint.partConnectionOffset(new Vector3d(), new RotationMatrix(), new Vector3d(1, 1, 1), connectionLocalPos, new Vector3d());
+  assertEquals(new Vector3d(1, 0, -3), result);
+ }
+
+ @Test void partConnectionOffsetAppliesPartScaleBeforeOffset() {
+  // A part scaled 2x on X only, installed at the vehicle's own origin with no extra rotation.
+  var result = HitchJoint.partConnectionOffset(new Vector3d(), new RotationMatrix(), new Vector3d(2, 1, 1),
+    new Vector3d(3, 0, 0), new Vector3d());
+  assertEquals(new Vector3d(6, 0, 0), result, "connection pos scales with the part's own full accumulated scale");
+ }
+
+ @Test void partConnectionOffsetTranslatesByPartLocalOffset() {
+  // An unscaled, unrotated part installed 5 units forward of the vehicle's own origin.
+  var result = HitchJoint.partConnectionOffset(new Vector3d(5, 0, 0), new RotationMatrix(), new Vector3d(1, 1, 1),
+    new Vector3d(0, 0, -2), new Vector3d());
+  assertEquals(new Vector3d(5, 0, -2), result);
+ }
+
+ @Test void partConnectionOffsetRotatesScaledOffsetByPartOrientationBeforeTranslating() {
+  // Same +90-degree yaw convention as localJointFrameConvertsAnAuthoredRotation (local +Z to
+  // +X), applied to the part's own installed orientation this time, with a non-trivial scale
+  // and offset too - demonstrating translated/rotated/scaled composed together, not in
+  // isolation.
+  var partOrientation = new RotationMatrix().rotateY(90);
+  var result = HitchJoint.partConnectionOffset(new Vector3d(10, 0, 0), partOrientation, new Vector3d(2, 1, 1),
+    new Vector3d(0, 0, 1), new Vector3d());
+  // Scale by (2,1,1) first: (0,0,1) unaffected on Z -> (0,0,1); rotate +90 yaw: local +Z -> +X ->
+  // (1,0,0); translate by the part's own vehicle-root-local offset (10,0,0) -> (11,0,0).
+  assertEquals(11, result.x, 1e-9);
+  assertEquals(0, result.y, 1e-9);
+  assertEquals(0, result.z, 1e-9);
+ }
+
+ @Test void partConnectionOffsetUsesTheSameDestInstanceItReturns() {
+  var dest = new Vector3d();
+  var result = HitchJoint.partConnectionOffset(new Vector3d(), new RotationMatrix(), new Vector3d(1, 1, 1), new Vector3d(), dest);
+  assertSame(dest, result);
+ }
+
+ @Test void partConnectionRotationCollapsesToPlainConversionWithIdentityPartOrientation() {
+  var hookupRot = new RotationMatrix().rotateY(30);
+  var result = HitchJoint.partConnectionRotation(new RotationMatrix(), hookupRot);
+  assertEquals(HitchJoint.localJointFrame(hookupRot), result);
+ }
+
+ @Test void partConnectionRotationComposesPartOrientationBeforeConnectionRot() {
+  // The part's own installed orientation (+90 yaw) must be applied FIRST, with the connection's
+  // own authored rot (+30 yaw) composed after it - not the other way around, and not just the
+  // connection's rot alone. Transforming local +Z should land where a +90-then-+30 (120 total)
+  // yaw of +Z would: local +Z rotated 120 degrees about Y.
+  var partOrientation = new RotationMatrix().rotateY(90);
+  var connectionRot = new RotationMatrix().rotateY(30);
+  var composed = HitchJoint.partConnectionRotation(partOrientation, connectionRot);
+  var expected = HitchJoint.localJointFrame(new RotationMatrix().rotateY(120));
+  double angleDiff = new Quaterniond(composed).invert().mul(expected).angle();
+  assertEquals(0, angleDiff, 1e-9);
+  // And it must differ from using the bare connection rot alone (would wrongly drop the part's
+  // own +90 yaw entirely).
+  double angleDiffFromBareConnectionRot = new Quaterniond(composed).invert().mul(HitchJoint.localJointFrame(connectionRot)).angle();
+  assertTrue(angleDiffFromBareConnectionRot > 1e-6);
+ }
 }

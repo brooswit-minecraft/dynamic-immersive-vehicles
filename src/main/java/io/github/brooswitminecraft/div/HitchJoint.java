@@ -68,6 +68,47 @@ public final class HitchJoint {
   * free; an ordinary connection leaves all rotation free, matching a real ball/pintle hitch where
   * the trailer's own wheels and suspension keep it upright, not the joint.
   */
+ /**
+  * Composes a connection's own {@code pos} - authored in the connection's OWNING entity's local
+  * frame, per {@code AJSONInteractableEntity.connections}'s shared base (both a vehicle's own
+  * root JSON and an installed part's own JSON can define connections) - into the vehicle-root-
+  * local frame {@link #anchorLocalOffset} needs, for the case left unverified/unsupported by
+  * MINECRAFT-525 (see {@code PhysicsBridge.createHitch}'s own doc comment): the owning entity is
+  * an installed {@code APart} rather than the vehicle's own root. {@code partLocalOffset}/
+  * {@code partLocalOrientation} are {@code APart}'s own public fields, already fully resolved to
+  * vehicle-root-local by MTS itself (APart composes them recursively through any of its own
+  * sub-parts before DIV ever sees them - confirmed by the real {@code APart.update()} source,
+  * and already relied on elsewhere in this codebase: {@code PhysicsBridge}'s wheel load-share
+  * computation uses {@code wheel.localOffset} directly against the same body {@code center}
+  * {@link #anchorLocalOffset}'s caller uses, with no extra transform). {@code partScale} is the
+  * part's own full accumulated scale ({@code APart.scale}, the {@code AEntityC_Renderable} field
+  * - includes both the parent's scale and the part's own {@code partScale}) - applied to the
+  * connection's positional offset only, mirroring how {@code APart} itself scales its OWN
+  * placement offset before adding its own position (its {@code rot} carries no separate scale;
+  * {@code JSONConnection} defines none either). A connection authored directly on the vehicle's
+  * own root JSON (the ordinary, pre-MINECRAFT-530 case) passes an identity orientation, zero
+  * offset and scale of 1 here, which collapses this to exactly {@code connectionLocalPos} -
+  * the original, unconverted value {@code createHitch} always used for that case.
+  */
+ public static Vector3d partConnectionOffset(Vector3dc partLocalOffset, RotationMatrix partLocalOrientation, Vector3dc partScale, Vector3dc connectionLocalPos, Vector3d dest) {
+  dest.set(connectionLocalPos.x()*partScale.x(), connectionLocalPos.y()*partScale.y(), connectionLocalPos.z()*partScale.z());
+  localJointFrame(partLocalOrientation).transform(dest);
+  return dest.add(partLocalOffset);
+ }
+ /**
+  * Composes a connection's own {@code rot} with the installed part's own local-frame rotation it
+  * is authored against, for the same owning-entity gap {@link #partConnectionOffset} closes. The
+  * right-multiply order ({@code partLocalOrientation} first, {@code connectionRot} applied after
+  * it) mirrors {@code RotationMatrix.multiply(other)}'s own {@code this = this*other} convention
+  * - the exact operation {@code APart.update()} itself uses to compose its placement {@code rot}
+  * onto its own local orientation, and the one {@code PhysicsBridge.createHitch}'s doc comment
+  * already cites for IV's native composition. A vehicle-root-defined connection passes an
+  * identity {@code partLocalOrientation}, collapsing this to exactly {@link #localJointFrame}'s
+  * own plain conversion of {@code connectionRot} alone - unaffected for that case.
+  */
+ public static Quaterniond partConnectionRotation(RotationMatrix partLocalOrientation, RotationMatrix connectionRot) {
+  return localJointFrame(partLocalOrientation).mul(localJointFrame(connectionRot));
+ }
  public static Set<ConstraintJointAxis> lockedAxes(boolean mounted, boolean restricted) {
   var axes = EnumSet.of(ConstraintJointAxis.LINEAR_X, ConstraintJointAxis.LINEAR_Y, ConstraintJointAxis.LINEAR_Z);
   if (mounted) {
