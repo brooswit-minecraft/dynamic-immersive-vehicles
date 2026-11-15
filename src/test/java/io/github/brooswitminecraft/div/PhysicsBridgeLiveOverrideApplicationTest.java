@@ -35,6 +35,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.suspensionDampingRatio = 1.1;
   // MINECRAFT-537: rotorAngularDampingCoefficient must go through this same live-mutation path too.
   fresh.rotorAngularDampingCoefficient = 3.5;
+  // MINECRAFT-532: axleDriveForceSharing must go through this same live-mutation path too.
+  fresh.axleDriveForceSharing = true;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
@@ -47,8 +49,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
   assertEquals(1.1, target.suspensionDampingRatio);
   assertEquals(3.5, target.rotorAngularDampingCoefficient);
+  assertEquals(true, target.axleDriveForceSharing);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","rotorAngularDampingCoefficient"),
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","rotorAngularDampingCoefficient","axleDriveForceSharing"),
     new TreeSet<>(applied));
  }
 

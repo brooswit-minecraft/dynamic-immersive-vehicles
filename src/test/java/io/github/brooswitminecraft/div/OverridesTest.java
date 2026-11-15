@@ -432,6 +432,32 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
  }
 
+ @Test void axleDriveForceSharingHasNoFallbackAndStaysNullWhenNeverConfigured() {
+  // Same "stays null, not a default value" shape as driveBiasFront above -
+  // AxleDriveForceSharing's own caller treats null as "disabled", not a fabricated default.
+  assertNull(Overrides.resolved("packid:not_configured").axleDriveForceSharing);
+  assertNull(Overrides.defaultTuning().axleDriveForceSharing);
+ }
+
+ @Test void axleDriveForceSharingParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.axleDriveForceSharing = true;
+   Overrides.setForTest(java.util.Map.of("packid:axle_sharing_vehicle", override));
+   assertEquals(true, Overrides.resolved("packid:axle_sharing_vehicle").axleDriveForceSharing,
+     "an explicit operator override must be used instead of staying null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+  var packMetadata = new Overrides.Tuning(); packMetadata.axleDriveForceSharing = true;
+  assertEquals(true, Overrides.resolved("packid:not_configured", packMetadata, null, null).axleDriveForceSharing,
+    "with no operator override, pack DIV metadata must still be used over staying null");
+ }
+
+ @Test void axleDriveForceSharingIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.axleDriveForceSharing = true;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
  @Test void packMetadataFillsAGapBelowAMissingOperatorOverrideButAboveTheFallback() {
   var packMetadata = new Overrides.Tuning();
   packMetadata.suspensionTravel = 0.45;

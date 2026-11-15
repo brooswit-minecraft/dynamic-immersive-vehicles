@@ -35,6 +35,10 @@
       "driveForce": 9000.0,
       "driveBiasFront": 0.2
     },
+    "examplepack:axle_force_sharing_car": {
+      "driveForce": 9000.0,
+      "axleDriveForceSharing": true
+    },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
       "hullFillFactor": 0.5,
