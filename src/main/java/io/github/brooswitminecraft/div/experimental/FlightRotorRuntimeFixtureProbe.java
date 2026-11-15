@@ -232,6 +232,13 @@ public final class FlightRotorRuntimeFixtureProbe {
  // restoreConfigOnce's own check of this flag correctly no-ops instead of restoring a snapshot
  // that was never taken.
  private static boolean configWasWritten = false;
+ // Review finding (comments 53958/53959): a config-restore failure must not be allowed to read
+ // as a clean completion just because runScenarios() already logged its own
+ // "ALL SCENARIOS FINISHED" line before cleanup even starts, and releaseChunksOnce's own final
+ // line used to say exactly the same "- ALL_DONE" regardless of whether restoration succeeded.
+ // Set ONLY in restoreConfigOnce's own IOException branch; read by releaseChunksOnce to make the
+ // actual terminal outcome explicit instead of success-shaped.
+ private static boolean configRestoreFailed = false;
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -865,6 +872,7 @@ public final class FlightRotorRuntimeFixtureProbe {
       + " - NOT reloading (would apply the known-still-probe-mutated file) - manual cleanup needed."
       + (originalConfigExisted ? " Original content this probe is preserving for that cleanup: " + originalConfigContent : " Original file did not exist - it should be deleted."), ex);
     restoredOnDisk = false;
+    configRestoreFailed = true;
    }
    if (restoredOnDisk) {
     var report = PhysicsBridge.reloadOverrides();
@@ -890,8 +898,18 @@ public final class FlightRotorRuntimeFixtureProbe {
    int x = (int) (key >> 32), z = (int) key;
    level.setChunkForced(x, z, false);
   }
-  LOGGER.info("[DIV flightRotorFixture] released " + chunksForcedByThisProbe.size() + " chunk(s) this probe itself forced - ALL_DONE");
+  int released = chunksForcedByThisProbe.size();
   chunksForcedByThisProbe.clear();
   globalPhase = GlobalPhase.ALL_DONE;
+  // Review finding: chunk release (this method) always succeeds the same way regardless of
+  // config-restore outcome, but the terminal log line must say so explicitly - runScenarios()
+  // already emitted its own "ALL SCENARIOS FINISHED" line before cleanup even started, so a
+  // reader scanning only for a final success-shaped line could otherwise miss that cleanup
+  // itself did not fully succeed.
+  if (configRestoreFailed) {
+   LOGGER.error("[DIV flightRotorFixture] released " + released + " chunk(s) this probe itself forced, but config restore FAILED (see the earlier FAILED-to-restore error above for manual cleanup) - CLEANUP FAILED, not a clean ALL_DONE");
+  } else {
+   LOGGER.info("[DIV flightRotorFixture] released " + released + " chunk(s) this probe itself forced - ALL_DONE");
+  }
  }
 }
