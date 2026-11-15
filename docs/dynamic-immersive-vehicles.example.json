@@ -35,6 +35,10 @@
       "driveForce": 9000.0,
       "driveBiasFront": 0.2
     },
+    "examplepack:toe_tuned_car": {
+      "toeFrontDegrees": 1.5,
+      "toeRearDegrees": -0.5
+    },
     "examplepack:axle_force_sharing_car": {
       "driveForce": 9000.0,
       "axleDriveForceSharing": true

@@ -615,6 +615,25 @@ See [Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528)
 below for the full math, the ride-height consequence, and the combined
 stability guard it shares with `suspensionDampingRatio`.
 
+`toeFrontDegrees`/`toeRearDegrees` (optional, degrees, `-20` to `20`) set a
+static toe alignment angle for the geometric front/rear axle group
+respectively - same axle grouping as `brakeBiasFront`/`driveBiasFront`
+above. A positive value is toe-IN (both wheels on that axle angled slightly
+toward the vehicle's own centerline); negative is toe-OUT (angled away from
+it). Mirrored left/right automatically, by each wheel's own lateral anchor
+position, so a symmetric vehicle produces no net lateral force while
+driving straight - only the intentional alignment effect (added grip/
+stability from toe-in, or reduced rolling resistance/increased turn-in from
+toe-out) once the vehicle is actually turning or the surface asks for it.
+Leaving either field unset is a strict no-op for that axle: it keeps the
+exact pre-ticket zero-offset wheel direction. A layout with no
+geometrically-distinguishable rear axle (same ambiguous case
+`brakeBiasFront`/`driveBiasFront` fall back on) ignores whatever toe is
+configured and applies none, for the same "don't fabricate an axle
+distinction that isn't there" reason. See
+[`AxleToeDistribution`](src/main/java/io/github/brooswitminecraft/div/AxleToeDistribution.java)
+for the implementation.
+
 `massKg` is optional; omit it to use IV's calculated vehicle mass. The four
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
@@ -748,7 +767,7 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
 `yawAuthorityScale`, `rotorAngularDampingCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
-`suspensionSpringMultiplier`, `axleDriveForceSharing`. Fields baked in at vehicle construction - `massKg`,
+`suspensionSpringMultiplier`, `toeFrontDegrees`, `toeRearDegrees`, `axleDriveForceSharing`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
