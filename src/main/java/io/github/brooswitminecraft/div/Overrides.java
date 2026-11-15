@@ -180,6 +180,38 @@ public final class Overrides {
   // THIS configured ratio, never a second hardcoded 0.7, so a configured value never silently
   // disappears depending on whether that unrelated experimental candidate happens to be enabled.
   public Double suspensionDampingRatio;
+  // MINECRAFT-528: optional, per-vehicle dimensionless suspension SPRING-stiffness multiplier -
+  // uniformly scales the calibrated per-wheel spring rate PhysicsBridge.suspensionSpring/
+  // suspensionSpringForShare already compute (mass*gravity*loadShare/(travel*.5)), previously
+  // never configurable at all. 1.0 (FALLBACK below) reproduces that exact calibrated rate - a
+  // byte-identical default equivalence for every vehicle that never sets this field, same shape
+  // as suspensionDampingRatio immediately above. UNLIKE suspensionDampingRatio, this is NOT a
+  // settling-behavior-only knob: the spring rate itself sets the static ride-height equilibrium
+  // (PhysicsBridge.suspensionSpring's own doc - compression balances gravity at exactly
+  // travel*.5 for the CALIBRATED rate), so scaling it moves that equilibrium. A multiplier m
+  // settles to compression (travel*.5)/m instead: m>1 (stiffer) sits HIGHER (less compression,
+  // a harder/sportier ride), m<1 (softer) sits LOWER (more compression, a plusher/softer ride).
+  // Review finding: m<=0.5 is not merely "soft" - it is PHYSICALLY UNREACHABLE. Equilibrium
+  // (travel*.5)/m must stay strictly below suspensionTravel itself (the hard compression ceiling
+  // PhysicsBridge's raycast length and TireForces.suspension's own geometry enforce; damping
+  // supplies no static support at zero velocity, so it cannot make up a shortfall at rest) -
+  // algebraically (travel*.5)/m < travel reduces to m > 0.5, independent of suspensionTravel's
+  // own configured value entirely (the travel cancels out). At or below 0.5 the wheel has no
+  // static rest position short of fully bottomed out (zero remaining travel, and strictly below
+  // 0.5 the vehicle's real weight permanently exceeds what the spring can ever support at rest,
+  // regardless of travel) - rejected here, not merely documented as a caveat. Lower-bounded at
+  // a strict 0.5 (never inclusive, same "reject the exact boundary too" reasoning
+  // suspensionDampingRatio's own STABILITY_MARGIN uses - 0.5 exactly is already fully bottomed,
+  // not a working suspension), capped at 4.0 as a documentable flat ceiling on the stiff end;
+  // the REAL stability guard on the stiff end is the travel/damping-ratio-aware cross-field check
+  // below (see maxStableSuspensionDampingRatio's own doc, now generalized to take this
+  // multiplier too) - scaling the spring raises the per-wheel natural frequency by sqrt(m),
+  // which can destabilize Body.stepGround's explicit-damping-term integration exactly the same
+  // way an excessive suspensionDampingRatio alone already could, so the two fields share one
+  // combined stability check rather than two independent ones that could each pass alone while
+  // their combination does not. Re-read live every tick by PhysicsBridge.stepGround, same as
+  // suspensionDampingRatio/brakeBiasFront - see PhysicsBridge.applyLiveSafeFields.
+  public Double suspensionSpringMultiplier;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -252,6 +284,15 @@ public final class Overrides {
    // every travel on its own; the real, travel-dependent bound below is what actually guards
    // stability.
    if (suspensionDampingRatio != null && !(Double.isFinite(suspensionDampingRatio) && suspensionDampingRatio > 0 && suspensionDampingRatio <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Review finding: strictly positive is not enough - a multiplier at or below 0.5 is
+   // physically unreachable at rest regardless of suspensionTravel (see suspensionSpringMultiplier's
+   // own doc for the full "(travel*.5)/m < travel reduces to m > 0.5, travel cancels out"
+   // derivation), so the lower bound is a strict 0.5 (the exact boundary itself is already fully
+   // bottomed out, not a working suspension - rejected too, same "reject the exact boundary"
+   // reasoning suspensionDampingRatio's own STABILITY_MARGIN uses), flat-capped at 4.0 on the
+   // stiff end as a documentable ceiling - the real stiff-end stability guard is the combined
+   // cross-field check below, not this flat range alone.
+   if (suspensionSpringMultiplier != null && !(Double.isFinite(suspensionSpringMultiplier) && suspensionSpringMultiplier > 0.5 && suspensionSpringMultiplier <= 4.0)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Review finding (comments 53839/53840): the flat 2.0 ceiling above only proves stable at
    // this project's documented default suspensionTravel (0.3) - Body.stepGround's own explicit-
    // damping-term integration has a REAL, travel-dependent stability bound (confirmed against an
@@ -271,9 +312,20 @@ public final class Overrides {
    // stable" a non-strict `>` comparison alone would wrongly accept. STABILITY_MARGIN applies a
    // modest (0.5%) safety factor below the computed bound - confirmed by the same sweep to
    // actually converge - so this check rejects the exact boundary too, not only values past it.
-   if (suspensionDampingRatio != null) {
+   // MINECRAFT-528: this check now also triggers whenever suspensionSpringMultiplier alone is
+   // configured (suspensionDampingRatio left null/default) - scaling the spring raises the same
+   // per-wheel natural frequency the ratio-only check below is written against (see
+   // maxStableSuspensionDampingRatio's own doc, now generalized to take the multiplier too), so
+   // a configured multiplier can destabilize the UNCONFIGURED 0.7 default ratio exactly the way
+   // an excessive configured ratio alone already could against the unconfigured 1.0 multiplier.
+   // Both fields default to their own FALLBACK (never to "skip the check") whenever only one is
+   // actually set, so this is a true combined check, not two independent ones that could each
+   // pass alone while their actual configured combination does not.
+   if (suspensionDampingRatio != null || suspensionSpringMultiplier != null) {
     double travelForStabilityCheck = suspensionTravel != null ? suspensionTravel : FALLBACK.suspensionTravel;
-    if (suspensionDampingRatio > maxStableSuspensionDampingRatio(travelForStabilityCheck)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+    double ratioForStabilityCheck = suspensionDampingRatio != null ? suspensionDampingRatio : FALLBACK.suspensionDampingRatio;
+    double multiplierForStabilityCheck = suspensionSpringMultiplier != null ? suspensionSpringMultiplier : FALLBACK.suspensionSpringMultiplier;
+    if (ratioForStabilityCheck > maxStableSuspensionDampingRatio(travelForStabilityCheck, multiplierForStabilityCheck)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
    }
   }
   /** See the {@code suspensionDampingRatio} cross-field check in {@link #validate()} - a modest
@@ -303,10 +355,20 @@ public final class Overrides {
    * gravity could still destabilize a configuration this check accepts, exactly the same
    * pre-existing, out-of-{@code Tuning}-scope limitation every other hardcoded physics default in
    * this class (spring/damper calibration included) already carries.
+   * <p>MINECRAFT-528: generalized to also take a configured {@code springMultiplier} - the per-
+   * wheel spring rate {@code PhysicsBridge.suspensionSpringForShare}/{@code suspensionSpring}
+   * compute is now scaled by that multiplier before the damper formula ever sees it, so the
+   * natural frequency this method is already written against becomes {@code omega =
+   * sqrt(2*gravity*springMultiplier/travel)} - still with mass/loadShare cancelling out of the
+   * stability term entirely (the multiplier scales spring only, not mass or loadShare, so the
+   * same cancellation argument applies unchanged). At {@code springMultiplier==1.0} this is
+   * algebraically IDENTICAL to the original fixed-multiplier formula - the exact "preserved
+   * calibrated defaults" equivalence this ticket requires for a vehicle that never configures
+   * {@code suspensionSpringMultiplier}.
    */
-  private static double maxStableSuspensionDampingRatio(double travel) {
+  private static double maxStableSuspensionDampingRatio(double travel, double springMultiplier) {
    double gravity = 11.0;
-   double omega = Math.sqrt(2*gravity/travel);
+   double omega = Math.sqrt(2*gravity*springMultiplier/travel);
    double dtOmega = PhysicsBridge.DT*omega;
    double headroom = 4 - dtOmega*dtOmega;
    if (headroom <= 0) return 0;
@@ -364,6 +426,7 @@ public final class Overrides {
    if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (driveBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'driveBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (suspensionDampingRatio != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatio' (no part-level consumer yet)");
+   if (suspensionSpringMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'suspensionSpringMultiplier' (vehicle-only concept - no part-level consumer yet)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -396,6 +459,10 @@ public final class Overrides {
   // effectiveMassDamper previously hardcoded - an unconfigured vehicle settles byte-identically
   // to before this ticket.
   FALLBACK.suspensionDampingRatio=0.7;
+  // MINECRAFT-528: 1.0 is a pure no-op multiplier against the calibrated spring rate - an
+  // unconfigured vehicle's spring (and therefore ride-height equilibrium) stays byte-identical
+  // to before this ticket.
+  FALLBACK.suspensionSpringMultiplier=1.0;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -413,6 +480,7 @@ public final class Overrides {
   c.brakeBiasFront=t.brakeBiasFront;
   c.driveBiasFront=t.driveBiasFront;
   c.suspensionDampingRatio=t.suspensionDampingRatio;
+  c.suspensionSpringMultiplier=t.suspensionSpringMultiplier;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -448,6 +516,7 @@ public final class Overrides {
   m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
   m.suspensionDampingRatio = child.suspensionDampingRatio!=null?child.suspensionDampingRatio:parent.suspensionDampingRatio;
+  m.suspensionSpringMultiplier = child.suspensionSpringMultiplier!=null?child.suspensionSpringMultiplier:parent.suspensionSpringMultiplier;
   return m;
  }
  /**
@@ -639,6 +708,7 @@ public final class Overrides {
   // exactly the signal DriveBiasDistribution needs to reproduce the pre-ticket even split.
   result.driveBiasFront = firstNonNull(override!=null?override.driveBiasFront:null, packMetadata!=null?packMetadata.driveBiasFront:null, ivAdapted!=null?ivAdapted.driveBiasFront:null, physicallyDerived!=null?physicallyDerived.driveBiasFront:null);
   result.suspensionDampingRatio = firstNonNull(override!=null?override.suspensionDampingRatio:null, packMetadata!=null?packMetadata.suspensionDampingRatio:null, ivAdapted!=null?ivAdapted.suspensionDampingRatio:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatio:null, FALLBACK.suspensionDampingRatio);
+  result.suspensionSpringMultiplier = firstNonNull(override!=null?override.suspensionSpringMultiplier:null, packMetadata!=null?packMetadata.suspensionSpringMultiplier:null, ivAdapted!=null?ivAdapted.suspensionSpringMultiplier:null, physicallyDerived!=null?physicallyDerived.suspensionSpringMultiplier:null, FALLBACK.suspensionSpringMultiplier);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

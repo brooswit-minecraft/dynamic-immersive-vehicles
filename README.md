@@ -579,6 +579,23 @@ value never silently disappears depending on whether that candidate happens
 to be active. See [Suspension damping ratio](#suspension-damping-ratio-minecraft-523)
 below for the full math and a worked example.
 
+`suspensionSpringMultiplier` (optional, dimensionless, strictly above `0.5`
+and flat-capped at `4.0`) uniformly scales the calibrated per-wheel SPRING
+rate itself (`suspensionSpring`/`suspensionSpringForShare`), previously
+never configurable at all. `1.0` is a pure no-op, reproducing the exact
+prior calibrated rate byte-identically. Unlike `suspensionDampingRatio`
+above, this is NOT a settling-behavior-only knob - it moves the static
+ride-height equilibrium: a value above `1.0` (stiffer) settles to LESS
+compression (rides higher); below `1.0` (softer) settles to MORE
+compression (rides lower). The `0.5` lower bound is not a soft
+recommendation - at or below it the equilibrium compression would be at or
+past `suspensionTravel` itself (fully bottomed out, with no static rest
+position damping can supply), independent of whatever `suspensionTravel` is
+actually configured.
+See [Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528)
+below for the full math, the ride-height consequence, and the combined
+stability guard it shares with `suspensionDampingRatio`.
+
 `massKg` is optional; omit it to use IV's calculated vehicle mass. The four
 fields above a boat/pontoon hull specifically uses - `hullFillFactor` (the
 fraction of the chassis bounding-box volume the hull actually displaces when
@@ -689,7 +706,8 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
-`yawAuthorityScale`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`. Fields baked in at vehicle construction - `massKg`,
+`yawAuthorityScale`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
+`suspensionSpringMultiplier`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
@@ -818,6 +836,78 @@ happens to be enabled for a given run.
   "vehicles": {
     "examplepack:ordinary_car": {
       "suspensionDampingRatio": 0.85
+    }
+  }
+}
+```
+
+### Suspension spring stiffness (MINECRAFT-528)
+
+Optional, per-vehicle `suspensionSpringMultiplier` - a dimensionless,
+strictly-above-`0.5`, `4.0`-capped multiplier
+[`PhysicsBridge.suspensionSpringForShare`](src/main/java/io/github/brooswitminecraft/div/PhysicsBridge.java)
+(and its non-share-based counterpart `suspensionSpring`) apply to each
+wheel's own calibrated static-load spring rate, uniformly: `spring =
+mass * loadShare * gravity / (suspensionTravel * .5) *
+suspensionSpringMultiplier`. `1.0` (the documented fallback) reproduces the
+exact prior calibrated rate byte-identically - no change in behavior for a
+vehicle that never configures this field.
+
+**This moves the static ride-height equilibrium - unlike
+`suspensionDampingRatio`, which never does.** The unconfigured spring rate
+is calibrated so a wheel's static load exactly balances at `suspensionTravel
+* .5` compressed; scaling that rate by a multiplier `m` moves where that
+balance point sits, to `(suspensionTravel * .5) / m`:
+
+- `m > 1.0` (a stiffer spring) settles to LESS compression - the vehicle
+  rides HIGHER, a harder/sportier setup.
+- `m < 1.0` (a softer spring) settles to MORE compression - the vehicle
+  rides LOWER, a plusher/softer setup.
+
+**The `0.5` lower bound is load-bearing, not a style preference.** Damping
+supplies no static support at zero velocity, so the spring alone must be
+able to hold the wheel's real static load at some compression strictly
+below `suspensionTravel` (the hard ceiling the raycast length and
+`TireForces.suspension`'s own geometry enforce). Substituting the
+equilibrium formula above, `(suspensionTravel * .5) / m < suspensionTravel`
+reduces to `m > 0.5` - with `suspensionTravel` cancelling out entirely, so
+this bound holds regardless of whatever `suspensionTravel` a vehicle
+actually configures. At or below `0.5` there is no reachable static rest
+position at all - config load/reload rejects it outright, the same as any
+other out-of-range field (and, same as `suspensionDampingRatio`'s own
+exact-boundary rejection, `0.5` itself is rejected too: it is already fully
+bottomed out, not a working suspension).
+
+Load-share geometry and anti-roll conservation are both preserved exactly:
+every per-wheel call site that computes a calibrated spring rate (the main
+per-wheel suspension force, and the anti-roll transfer's own paired rate
+comparison) applies the SAME configured multiplier, so an asymmetric axle's
+heavier and lighter wheels still settle at the same (multiplier-scaled)
+equilibrium height, and anti-roll's restoring transfer still compares the
+pair's rates on a consistent, equally-scaled basis - only the absolute rate
+changes, never the relative geometry between wheels.
+
+**Stability is a COMBINED guard shared with `suspensionDampingRatio`, not an
+independent one.** Scaling the spring raises the same per-wheel natural
+frequency (`omega = sqrt(2 * gravity * suspensionSpringMultiplier /
+suspensionTravel)`) `suspensionDampingRatio`'s own travel-aware stability
+check (see [Suspension damping ratio](#suspension-damping-ratio-minecraft-523)
+above) is written against - a configured spring multiplier can destabilize
+even the UNCONFIGURED `0.7` default damping ratio, and a configured damping
+ratio can be destabilized by the UNCONFIGURED `1.0` default multiplier being
+scaled up elsewhere in the same check. Config load/reload therefore
+validates whichever of the two is actually configured (falling back to the
+other's own documented default when only one is set) as a single pair
+against `Body.stepGround`'s own numerical-stability bound, exactly the same
+formula and safety margin `suspensionDampingRatio`'s own cross-field check
+already uses - a vehicle that never configures either field is entirely
+unaffected by this check, same as before this ticket.
+
+```json
+{
+  "vehicles": {
+    "examplepack:ordinary_car": {
+      "suspensionSpringMultiplier": 1.15
     }
   }
 }
