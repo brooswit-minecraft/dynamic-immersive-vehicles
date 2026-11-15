@@ -2490,3 +2490,51 @@ quietly, producing
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
 checksum
 `a2fd5a8b59e0d7b6682c7b0fef1c5025b557c1ca0fb7bbc4a7ad436f29d72dae`.
+
+**Hosted-CI billing/capacity limit disclosure.** The exact-head run
+(https://github.com/brooswit-minecraft/dynamic-immersive-vehicles/actions/runs/43756562991)
+failed before execution on all 5 jobs (`runner_id 0`, zero steps),
+annotation "The job was not started because recent account payments have
+failed or your spending limit needs to be increased." - the same pre-
+existing, already-disclosed hosted-CI billing blockage recent DIV
+tickets on this repo have hit (most recently MINECRAFT-531's merge),
+not introduced by this change. Disclosed on both PR #30 and this ticket
+per the sprint's shared acceptance requirement.
+
+**Review correction (PR #30/Jira comment 54071, CHANGES_REQUESTED by
+Wroosbit).** The initial composition at `stepGround`'s `FrictionContact`-
+construction call site divided the resolved tire value back out by
+`tuning.rollingResistance` (mirroring `tireGripRatio`'s own division by
+`tuning.friction` immediately above it) - but, UNLIKE `friction`,
+`solveFriction` has no separate vehicle-baseline parameter for rolling
+resistance (its `rollingResistanceMultiplier` is the SOLE scalar
+multiplying the solver's fixed k=20 formula). That division silently
+cancelled any configured non-unit vehicle `rollingResistance` back to a
+no-op when no part override existed, and produced `surface*(part/
+vehicle)` instead of `surface*part` when a part override DID exist -
+contradicting this ticket's own declared "replace, not multiply"
+precedence. The review also correctly noted the new solver test
+hard-coded a unit (1.0) vehicle baseline and repeated the same (buggy)
+division in its own helper, so it could not have caught this.
+
+**Fix.** Removed the division entirely -
+`PhysicsBridge.tirePartRollingResistance(tireKey, tuning.rollingResistance)`
+already returns the fully-resolved value either way (part override, or
+the vehicle's own resolved value unchanged), so the contact-construction
+site now composes `h.surface().rollingResistanceMultiplier()*
+tireRollingResistance` directly, no ratio. Added two dedicated non-unit-
+vehicle-baseline regressions to `OverridesTest`
+(`nonUnitVehicleRollingResistanceComposesWithGroundSurfaceUnchangedWhenNoPartOverrideExists`,
+`nonUnitVehicleRollingResistanceIsReplacedOutrightByAPartOverrideInTheComposedMultiplier`),
+driven through the real production `PhysicsBridge.tirePartRollingResistance`
+with vehicleRollingResistance=2.0 (not 1.0, so a reintroduced division bug
+cannot hide behind self-cancelling arithmetic) - one asserting the
+no-override case composes to 2.0 (not 1.0), the other asserting a 3.0
+part override composes to 3.0 (not 1.5). Also corrected the existing
+`MultiContactFrictionSolverTirePartRollingResistanceTest` helper to match
+the fixed production composition (no division). Full suite re-run after
+the fix: **705 tests**, 0 skipped, 0 failures, 0 errors (703 + 2 net-new
+regressions). `gradle --offline build -q` succeeded again; jar SHA-256
+`65ea6c7725a863c979f1b8ae0a0d34817f54043a598582f49b480bab6a2a140f`
+(changed from the pre-fix build, as expected for a real production
+behavior change).

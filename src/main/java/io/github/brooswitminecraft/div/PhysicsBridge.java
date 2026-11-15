@@ -2354,23 +2354,31 @@ public final class PhysicsBridge {
    // MINECRAFT-534: FrictionContact.rollingResistanceMultiplier is likewise reused (not a new
    // record component) to also carry THIS WHEEL'S own installed tire part's rolling-resistance
    // override, composed MULTIPLICATIVELY with the existing ground-surface
-   // rollingResistanceMultiplier - same "ratio divided back out" composition tireGripRatio uses
-   // immediately above, independent of (and alongside) that grip ratio: tirePartRollingResistance
-   // resolves this wheel's own currently-installed part key fresh every tick to either that
-   // part's explicit rollingResistance override or the vehicle's own resolved
-   // tuning.rollingResistance unchanged; dividing back by tuning.rollingResistance yields a pure
-   // ratio that is exactly 1.0 (a true no-op) whenever no part override is set. tuning.
-   // rollingResistance is always > 0 (Tuning.validate()'s own bound), so this division never
-   // degenerates. No change to MultiContactFrictionSolver's own rolling-resistance formula.
+   // rollingResistanceMultiplier - but, UNLIKE tireGripRatio immediately above, NOT as a ratio
+   // divided back out against tuning.rollingResistance: solveFriction has no separate "vehicle
+   // baseline" parameter for rolling resistance the way it does for friction (friction.friction
+   // is passed to solveFriction directly and multiplied by frictionMultiplier INSIDE the solver -
+   // see solveFriction's own `friction*c.frictionMultiplier()` - so frictionMultiplier only ever
+   // needs to carry the DEVIATION from that already-applied baseline). rollingResistanceMultiplier
+   // has no such separately-applied baseline anywhere in MultiContactFrictionSolver - it is the
+   // SOLE scalar multiplying the solver's fixed k=20 formula - so this slot must carry the FULL
+   // resolved per-wheel value outright, review finding (PR #30/Jira comment 54071): dividing by
+   // tuning.rollingResistance here (an earlier version of this code did) silently cancelled any
+   // configured vehicle-level value back to 1.0 whenever no part override existed, and produced
+   // surface*(part/vehicle) instead of surface*part when a part override DID exist - contradicting
+   // this ticket's own declared "replace, not multiply" part precedence. tirePartRollingResistance
+   // already returns exactly the right fully-resolved value either way (the part's own override,
+   // or - when absent - the vehicle's own resolved tuning.rollingResistance unchanged, itself
+   // FALLBACK 1.0 when unconfigured), so no division is needed or correct here.
    var contacts=hits.stream().map(h->{
     double wheelBrakeMagnitude = perWheelBrakeMagnitude(h.wheel().placementDefinition.turnsWithSteer,
       v.parkingBrakeVar.isActive, brakeMagnitude, handbrakeMagnitudeThisTick, h.brakeShareRatio());
     String tireKey = h.wheel().definition.packID+":"+h.wheel().definition.systemName;
     double tireGripRatio = tirePartFriction(tireKey, tuning.friction)/tuning.friction;
-    double tireRollingResistanceRatio = tirePartRollingResistance(tireKey, tuning.rollingResistance)/tuning.rollingResistance;
+    double tireRollingResistance = tirePartRollingResistance(tireKey, tuning.rollingResistance);
     return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier()*tireRollingResistanceRatio,wheelBrakeMagnitude,h.driveShareRatio());
+     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier()*tireRollingResistance,wheelBrakeMagnitude,h.driveShareRatio());
    }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,

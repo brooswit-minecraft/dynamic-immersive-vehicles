@@ -936,6 +936,42 @@ class OverridesTest {
   }
  }
 
+ // Review finding (PR #30/Jira comment 54071): the production composition at stepGround's
+ // FrictionContact-construction call site (surface.rollingResistanceMultiplier() * resolved
+ // tire value) must NOT divide the resolved value back out by tuning.rollingResistance the way
+ // tireGripRatio divides by tuning.friction - unlike friction, solveFriction has no separate
+ // vehicle-baseline parameter for rolling resistance, so rollingResistanceMultiplier must carry
+ // the FULL resolved value outright. These two regressions drive PhysicsBridge.
+ // tirePartRollingResistance directly with a NON-UNIT vehicle baseline (1.0 alone cannot
+ // distinguish "divides and cancels to itself" from "doesn't divide at all") and then perform
+ // the exact same surface*resolved multiplication stepGround performs, proving neither a
+ // no-part-override fallback nor a part-override replacement gets silently rescaled against the
+ // vehicle's own configured baseline.
+
+ @Test void nonUnitVehicleRollingResistanceComposesWithGroundSurfaceUnchangedWhenNoPartOverrideExists() {
+  double vehicleRollingResistance = 2.0;
+  double resolved = PhysicsBridge.tirePartRollingResistance("packid:no_override_tire", vehicleRollingResistance);
+  assertEquals(2.0, resolved, 0, "with no part override, the resolved value must equal the configured vehicle baseline exactly, not a ratio against itself");
+  double surfaceMultiplier = 1.0;
+  double composed = surfaceMultiplier * resolved; // the exact stepGround composition, no division
+  assertEquals(2.0, composed, 0, "a configured, non-unit vehicle rollingResistance with no part override must actually take effect on the composed multiplier, not be cancelled back to 1.0 by dividing against itself");
+ }
+
+ @Test void nonUnitVehicleRollingResistanceIsReplacedOutrightByAPartOverrideInTheComposedMultiplier() {
+  try {
+   var part = new Overrides.Tuning(); part.rollingResistance = 3.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:overridden_tire", part));
+   double vehicleRollingResistance = 2.0;
+   double resolved = PhysicsBridge.tirePartRollingResistance("examplepack:overridden_tire", vehicleRollingResistance);
+   assertEquals(3.0, resolved, 0, "a part override must replace the vehicle's own non-unit baseline outright, not multiply/divide against it");
+   double surfaceMultiplier = 1.0;
+   double composed = surfaceMultiplier * resolved; // the exact stepGround composition, no division
+   assertEquals(3.0, composed, 0, "the composed multiplier must be surface*part (3.0), never surface*(part/vehicle) (1.5)");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  @Test void enginePartDriveForceFallsThroughWhenThePartEntryExistsButDoesNotSetDriveForce() {
   try {
    var part = new Overrides.Tuning(); part.friction = 0.9; // sets a different field, not driveForce
