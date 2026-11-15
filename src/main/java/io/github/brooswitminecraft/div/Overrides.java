@@ -128,6 +128,19 @@ public final class Overrides {
   public Double stallAngleDegrees;
   public Double liftSlope;
   public Double controlSurfaceSlope;
+  // MINECRAFT-536: bounded fixed-wing parasitic/induced drag tuning, consumed by
+  // PhysicsBridge.stepFlight via FlightForces.dragCoefficient. parasiticDragMultiplier scales
+  // the existing native-derived parasitic budget (PhysicsBridge's own Math.max(0.02,
+  // motorized.dragCoefficient) floor, unchanged) - 1.0 (FALLBACK) is a pure no-op against that
+  // floored native value, same "multiplier against an existing calibrated/native number" shape
+  // suspensionSpringMultiplier already established, not a replacement for it. oswaldEfficiency
+  // replaces FlightForces' own previously-hardcoded 0.8 induced-drag efficiency constant - see
+  // FlightForces.DEFAULT_OSWALD_EFFICIENCY/dragCoefficient's own doc. Neither affects a blimp
+  // (FlightForces.dragCoefficient's own aspectRatio<=0 branch never reaches oswaldEfficiency at
+  // all, and a blimp's parasiticDragMultiplier still only scales its own parasitic term, exactly
+  // as before) or a rotorcraft (stepRotor has no drag-coefficient model to apply either to).
+  public Double parasiticDragMultiplier;
+  public Double oswaldEfficiency;
   // MINECRAFT-522: rotorcraft-only cyclic/yaw tuning, mirroring RotorForces.cyclicTilt's own
   // bounded-clamp contract and RotorForces.cyclicTorque/yawTorque's new authority-scale overloads
   // - see those methods' own docs. cyclicLimitDegrees bounds how far EACH AXIS (pitch and roll
@@ -256,6 +269,18 @@ public final class Overrides {
    // never so large it produces an absurd lift/control force from a tiny angle/deflection.
    if (liftSlope != null && !(Double.isFinite(liftSlope) && liftSlope > 0 && liftSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (controlSurfaceSlope != null && !(Double.isFinite(controlSurfaceSlope) && controlSurfaceSlope > 0 && controlSurfaceSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-536: strictly positive (a zero or negative multiplier would produce zero/
+   // negative drag - a physically nonsensical dragless or energy-adding airframe, the same
+   // "never negative/energy-adding" reasoning suspensionDampingRatio's own strictly-positive
+   // bound already uses), capped at 5.0 as a documentable ceiling keeping this a tuning knob
+   // against the existing native-derived budget, not an unbounded multiplier.
+   if (parasiticDragMultiplier != null && !(Double.isFinite(parasiticDragMultiplier) && parasiticDragMultiplier > 0 && parasiticDragMultiplier <= 5.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-536: strictly positive (a zero efficiency divides by zero in
+   // FlightForces.dragCoefficient's induced term, producing infinite drag - never a sensible
+   // configuration) and capped at the real Oswald-efficiency ceiling, 1.0 - the ideal elliptical
+   // lift distribution is the theoretical maximum (e==1.0); no real wing exceeds it, so this is a
+   // genuine physical bound, not an arbitrary documentable one like parasiticDragMultiplier's.
+   if (oswaldEfficiency != null && !(Double.isFinite(oswaldEfficiency) && oswaldEfficiency > 0 && oswaldEfficiency <= 1.0)) throw new IllegalArgumentException("invalid vehicle tuning");
    // MINECRAFT-522: bounded the same way the class doc on RotorForces.MAX_CYCLIC_LIMIT_DEGREES
    // explains - a real rotor disk cannot be tilted onto its edge, so even an operator-configured
    // limit is capped there, never just "whatever value was typed".
@@ -420,6 +445,8 @@ public final class Overrides {
    if (stallAngleDegrees != null) throw new IllegalArgumentException("part overrides do not support 'stallAngleDegrees' (no part-level consumer yet)");
    if (liftSlope != null) throw new IllegalArgumentException("part overrides do not support 'liftSlope' (no part-level consumer yet)");
    if (controlSurfaceSlope != null) throw new IllegalArgumentException("part overrides do not support 'controlSurfaceSlope' (no part-level consumer yet)");
+   if (parasiticDragMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'parasiticDragMultiplier' (no part-level consumer yet)");
+   if (oswaldEfficiency != null) throw new IllegalArgumentException("part overrides do not support 'oswaldEfficiency' (no part-level consumer yet)");
    if (cyclicLimitDegrees != null) throw new IllegalArgumentException("part overrides do not support 'cyclicLimitDegrees' (no part-level consumer yet)");
    if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
@@ -440,7 +467,11 @@ public final class Overrides {
   * values that class previously hardcoded, so an unconfigured fixed-wing vehicle flies
   * byte-identically to before this ticket. MINECRAFT-522: cyclicLimitDegrees 20deg and
   * cyclicAuthorityScale/yawAuthorityScale 1.0 (unit scaling) reproduce RotorForces' own prior
-  * hardcoded constant/behavior exactly - see that class's doc. */
+  * hardcoded constant/behavior exactly - see that class's doc. MINECRAFT-536:
+  * parasiticDragMultiplier 1.0 is a pure no-op against the existing native-derived parasitic
+  * budget; oswaldEfficiency falls back to {@link FlightForces#DEFAULT_OSWALD_EFFICIENCY} (0.8),
+  * the exact value that class previously hardcoded - an unconfigured fixed-wing vehicle's drag
+  * is byte-identical to before this ticket. */
  private static final Tuning FALLBACK = new Tuning();
  static {
   FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
@@ -463,6 +494,13 @@ public final class Overrides {
   // unconfigured vehicle's spring (and therefore ride-height equilibrium) stays byte-identical
   // to before this ticket.
   FALLBACK.suspensionSpringMultiplier=1.0;
+  // MINECRAFT-536: 1.0 is a pure no-op multiplier against the existing native-derived parasitic
+  // drag budget - an unconfigured fixed-wing vehicle's parasitic drag stays byte-identical to
+  // before this ticket. oswaldEfficiency reuses FlightForces' own previously-hardcoded constant
+  // directly, same "don't re-state the same number twice" convention stallAngleDegrees/liftSlope/
+  // controlSurfaceSlope above already use.
+  FALLBACK.parasiticDragMultiplier=1.0;
+  FALLBACK.oswaldEfficiency=FlightForces.DEFAULT_OSWALD_EFFICIENCY;
  }
  private static Tuning copy(Tuning t) {
   Tuning c = new Tuning();
@@ -481,6 +519,7 @@ public final class Overrides {
   c.driveBiasFront=t.driveBiasFront;
   c.suspensionDampingRatio=t.suspensionDampingRatio;
   c.suspensionSpringMultiplier=t.suspensionSpringMultiplier;
+  c.parasiticDragMultiplier=t.parasiticDragMultiplier; c.oswaldEfficiency=t.oswaldEfficiency;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -517,6 +556,8 @@ public final class Overrides {
   m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
   m.suspensionDampingRatio = child.suspensionDampingRatio!=null?child.suspensionDampingRatio:parent.suspensionDampingRatio;
   m.suspensionSpringMultiplier = child.suspensionSpringMultiplier!=null?child.suspensionSpringMultiplier:parent.suspensionSpringMultiplier;
+  m.parasiticDragMultiplier = child.parasiticDragMultiplier!=null?child.parasiticDragMultiplier:parent.parasiticDragMultiplier;
+  m.oswaldEfficiency = child.oswaldEfficiency!=null?child.oswaldEfficiency:parent.oswaldEfficiency;
   return m;
  }
  /**
@@ -709,6 +750,8 @@ public final class Overrides {
   result.driveBiasFront = firstNonNull(override!=null?override.driveBiasFront:null, packMetadata!=null?packMetadata.driveBiasFront:null, ivAdapted!=null?ivAdapted.driveBiasFront:null, physicallyDerived!=null?physicallyDerived.driveBiasFront:null);
   result.suspensionDampingRatio = firstNonNull(override!=null?override.suspensionDampingRatio:null, packMetadata!=null?packMetadata.suspensionDampingRatio:null, ivAdapted!=null?ivAdapted.suspensionDampingRatio:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatio:null, FALLBACK.suspensionDampingRatio);
   result.suspensionSpringMultiplier = firstNonNull(override!=null?override.suspensionSpringMultiplier:null, packMetadata!=null?packMetadata.suspensionSpringMultiplier:null, ivAdapted!=null?ivAdapted.suspensionSpringMultiplier:null, physicallyDerived!=null?physicallyDerived.suspensionSpringMultiplier:null, FALLBACK.suspensionSpringMultiplier);
+  result.parasiticDragMultiplier = firstNonNull(override!=null?override.parasiticDragMultiplier:null, packMetadata!=null?packMetadata.parasiticDragMultiplier:null, ivAdapted!=null?ivAdapted.parasiticDragMultiplier:null, physicallyDerived!=null?physicallyDerived.parasiticDragMultiplier:null, FALLBACK.parasiticDragMultiplier);
+  result.oswaldEfficiency = firstNonNull(override!=null?override.oswaldEfficiency:null, packMetadata!=null?packMetadata.oswaldEfficiency:null, ivAdapted!=null?ivAdapted.oswaldEfficiency:null, physicallyDerived!=null?physicallyDerived.oswaldEfficiency:null, FALLBACK.oswaldEfficiency);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

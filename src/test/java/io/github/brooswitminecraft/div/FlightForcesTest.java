@@ -54,13 +54,84 @@ class FlightForcesTest {
  }
 
  @Test void noWingMeansNoInducedDrag() {
-  assertEquals(0.03, FlightForces.dragCoefficient(1.2,0.03,0), 1e-9);
+  // Zero/negative aspectRatio (a blimp hull, or a degenerate zero-wing-area config) skips the
+  // induced term entirely - oswaldEfficiency is never consulted in this branch, so an
+  // out-of-normal-range value here (0, which validate() rejects for a real Tuning but this
+  // plain-math method does not itself enforce) must not matter at all.
+  assertEquals(0.03, FlightForces.dragCoefficient(1.2,0.03,0,FlightForces.DEFAULT_OSWALD_EFFICIENCY), 1e-9);
+  assertEquals(0.03, FlightForces.dragCoefficient(1.2,0.03,-5,0), 1e-9, "a negative aspectRatio must also skip the induced term, not divide by a negative number");
  }
 
  @Test void higherLiftIncreasesInducedDragWithAWing() {
-  double low = FlightForces.dragCoefficient(0.2,0.03,8);
-  double high = FlightForces.dragCoefficient(1.0,0.03,8);
+  double low = FlightForces.dragCoefficient(0.2,0.03,8,FlightForces.DEFAULT_OSWALD_EFFICIENCY);
+  double high = FlightForces.dragCoefficient(1.0,0.03,8,FlightForces.DEFAULT_OSWALD_EFFICIENCY);
   assertTrue(high > low);
+ }
+
+ // MINECRAFT-536: parasiticDragMultiplier/oswaldEfficiency are now caller-supplied (Overrides.
+ // Tuning fields) rather than a hardcoded 0.8 inside dragCoefficient itself.
+
+ @Test void configuredOswaldEfficiencyScalesTheInducedTermInversely() {
+  // induced = lift^2/(pi*aspectRatio*e) - halving e must double the induced contribution, same
+  // "inverse scaling" FlightForces.dragCoefficient's own doc describes.
+  double parasitic = 0.03, lift = 1.0, aspectRatio = 8;
+  double defaultInduced = FlightForces.dragCoefficient(lift,parasitic,aspectRatio,FlightForces.DEFAULT_OSWALD_EFFICIENCY) - parasitic;
+  double halvedEfficiencyInduced = FlightForces.dragCoefficient(lift,parasitic,aspectRatio,FlightForces.DEFAULT_OSWALD_EFFICIENCY/2) - parasitic;
+  assertEquals(2*defaultInduced, halvedEfficiencyInduced, 1e-9, "halving oswaldEfficiency must double the induced-drag contribution");
+ }
+
+ @Test void boundedExtremeOswaldEfficiencyStaysFiniteAndNeverNegative() {
+  // Finite/bounded-extreme coverage (ticket's own ask): the validated range's extremes (a tiny
+  // strictly-positive efficiency, and the real physical ceiling 1.0) must still produce a
+  // finite, non-negative drag coefficient, never NaN/infinite/negative.
+  double tinyEfficiency = FlightForces.dragCoefficient(1.0,0.03,8,0.01);
+  double ceilingEfficiency = FlightForces.dragCoefficient(1.0,0.03,8,1.0);
+  assertTrue(Double.isFinite(tinyEfficiency) && tinyEfficiency >= 0.03);
+  assertTrue(Double.isFinite(ceilingEfficiency) && ceilingEfficiency >= 0.03);
+  assertTrue(tinyEfficiency > ceilingEfficiency, "a smaller oswaldEfficiency produces strictly more induced drag at the same lift/aspect ratio");
+ }
+
+ @Test void dragCoefficientNeverGoesBelowTheParasiticFloorRegardlessOfLiftOrEfficiency() {
+  // Ticket's own "no negative drag/energy addition" acceptance requirement: the induced term is
+  // always lift^2 (never negative) divided by a strictly-positive pi*aspectRatio*efficiency, so
+  // the total can never fall below the parasitic floor it is added to, across the entire
+  // validated oswaldEfficiency range and an arbitrary lift coefficient (including zero and a
+  // sign-flipped value, since lift is squared).
+  double parasitic = 0.04;
+  for (double lift : new double[]{0, 0.5, -0.5, 2.0, -2.0}) {
+   for (double efficiency : new double[]{0.01, 0.5, 0.8, 1.0}) {
+    double result = FlightForces.dragCoefficient(lift,parasitic,8,efficiency);
+    assertTrue(Double.isFinite(result) && result >= parasitic,
+      "dragCoefficient(" + lift + "," + parasitic + ",8," + efficiency + ") must never drop below the parasitic floor");
+   }
+  }
+ }
+
+ @Test void dragForceScalesQuadraticallyWithAirspeedAtAFixedCoefficient() {
+  // Ticket's own "quadratic speed drag" acceptance requirement: aeroForce composed with
+  // dynamicPressure (q = 1/2*rho*v^2) at a fixed, speed-independent drag coefficient must scale
+  // as v^2, not linearly - doubling airspeed must quadruple the resulting drag force.
+  double coeff = FlightForces.dragCoefficient(0.3,0.03,8,FlightForces.DEFAULT_OSWALD_EFFICIENCY);
+  double area = 3.0, airDensity = 1.225;
+  double dragAt10 = FlightForces.aeroForce(coeff, area, FlightForces.dynamicPressure(airDensity,10));
+  double dragAt20 = FlightForces.aeroForce(coeff, area, FlightForces.dynamicPressure(airDensity,20));
+  assertEquals(4*dragAt10, dragAt20, 1e-9, "doubling airspeed must quadruple drag force (quadratic in speed)");
+ }
+
+ @Test void boundedProductionAircraftDragStaysFiniteAndSane() {
+  // Ticket's own "bounded production aircraft probe" acceptance requirement: a representative
+  // real-aircraft wing (10m span / 18m^2 area, matching FlightRotorRuntimeFixtureProbe's own
+  // FW_WING_SPAN/FW_WING_AREA fixture constants - aspect ratio span^2/area ~= 5.56) at a
+  // moderate, pre-stall angle of attack, with every drag-tuning field at its documented default,
+  // must produce a finite, strictly-positive, boundedly-small drag coefficient - not an absurd
+  // or degenerate number from a realistic production configuration.
+  double wingSpan = 10.0, wingArea = 18.0;
+  double aspectRatio = (wingSpan*wingSpan)/wingArea;
+  double liftCoeff = FlightForces.liftCoefficient(Math.toRadians(5), FlightForces.DEFAULT_STALL_ANGLE_DEGREES, FlightForces.DEFAULT_LIFT_SLOPE);
+  double parasitic = Math.max(0.02, 0.04) * 1.0; // FW_DRAG_COEFF=0.04f floored, default multiplier
+  double dragCoeff = FlightForces.dragCoefficient(liftCoeff, parasitic, aspectRatio, FlightForces.DEFAULT_OSWALD_EFFICIENCY);
+  assertTrue(Double.isFinite(dragCoeff) && dragCoeff > 0, "a production-representative fixed-wing drag coefficient must be finite and positive");
+  assertTrue(dragCoeff < 1.0, "a moderate pre-stall angle of attack on a realistic wing must not produce an absurdly large drag coefficient");
  }
 
  @Test void aeroForceScalesWithCoefficientAreaAndPressure() {

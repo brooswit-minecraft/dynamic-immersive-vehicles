@@ -33,6 +33,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.cyclicLimitDegrees = 12.0; fresh.cyclicAuthorityScale = 1.4; fresh.yawAuthorityScale = 0.6;
   // MINECRAFT-523: suspensionDampingRatio must go through this same live-mutation path too.
   fresh.suspensionDampingRatio = 1.1;
+  // MINECRAFT-536: parasiticDragMultiplier/oswaldEfficiency must go through this same
+  // live-mutation path too.
+  fresh.parasiticDragMultiplier = 1.3; fresh.oswaldEfficiency = 0.65;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
@@ -44,9 +47,26 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(0.3, target.driveBiasFront);
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
   assertEquals(1.1, target.suspensionDampingRatio);
+  assertEquals(1.3, target.parasiticDragMultiplier); assertEquals(0.65, target.oswaldEfficiency);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio"),
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency"),
     new TreeSet<>(applied));
+ }
+
+ @Test void removingADragTuningOverrideLiveAppliesBackDownToItsDocumentedDefault() {
+  // Same "revert to documented default on removal" requirement as the rotor/suspension fields
+  // above - an operator who removes a previously-configured parasiticDragMultiplier/
+  // oswaldEfficiency entry must see the live vehicle actually settle back to the FALLBACK
+  // (1.0/0.8), not get stuck at its last explicit value.
+  var target = Overrides.defaultTuning();
+  target.parasiticDragMultiplier = 1.8; target.oswaldEfficiency = 0.6;
+  var fresh = Overrides.defaultTuning(); // no override at all -> FALLBACK defaults
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(1.0, target.parasiticDragMultiplier, "must revert to the documented no-op 1.0 default once the override is removed");
+  assertEquals(FlightForces.DEFAULT_OSWALD_EFFICIENCY, target.oswaldEfficiency, "must revert to FlightForces's own previously-hardcoded 0.8 once the override is removed");
+  assertTrue(applied.containsAll(List.of("parasiticDragMultiplier","oswaldEfficiency")),
+    "the revert-to-default must itself be reported as an applied live change");
  }
 
  @Test void removingASuspensionDampingRatioOverrideLiveAppliesBackDownToItsDocumentedDefault() {

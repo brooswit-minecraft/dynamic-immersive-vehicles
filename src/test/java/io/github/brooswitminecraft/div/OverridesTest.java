@@ -78,6 +78,8 @@ class OverridesTest {
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertEquals(1.0, r.suspensionSpringMultiplier, "suspensionSpringMultiplier's fallback is a pure no-op - an unconfigured vehicle's calibrated spring rate is unchanged");
+  assertEquals(1.0, r.parasiticDragMultiplier, "parasiticDragMultiplier's fallback is a pure no-op - an unconfigured vehicle's native-derived parasitic drag budget is unchanged");
+  assertEquals(FlightForces.DEFAULT_OSWALD_EFFICIENCY, r.oswaldEfficiency, "oswaldEfficiency falls back to FlightForces's own previously-hardcoded 0.8");
   assertNull(r.massKg, "massKg has no flat fallback here - PhysicsBridge falls back to the vehicle's own native mass instead");
  }
 
@@ -94,6 +96,7 @@ class OverridesTest {
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
   assertNotNull(r.suspensionDampingRatio);
   assertNotNull(r.suspensionSpringMultiplier);
+  assertNotNull(r.parasiticDragMultiplier); assertNotNull(r.oswaldEfficiency);
  }
 
  // MINECRAFT-519: antiRollStiffness - dimensionless 0 (off, the FALLBACK) to 1 (fully-rigid-bar)
@@ -278,6 +281,55 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, lift::validateSupportedForPart);
   var control = new Overrides.Tuning(); control.controlSurfaceSlope = 4.0;
   assertThrows(IllegalArgumentException.class, control::validateSupportedForPart);
+ }
+
+ // MINECRAFT-536: parasiticDragMultiplier/oswaldEfficiency - bounded fixed-wing parasitic/
+ // induced drag tuning, consumed by PhysicsBridge.stepFlight via FlightForces.dragCoefficient.
+
+ @Test void parasiticDragMultiplierOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.parasiticDragMultiplier = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.parasiticDragMultiplier = -1.0;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.parasiticDragMultiplier = 5.001;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.parasiticDragMultiplier = 5.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.parasiticDragMultiplier = 1.3;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void oswaldEfficiencyOutOfRangeFailsValidation() {
+  var zero = new Overrides.Tuning(); zero.oswaldEfficiency = 0.0;
+  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.oswaldEfficiency = -0.5;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.oswaldEfficiency = 1.001;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var atCap = new Overrides.Tuning(); atCap.oswaldEfficiency = 1.0;
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.oswaldEfficiency = 0.75;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void dragTuningFieldsParticipateInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.parasiticDragMultiplier = 1.4; override.oswaldEfficiency = 0.7;
+   Overrides.setForTest(java.util.Map.of("packid:glider3", override));
+   var r = Overrides.resolved("packid:glider3");
+   assertEquals(1.4, r.parasiticDragMultiplier, "an explicit operator override must take precedence over the documented fallback");
+   assertEquals(0.7, r.oswaldEfficiency, 1e-9);
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void dragTuningFieldsAreRejectedOnAPartOverride() {
+  var multiplier = new Overrides.Tuning(); multiplier.parasiticDragMultiplier = 1.3;
+  assertThrows(IllegalArgumentException.class, multiplier::validateSupportedForPart);
+  var efficiency = new Overrides.Tuning(); efficiency.oswaldEfficiency = 0.7;
+  assertThrows(IllegalArgumentException.class, efficiency::validateSupportedForPart);
  }
 
  @Test void brakeBiasFrontOutOfRangeFailsValidation() {
@@ -881,6 +933,33 @@ class OverridesTest {
    assertEquals(5.0, Overrides.resolved("packid:glider").liftSlope, 1e-9,
      "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
    assertEquals(4.0, Overrides.resolved("packid:glider").controlSurfaceSlope, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-536 self-review: same "invalid reload retaining last-good values" regression
+ // already covered for stallAngleDegrees/liftSlope/controlSurfaceSlope above, for the new
+ // parasiticDragMultiplier/oswaldEfficiency fields.
+
+ @Test void invalidReloadRetainsThePriorGoodParasiticDragMultiplierAndOswaldEfficiency() {
+  try {
+   var good = new Overrides.Tuning();
+   good.parasiticDragMultiplier = 1.4; good.oswaldEfficiency = 0.7;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider3", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(1.4, Overrides.resolved("packid:glider3").parasiticDragMultiplier, 1e-9);
+   assertEquals(0.7, Overrides.resolved("packid:glider3").oswaldEfficiency, 1e-9);
+
+   var invalid = new Overrides.Tuning();
+   invalid.parasiticDragMultiplier = -1.0; invalid.oswaldEfficiency = 1.5;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider3", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload for these fields must be rejected, not silently applied");
+
+   assertEquals(1.4, Overrides.resolved("packid:glider3").parasiticDragMultiplier, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(0.7, Overrides.resolved("packid:glider3").oswaldEfficiency, 1e-9,
      "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
