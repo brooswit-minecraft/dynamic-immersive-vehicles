@@ -42,6 +42,11 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.toeFrontDegrees = 2.5; fresh.toeRearDegrees = -1.5;
   // MINECRAFT-532: axleDriveForceSharing must go through this same live-mutation path too.
   fresh.axleDriveForceSharing = true;
+  // MINECRAFT-535: longitudinal/lateral/verticalWaterDragMultiplier must go through this same
+  // live-mutation path too (Wroosbit review, comment 54117: the original revision added the
+  // PhysicsBridge.applyLiveSafeFields mutations but never actually exercised them here, so the
+  // test stayed green even if those lines were removed).
+  fresh.longitudinalWaterDragMultiplier = 2.5; fresh.lateralWaterDragMultiplier = 0.4; fresh.verticalWaterDragMultiplier = 3.0;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
@@ -57,8 +62,10 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(3.5, target.rotorAngularDampingCoefficient);
   assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
   assertEquals(true, target.axleDriveForceSharing);
+  assertEquals(2.5, target.longitudinalWaterDragMultiplier); assertEquals(0.4, target.lateralWaterDragMultiplier); assertEquals(3.0, target.verticalWaterDragMultiplier);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing"),
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing",
+      "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier"),
     new TreeSet<>(applied));
  }
 
@@ -135,6 +142,23 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertNull(target.toeFrontDegrees, "must revert to unconfigured (null, no toe applied) once the override is removed");
   assertNull(target.toeRearDegrees, "must revert to unconfigured (null, no toe applied) once the override is removed");
   assertTrue(applied.containsAll(List.of("toeFrontDegrees","toeRearDegrees")), "the revert-to-unconfigured must itself be reported as an applied live change");
+ }
+
+ @Test void removingADirectionalWaterDragMultiplierOverrideLiveAppliesBackDownToItsDocumentedDefault() {
+  // MINECRAFT-535: same "revert to documented default on removal" requirement as every other
+  // live-safe field above - an operator who removes a previously-configured longitudinal/
+  // lateral/verticalWaterDragMultiplier entry must see the live vehicle actually settle back to
+  // the FALLBACK (1.0, the isotropic no-op), not get stuck at its last explicit value.
+  var target = Overrides.defaultTuning();
+  target.longitudinalWaterDragMultiplier = 2.5; target.lateralWaterDragMultiplier = 0.4; target.verticalWaterDragMultiplier = 3.0;
+  var fresh = Overrides.defaultTuning(); // no override at all -> FALLBACK defaults (1.0 each)
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(1.0, target.longitudinalWaterDragMultiplier, "must revert to the documented no-op 1.0 default once the override is removed");
+  assertEquals(1.0, target.lateralWaterDragMultiplier, "must revert to the documented no-op 1.0 default once the override is removed");
+  assertEquals(1.0, target.verticalWaterDragMultiplier, "must revert to the documented no-op 1.0 default once the override is removed");
+  assertTrue(applied.containsAll(List.of("longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier")),
+    "the revert-to-default must itself be reported as an applied live change");
  }
 
  @Test void unchangedFieldsAreNotReportedAsApplied() {
