@@ -228,6 +228,15 @@ public final class Overrides {
   // their combination does not. Re-read live every tick by PhysicsBridge.stepGround, same as
   // suspensionDampingRatio/brakeBiasFront - see PhysicsBridge.applyLiveSafeFields.
   public Double suspensionSpringMultiplier;
+  // MINECRAFT-532: opt-in contact-aware axle drive-force sharing - see AxleDriveForceSharing's
+  // own doc for the full redistribution reasoning. null/false (the documented default) is a
+  // byte-identical no-op: unset reproduces the exact pre-ticket per-wheel drive allocation,
+  // same "unset means untouched" shape driveBiasFront/brakeBiasFront already use, not merely a
+  // conservative default value. true opts a vehicle INTO redistributing an airborne wheel's own
+  // now-unusable drive share to its grounded same-axle wheel(s), weighted by their real measured
+  // contact load - never across the front/rear axle boundary. Re-read live every tick by
+  // PhysicsBridge.stepGround, same as driveBiasFront - see PhysicsBridge.applyLiveSafeFields.
+  public Boolean axleDriveForceSharing;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -457,6 +466,7 @@ public final class Overrides {
    if (driveBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'driveBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (suspensionDampingRatio != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatio' (no part-level consumer yet)");
    if (suspensionSpringMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'suspensionSpringMultiplier' (vehicle-only concept - no part-level consumer yet)");
+   if (axleDriveForceSharing != null) throw new IllegalArgumentException("part overrides do not support 'axleDriveForceSharing' (vehicle-only concept - a part has no own axle position)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -523,6 +533,7 @@ public final class Overrides {
   c.suspensionDampingRatio=t.suspensionDampingRatio;
   c.suspensionSpringMultiplier=t.suspensionSpringMultiplier;
   c.parasiticDragMultiplier=t.parasiticDragMultiplier; c.oswaldEfficiency=t.oswaldEfficiency;
+  c.axleDriveForceSharing=t.axleDriveForceSharing;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -561,6 +572,7 @@ public final class Overrides {
   m.suspensionSpringMultiplier = child.suspensionSpringMultiplier!=null?child.suspensionSpringMultiplier:parent.suspensionSpringMultiplier;
   m.parasiticDragMultiplier = child.parasiticDragMultiplier!=null?child.parasiticDragMultiplier:parent.parasiticDragMultiplier;
   m.oswaldEfficiency = child.oswaldEfficiency!=null?child.oswaldEfficiency:parent.oswaldEfficiency;
+  m.axleDriveForceSharing = child.axleDriveForceSharing!=null?child.axleDriveForceSharing:parent.axleDriveForceSharing;
   return m;
  }
  /**
@@ -755,6 +767,9 @@ public final class Overrides {
   result.suspensionSpringMultiplier = firstNonNull(override!=null?override.suspensionSpringMultiplier:null, packMetadata!=null?packMetadata.suspensionSpringMultiplier:null, ivAdapted!=null?ivAdapted.suspensionSpringMultiplier:null, physicallyDerived!=null?physicallyDerived.suspensionSpringMultiplier:null, FALLBACK.suspensionSpringMultiplier);
   result.parasiticDragMultiplier = firstNonNull(override!=null?override.parasiticDragMultiplier:null, packMetadata!=null?packMetadata.parasiticDragMultiplier:null, ivAdapted!=null?ivAdapted.parasiticDragMultiplier:null, physicallyDerived!=null?physicallyDerived.parasiticDragMultiplier:null, FALLBACK.parasiticDragMultiplier);
   result.oswaldEfficiency = firstNonNull(override!=null?override.oswaldEfficiency:null, packMetadata!=null?packMetadata.oswaldEfficiency:null, ivAdapted!=null?ivAdapted.oswaldEfficiency:null, physicallyDerived!=null?physicallyDerived.oswaldEfficiency:null, FALLBACK.oswaldEfficiency);
+  // MINECRAFT-532: no FALLBACK entry (mirrors brakeBiasFront/driveBiasFront above) - stays null
+  // (treated as "off", see AxleDriveForceSharing's own doc) unless some level actually sets it.
+  result.axleDriveForceSharing = firstNonNullBoolean(override!=null?override.axleDriveForceSharing:null, packMetadata!=null?packMetadata.axleDriveForceSharing:null, ivAdapted!=null?ivAdapted.axleDriveForceSharing:null, physicallyDerived!=null?physicallyDerived.axleDriveForceSharing:null);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}

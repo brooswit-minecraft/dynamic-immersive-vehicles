@@ -36,6 +36,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   // MINECRAFT-536: parasiticDragMultiplier/oswaldEfficiency must go through this same
   // live-mutation path too.
   fresh.parasiticDragMultiplier = 1.3; fresh.oswaldEfficiency = 0.65;
+  // MINECRAFT-532: axleDriveForceSharing must go through this same live-mutation path too.
+  fresh.axleDriveForceSharing = true;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
@@ -48,8 +50,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(12.0, target.cyclicLimitDegrees); assertEquals(1.4, target.cyclicAuthorityScale); assertEquals(0.6, target.yawAuthorityScale);
   assertEquals(1.1, target.suspensionDampingRatio);
   assertEquals(1.3, target.parasiticDragMultiplier); assertEquals(0.65, target.oswaldEfficiency);
+  assertEquals(true, target.axleDriveForceSharing);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency"),
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","axleDriveForceSharing"),
     new TreeSet<>(applied));
  }
 
