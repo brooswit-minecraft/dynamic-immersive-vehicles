@@ -2212,3 +2212,116 @@ pre-existing test run unchanged alongside them -
 confirming this change introduces no regression anywhere else in the
 suite, including every other ticket's own friction/part-override/ground-
 surface coverage).
+
+## Ground-surface config hot-reload (MINECRAFT-531)
+
+Bounded deliverable: wire the already-implemented, already-non-throwing/
+last-known-good `GroundSurfaceOverrides.reload()` (MINECRAFT-508) into the
+existing periodic `OverridesHotReload` mechanism `Overrides.reload()`
+(MINECRAFT-505) already uses, so editing
+`dynamic-immersive-vehicles-surfaces.json` while the server is running
+takes effect without a restart - the one thing `GroundSurfaceOverrides`'s
+own class doc explicitly disclosed as missing.
+
+`OverridesHotReload` now independently tracks and checks BOTH files' own
+last-modified time (`lastSeenModifiedMillis` for the vehicle file,
+`lastSeenSurfacesModifiedMillis` for the surfaces file - each read/compared
+in its own try/catch, over its own file) on the SAME shared 100-tick check
+period - an edit to one file can never mask, or be masked by, an edit to
+the other, since neither's own detection depends on the other's state at
+all. Confirmed by reading `GroundSurfaces.atState` (the real production
+ground-contact entry point): it already calls
+`GroundSurfaceOverrides.effective` fresh on every call, with no per-vehicle
+caching layer in between - unlike vehicle `Tuning` (cached per-body,
+selectively live-mutated via `PhysicsBridge.applyLiveSafeFields`), so
+swapping `GroundSurfaceOverrides`'s own static map is already "live" for
+every active vehicle's very next ground-contact tick. No change to
+`PhysicsBridge.reloadOverrides()`'s signature or behavior was needed - the
+"shared reload entry point" the sprint coordination comment named stays
+exactly what it was; this ticket only adds a second, independent reload
+call inside `OverridesHotReload` itself.
+
+Adds `experimental/GroundSurfaceHotReloadProbe.java`: opt-in
+(`-Ddiv.experimentalGroundSurfaceHotReload=true`, env-gated in
+`build.gradle` as `DIV_GROUND_SURFACE_HOT_RELOAD_PROBE`), dev/isolated-
+host-only, OFF by default - the same convention every other probe in this
+package already uses. Unlike every ground-domain probe in this package, it
+spawns no vehicle at all: "actual contacted-surface response" is read via
+`GroundSurfaces.atState` against a real registered block's
+`defaultBlockState()` (`minecraft:ice`/`minecraft:gravel`), the exact same
+production entry point `GroundSurfaceTagProbe` (MINECRAFT-508) already
+established as valid live evidence - no wheel/vehicle fixture is needed
+since this file's own override map has no per-vehicle caching layer to
+exercise. Four sequential phases, each writing to BOTH the surfaces file
+and the vehicle-overrides file in the same step (non-destructive read-
+merge-write, same convention `FlightRotorRuntimeFixtureProbe` uses) then
+reloading BOTH via their real production entry points
+(`GroundSurfaceOverrides.reload()`, `PhysicsBridge.reloadOverrides()` - the
+same ones `OverridesHotReload` itself calls on its own mtime-poll, not a
+re-derivation): BASELINE (establishes a known starting point for both
+files together), VALID_SURFACE_VALID_VEHICLE (ordinary concurrent edit,
+both succeed), INVALID_SURFACE_VALID_VEHICLE (a malformed surfaces edit is
+rejected - last-known-good retained - while the concurrent valid vehicle
+edit is NOT masked by that failure), VALID_SURFACE_INVALID_VEHICLE (the
+mirror - an out-of-range vehicle edit is rejected while the concurrent
+valid surfaces edit is NOT masked). Both files' pre-probe content is
+snapshotted and restored verbatim (plus a final live reload of the
+restored content) once done, reached from every exit path including a
+mid-run failure - same `restoreConfigOnce` pattern
+`FlightRotorRuntimeFixtureProbe` established.
+
+**Self-found/self-fixed defect in this probe itself (not production code),
+found by actually running it against a real dedicated server rather than
+trusting code inspection alone:** the first live run's
+INVALID_SURFACE_VALID_VEHICLE phase correctly asserted the rejected
+`gravel` entry's last-known-good retention, but never repaired that
+rejected entry back to valid ON DISK afterward - since
+`GroundSurfaceOverrides.reload()` validates the WHOLE surfaces file as one
+unit (same as `Overrides.reload()` does for vehicles), that still-broken
+on-disk entry then poisoned the NEXT phase's own reload of the same shared
+file, exactly the failure mode `FlightRotorRuntimeFixtureProbe`'s own
+`applyInvalidConfig` doc already found and fixed for the vehicle file. Real
+live-server evidence of the actual failure (first run, before the fix):
+```
+[DIV groundSurfaceHotReload] FAILED - VALID_VEHICLE_INVALID: the concurrent VALID surfaces edit was masked by the vehicle failure: ReloadResult[success=false, message=Cannot apply surface overrides: frictionMultiplier out of range, surfaceCount=-1]
+```
+Fixed by repairing the on-disk `gravel` entry back to its last-known-good
+value immediately after that phase's retention assertion (mirroring the
+established fix). Rerun after the fix, same real dedicated server, all four
+phases passed:
+```
+[DIV groundSurfaceHotReload] BASELINE PASSED - surfaces reloaded (reloaded 1 surface override(s)) and vehicle reloaded (reloaded 3 vehicle override(s), 0 part override(s)) independently, both live-resolved correctly
+[DIV groundSurfaceHotReload] VALID_SURFACE_VALID_VEHICLE PASSED - concurrent edits to both files both reloaded live and independently
+[DIV groundSurfaceHotReload] INVALID_SURFACE_VALID_VEHICLE PASSED - invalid surfaces edit correctly rejected (last-known-good retained) while the concurrent valid vehicle edit applied, unmasked
+[DIV groundSurfaceHotReload] VALID_SURFACE_INVALID_VEHICLE PASSED - invalid vehicle edit correctly rejected (last-known-good retained) while the concurrent valid surfaces edit applied, unmasked
+[DIV groundSurfaceHotReload] original surfaces config restored and reloaded: reloaded 0 surface override(s)
+[DIV groundSurfaceHotReload] original vehicle config restored and reloaded: reloaded 2 vehicle override(s), 0 part override(s)
+[DIV groundSurfaceHotReload] COMPLETE (PASSED) - cleanup successful
+```
+(`gradle runServer` locally on Servy, under the required
+`/tmp/div-gradle-slot.lock` flock, held through bounded cleanup and never
+unlinked - a real headless dedicated server, `Done (6.7s)!`, this mod's own
+mixins/physics pipeline actually initialized, not a mock.) This worktree's
+`run/` directory is gitignored and private to this ticket; the probe's own
+snapshot/restore left both shared config files byte-identical to their
+pre-run content, verified by reading them back after the run.
+
+**What this proves:** both files are independently detected and reloaded
+without one masking the other, in both failure directions; a malformed
+edit to either file is rejected with last-known-good retained; a valid
+edit reaches the real production ground-contact resolution path with no
+restart. **What this does NOT change:** no new surface model, erosion,
+asset sampling, or vehicle-tuning field was added, and `PhysicsBridge`'s
+existing vehicle live/respawn-field reporting (`applyLiveSafeFields`/
+`reportFieldsNeedingRespawn`) is untouched - this ticket only adds the
+second, independent surfaces-file check inside `OverridesHotReload`.
+
+**Evidence gathered this pass:** `gradle --offline compileJava` (`BUILD
+SUCCESSFUL`); `gradle --offline test --rerun-tasks` - `BUILD SUCCESSFUL`,
+the real JUnit XML reports **652 tests**, 0 skipped, 0 failures, 0 errors
+(this ticket adds no new unit tests of its own beyond what the real
+dedicated-server probe above already exercises - `OverridesHotReload`'s
+only pure/unit-testable seam, `isCheckTick`, is unchanged by this ticket
+and already covered); the real dedicated-server `gradle runServer` probe
+run above, both before and after the probe's own self-found/self-fixed
+defect.

@@ -696,6 +696,11 @@ respawn) the vehicle to pick up a changed value for one of those. The
 reload log names exactly which changed fields, if any, fell into this
 "needs respawn" set, rather than claiming everything applied.
 
+The same periodic watcher independently tracks and reloads
+`dynamic-immersive-vehicles-surfaces.json` (MINECRAFT-531) - see "Ground-
+surface tire response" below for that file's own load-timing/validation
+details.
+
 ### Axle anti-roll (MINECRAFT-519)
 
 Optional, per-vehicle `antiRollStiffness` - a dimensionless `0.0` (the
@@ -850,19 +855,19 @@ never fatal - startup logs a warning/error and continues with the hardcoded
 defaults (see `GroundSurfaceOverrides`'s own class doc for the self-review
 finding this guarantees).
 
-**Load timing - read this before assuming a live edit takes effect.**
+**Load timing (MINECRAFT-531): this file now also hot-reloads.**
 `GroundSurfaceOverrides.load()` runs once, at mod construction (same as
-`Overrides.load()`). `GroundSurfaceOverrides.reload()` already exists and is
-fully non-throwing/last-known-good, but **nothing currently calls it** - there
-is no live-reload command or trigger wired up for this file yet. Editing
-`dynamic-immersive-vehicles-surfaces.json` while the server is running has no
-effect until the next full restart. This is now DIFFERENT from the per-vehicle
-config above: MINECRAFT-505's periodic watcher (the "Hot reload" section just
-above) already calls `Overrides.reload()` on this branch, but nothing
-equivalent exists yet for this file. Wiring an actual trigger for THIS file is
-expected to piggyback on that same `OverridesHotReload` mechanism rather than
-add a second, separate one - that wiring is not part of this ticket's bounded
-scope.
+`Overrides.load()`). `GroundSurfaceOverrides.reload()` is now wired into the
+same bounded, periodic `OverridesHotReload` mechanism the per-vehicle config
+above uses (MINECRAFT-505) - editing `dynamic-immersive-vehicles-surfaces.json`
+while the server is running takes effect within the same ~5s check period,
+with no restart needed. The two files are watched independently (their own
+last-seen-mtime state each), so editing one can never mask an edit to the
+other. A malformed or out-of-range edit is rejected and the previous
+last-known-good surface overrides stay in effect, logged once per check
+period rather than repeatedly. No per-vehicle respawn is ever needed for a
+surface-config change: ground contact resolves the effective surface fresh
+on every lookup, unlike the per-vehicle `Tuning` fields above.
 
 ### Directional block-face tire response (MINECRAFT-517)
 
