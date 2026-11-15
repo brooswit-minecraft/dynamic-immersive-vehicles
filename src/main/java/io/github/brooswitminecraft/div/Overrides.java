@@ -212,6 +212,20 @@ public final class Overrides {
   // their combination does not. Re-read live every tick by PhysicsBridge.stepGround, same as
   // suspensionDampingRatio/brakeBiasFront - see PhysicsBridge.applyLiveSafeFields.
   public Double suspensionSpringMultiplier;
+  // MINECRAFT-533: optional, per-vehicle static toe alignment angle (degrees) for the geometric
+  // front/rear axle group (same grouping as brakeBiasFront/driveBiasFront - see
+  // AxleToeDistribution's own doc), applied to each wheel's own contact tangent forward/right
+  // frame (PhysicsBridge.stepGround's `steer`/`forward`/`right`), mirrored left/right by anchor
+  // x-sign so a positive value is toe-IN (converging) and a negative value is toe-OUT
+  // (diverging) at THAT axle - never a vehicle-wide concept, unlike maxSteerDegrees. No FALLBACK
+  // entry (same shape as brakeBiasFront/driveBiasFront) - null/unset means "no operator toe
+  // configured at all" for that axle, which AxleToeDistribution treats as the exact pre-ticket
+  // zero-offset behavior, not merely a 0.0 default (a vehicle that never sets either field is
+  // byte-identical to before this ticket). Re-read live every tick by PhysicsBridge.stepGround -
+  // see PhysicsBridge.applyLiveSafeFields.
+  public Double toeFrontDegrees;
+  // Same shape as toeFrontDegrees immediately above, for the geometric rear axle group instead.
+  public Double toeRearDegrees;
   // MINECRAFT-532: opt-in contact-aware axle drive-force sharing - see AxleDriveForceSharing's
   // own doc for the full redistribution reasoning. null/false (the documented default) is a
   // byte-identical no-op: unset reproduces the exact pre-ticket per-wheel drive allocation,
@@ -284,6 +298,14 @@ public final class Overrides {
    // drive bias (e.g. a front-wheel-drive-only or rear-wheel-drive-only configuration) is a
    // normal, physically sensible setting, not a degenerate one.
    if (driveBiasFront != null && !(Double.isFinite(driveBiasFront) && driveBiasFront >= 0 && driveBiasFront <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // Bounded well short of a real steering angle (maxSteerDegrees's own range) - toe is a static
+   // alignment trim, not a second steering input; +-20deg is already far beyond any real-world
+   // toe setting (typically under a few degrees) while still leaving room for exaggerated/arcade
+   // tuning. Inclusive of 0 and of either sign (toe-out is a normal, legitimate setting, not a
+   // degenerate one) - same "both signed extremes are real configurations" reasoning
+   // suspensionDampingRatio/brakeBiasFront's own bounds use.
+   if (toeFrontDegrees != null && !(Double.isFinite(toeFrontDegrees) && toeFrontDegrees >= -20 && toeFrontDegrees <= 20)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (toeRearDegrees != null && !(Double.isFinite(toeRearDegrees) && toeRearDegrees >= -20 && toeRearDegrees <= 20)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Strictly positive (a zero or negative ratio is an undamped or energy-adding oscillator -
    // never a sensible suspension, and not what "configurable damping" is meant to permit; a
    // vehicle that truly wants no settling behavior should disable physics for it instead, the
@@ -436,6 +458,8 @@ public final class Overrides {
    if (driveBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'driveBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (suspensionDampingRatio != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatio' (no part-level consumer yet)");
    if (suspensionSpringMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'suspensionSpringMultiplier' (vehicle-only concept - no part-level consumer yet)");
+   if (toeFrontDegrees != null) throw new IllegalArgumentException("part overrides do not support 'toeFrontDegrees' (vehicle-only concept - a part has no own axle position)");
+   if (toeRearDegrees != null) throw new IllegalArgumentException("part overrides do not support 'toeRearDegrees' (vehicle-only concept - a part has no own axle position)");
    if (axleDriveForceSharing != null) throw new IllegalArgumentException("part overrides do not support 'axleDriveForceSharing' (vehicle-only concept - a part has no own axle position)");
   }
  }
@@ -491,6 +515,8 @@ public final class Overrides {
   c.driveBiasFront=t.driveBiasFront;
   c.suspensionDampingRatio=t.suspensionDampingRatio;
   c.suspensionSpringMultiplier=t.suspensionSpringMultiplier;
+  c.toeFrontDegrees=t.toeFrontDegrees;
+  c.toeRearDegrees=t.toeRearDegrees;
   c.axleDriveForceSharing=t.axleDriveForceSharing;
   return c;
  }
@@ -528,6 +554,8 @@ public final class Overrides {
   m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
   m.suspensionDampingRatio = child.suspensionDampingRatio!=null?child.suspensionDampingRatio:parent.suspensionDampingRatio;
   m.suspensionSpringMultiplier = child.suspensionSpringMultiplier!=null?child.suspensionSpringMultiplier:parent.suspensionSpringMultiplier;
+  m.toeFrontDegrees = child.toeFrontDegrees!=null?child.toeFrontDegrees:parent.toeFrontDegrees;
+  m.toeRearDegrees = child.toeRearDegrees!=null?child.toeRearDegrees:parent.toeRearDegrees;
   m.axleDriveForceSharing = child.axleDriveForceSharing!=null?child.axleDriveForceSharing:parent.axleDriveForceSharing;
   return m;
  }
@@ -721,6 +749,11 @@ public final class Overrides {
   result.driveBiasFront = firstNonNull(override!=null?override.driveBiasFront:null, packMetadata!=null?packMetadata.driveBiasFront:null, ivAdapted!=null?ivAdapted.driveBiasFront:null, physicallyDerived!=null?physicallyDerived.driveBiasFront:null);
   result.suspensionDampingRatio = firstNonNull(override!=null?override.suspensionDampingRatio:null, packMetadata!=null?packMetadata.suspensionDampingRatio:null, ivAdapted!=null?ivAdapted.suspensionDampingRatio:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatio:null, FALLBACK.suspensionDampingRatio);
   result.suspensionSpringMultiplier = firstNonNull(override!=null?override.suspensionSpringMultiplier:null, packMetadata!=null?packMetadata.suspensionSpringMultiplier:null, ivAdapted!=null?ivAdapted.suspensionSpringMultiplier:null, physicallyDerived!=null?physicallyDerived.suspensionSpringMultiplier:null, FALLBACK.suspensionSpringMultiplier);
+  // MINECRAFT-533: same "no FALLBACK entry" shape as brakeBiasFront/driveBiasFront above - stays
+  // null (no toe configured for that axle) unless some level actually sets it, which is exactly
+  // the signal AxleToeDistribution needs to reproduce the pre-ticket zero-offset behavior.
+  result.toeFrontDegrees = firstNonNull(override!=null?override.toeFrontDegrees:null, packMetadata!=null?packMetadata.toeFrontDegrees:null, ivAdapted!=null?ivAdapted.toeFrontDegrees:null, physicallyDerived!=null?physicallyDerived.toeFrontDegrees:null);
+  result.toeRearDegrees = firstNonNull(override!=null?override.toeRearDegrees:null, packMetadata!=null?packMetadata.toeRearDegrees:null, ivAdapted!=null?ivAdapted.toeRearDegrees:null, physicallyDerived!=null?physicallyDerived.toeRearDegrees:null);
   // MINECRAFT-532: no FALLBACK entry (mirrors brakeBiasFront/driveBiasFront above) - stays null
   // (treated as "off", see AxleDriveForceSharing's own doc) unless some level actually sets it.
   result.axleDriveForceSharing = firstNonNullBoolean(override!=null?override.axleDriveForceSharing:null, packMetadata!=null?packMetadata.axleDriveForceSharing:null, ivAdapted!=null?ivAdapted.axleDriveForceSharing:null, physicallyDerived!=null?physicallyDerived.axleDriveForceSharing:null);

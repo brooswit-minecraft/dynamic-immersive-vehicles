@@ -383,6 +383,11 @@ public final class PhysicsBridge {
   // suspensionSpring/suspensionSpringForShare, same "no separate cached field" shape as
   // suspensionDampingRatio immediately above.
   if (!java.util.Objects.equals(target.suspensionSpringMultiplier, fresh.suspensionSpringMultiplier)) { target.suspensionSpringMultiplier = fresh.suspensionSpringMultiplier; appliedOut.add("suspensionSpringMultiplier"); }
+  // MINECRAFT-533: stepGround reads tuning.toeFrontDegrees/toeRearDegrees fresh every tick via
+  // AxleToeDistribution.toeRadians, same "no separate cached field" shape as maxSteerDegrees/
+  // brakeBiasFront/driveBiasFront above - no respawn needed for either field.
+  if (!java.util.Objects.equals(target.toeFrontDegrees, fresh.toeFrontDegrees)) { target.toeFrontDegrees = fresh.toeFrontDegrees; appliedOut.add("toeFrontDegrees"); }
+  if (!java.util.Objects.equals(target.toeRearDegrees, fresh.toeRearDegrees)) { target.toeRearDegrees = fresh.toeRearDegrees; appliedOut.add("toeRearDegrees"); }
   // MINECRAFT-532: stepGround reads tuning.axleDriveForceSharing fresh every tick via
   // AxleDriveForceSharing#shareRatios, same "no separate cached field" shape as driveBiasFront.
   if (!java.util.Objects.equals(target.axleDriveForceSharing, fresh.axleDriveForceSharing)) { target.axleDriveForceSharing = fresh.axleDriveForceSharing; appliedOut.add("axleDriveForceSharing"); }
@@ -2015,6 +2020,12 @@ public final class PhysicsBridge {
    // by that same tiny error - shareRatios's own doc has the full reasoning for why this needs to
    // be byte-identical, not merely close.
    double[] driveShareRatios=DriveBiasDistribution.shareRatios(loadShareZ,tuning.driveBiasFront);
+   // MINECRAFT-533: each wheel's own static TOE alignment offset (radians), from the same
+   // loadShareX/loadShareZ anchor positions used for the load/brake/drive shares above - see
+   // AxleToeDistribution's own doc for the front/rear axle grouping and mirrored left/right sign
+   // convention. Unset tuning.toeFrontDegrees/toeRearDegrees (both null) reproduces the exact
+   // pre-ticket all-zero offset.
+   double[] toeRadians=AxleToeDistribution.toeRadians(loadShareX,loadShareZ,tuning.toeFrontDegrees,tuning.toeRearDegrees);
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
@@ -2076,7 +2087,11 @@ public final class PhysicsBridge {
     // out. Only the calibrated RATE that normally keeps compression near travel*.5 varies by
     // load share; this clamp is the same last-resort backstop every wheel already had.
     double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),wheelSpring,damperResult.damper()));
-    double steer=wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0;
+    // MINECRAFT-533: static toe offset composes ADDITIVELY with steer input (never replacing
+    // it) - a steering wheel still toes at center and continues to sweep with rudder input
+    // exactly as before, just around a toed-in/out neutral rather than dead-ahead; a non-
+    // steering wheel (turnsWithSteer false, steer==0 above) still gets its own configured toe.
+    double steer=(wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0)+toeRadians[wheelIdx];
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
