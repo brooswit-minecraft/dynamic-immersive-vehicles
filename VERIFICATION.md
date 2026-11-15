@@ -2373,3 +2373,82 @@ only pure/unit-testable seam, `isCheckTick`, is unchanged by this ticket
 and already covered); the real dedicated-server `gradle runServer` probe
 run above, both before and after the probe's own self-found/self-fixed
 defect.
+
+## Per-axle toe alignment (MINECRAFT-533, added 2026-11-15)
+
+Bounded M507 slice. Inspected the named seams first:
+`PhysicsBridge.stepGround`'s per-wheel loop already computes `loadShareX`/
+`loadShareZ` (each wheel's own x/z anchor relative to `center`, the exact
+geometry `BrakeBiasDistribution`/`DriveBiasDistribution` already use for
+their own front/rear axle split) before building `steer`/`forward`/`right`
+at the documented `~1960` seam - no new per-wheel geometry needed, only a
+new per-wheel angular offset folded into the existing `steer` value before
+`forward`/`right` are derived from it.
+
+Implementation deliberately mirrors MINECRAFT-520/524's own
+`BrakeBiasDistribution`/`DriveBiasDistribution` shape (same geometric
+front/rear axle grouping off each wheel's own `z`, same unset/degenerate-
+layout fallback), but adds the orthogonal left/right mirroring
+`PhysicsBridge`'s own `skidSteerMultiplier` already does off `anchor.x`:
+new `AxleToeDistribution` class (`toeRadians(x[], z[], toeFrontDegrees,
+toeRearDegrees)` - `-signum(x)*toeRadians` per wheel, so a positive value
+is toe-IN, converging, on whichever axle it is configured for), new
+`Overrides.Tuning#toeFrontDegrees`/`#toeRearDegrees` (`-20` to `20`
+degrees, no FALLBACK entry - null means that axle's toe is unconfigured,
+rejected on `parts` entries since a part has no own axle position, live-
+hot-reloaded via `applyLiveSafeFields` the same as `brakeBiasFront`/
+`driveBiasFront`). `PhysicsBridge.stepGround`'s existing `steer` line now
+adds this per-wheel offset ADDITIVELY to the existing rudder-driven
+steering term (never replacing it), so a steerable wheel still sweeps with
+rudder input exactly as before, just around a toed neutral, and a non-
+steering wheel still gets its own configured toe; `skidSteerMultiplier`'s
+own separate `anchor.x`-based computation is untouched, so track-vehicle
+skid-steer composes unaffected. No camber thrust, suspension, or visual-
+only change - only the contact tangent `forward`/`right` frame itself.
+
+Evidence named by the ticket: `AxleToeDistributionTest` covers the pure-
+math core - mirrored left/right symmetry (equal-magnitude opposite-sign
+offsets), axle classification (including a reversed-z and a lumped-multi-
+axle layout, mirroring `BrakeBiasDistributionTest`'s own cases), the
+ambiguous single-axle/lone-wheel fallback to zero toe, a wheel exactly on
+the centerline getting no toe (no "other side" to mirror against), degrees-
+to-radians conversion, and a 500-trial random-layout finiteness sweep.
+`ToeAlignmentContactIntegrationTest` is the real production-path
+integration against the actual `MultiContactFrictionSolver.solveFriction`
+on the same representative 4-wheel layout `ServiceDriveBiasTest` uses, with
+each wheel's own `forward`/`right` built exactly the way `stepGround` does
+(`steer`->`sin`/`cos`): straight travel from rest with a symmetric toe
+configuration produces exactly zero net world-frame lateral velocity (the
+ticket's own "no unintended net lateral force at symmetric state") while
+still accelerating forward; the same holds in reverse; an unset
+(`null`/`null`) toe is a byte-identical no-op against an explicit
+`0.0`/`0.0`; a configured front toe produces a measurably different
+lateral outcome than no toe at all once the vehicle already has lateral
+slip to act against (the ticket's own "meaningful aligned-force
+difference"); and toe composes additively with an existing rudder steer
+angle rather than replacing it. `PhysicsBridgeLiveOverrideApplicationTest`
+gained `toeFrontDegrees`/`toeRearDegrees` coverage mirroring its existing
+`brakeBiasFront`/`driveBiasFront` cases (live hot-reload mutation,
+including revert-to-null on removal).
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain`, Gradle
+8.14 / JDK 21 (Temurin), against this branch
+(`minecraft-533/per-axle-toe-alignment`) at head `a0c4fa4` (origin/main,
+the pinned baseline for this six-slice sprint) - `BUILD SUCCESSFUL`. The
+real JUnit XML reports total **707 tests**, 0 skipped, 0 failures, 0
+errors across the whole suite (13 from the new `AxleToeDistributionTest`,
+5 from the new `ToeAlignmentContactIntegrationTest`, plus every
+pre-existing test run unchanged alongside them - confirming this change
+introduces no regression anywhere else in the suite, skid-steer/tracks,
+brake/drive-bias and every other ground-force path included).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `2df1d3ac26f5da6ee474e7bc74b89e43fa94ff74e2daad5509466446b1b56674`)
+was produced.
+
+Not yet performed: in-game acceptance (real vehicle spawn with configured
+`toeFrontDegrees`/`toeRearDegrees`, observed grip/stability effect) - this
+ticket's own brief says focused engineering tests are in scope, not John's
+broad/hardware playtesting, which is explicitly out of scope here.

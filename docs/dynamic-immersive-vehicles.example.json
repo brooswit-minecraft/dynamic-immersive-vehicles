@@ -34,6 +34,10 @@
       "driveForce": 9000.0,
       "driveBiasFront": 0.2
     },
+    "examplepack:toe_tuned_car": {
+      "toeFrontDegrees": 1.5,
+      "toeRearDegrees": -0.5
+    },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
       "hullFillFactor": 0.5,
