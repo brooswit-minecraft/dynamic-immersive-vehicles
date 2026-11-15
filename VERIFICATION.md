@@ -2535,3 +2535,99 @@ The real-Sable `DirectionalWaterDragProbe` run itself (an opt-in
 not yet performed in this pass - same disclosed-limitation shape as other
 sibling tickets' own opt-in runtime probes when only unit-level evidence
 has been gathered so far; it remains available on request before Done.
+
+## Contact-aware axle drive-force sharing (MINECRAFT-532, added 2026-11-15)
+
+Bounded deliverable: opt-in redistribution of a wheel's own already-assigned
+drive-force share (`DriveBiasDistribution#shareRatios`' output) to its
+grounded same-axle wheel(s), whenever that wheel has no ground contact this
+tick, weighted by each grounded wheel's own real measured suspension
+contact load (`WheelHit.normal()`, AFTER MINECRAFT-519's anti-roll
+redistribution) - never wheel angular velocity/slip, and never across the
+front/rear axle boundary. This is explicitly NOT a limited-slip
+differential, wheel-spin simulation, or traction control, per the ticket's
+own stated constraint.
+
+New isolated, Minecraft-type-free helper class `AxleDriveForceSharing`
+(mirrors `DriveBiasDistribution`'s own shape: same `AXLE_EPSILON`/max-`z`
+front-row classification, "lump every non-front row into one rear group"
+convention). `shareRatios(z, driveShareRatio, grounded, load, enabled)`:
+disabled (default) returns a defensive copy of `driveShareRatio` completely
+unchanged - byte-identical to the pre-ticket allocation; enabled
+redistributes WITHIN each axle group independently (front and rear total
+assigned ratio both exactly conserved), weighting grounded wheels by real
+load and sending an airborne wheel's own ratio to `0`; an axle with no
+grounded wheel carrying positive load at all (every wheel airborne, or
+every grounded wheel reporting exactly zero load) is left completely
+untouched rather than fabricating a split with nothing real to weight it
+by.
+
+New `Overrides.Tuning#axleDriveForceSharing` (`Boolean`, no FALLBACK entry -
+null/false is the documented no-op default, same "unset means untouched"
+shape as `driveBiasFront`/`brakeBiasFront`; rejected on `parts` entries, a
+vehicle-only axle concept). Wired into `PhysicsBridge.stepGround` as a new
+post-Phase-1 pass placed immediately AFTER the existing MINECRAFT-519
+anti-roll block (so the `load` it consults is the final, already-
+redistributed contact load) and before the native contact-ownership sync:
+builds `grounded`/`load` arrays over the full wheel count from `hits`, calls
+`AxleDriveForceSharing.shareRatios`, and rebuilds each `WheelHit` with its
+new ratio via the new `WheelHit.withDriveShareRatio` (mirrors the existing
+`withNormal` record-replacement shape). Re-read live every tick via
+`applyLiveSafeFields`, same as `driveBiasFront`. No change to
+`MultiContactFrictionSolver.FrictionContact`'s own shape - only which
+`driveShareRatio` value a `WheelHit` carries before the solver composes it
+with `driveForcePerWheel*skidSteerMultiplier`, same as before this ticket.
+
+**Evidence named by the ticket:** `AxleDriveForceSharingTest` (pure-math
+core) covers disabled no-op (byte-identical, independently-allocated
+copy), equal contacts (no change from an already-even split), an
+asymmetric-load split (weighted exactly by real measured load, each
+axle's own total conserved), one wheel airborne (its share moves only to
+its grounded same-axle mate, the other axle completely untouched),
+zero/all-airborne and all-grounded-zero-load fallback (left untouched
+rather than dividing by zero or fabricating a split), an asymmetric
+(trike-like) wheel-count layout, and 500 randomized trials asserting every
+ratio stays finite/non-negative and each axle's own total assigned ratio
+is exactly conserved. `AxleDriveForceSharingIntegrationTest` is the real
+production-path integration against `MultiContactFrictionSolver
+.solveFriction` (mirrors `ServiceDriveBiasTest`'s own solver-level shape):
+enabling sharing measurably recovers acceleration an airborne wheel's
+share would otherwise lose versus the disabled default; disabled
+reproduces the exact pre-ticket unredistributed-loss outcome; reverse
+travel still accelerates correctly (and still shows the same recovered-
+acceleration effect) with the sign flip applied at the `driveForcePerWheel`
+call site, unaffected by this ratio composition; and the redistributed
+ratio composes multiplicatively with skid-steer's own per-wheel
+multiplier, neither overriding the other. `OverridesTest` and
+`PhysicsBridgeLiveOverrideApplicationTest` gained `axleDriveForceSharing`
+coverage mirroring their existing `driveBiasFront` cases (no-fallback-
+stays-null, full precedence chain, part-override rejection, live hot-
+reload mutation).
+
+Schema coordination (ticket comments 54060/54063 - a live multi-agent
+coordination exchange on this ticket itself, which this owner coordinates
+as the designated schema coordinator for the concurrent M532-537 sprint):
+this ticket's own additive `Overrides.Tuning` region (one new field, one
+new independent helper class, one new post-Phase-1 `PhysicsBridge.stepGround`
+pass) was posted before any of M533-537 landed their own fields, along with
+a proposed ticket-number merge-sequencing convention for the remaining five.
+
+Local slot-lock coordination (per this ticket's own shared cooperative
+`flock` on `/tmp/div-gradle-slot.lock`, held for the whole Gradle lifetime,
+never unlinked or bypassed). `gradle --offline compileJava compileTestJava
+test --console=plain` against this branch
+(`minecraft-532/contact-aware-axle-drive-force-sharing`) at head (origin/main
+`a0c4fa4` unchanged at this ticket's start) - `BUILD SUCCESSFUL` in 49s. The
+real JUnit XML reports total **705 tests**, 0 skipped, 0 failures, 0 errors
+across the whole suite (10 from the new `AxleDriveForceSharingTest`, 4 from
+the new `AxleDriveForceSharingIntegrationTest`, plus every pre-existing
+test - including every other ticket's own drive/brake/anti-roll/suspension
+behavior - run unchanged alongside them, confirming no regression).
+
+Not yet performed: in-game acceptance (a real vehicle spawn with
+`axleDriveForceSharing` configured, observed recovered acceleration with
+one wheel genuinely airborne over uneven terrain) - this ticket's own brief
+says focused engineering tests are in scope, not John's broad/hardware
+playtesting, which is explicitly out of scope here. Hosted CI remains
+limited by the disclosed billing/capacity constraint (see other tickets'
+own entries above); this pass relies on the local evidence above.
