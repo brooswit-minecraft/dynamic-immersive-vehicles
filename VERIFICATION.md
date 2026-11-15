@@ -2043,3 +2043,42 @@ unmodified production default - for every scenario, not a forced-off test
 isolation flag. This is now the strongest evidence this ticket can offer:
 the real production default, unmodified, correctly manages fixed-wing and
 rotorcraft vehicles end to end.
+
+**Targeted live evidence for the config-restore-failure path (review
+53958/53959).** Review correctly found that even after the
+"don't reload/claim restoration on a write failure" fix (`b7e8f05`), the
+overall completion logging still looked success-shaped: `runScenarios()`
+already logs `ALL SCENARIOS FINISHED` before cleanup starts, and
+`releaseChunksOnce()`'s own final line always said `- ALL_DONE` regardless
+of whether the config restore actually succeeded. Added `configRestoreFailed`
+(set only in `restoreConfigOnce`'s own `IOException` branch) so
+`releaseChunksOnce` now logs an explicit `CLEANUP FAILED, not a clean
+ALL_DONE` ERROR line instead of the plain success line on that path.
+
+To actually exercise this failure path live (not just reason about it), a
+one-off local harness (outside the probe itself - a host-side `chmod 444`
+on this worktree's own gitignored `run/config/dynamic-immersive-vehicles.json`,
+timed via log-watching, restored to `644` immediately after capturing the
+evidence) deliberately forced the restore write to throw. Captured from
+`/tmp/m526-live-run9.log`:
+
+```
+[DIV flightRotorFixture] FAILED to restore original config at .../dynamic-immersive-vehicles.json - NOT reloading (would apply the known-still-probe-mutated file) - manual cleanup needed. Original content this probe is preserving for that cleanup: {...}
+[DIV flightRotorFixture] released 115 chunk(s) this probe itself forced, but config restore FAILED (see the earlier FAILED-to-restore error above for manual cleanup) - CLEANUP FAILED, not a clean ALL_DONE
+```
+
+This proves, from an actual forced failure rather than code inspection
+alone: no reload of the unrestored file, no false "restored and reloaded"
+claim, chunk release still ran and is reported as unconditional, and the
+terminal outcome is explicitly flagged as a cleanup failure rather than a
+plain `ALL_DONE`. (The forced read-only permission also broke several
+earlier in-run config writes as a side effect of firing early rather than
+precisely at the final restore step - expected collateral of this blunt
+harness technique, not a probe defect; the targeted final-restore-failure
+lines above are what this evidence is for.) Permissions were restored and
+the file's actual content verified intact immediately after capturing this
+evidence - this worktree's own `run/` directory is gitignored and private
+to this ticket, not shared repository state.
+
+`gradle --offline compileJava/test --rerun-tasks` after this fix: `BUILD
+SUCCESSFUL`, 648 tests, 0 failures, 0 errors (unchanged).
