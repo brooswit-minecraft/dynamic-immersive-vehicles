@@ -369,13 +369,15 @@ public final class PhysicsBridge {
   * every tick via suspensionDamper/suspensionDamperForShare/effectiveMassDamper, same as every
   * other field in this list)/suspensionSpringMultiplier (MINECRAFT-528, stepGround reads
   * tuning.suspensionSpringMultiplier fresh every tick via suspensionSpring/
-  * suspensionSpringForShare, same as every other field in this list)/parasiticDragMultiplier/
-  * oswaldEfficiency (MINECRAFT-536, stepFlight only, same reasoning as stallAngleDegrees/
-  * liftSlope/controlSurfaceSlope above)/axleDriveForceSharing (MINECRAFT-532, stepGround reads
-  * tuning.axleDriveForceSharing fresh every tick via AxleDriveForceSharing#shareRatios, same as
-  * every other field in this list)/rollingResistance (MINECRAFT-534, stepGround reads
-  * tuning.rollingResistance fresh every tick at the FrictionContact-construction call site, same
-  * as every other field in this list). Mutating
+  * suspensionSpringForShare, same as every other field in this list)/longitudinalWaterDrag
+  * Multiplier/lateralWaterDragMultiplier/verticalWaterDragMultiplier (MINECRAFT-535,
+  * BuoyantForces.apply reads all three fresh every tick alongside waterDrag itself)/
+  * parasiticDragMultiplier/oswaldEfficiency (MINECRAFT-536, stepFlight only, same reasoning as
+  * stallAngleDegrees/liftSlope/controlSurfaceSlope above)/axleDriveForceSharing (MINECRAFT-532,
+  * stepGround reads tuning.axleDriveForceSharing fresh every tick via
+  * AxleDriveForceSharing#shareRatios, same as every other field in this list)/rollingResistance
+  * (MINECRAFT-534, stepGround reads tuning.rollingResistance fresh every tick at the
+  * FrictionContact-construction call site, same as every other field in this list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -423,6 +425,11 @@ public final class PhysicsBridge {
   // suspensionSpring/suspensionSpringForShare, same "no separate cached field" shape as
   // suspensionDampingRatio immediately above.
   if (!java.util.Objects.equals(target.suspensionSpringMultiplier, fresh.suspensionSpringMultiplier)) { target.suspensionSpringMultiplier = fresh.suspensionSpringMultiplier; appliedOut.add("suspensionSpringMultiplier"); }
+  // MINECRAFT-535: BuoyantForces.apply reads tuning.longitudinal/lateral/verticalWaterDragMultiplier
+  // fresh every tick, same "no separate cached field" shape as waterDrag/angularWaterDrag above.
+  if (!java.util.Objects.equals(target.longitudinalWaterDragMultiplier, fresh.longitudinalWaterDragMultiplier)) { target.longitudinalWaterDragMultiplier = fresh.longitudinalWaterDragMultiplier; appliedOut.add("longitudinalWaterDragMultiplier"); }
+  if (!java.util.Objects.equals(target.lateralWaterDragMultiplier, fresh.lateralWaterDragMultiplier)) { target.lateralWaterDragMultiplier = fresh.lateralWaterDragMultiplier; appliedOut.add("lateralWaterDragMultiplier"); }
+  if (!java.util.Objects.equals(target.verticalWaterDragMultiplier, fresh.verticalWaterDragMultiplier)) { target.verticalWaterDragMultiplier = fresh.verticalWaterDragMultiplier; appliedOut.add("verticalWaterDragMultiplier"); }
   // MINECRAFT-536: stepFlight reads tuning.parasiticDragMultiplier/tuning.oswaldEfficiency fresh
   // every tick, same "no separate cached field" shape as stallAngleDegrees/liftSlope/
   // controlSurfaceSlope immediately above - both are safe to hot-mutate in place.

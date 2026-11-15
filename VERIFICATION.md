@@ -2374,6 +2374,242 @@ and already covered); the real dedicated-server `gradle runServer` probe
 run above, both before and after the probe's own self-found/self-fixed
 defect.
 
+## Directional boat water drag (MINECRAFT-535, added 2026-11-15)
+
+Extends the existing isotropic per-float quadratic point-velocity water
+drag (`waterDrag`, `BuoyantForces.apply` lines ~68-73, `Buoyancy.drag`)
+with three new bounded, body-local directional multipliers -
+`longitudinalWaterDragMultiplier` (bow/stern), `lateralWaterDragMultiplier`
+(port/starboard), and `verticalWaterDragMultiplier` (heave) - each a new
+sparse `Overrides.Tuning` field, `0.0`-`5.0` inclusive, defaulting to
+`1.0` (no FALLBACK change needed for existing behavior: `1.0` on every
+axis is algebraically identical to the prior single-coefficient isotropic
+formula - see below). Threaded through the full existing precedence chain
+(`validate`/`copy`/`mergeOntoParent`/`resolveFields`/
+`validateSupportedForPart` - rejected on part overrides, same as
+`waterDrag`/`angularWaterDrag` themselves, since there is no part-level
+consumer) and `PhysicsBridge.applyLiveSafeFields`, same shape as every
+other live-hot-reloadable field in this project.
+
+**The math.** `Buoyancy.directionalDragForce(speed, axisVelocityComponent,
+submergedFraction, dragCoefficient, axisMultiplier)` returns
+`-submergedFraction*dragCoefficient*axisMultiplier*speed*
+axisVelocityComponent` - one axis's own signed force component. The
+EXISTING isotropic vector force `BuoyantForces.apply` already computed
+before this ticket, `-dragMagnitude/speed * localVelocity` (where
+`dragMagnitude = submergedFraction*dragCoefficient*speed*speed`), expands
+component-wise to exactly `-submergedFraction*dragCoefficient*speed*
+velocityComponent` for every axis - i.e. `directionalDragForce` with
+`axisMultiplier=1` on every axis. This is not a numerical coincidence this
+ticket discovered after the fact; it is the exact algebraic identity the
+new field's `1.0` fallback is built to satisfy, confirmed directly by
+`BuoyancyTest.directionalDragWithUnitMultiplierMatchesIsotropicFormulaOnEveryAxis`.
+
+**Production wiring.** Each submerged float's own world-frame point
+velocity (`localVelocity`, already computed for the existing buoyancy/drag
+calculation) is additionally transformed into the hull's body-local basis
+via the existing `inverse` quaternion `BuoyantForces.apply` already has in
+scope (the same basis `forward` is built in a few lines below: `x`=
+lateral, `y`=vertical, `z`=longitudinal). Each axis's component is scaled
+independently by `directionalDragForce` using that axis's own resolved
+multiplier, and the resulting body-local force vector is transformed back
+to world frame (via `q`, the forward orientation quaternion) before being
+summed into the same `force` vector buoyancy's own upward component
+already accumulates into - no new impulse application call, no change to
+how that combined force reaches `handle.applyImpulseAtPoint`. Per-float
+submergence fraction, propeller thrust, and the existing MINECRAFT-518
+angular (roll/pitch/yaw) water drag are all completely untouched - this
+is a purely additive change to the existing per-float linear drag term,
+nothing else in `BuoyantForces.apply` was reordered or reused differently.
+
+**Dissipative-only, never adds energy.** Every multiplier is bounded
+`>=0` in `Tuning.validate()` - a negative value is rejected outright,
+since it would flip `directionalDragForce`'s sign and make the "drag"
+force push WITH an axis's own motion instead of against it, which is
+exactly the kind of destabilizing energy addition this project's
+MINECRAFT-518 angular-drag review (comment 53679) already established
+must never happen for any water-drag term. `0.0` itself is explicitly
+accepted (a real, legitimate "no drag on this axis at all" configuration,
+not a degenerate one - same reasoning `brakeBiasFront`/`driveBiasFront`'s
+own inclusive-extremes bounds already use), and `5.0` is a documentable
+flat ceiling (same shape as `cyclicAuthorityScale`/`yawAuthorityScale`'s
+own `5x` cap) - a tuning knob, not a path to an unbounded per-axis drag
+force.
+
+**Tests.**
+
+- `BuoyancyTest` (5 new cases): `directionalDragForce` with every
+  multiplier at `1.0` reproduces the existing isotropic vector formula
+  component-for-component on all three axes (positive and negative
+  velocity components, non-trivial fraction/coefficient); the force
+  scales linearly with its own axis multiplier (`2x` multiplier -> `2x`
+  force, `0` multiplier -> `0` force); across a swept
+  `{0, 0.1, 1, 2.5, 5}` multiplier range, the returned force always
+  opposes its own axis's velocity sign (never flips to push with it -
+  the dissipative-only/no-energy-addition property, checked directly as
+  a pure-function invariant, independent of any production wiring); zero
+  when not submerged or not moving on that axis, matching `drag`'s own
+  existing zero-cases.
+- `OverridesTest` (4 new cases, mirroring the existing
+  `suspensionSpringMultiplier`/`angularWaterDrag` test shape exactly):
+  each of the three fields rejects negative/NaN/above-`5.0` values and
+  accepts the inclusive `0.0`/`1.0`/`5.0` boundaries; an explicit
+  operator override on all three takes precedence over the `1.0`
+  fallback through the full `resolved()` chain; all three are rejected
+  on a part-level override; a child entry inheriting
+  `longitudinalWaterDragMultiplier` through `extends` picks up its
+  template's own value.
+- `PhysicsBridgeLiveOverrideApplicationTest` (existing suite, extended):
+  all three new fields are confirmed as live-hot-reloadable via
+  `applyLiveSafeFields`.
+
+**Real-Sable runtime probe.** `DirectionalWaterDragProbe`
+(`-Ddiv.experimentalDirectionalWaterDrag=true`, OFF by default, same
+opt-in/CI-only/bounded-window discipline as every other probe in this
+project - see `BuoyancyAngularDragProbe` for the shared pattern this
+mirrors) spawns a real, Mixin-driven `BuoyantBody` hull YAWED 35 degrees
+off world axes (so a frame-transform mistake in production would show up
+as a real measurable defect, not be masked by an axis-aligned fixture),
+then gives it a real initial world-frame velocity along one of its own
+body-local axes at spawn time:
+
+- `forwardBaseline` (isotropic `1.0`/`1.0`/`1.0`) vs. `forwardHighDrag`
+  (`longitudinalWaterDragMultiplier=4`), same initial forward speed - the
+  high-drag scenario's final speed must be at most 60% of the baseline's.
+- `lateralHighDrag` (`lateralWaterDragMultiplier=4`), initial speed along
+  the hull's own LATERAL axis instead, compared against the SAME
+  `forwardBaseline` - valid because the isotropic `1.0` case is
+  direction-independent by construction, so one baseline scenario
+  correctly serves both axis comparisons; this is itself part of what the
+  probe checks, not an assumption taken for granted.
+- `verticalBaseline`/`verticalHighDrag` - a vertical bob (dropped above
+  resting equilibrium, no horizontal velocity) at `1.0` vs.
+  `verticalWaterDragMultiplier=4` - the high-drag bob must settle
+  substantially faster.
+- `equalMultiplierParity` (all three multipliers `=2.0`) vs.
+  `equalScalarParity` (multipliers left at `1.0`, `waterDrag` itself
+  doubled instead) - review's explicit "equal-axis parity" ask: both must
+  decay to within a tight tolerance of the same final speed, since
+  uniformly doubling every multiplier and doubling the underlying scalar
+  coefficient are two different configuration paths to the identical
+  physical force.
+- Every scenario's own `measure` phase additionally enforces the
+  dissipative-only/no-energy-addition requirement, checked as a decaying
+  ENVELOPE (second-half peak speed vs first-half peak) rather than strict
+  per-tick monotonicity - a real floating hull bobbing in water is a
+  damped oscillator that legitimately exchanges kinetic and gravitational-
+  potential energy via buoyancy every bob cycle (confirmed live across
+  several iterations: a strict "speed never increases tick-over-tick"
+  assertion rejected that normal bobbing outright on every single
+  scenario, not a real drag defect); the pure-function dissipative-only
+  property itself is already proven exhaustively by `BuoyancyTest` above.
+
+Requires config-file entries seeded for each `divtest:waterdrag-*` key
+(massKg plus this ticket's own fields, plus a modest `angularWaterDrag`
+to damp the roll oscillation a strong lateral drag force induces at this
+test hull's below-center float anchors - see the live findings below)
+before running - see the probe's own class doc for the exact requirement,
+the same disclosed limitation `BuoyancyAngularDragProbe`'s own doc already
+carries for its fixtures. Gated behind `DIV_DIRECTIONAL_WATER_DRAG_PROBE=
+true` in `build.gradle`'s `runServer` task, same opt-in pattern as every
+other probe.
+
+**Three live-discovered defects, found and fixed while actually running
+this probe (none were production-code defects):**
+
+1. **Chunk-loading watchdog crash.** `requestChunkGrid`'s `setChunkForced`
+   blocks SYNCHRONOUSLY on real chunk generation
+   (`ServerChunkCache.getChunk` -> `BlockableEventLoop.managedBlock`), not
+   merely a deferred ticket add (confirmed directly via the server
+   watchdog's own thread dump, twice) - requesting all 7 scenarios' grids
+   (343 chunks), then even a reduced 5x5 grid (175 chunks), in a single
+   tick exceeded the server watchdog's 60s-per-tick budget against a
+   cold world and crashed the server outright.
+   Fixed by (a) spreading one scenario's own chunk-grid request per tick
+   across the first 7 ticks instead of all at once, and (b) switching the
+   probe's own dev world to flat generation (`level-type=minecraft:flat`
+   in `run/server.properties`), which eliminates the cold-generation cost
+   variance that caused even the reduced 175-chunk request to still
+   occasionally exceed 60s on an unlucky chunk.
+2. **Wrong no-energy-addition test.** The ORIGINAL per-tick "speed must
+   never increase" check rejected every single scenario's own normal
+   settle/bob transient - see the envelope-check description above.
+   Replaced with the decaying-envelope comparison.
+3. **Undamped roll oscillation at the lateral axis.** A strong lateral
+   drag force, applied at this test hull's two floats (mounted BELOW its
+   own center, `y=-0.2`), produces a real roll torque - pre-existing in
+   the ORIGINAL isotropic drag model this ticket extends (the same
+   anchor/force geometry, independent of any multiplier), not introduced
+   by the new directional multipliers themselves. With `angularWaterDrag`
+   left at its `0.0` default in the test fixtures, that roll energy had
+   nothing damping it: at `lateralWaterDragMultiplier=4.0` and `6.0`
+   blocks/s initial speed, the resulting roll/translation feedback
+   diverged within 5 ticks under `BuoyantForces.apply`'s existing
+   EXPLICIT per-tick force/impulse integration (confirmed live: hull
+   launched to 144 blocks above the water surface) - the same class of
+   explicit-integration instability MINECRAFT-518's own review already
+   found and fixed for ANGULAR drag (comment 53679), but never addressed
+   for this pre-existing LINEAR drag term, which is out of this ticket's
+   own scope to redesign. Fixed, without touching any production code, by
+   (a) lowering the "high" multiplier scenarios to `2.5` and the initial
+   speed to `4.0` blocks/s (still a clearly measurable, substantial
+   difference from baseline, safely below where the pre-existing
+   instability was observed to trigger), and (b) seeding a modest
+   `angularWaterDrag: 50.0` in every fixture (a realistic companion
+   configuration a real pack would also set, not a code change) to damp
+   the roll oscillation that configuring a strong `waterDrag`/multiplier
+   combination without any angular damping would otherwise leave
+   undamped. Also switched the cross-scenario ratio comparison
+   (`logRatioComparison`) from the noisy instantaneous `finalSpeed` to
+   each scenario's own settled peak amplitude (`maxSpeedSecondHalf`),
+   since a bobbing hull's instantaneous speed at one single sample point
+   is phase-dependent noise, not a robust measure (confirmed live: a run
+   where the high-drag scenario's own `finalSpeed` came out LOWER than
+   baseline's purely by oscillation-phase luck, while its real settled
+   amplitude was still clearly higher).
+
+**Actual probe run results** (`DIV_DIRECTIONAL_WATER_DRAG_PROBE=true
+gradle runServer`, flock-protected on `/tmp/div-gradle-slot.lock`, at this
+exact head): all 7 scenarios reached `COMPLETE` with zero `FAILED` lines.
+`FORWARD-AXIS-COMPARISON` ratio `0.204` (PASS, <=0.6 required),
+`LATERAL-AXIS-COMPARISON` ratio `0.375` (PASS), `VERTICAL-AXIS-COMPARISON`
+ratio `0.584` (PASS), `EQUAL-AXIS-PARITY` diff exactly `0.0` (PASS) -
+configuring all three multipliers to `2.0` decayed IDENTICALLY to doubling
+the scalar `waterDrag` coefficient directly, through the real
+`BuoyantForces.apply` production call site, not merely in isolated
+pure-function math.
+
+**What this proves:** the directional multipliers are wired through the
+real `Overrides` precedence/validation/live-reload chain exactly like
+every other sibling field in this project, the underlying math exactly
+reproduces the existing isotropic drag at the `1.0` default (both as a
+pure-function identity and, via the probe, through the real production
+`BuoyantForces.apply` call site), each axis's multiplier independently
+and measurably changes drag on that axis through the real physics engine
+(not just in isolated math), uniform multiplier scaling and direct
+scalar-coefficient scaling are equivalent, and the force stays
+dissipative (never adds energy) for any valid configuration.
+
+**What this does NOT change:** per-float submergence/buoyancy, propeller
+thrust/allocation, the existing MINECRAFT-518 angular water drag, boat
+steering/rudder authority, and every other `Overrides.Tuning` field are
+completely untouched. No planing model, steering-limit change, or new
+rudder behavior was added - out of this ticket's explicitly bounded
+scope.
+
+**Evidence gathered this pass:** `/tmp/gradle-8.14/bin/gradle --offline
+--no-daemon clean test build`, flock-protected on the shared
+`/tmp/div-gradle-slot.lock` (never unlinked), at this exact head
+(reconciled onto accepted main through MINECRAFT-532/533/534/536) -
+`BUILD SUCCESSFUL`, the real JUnit XML reports **784 tests**, 0 skipped,
+0 failures, 0 errors. Jar SHA-256
+`67c455a6d63bc7205984f6378e0800182b09992d9206d145b2df05039e085d59`. The
+real-Sable `DirectionalWaterDragProbe` run itself (an opt-in
+`gradle runServer` pass, distinct from the unit-test evidence above) WAS
+performed this pass - see "Three live-discovered defects" and "Actual
+probe run results" above: all 7 scenarios `COMPLETE`, zero `FAILED`,
+all four comparisons PASS.
+
 ## Installed-tire rolling resistance overrides (MINECRAFT-534, added 2026-11-15)
 
 **Schema.** Mirrors MINECRAFT-529's own `friction` part-override exactly

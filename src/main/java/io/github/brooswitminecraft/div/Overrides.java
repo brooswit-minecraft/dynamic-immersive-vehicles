@@ -250,6 +250,21 @@ public final class Overrides {
   // their combination does not. Re-read live every tick by PhysicsBridge.stepGround, same as
   // suspensionDampingRatio/brakeBiasFront - see PhysicsBridge.applyLiveSafeFields.
   public Double suspensionSpringMultiplier;
+  // MINECRAFT-535: optional, bounded body-local directional multipliers on top of the existing
+  // isotropic waterDrag - longitudinal (bow/stern, the hull's own forward axis), lateral
+  // (port/starboard), and vertical (heave) each independently scale the SAME quadratic drag
+  // model BuoyantForces.apply already computes per float, see Buoyancy.directionalDragForce.
+  // Each defaults to 1.0 (FALLBACK below) - a pure no-op multiplier reproducing the exact prior
+  // isotropic drag force on that axis, byte-identical for a vehicle that never sets any of these
+  // three fields, same "preserved calibrated defaults" shape as lateralGripMultiplier/
+  // suspensionSpringMultiplier. Dissipative only (see Buoyancy.directionalDragForce's own doc for
+  // why a nonnegative multiplier can never flip an axis's own drag force to push WITH motion
+  // instead of against it) - this never adds energy, only varies how much is removed per axis.
+  // Re-read live every tick by BuoyantForces.apply, same as waterDrag itself - see
+  // PhysicsBridge.applyLiveSafeFields.
+  public Double longitudinalWaterDragMultiplier;
+  public Double lateralWaterDragMultiplier;
+  public Double verticalWaterDragMultiplier;
   // MINECRAFT-533: optional, per-vehicle static toe alignment angle (degrees) for the geometric
   // front/rear axle group (same grouping as brakeBiasFront/driveBiasFront - see
   // AxleToeDistribution's own doc), applied to each wheel's own contact tangent forward/right
@@ -294,6 +309,18 @@ public final class Overrides {
    if (waterDrag != null && !(waterDrag >= 0 && waterDrag <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (propellerForce != null && !(propellerForce >= 0 && propellerForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (angularWaterDrag != null && !(angularWaterDrag >= 0 && angularWaterDrag <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-535: inclusive 0 (a deliberate, physically sensible extreme - an operator may
+   // want an axis with literally no drag, e.g. a keel-less hull sliding sideways with no
+   // resistance at all, same "exact 0/1 extremes are normal, not degenerate" reasoning
+   // brakeBiasFront/driveBiasFront already use) through a documentable flat 5.0 ceiling (keeps
+   // this a tuning knob, not a way to grant an unbounded drag force on one axis - same shape as
+   // cyclicAuthorityScale/yawAuthorityScale's own 5x ceiling). Never negative: a negative
+   // multiplier would flip Buoyancy.directionalDragForce's sign, turning dissipative drag into a
+   // force that pushes WITH motion and adds energy - exactly what this ticket's "no energy
+   // addition" requirement forbids.
+   if (longitudinalWaterDragMultiplier != null && !(Double.isFinite(longitudinalWaterDragMultiplier) && longitudinalWaterDragMultiplier >= 0 && longitudinalWaterDragMultiplier <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (lateralWaterDragMultiplier != null && !(Double.isFinite(lateralWaterDragMultiplier) && lateralWaterDragMultiplier >= 0 && lateralWaterDragMultiplier <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (verticalWaterDragMultiplier != null && !(Double.isFinite(verticalWaterDragMultiplier) && verticalWaterDragMultiplier >= 0 && verticalWaterDragMultiplier <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (selfRightStrength != null && !(Double.isFinite(selfRightStrength) && selfRightStrength >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (selfRightDamping != null && !(Double.isFinite(selfRightDamping) && selfRightDamping >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (selfRightMaxTorque != null && !(Double.isFinite(selfRightMaxTorque) && selfRightMaxTorque >= 0)) throw new IllegalArgumentException("invalid vehicle tuning");
@@ -527,6 +554,9 @@ public final class Overrides {
    if (waterDrag != null) throw new IllegalArgumentException("part overrides do not support 'waterDrag' (no part-level consumer yet)");
    if (propellerForce != null) throw new IllegalArgumentException("part overrides do not support 'propellerForce' (no part-level consumer yet)");
    if (angularWaterDrag != null) throw new IllegalArgumentException("part overrides do not support 'angularWaterDrag' (no part-level consumer yet)");
+   if (longitudinalWaterDragMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'longitudinalWaterDragMultiplier' (no part-level consumer yet)");
+   if (lateralWaterDragMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'lateralWaterDragMultiplier' (no part-level consumer yet)");
+   if (verticalWaterDragMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'verticalWaterDragMultiplier' (no part-level consumer yet)");
    if (selfRightStrength != null || selfRightDamping != null || selfRightMaxTorque != null
      || selfRightFadeStartDegrees != null || selfRightFadeEndDegrees != null)
     throw new IllegalArgumentException("part overrides do not support selfRight* fields (no part-level consumer yet)");
@@ -599,6 +629,11 @@ public final class Overrides {
   // unconfigured vehicle's spring (and therefore ride-height equilibrium) stays byte-identical
   // to before this ticket.
   FALLBACK.suspensionSpringMultiplier=1.0;
+  // MINECRAFT-535: 1.0 on every axis is a pure no-op multiplier against the existing isotropic
+  // waterDrag - an unconfigured vehicle's water drag stays byte-identical to before this ticket.
+  FALLBACK.longitudinalWaterDragMultiplier=1.0;
+  FALLBACK.lateralWaterDragMultiplier=1.0;
+  FALLBACK.verticalWaterDragMultiplier=1.0;
   // MINECRAFT-536: 1.0 is a pure no-op multiplier against the existing native-derived parasitic
   // drag budget - an unconfigured fixed-wing vehicle's parasitic drag stays byte-identical to
   // before this ticket. oswaldEfficiency reuses FlightForces' own previously-hardcoded constant
@@ -626,6 +661,9 @@ public final class Overrides {
   c.driveBiasFront=t.driveBiasFront;
   c.suspensionDampingRatio=t.suspensionDampingRatio;
   c.suspensionSpringMultiplier=t.suspensionSpringMultiplier;
+  c.longitudinalWaterDragMultiplier=t.longitudinalWaterDragMultiplier;
+  c.lateralWaterDragMultiplier=t.lateralWaterDragMultiplier;
+  c.verticalWaterDragMultiplier=t.verticalWaterDragMultiplier;
   c.parasiticDragMultiplier=t.parasiticDragMultiplier; c.oswaldEfficiency=t.oswaldEfficiency;
   c.toeFrontDegrees=t.toeFrontDegrees;
   c.toeRearDegrees=t.toeRearDegrees;
@@ -668,6 +706,9 @@ public final class Overrides {
   m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
   m.suspensionDampingRatio = child.suspensionDampingRatio!=null?child.suspensionDampingRatio:parent.suspensionDampingRatio;
   m.suspensionSpringMultiplier = child.suspensionSpringMultiplier!=null?child.suspensionSpringMultiplier:parent.suspensionSpringMultiplier;
+  m.longitudinalWaterDragMultiplier = child.longitudinalWaterDragMultiplier!=null?child.longitudinalWaterDragMultiplier:parent.longitudinalWaterDragMultiplier;
+  m.lateralWaterDragMultiplier = child.lateralWaterDragMultiplier!=null?child.lateralWaterDragMultiplier:parent.lateralWaterDragMultiplier;
+  m.verticalWaterDragMultiplier = child.verticalWaterDragMultiplier!=null?child.verticalWaterDragMultiplier:parent.verticalWaterDragMultiplier;
   m.parasiticDragMultiplier = child.parasiticDragMultiplier!=null?child.parasiticDragMultiplier:parent.parasiticDragMultiplier;
   m.oswaldEfficiency = child.oswaldEfficiency!=null?child.oswaldEfficiency:parent.oswaldEfficiency;
   m.toeFrontDegrees = child.toeFrontDegrees!=null?child.toeFrontDegrees:parent.toeFrontDegrees;
@@ -867,6 +908,9 @@ public final class Overrides {
   result.driveBiasFront = firstNonNull(override!=null?override.driveBiasFront:null, packMetadata!=null?packMetadata.driveBiasFront:null, ivAdapted!=null?ivAdapted.driveBiasFront:null, physicallyDerived!=null?physicallyDerived.driveBiasFront:null);
   result.suspensionDampingRatio = firstNonNull(override!=null?override.suspensionDampingRatio:null, packMetadata!=null?packMetadata.suspensionDampingRatio:null, ivAdapted!=null?ivAdapted.suspensionDampingRatio:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatio:null, FALLBACK.suspensionDampingRatio);
   result.suspensionSpringMultiplier = firstNonNull(override!=null?override.suspensionSpringMultiplier:null, packMetadata!=null?packMetadata.suspensionSpringMultiplier:null, ivAdapted!=null?ivAdapted.suspensionSpringMultiplier:null, physicallyDerived!=null?physicallyDerived.suspensionSpringMultiplier:null, FALLBACK.suspensionSpringMultiplier);
+  result.longitudinalWaterDragMultiplier = firstNonNull(override!=null?override.longitudinalWaterDragMultiplier:null, packMetadata!=null?packMetadata.longitudinalWaterDragMultiplier:null, ivAdapted!=null?ivAdapted.longitudinalWaterDragMultiplier:null, physicallyDerived!=null?physicallyDerived.longitudinalWaterDragMultiplier:null, FALLBACK.longitudinalWaterDragMultiplier);
+  result.lateralWaterDragMultiplier = firstNonNull(override!=null?override.lateralWaterDragMultiplier:null, packMetadata!=null?packMetadata.lateralWaterDragMultiplier:null, ivAdapted!=null?ivAdapted.lateralWaterDragMultiplier:null, physicallyDerived!=null?physicallyDerived.lateralWaterDragMultiplier:null, FALLBACK.lateralWaterDragMultiplier);
+  result.verticalWaterDragMultiplier = firstNonNull(override!=null?override.verticalWaterDragMultiplier:null, packMetadata!=null?packMetadata.verticalWaterDragMultiplier:null, ivAdapted!=null?ivAdapted.verticalWaterDragMultiplier:null, physicallyDerived!=null?physicallyDerived.verticalWaterDragMultiplier:null, FALLBACK.verticalWaterDragMultiplier);
   result.parasiticDragMultiplier = firstNonNull(override!=null?override.parasiticDragMultiplier:null, packMetadata!=null?packMetadata.parasiticDragMultiplier:null, ivAdapted!=null?ivAdapted.parasiticDragMultiplier:null, physicallyDerived!=null?physicallyDerived.parasiticDragMultiplier:null, FALLBACK.parasiticDragMultiplier);
   result.oswaldEfficiency = firstNonNull(override!=null?override.oswaldEfficiency:null, packMetadata!=null?packMetadata.oswaldEfficiency:null, ivAdapted!=null?ivAdapted.oswaldEfficiency:null, physicallyDerived!=null?physicallyDerived.oswaldEfficiency:null, FALLBACK.oswaldEfficiency);
   // MINECRAFT-533: same "no FALLBACK entry" shape as brakeBiasFront/driveBiasFront above - stays

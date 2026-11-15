@@ -134,6 +134,14 @@ neoForge {
     jvmArgument('-Ddiv.experimentalBuoyancyAngularDrag=true')
     jvmArgument('-Ddiv.debugGroundContact=true')
    }
+   // MINECRAFT-535: opt-in float-only-hull DIRECTIONAL (longitudinal/lateral/vertical) water-drag
+   // runtime probe - same gating pattern as every other probe above; OFF for every normal
+   // `gradle runServer`. See DirectionalWaterDragProbe's own doc for the config-file entries
+   // this requires before running.
+   if (System.getenv('DIV_DIRECTIONAL_WATER_DRAG_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalDirectionalWaterDrag=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+   }
    // MINECRAFT-517 independent review (PR #16): opt-in real-oak_log canonical-texture/rotation
    // smoke test - same gating pattern as every other probe above; OFF for every normal
    // `gradle runServer`.

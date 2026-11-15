@@ -99,6 +99,13 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.BuoyancyAngularDragProbe.maybeRun(overworld);
   });
+  // Opt-in, CI/isolated-host-only float-only-hull DIRECTIONAL (longitudinal/lateral/vertical)
+  // water-drag probe (MINECRAFT-535) - OFF by default, a strict no-op otherwise. Never touches
+  // any real vehicle, Zippy, or world content - see DirectionalWaterDragProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.DirectionalWaterDragProbe.maybeRun(overworld);
+  });
   // Opt-in, dev/isolated-host-only fixed-wing/rotorcraft activation, default-response,
   // configured-response and valid/invalid live-reload probe (MINECRAFT-526) - OFF by default, a
   // strict no-op otherwise. Closes the disclosed "no live EntityVehicleF_Physics/Sable runtime

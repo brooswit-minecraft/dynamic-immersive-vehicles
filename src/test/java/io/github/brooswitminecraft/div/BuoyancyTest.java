@@ -30,6 +30,39 @@ class BuoyancyTest {
   double at1 = Buoyancy.drag(1, 1, 3), at2 = Buoyancy.drag(2, 1, 3);
   assertEquals(4 * at1, at2, 1e-9);
  }
+ // MINECRAFT-535: directional water drag - equal-axis parity against the existing isotropic
+ // vector formula already in production (BuoyantForces.apply, before this ticket): force =
+ // -dragMagnitude/speed * localVelocity, i.e. force_i = -fraction*dragCoefficient*speed*v_i.
+ @Test void directionalDragWithUnitMultiplierMatchesIsotropicFormulaOnEveryAxis() {
+  double speed = 5.0, fraction = 0.6, coefficient = 400;
+  double vx = 3.0, vy = -1.5, vz = 4.0;
+  double isotropicX = -fraction * coefficient * speed * vx;
+  double isotropicY = -fraction * coefficient * speed * vy;
+  double isotropicZ = -fraction * coefficient * speed * vz;
+  assertEquals(isotropicX, Buoyancy.directionalDragForce(speed, vx, fraction, coefficient, 1.0), 1e-9);
+  assertEquals(isotropicY, Buoyancy.directionalDragForce(speed, vy, fraction, coefficient, 1.0), 1e-9);
+  assertEquals(isotropicZ, Buoyancy.directionalDragForce(speed, vz, fraction, coefficient, 1.0), 1e-9);
+ }
+ @Test void directionalDragScalesLinearlyWithItsOwnAxisMultiplier() {
+  double base = Buoyancy.directionalDragForce(5, 2, 0.5, 100, 1.0);
+  assertEquals(2 * base, Buoyancy.directionalDragForce(5, 2, 0.5, 100, 2.0), 1e-9);
+  assertEquals(0, Buoyancy.directionalDragForce(5, 2, 0.5, 100, 0.0), 1e-9);
+ }
+ @Test void directionalDragAlwaysOpposesItsOwnAxisVelocityForAnyNonnegativeMultiplier() {
+  // Dissipative-only requirement: a nonnegative multiplier must never flip the force to push
+  // WITH motion (same sign as velocity) instead of against it (adding energy).
+  for (double multiplier : new double[]{0, 0.1, 1, 2.5, 5}) {
+   double forcePositiveVelocity = Buoyancy.directionalDragForce(5, 3, 0.8, 400, multiplier);
+   double forceNegativeVelocity = Buoyancy.directionalDragForce(5, -3, 0.8, 400, multiplier);
+   assertTrue(forcePositiveVelocity <= 0, "force must oppose positive velocity for multiplier=" + multiplier);
+   assertTrue(forceNegativeVelocity >= 0, "force must oppose negative velocity for multiplier=" + multiplier);
+  }
+ }
+ @Test void directionalDragIsZeroWhenNotSubmergedOrNotMovingOnThatAxis() {
+  assertEquals(0, Buoyancy.directionalDragForce(5, 0, 0, 400, 1.0), 1e-9);
+  assertEquals(0, Buoyancy.directionalDragForce(5, 3, 0, 400, 1.0), 1e-9);
+  assertEquals(0, Buoyancy.directionalDragForce(5, 0, 1, 400, 1.0), 1e-9);
+ }
  // MINECRAFT-518 review (comment 53679): the retention fraction returned here must always be in
  // (0,1] regardless of how large angularSpeed/submergedFraction/angularDragCoefficient/dt are -
  // the whole point of the implicit (not explicit-impulse) formulation is that it is impossible to
