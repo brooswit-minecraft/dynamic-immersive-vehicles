@@ -377,24 +377,34 @@ public final class Overrides {
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
    * "narrow the accepted part schema/docs to only supported attributes" - a {@code parts} entry
-   * may ONLY set {@code driveForce} (plus {@code extends}, which is structural, not itself a
-   * tuning field) today, since {@code driveForce} is the one field
-   * {@link io.github.brooswitminecraft.div.PhysicsBridge#enginePartDriveForce} actually consumes.
-   * Every other field - {@code friction}/{@code brakeForce}/{@code maxSteerDegrees}/{@code
-   * lateralGripMultiplier}/{@code waterDrag}/{@code propellerForce}/{@code massKg}/{@code
-   * hullFillFactor}/{@code upperMassFraction}/every {@code selfRight*}/{@code enabled} - has no
-   * part-level consumer, so a part entry that sets one would silently do nothing; this fails
-   * loudly at load/reload instead, the same as an out-of-range value already does, rather than
-   * accepting a config an operator would reasonably expect to have an effect. Called on the
-   * MERGED (post-{@code extends}) entry, same as {@link #validate} already is for every {@code
-   * parts} entry in {@link Overrides#readAndValidate} - a part inheriting an unsupported field
-   * from a template is exactly as rejected as setting it directly.
+   * may ONLY set {@code driveForce} or {@code friction} (plus {@code extends}, which is
+   * structural, not itself a tuning field) today, since those are the two fields
+   * {@link io.github.brooswitminecraft.div.PhysicsBridge#enginePartDriveForce}/{@link
+   * io.github.brooswitminecraft.div.PhysicsBridge#tirePartFriction} actually consume.
+   * {@code friction} was added by MINECRAFT-529 (installed tire-specific grip overrides) - an
+   * installed ground-device/tire part's own {@code friction} REPLACES (never multiplies) the
+   * vehicle's resolved {@code friction} for that one wheel's contact only, same "complete
+   * replacement, not a modifier" precedence {@code driveForce} already established for engine
+   * parts; see {@code PhysicsBridge.tirePartFriction}'s own doc for the full composition. Every
+   * other field - {@code brakeForce}/{@code maxSteerDegrees}/{@code lateralGripMultiplier}/
+   * {@code waterDrag}/{@code propellerForce}/{@code massKg}/{@code hullFillFactor}/{@code
+   * upperMassFraction}/every {@code selfRight*}/{@code enabled} - has no part-level consumer, so
+   * a part entry that sets one would silently do nothing; this fails loudly at load/reload
+   * instead, the same as an out-of-range value already does, rather than accepting a config an
+   * operator would reasonably expect to have an effect. Called on the MERGED (post-{@code
+   * extends}) entry, same as {@link #validate} already is for every {@code parts} entry in
+   * {@link Overrides#readAndValidate} - a part inheriting an unsupported field from a template is
+   * exactly as rejected as setting it directly; a part that inherits {@code friction} from a
+   * template is, since MINECRAFT-529, exactly as ACCEPTED as setting it directly.
    */
   void validateSupportedForPart() {
    if (enabled != null) throw new IllegalArgumentException("part overrides do not support 'enabled' (vehicle-only concept)");
    if (massKg != null) throw new IllegalArgumentException("part overrides do not support 'massKg' (no part-level consumer yet)");
    if (suspensionTravel != null) throw new IllegalArgumentException("part overrides do not support 'suspensionTravel' (no part-level consumer yet)");
-   if (friction != null) throw new IllegalArgumentException("part overrides do not support 'friction' (no part-level consumer yet)");
+   // MINECRAFT-529: friction is now a supported part-level field (installed tire-specific grip
+   // overrides) - see PhysicsBridge.tirePartFriction. Bounds are still exactly validate()'s
+   // existing friction>0 && friction<=3 check above (run on this same merged entry by
+   // Overrides.validateConfig right after this method), no new/different bound was introduced.
    if (brakeForce != null) throw new IllegalArgumentException("part overrides do not support 'brakeForce' (no part-level consumer yet)");
    if (maxSteerDegrees != null) throw new IllegalArgumentException("part overrides do not support 'maxSteerDegrees' (no part-level consumer yet)");
    if (hullFillFactor != null) throw new IllegalArgumentException("part overrides do not support 'hullFillFactor' (no part-level consumer yet)");
