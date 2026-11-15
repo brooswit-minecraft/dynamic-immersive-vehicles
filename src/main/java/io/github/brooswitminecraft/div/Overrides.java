@@ -49,6 +49,17 @@ public final class Overrides {
   public Double massKg;
   public Double suspensionTravel;
   public Double friction;
+  // MINECRAFT-534: installed-tire rolling-resistance multiplier, independent of friction/grip -
+  // see PhysicsBridge.tirePartRollingResistance's own doc for the composition. Vehicle-level,
+  // same shape as friction: resolves to the flat FALLBACK (1.0, a true no-op reproducing today's
+  // exact ground-surface-only rollingResistanceMultiplier byte-identically) when unconfigured at
+  // every precedence level; a part-level entry for THIS SPECIFIC installed tire REPLACES (never
+  // multiplies) the vehicle's own resolved value for that one wheel's contact, exactly like
+  // friction's own part-level precedence (replacement, not a modifier). Composed MULTIPLICATIVELY
+  // with the existing ground-surface rollingResistanceMultiplier by PhysicsBridge.stepGround,
+  // never inside MultiContactFrictionSolver itself - no change to that solver's own rolling-
+  // resistance formula (F=-k*v*rollingResistanceMultiplier) was needed or made.
+  public Double rollingResistance;
   public Double driveForce;
   public Double brakeForce;
   public Double maxSteerDegrees;
@@ -219,6 +230,13 @@ public final class Overrides {
    if (massKg != null && (!Double.isFinite(massKg) || massKg < 50 || massKg > 100000)) throw new IllegalArgumentException("massKg out of range");
    if (suspensionTravel != null && !(suspensionTravel > 0 && suspensionTravel <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (friction != null && !(friction > 0 && friction <= 3)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-534: strictly positive, same "never zero" reasoning friction's own bound above
+   // documents - PhysicsBridge.tirePartRollingResistance divides a resolved value back by this
+   // same vehicle-resolved rollingResistance to form a pure ratio (mirroring tirePartFriction's
+   // own division by tuning.friction), so a zero value would be a division-by-zero. Capped at 10
+   // to match GroundSurfaceOverrides' own rollingResistanceMultiplier range - a consistent bound
+   // across both the ground-surface and tire-part multipliers that compose together.
+   if (rollingResistance != null && !(rollingResistance > 0 && rollingResistance <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (driveForce != null && !(driveForce >= 0 && driveForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (brakeForce != null && !(brakeForce >= 0 && brakeForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (maxSteerDegrees != null && !(maxSteerDegrees > 0 && maxSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
@@ -377,15 +395,20 @@ public final class Overrides {
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
    * "narrow the accepted part schema/docs to only supported attributes" - a {@code parts} entry
-   * may ONLY set {@code driveForce} or {@code friction} (plus {@code extends}, which is
-   * structural, not itself a tuning field) today, since those are the two fields
+   * may ONLY set {@code driveForce}, {@code friction}, or (MINECRAFT-534) {@code
+   * rollingResistance} (plus {@code extends}, which is structural, not itself a tuning field)
+   * today, since those are the three fields
    * {@link io.github.brooswitminecraft.div.PhysicsBridge#enginePartDriveForce}/{@link
-   * io.github.brooswitminecraft.div.PhysicsBridge#tirePartFriction} actually consume.
+   * io.github.brooswitminecraft.div.PhysicsBridge#tirePartFriction}/{@link
+   * io.github.brooswitminecraft.div.PhysicsBridge#tirePartRollingResistance} actually consume.
    * {@code friction} was added by MINECRAFT-529 (installed tire-specific grip overrides) - an
    * installed ground-device/tire part's own {@code friction} REPLACES (never multiplies) the
    * vehicle's resolved {@code friction} for that one wheel's contact only, same "complete
    * replacement, not a modifier" precedence {@code driveForce} already established for engine
-   * parts; see {@code PhysicsBridge.tirePartFriction}'s own doc for the full composition. Every
+   * parts; see {@code PhysicsBridge.tirePartFriction}'s own doc for the full composition.
+   * {@code rollingResistance} was added by MINECRAFT-534 (installed-tire rolling-resistance
+   * overrides), same replace-not-multiply precedence - see {@code
+   * PhysicsBridge.tirePartRollingResistance}'s own doc. Every
    * other field - {@code brakeForce}/{@code maxSteerDegrees}/{@code lateralGripMultiplier}/
    * {@code waterDrag}/{@code propellerForce}/{@code massKg}/{@code hullFillFactor}/{@code
    * upperMassFraction}/every {@code selfRight*}/{@code enabled} - has no part-level consumer, so
@@ -405,6 +428,9 @@ public final class Overrides {
    // overrides) - see PhysicsBridge.tirePartFriction. Bounds are still exactly validate()'s
    // existing friction>0 && friction<=3 check above (run on this same merged entry by
    // Overrides.validateConfig right after this method), no new/different bound was introduced.
+   // MINECRAFT-534: rollingResistance is likewise a supported part-level field (installed tire
+   // rolling-resistance overrides) - see PhysicsBridge.tirePartRollingResistance. Bounds are
+   // still exactly validate()'s own rollingResistance>0 && rollingResistance<=10 check above.
    if (brakeForce != null) throw new IllegalArgumentException("part overrides do not support 'brakeForce' (no part-level consumer yet)");
    if (maxSteerDegrees != null) throw new IllegalArgumentException("part overrides do not support 'maxSteerDegrees' (no part-level consumer yet)");
    if (hullFillFactor != null) throw new IllegalArgumentException("part overrides do not support 'hullFillFactor' (no part-level consumer yet)");
@@ -444,6 +470,10 @@ public final class Overrides {
  private static final Tuning FALLBACK = new Tuning();
  static {
   FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
+  // MINECRAFT-534: 1.0 is a pure no-op multiplier against the ground-surface
+  // rollingResistanceMultiplier - an unconfigured vehicle/tire-part rolls byte-identically to
+  // before this ticket.
+  FALLBACK.rollingResistance=1.0;
   FALLBACK.maxSteerDegrees=30.0; FALLBACK.hullFillFactor=0.5; FALLBACK.waterDrag=400.0; FALLBACK.propellerForce=6000.0;
   FALLBACK.upperMassFraction=0.5;
   FALLBACK.lateralGripMultiplier=1.0;
@@ -468,6 +498,7 @@ public final class Overrides {
   Tuning c = new Tuning();
   c.extendsTemplate=t.extendsTemplate;
   c.enabled=t.enabled; c.massKg=t.massKg; c.suspensionTravel=t.suspensionTravel; c.friction=t.friction;
+  c.rollingResistance=t.rollingResistance;
   c.driveForce=t.driveForce; c.brakeForce=t.brakeForce; c.maxSteerDegrees=t.maxSteerDegrees;
   c.hullFillFactor=t.hullFillFactor; c.waterDrag=t.waterDrag; c.propellerForce=t.propellerForce;
   c.selfRightStrength=t.selfRightStrength; c.selfRightDamping=t.selfRightDamping; c.selfRightMaxTorque=t.selfRightMaxTorque;
@@ -492,6 +523,7 @@ public final class Overrides {
   m.massKg = child.massKg!=null?child.massKg:parent.massKg;
   m.suspensionTravel = child.suspensionTravel!=null?child.suspensionTravel:parent.suspensionTravel;
   m.friction = child.friction!=null?child.friction:parent.friction;
+  m.rollingResistance = child.rollingResistance!=null?child.rollingResistance:parent.rollingResistance;
   m.driveForce = child.driveForce!=null?child.driveForce:parent.driveForce;
   m.brakeForce = child.brakeForce!=null?child.brakeForce:parent.brakeForce;
   m.maxSteerDegrees = child.maxSteerDegrees!=null?child.maxSteerDegrees:parent.maxSteerDegrees;
@@ -676,6 +708,7 @@ public final class Overrides {
   result.massKg = firstNonNull(override!=null?override.massKg:null, packMetadata!=null?packMetadata.massKg:null, ivAdapted!=null?ivAdapted.massKg:null, physicallyDerived!=null?physicallyDerived.massKg:null);
   result.suspensionTravel = firstNonNull(override!=null?override.suspensionTravel:null, packMetadata!=null?packMetadata.suspensionTravel:null, ivAdapted!=null?ivAdapted.suspensionTravel:null, physicallyDerived!=null?physicallyDerived.suspensionTravel:null, FALLBACK.suspensionTravel);
   result.friction = firstNonNull(override!=null?override.friction:null, packMetadata!=null?packMetadata.friction:null, ivAdapted!=null?ivAdapted.friction:null, physicallyDerived!=null?physicallyDerived.friction:null, FALLBACK.friction);
+  result.rollingResistance = firstNonNull(override!=null?override.rollingResistance:null, packMetadata!=null?packMetadata.rollingResistance:null, ivAdapted!=null?ivAdapted.rollingResistance:null, physicallyDerived!=null?physicallyDerived.rollingResistance:null, FALLBACK.rollingResistance);
   result.driveForce = firstNonNull(override!=null?override.driveForce:null, packMetadata!=null?packMetadata.driveForce:null, ivAdapted!=null?ivAdapted.driveForce:null, physicallyDerived!=null?physicallyDerived.driveForce:null, FALLBACK.driveForce);
   result.brakeForce = firstNonNull(override!=null?override.brakeForce:null, packMetadata!=null?packMetadata.brakeForce:null, ivAdapted!=null?ivAdapted.brakeForce:null, physicallyDerived!=null?physicallyDerived.brakeForce:null, FALLBACK.brakeForce);
   result.maxSteerDegrees = firstNonNull(override!=null?override.maxSteerDegrees:null, packMetadata!=null?packMetadata.maxSteerDegrees:null, ivAdapted!=null?ivAdapted.maxSteerDegrees:null, physicallyDerived!=null?physicallyDerived.maxSteerDegrees:null, FALLBACK.maxSteerDegrees);
