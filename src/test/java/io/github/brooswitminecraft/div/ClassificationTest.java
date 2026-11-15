@@ -227,7 +227,7 @@ class ClassificationTest {
   assertFalse(Classification.floatEligible(v, installedGroundDevices, installedPropellers, false, false));
  }
 
- @Test void floatEligibleExcludesAircraftBlimpTowedAndOptedOut() {
+ @Test void floatEligibleExcludesAircraftBlimpAndOptedOut() {
   var aircraft = motorized();
   aircraft.motorized.isAircraft = true;
   assertFalse(Classification.floatEligible(aircraft, List.of(pontoon()), NO_PROPELLERS, false, false));
@@ -236,8 +236,15 @@ class ClassificationTest {
   blimp.motorized.isBlimp = true;
   assertFalse(Classification.floatEligible(blimp, List.of(pontoon()), NO_PROPELLERS, false, false));
 
-  assertFalse(Classification.floatEligible(motorized(), List.of(pontoon()), NO_PROPELLERS, true, false));
   assertFalse(Classification.floatEligible(motorized(), List.of(pontoon()), NO_PROPELLERS, false, true));
+ }
+
+ @Test void floatEligibleNoLongerExcludesActivelyTowedHull() {
+  // MINECRAFT-545: a float-only hull being actively towed is eligible exactly like an untowed
+  // one - BuoyantBody now implements HitchAnchor, so PhysicsBridge.createHitch can connect to
+  // it. activelyTowed is still accepted (kept, now ignored) rather than ripping the param out of
+  // every existing call site.
+  assertTrue(Classification.floatEligible(motorized(), List.of(pontoon()), NO_PROPELLERS, true, false));
  }
 
  @Test void floatEligibleWithNoGroundDeviceAtAllIsExcluded() {

@@ -31,6 +31,7 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3d;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
+import org.joml.Vector3dc;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -622,10 +623,10 @@ public final class PhysicsBridge {
   var installedPropellers = installedPropellers(v);
   TowingConnection towedByConnection = v.towedByConnection;
   boolean towed = towedByConnection != null, optedOut = Overrides.isOptedOut(key);
-  // Hitch coupling (and the ordering wait/rollback it needs) applies only to the ground/flight/
-  // rotor domain - all three share one Body implementation. A float-only hull's activelyTowed
-  // gate stays exactly as floatEligible already enforces it (see Classification's class doc for
-  // why: BuoyantBody has no pose/anchor API for a joint to connect to).
+  // Hitch coupling (and the ordering wait/rollback it needs) now applies to the float-only
+  // domain too (MINECRAFT-545): BuoyantBody implements HitchAnchor exactly like the ground/
+  // flight/rotor Body does, so floatEligible no longer excludes an actively-towed hull - see
+  // Classification's class doc.
   boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, optedOut);
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   if (brokenDefinitions.contains(definition)) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "brokenDefinition:"+key); return deactivate(v); }
@@ -643,10 +644,13 @@ public final class PhysicsBridge {
    if (old != null) { hitches.release(v); old.remove(); }
   }
   boolean alreadyActive = registry.isActive(v);
-  boolean towingVehicleActive = ground && towed && isHitchableBody(towedByConnection.towingVehicle);
-  var decision = ground
-    ? decide(true, isClient, towed, alreadyActive, towingVehicleActive)
-    : (isClient ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
+  // No `ground &&` gate any more (MINECRAFT-545): a towed float-only hull now waits for its
+  // towing vehicle's own hitchable body exactly like a towed ground/flight/rotor vehicle does.
+  // `ground || floating` is always true here (the deactivate return above already excludes
+  // neither), so `decide` alone (its own isClient/towed handling already matches the previous
+  // per-branch ternary exactly) replaces it.
+  boolean towingVehicleActive = towed && isHitchableBody(towedByConnection.towingVehicle);
+  var decision = decide(true, isClient, towed, alreadyActive, towingVehicleActive);
   GroundContactDiagnostics.logClassification(v.uniqueUUID, isClient, key, ground, floating, decision.toString());
   if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
   if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
@@ -659,7 +663,8 @@ public final class PhysicsBridge {
     ? () -> new Body(server,v,tuning(definition))
     : () -> new BuoyantBody(server,v,tuning(definition));
   boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, GroundContactDiagnostics.instrumentedConstruct(construct, v.uniqueUUID, isClient, key));
-  if (!activated || !ground) return activated;
+  // MINECRAFT-545: hitch reconciliation now runs for a float-only hull too, not just `ground`.
+  if (!activated) return activated;
   // Evaluated BEFORE reconcileHitch runs: HitchRegistry.reconcile already clears any existing
   // entry - valid/matching or not - before attempting to (re)create one, so this is the only
   // point that can still tell whether the trailer entered this attempt coherently jointed to its
@@ -671,10 +676,11 @@ public final class PhysicsBridge {
   EntityVehicleF_Physics desired = towingVehicleActive ? towedByConnection.towingVehicle : null;
   return reconcileOrRollBack(registry, hitches, v, hitches.isCoherentlyJointedTo(v, desired), () -> reconcileHitch(v, towedByConnection), VehicleBody::remove);
  }
- /** Whether the given towing vehicle's own active VehicleBody is a Body (ground/flight/rotor) -
-  * the only domain a hitch joint can connect to - rather than a BuoyantBody or no body at all. */
+ /** Whether the given towing vehicle's own active VehicleBody exposes {@link HitchAnchor} - a
+  * ground/flight/rotor {@code Body} or (MINECRAFT-545) a float-only {@link BuoyantBody} - rather
+  * than no body at all. */
  private static boolean isHitchableBody(EntityVehicleF_Physics towingVehicle) {
-  return registry.get(towingVehicle) instanceof Body;
+  return registry.get(towingVehicle) instanceof HitchAnchor;
  }
  /**
   * The exact reconcile-then-rollback composition {@code active()} performs once its body is
@@ -793,7 +799,9 @@ public final class PhysicsBridge {
  private static boolean reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
   EntityVehicleF_Physics desired = connection != null && isHitchableBody(connection.towingVehicle) ? connection.towingVehicle : null;
   try {
-   hitches.reconcile(v, desired, () -> createHitch((Body)registry.get(desired), (Body)registry.get(v), connection));
+   // MINECRAFT-545: either side can now be a ground/flight/rotor Body or a float-only
+   // BuoyantBody - createHitch only needs each side's HitchAnchor surface.
+   hitches.reconcile(v, desired, () -> createHitch((HitchAnchor)registry.get(desired), (HitchAnchor)registry.get(v), connection));
    return true;
   } catch (RuntimeException transientFailure) {
    return false;
@@ -839,16 +847,16 @@ public final class PhysicsBridge {
   * fields for that case, collapsing to exactly the raw {@code pos}/{@code rot} this method
   * always used.
   */
- private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
-  var hitchOffset = HitchJoint.anchorLocalOffset(towing.center,
+ private static PhysicsConstraintHandle createHitch(HitchAnchor towing, HitchAnchor trailer, TowingConnection connection) {
+  var hitchOffset = HitchJoint.anchorLocalOffset(towing.center(),
     connectionOffsetVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.pos), new Vector3d());
-  var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center,
+  var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center(),
     connectionOffsetVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.pos), new Vector3d());
   var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset,
     connectionRotationVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.rot),
     connectionRotationVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.rot).invert(),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
-  return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
+  return SubLevelContainer.getContainer(towing.level()).physicsSystem().getPipeline().addConstraint(towing.box(), trailer.box(), config);
  }
  /**
   * A hitch/hookup connection's own {@code pos}, converted to vehicle-root-local: unchanged when
@@ -1383,7 +1391,7 @@ public final class PhysicsBridge {
   double torqueForward = RotorForces.angularDampingTorque(angularVelocity.dot(forward), inertiaBody.z, dampingCoefficient, dt);
   return new Vector3d(right).mul(torqueRight).fma(torqueUp, up).fma(torqueForward, forward);
  }
- private static final class Body implements VehicleBody {
+ private static final class Body implements VehicleBody, HitchAnchor {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
   // Opt-in, self-limiting wheel-contact trace for the still-open initial-placement/asymmetric-
@@ -1843,8 +1851,13 @@ public final class PhysicsBridge {
     handle=h;
    }
   }
-  public Object level() { return level; }
+  public ServerLevel level() { return level; }
   public Overrides.Tuning tuning() { return tuning; }
+  // HitchAnchor (MINECRAFT-545): box/center already existed for this body's own wheel/joint
+  // geometry above - exposed here, read-only, so createHitch can treat this side of a joint the
+  // same way it now treats a BuoyantBody.
+  public BoxPhysicsObject box() { return box; }
+  public Vector3dc center() { return center; }
   public void remove() {
    var c=SubLevelContainer.getContainer(level);
    if (c==null) return;

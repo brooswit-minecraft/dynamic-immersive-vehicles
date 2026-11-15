@@ -8,6 +8,7 @@ import net.minecraft.server.level.ServerLevel;
 import org.joml.Matrix3d;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
+import org.joml.Vector3dc;
 
 /**
  * A float-only hull (boat/pontoon, Classification.floatEligible) - no wheel/track at all, so its
@@ -16,8 +17,14 @@ import org.joml.Vector3d;
  * alongside its wheel forces - see Classification.floatEligible's javadoc for why this class is
  * the exclusive fallback for a hull with nothing the ground solver can drive, not a general
  * "has a float device" body.
+ *
+ * <p>MINECRAFT-545: also implements {@link HitchAnchor}, so a float-only hull can now be either
+ * side of a {@code PhysicsBridge.createHitch} joint - towed behind a ground/flight/rotor vehicle
+ * or another float-only hull, and towing one in turn. {@code box}/{@code center} below are the
+ * same anchor geometry {@code PhysicsBridge.Body} already exposed; nothing about this body's own
+ * buoyancy/pose stepping changes.
  */
-final class BuoyantBody implements VehicleBody {
+final class BuoyantBody implements VehicleBody, HitchAnchor {
  private final ServerLevel level;
  private final Overrides.Tuning tuning;
  private final BoxPhysicsObject box;
@@ -68,9 +75,14 @@ final class BuoyantBody implements VehicleBody {
  public PhysicsBridge.InheritedRigidBodyVelocity captureReplacementState(EntityVehicleF_Physics v) {
   return PhysicsBridge.captureReplacementState(v, box, handle, center, false, 0);
  }
- public Object level() { return level; }
+ public ServerLevel level() { return level; }
  public void remove() { var c = SubLevelContainer.getContainer(level); if (c != null) c.physicsSystem().removeObject(box); }
  public Overrides.Tuning tuning() { return tuning; }
+ // HitchAnchor (MINECRAFT-545): box/center already exist for this body's own buoyancy/pose
+ // bookkeeping above - exposed here, read-only, for PhysicsBridge.createHitch to compose a hitch
+ // anchor against, exactly like PhysicsBridge.Body's own box/center fields.
+ public BoxPhysicsObject box() { return box; }
+ public Vector3dc center() { return center; }
 
  public void step(EntityVehicleF_Physics v) {
   box.updatePose();

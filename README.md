@@ -139,14 +139,6 @@ each vehicle from IV's own definition at the moment it is needed:
 Known, deliberate exclusions - not silently skipped, each tracked as a
 follow-up task rather than faked with an unrelated force model:
 
-- **A towed boat or other float-only hull** (an actively-hitched trailer
-  whose own category is the float-only one, not ground/flight/rotorcraft):
-  it keeps following IV's own native hitch code instead of getting a hitch
-  joint, because `BuoyantBody` (see `VehicleBody`, deliberately minimal)
-  exposes no pose/anchor API a `HitchJoint` could connect to - a concrete,
-  citable API gap, not an invented restriction. A towed ground, flight, or
-  rotorcraft vehicle has no such gap and is jointed normally; see "Trailer/
-  hitch coupling" below.
 - A vehicle whose JSON definition is missing or has a chassis with no finite
   collision volume is left on IV's native physics rather than crashing its
   tick; this is logged once per definition, not per vehicle instance.
@@ -155,20 +147,22 @@ follow-up task rather than faked with an unrelated force model:
 
 A vehicle actively hitched behind another (a trailer) is eligible for its
 own Sable body on the same terms as any other vehicle **in its own
-category** - ground, flight, or rotorcraft, all three sharing one
-`PhysicsBridge.Body` implementation - jointed to its towing vehicle's body by
-a Sable `GenericConstraintConfiguration` hitch (see `HitchJoint` for the
+category** - ground, flight, rotorcraft, or (MINECRAFT-545) a float-only
+hull - jointed to its towing vehicle's body by a Sable
+`GenericConstraintConfiguration` hitch (see `HitchJoint` for the
 anchor-position/locked-axis math, `HitchRegistry` for the testable joint-
 lifecycle bookkeeping - create/replace/release, by key - and
 `PhysicsBridge.createHitch`/`reconcileHitch` for how those two are wired to
 a live entity/Sable body), rather than IV's native hitch position-snap. The
 joint math itself is domain-agnostic - it only connects two already-
-classified bodies by their own `JSONConnection.pos` anchors - so a towed
-aircraft/blimp or rotorcraft is jointed exactly the same way a towed ground
-vehicle is; a towed boat is excluded instead because its `BuoyantBody` has
-no pose/anchor API for the joint to connect to (see the exclusions list
-above), not because of anything specific to towing. The joint anchors each
-body at its own
+classified bodies by their own `JSONConnection.pos` anchors, through the
+`HitchAnchor` interface (`level`/`box`/`center`) both `PhysicsBridge.Body`
+(ground/flight/rotor) and `BuoyantBody` (float-only) implement - so a towed
+aircraft/blimp, rotorcraft, **or float-only hull** is jointed exactly the
+same way a towed ground vehicle is, towing or being towed by any other
+category in turn (the `activelyTowed` exclusion `Classification.floatEligible`
+previously enforced for a float-only hull is gone, now that `BuoyantBody`
+has the anchor API this joint needs). The joint anchors each body at its own
 `JSONConnection.pos` (the hitch/hookup points IV's own connection group
 already defines), always locks the three linear axes (the two anchor points
 stay coincident - a hitch is not a sliding coupling), and locks rotation
