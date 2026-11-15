@@ -306,7 +306,9 @@ public final class PhysicsBridge {
   * stepGround reads tuning.driveBiasFront fresh every tick via DriveBiasDistribution#shareRatios)/
   * suspensionDampingRatio (MINECRAFT-523, stepGround reads tuning.suspensionDampingRatio fresh
   * every tick via suspensionDamper/suspensionDamperForShare/effectiveMassDamper, same as every
-  * other field in this list). Mutating
+  * other field in this list)/suspensionSpringMultiplier (MINECRAFT-528, stepGround reads
+  * tuning.suspensionSpringMultiplier fresh every tick via suspensionSpring/
+  * suspensionSpringForShare, same as every other field in this list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -342,6 +344,10 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.brakeBiasFront, fresh.brakeBiasFront)) { target.brakeBiasFront = fresh.brakeBiasFront; appliedOut.add("brakeBiasFront"); }
   if (!java.util.Objects.equals(target.driveBiasFront, fresh.driveBiasFront)) { target.driveBiasFront = fresh.driveBiasFront; appliedOut.add("driveBiasFront"); }
   if (!java.util.Objects.equals(target.suspensionDampingRatio, fresh.suspensionDampingRatio)) { target.suspensionDampingRatio = fresh.suspensionDampingRatio; appliedOut.add("suspensionDampingRatio"); }
+  // MINECRAFT-528: stepGround reads tuning.suspensionSpringMultiplier fresh every tick via
+  // suspensionSpring/suspensionSpringForShare, same "no separate cached field" shape as
+  // suspensionDampingRatio immediately above.
+  if (!java.util.Objects.equals(target.suspensionSpringMultiplier, fresh.suspensionSpringMultiplier)) { target.suspensionSpringMultiplier = fresh.suspensionSpringMultiplier; appliedOut.add("suspensionSpringMultiplier"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
@@ -928,9 +934,26 @@ public final class PhysicsBridge {
   * the ground a bit." Extracted as its own seam (same formula, now parameterized rather than a
   * hand-copied constant) so a settling simulation can exercise it at both the correct and the
   * previously-assumed gravity.
+  * @deprecated kept only for existing test call sites that never configure a spring-stiffness
+  * multiplier - delegates to {@link #suspensionSpring(double,int,double,double,double)} with
+  * the exact calibrated {@code 1.0} (no-op) default (MINECRAFT-528). Every real production call
+  * site passes the vehicle's own resolved {@code tuning.suspensionSpringMultiplier} explicitly
+  * instead.
   */
+ @Deprecated
  static double suspensionSpring(double mass, int wheelCount, double suspensionTravel, double gravity) {
-  return mass*gravity/(wheelCount*suspensionTravel*.5);
+  return suspensionSpring(mass, wheelCount, suspensionTravel, gravity, 1.0);
+ }
+ /**
+  * MINECRAFT-528: {@link #suspensionSpring(double,int,double,double)} generalized to an
+  * explicit, configurable, dimensionless {@code springMultiplier} (previously an implicit,
+  * unconfigurable {@code 1.0}) - see {@code Overrides.Tuning#suspensionSpringMultiplier}'s own
+  * doc for the validated range, default, and the ride-height-equilibrium consequence of
+  * configuring it away from 1.0. At {@code springMultiplier==1.0} this is byte-identical to the
+  * original formula - the exact "preserve calibrated defaults" equivalence this ticket requires.
+  */
+ static double suspensionSpring(double mass, int wheelCount, double suspensionTravel, double gravity, double springMultiplier) {
+  return mass*gravity/(wheelCount*suspensionTravel*.5)*springMultiplier;
  }
  /**
   * Per-wheel suspension damping rate - critically-damped-ish (0.7x the critical damping
@@ -971,9 +994,25 @@ public final class PhysicsBridge {
   * either way (the per-wheel anchor offset itself, {@code suspensionTravel*.5}, does not need to
   * change per wheel - only the rate that holds that height under this wheel's own real share of
   * the weight does).
+  * @deprecated kept only for existing test call sites that never configure a spring-stiffness
+  * multiplier - delegates to {@link #suspensionSpringForShare(double,double,double,double,double)}
+  * with the exact calibrated {@code 1.0} (no-op) default (MINECRAFT-528). Every real production
+  * call site passes the vehicle's own resolved {@code tuning.suspensionSpringMultiplier}
+  * explicitly instead.
   */
+ @Deprecated
  static double suspensionSpringForShare(double mass, double loadShare, double suspensionTravel, double gravity) {
-  return mass*loadShare*gravity/(suspensionTravel*.5);
+  return suspensionSpringForShare(mass, loadShare, suspensionTravel, gravity, 1.0);
+ }
+ /**
+  * MINECRAFT-528: {@link #suspensionSpringForShare(double,double,double,double)} generalized to
+  * an explicit, configurable, dimensionless {@code springMultiplier} - same relationship to it
+  * that {@link #suspensionSpring(double,int,double,double,double)} has to the plain
+  * even-split overload. At {@code springMultiplier==1.0} this is byte-identical to the original
+  * formula.
+  */
+ static double suspensionSpringForShare(double mass, double loadShare, double suspensionTravel, double gravity, double springMultiplier) {
+  return mass*loadShare*gravity/(suspensionTravel*.5)*springMultiplier;
  }
  /** {@link #suspensionDamper}'s own share-generalized counterpart - same relationship to it that
   * {@link #suspensionSpringForShare} has to {@link #suspensionSpring}.
@@ -1769,7 +1808,7 @@ public final class PhysicsBridge {
    // MINECRAFT-506: the ACTUAL per-wheel force calculation below no longer uses these two
    // variables at all - it uses wheelSpring/wheelDamper, computed per wheel from that wheel's
    // own geometry-derived static load share (see WheelLoadDistribution).
-   double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel,gravity);
+   double spring=suspensionSpring(mass,wheels.size(),tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
    double damper=suspensionDamper(mass,wheels.size(),spring,tuning.suspensionDampingRatio);
    boolean contact=false;
    boolean debugThisTick=DEBUG_GROUND_CONTACT && debugGroundContactTicksRemaining>0;
@@ -1907,7 +1946,7 @@ public final class PhysicsBridge {
     double loadShare=loadShares[wheelIdx];
     double brakeShareRatio=brakeShareRatios[wheelIdx];
     double driveShareRatio=driveShareRatios[wheelIdx];
-    double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity);
+    double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
     double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring,tuning.suspensionDampingRatio);
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
@@ -2061,8 +2100,8 @@ public final class PhysicsBridge {
      int hi=hitIndexForWheel[wi], hj=hitIndexForWheel[partnerWi];
      if (hi<0 || hj<0) continue; // one or both sides not actually grounded this tick - leave both alone
      double normalA=hits.get(hi).normal(), normalB=hits.get(hj).normal();
-     double rateA=suspensionSpringForShare(mass,loadShares[wi],tuning.suspensionTravel,gravity);
-     double rateB=suspensionSpringForShare(mass,loadShares[partnerWi],tuning.suspensionTravel,gravity);
+     double rateA=suspensionSpringForShare(mass,loadShares[wi],tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
+     double rateB=suspensionSpringForShare(mass,loadShares[partnerWi],tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
      double t=AntiRoll.transfer(hits.get(hi).compression(),hits.get(hj).compression(),rateA,rateB,normalA,normalB,tuning.antiRollStiffness);
      newNormal[hi]=normalA+t;
      newNormal[hj]=normalB-t;
