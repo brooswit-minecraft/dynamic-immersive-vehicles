@@ -66,7 +66,17 @@ public final class MultiContactFrictionSolver {
  }
  /** One wheel's world-frame contact geometry/inputs for {@link #solveFriction}.
   * {@code frictionMultiplier}/{@code rollingResistanceMultiplier} (MINECRAFT-508) scale this
-  * contact's own ground-surface response relative to dry pavement. {@code brakeMagnitude}
+  * contact's own ground-surface response relative to dry pavement. MINECRAFT-529: {@code
+  * frictionMultiplier} is deliberately NOT a ground-surface-only slot any more - the CALLER
+  * (PhysicsBridge.stepGround, never this solver) composes this wheel's own installed-tire-part
+  * grip ratio into it MULTIPLICATIVELY alongside the ground-surface multiplier before
+  * constructing this record (see {@code PhysicsBridge.tirePartFriction}'s own doc), so by the
+  * time this solver ever sees {@code frictionMultiplier} it already carries BOTH contributions
+  * combined into one scalar - a future reader should not assume this value is purely a ground-
+  * surface response. 1.0 (every shorter constructor below's default) remains the exact no-op for
+  * both contributions at once (no ground-surface effect AND no tire-part override), so every
+  * existing call site/test that never sets a part override continues to see exactly today's
+  * ground-surface-only value, byte-identical. {@code brakeMagnitude}
   * (MINECRAFT-504, comment 53603) is PER-WHEEL, not a single vehicle-wide scalar - a
   * front/steering wheel typically only ever carries the service-brake magnitude, while a rear
   * wheel can additionally carry the analog handbrake's own magnitude, composed by the CALLER

@@ -2082,3 +2082,264 @@ to this ticket, not shared repository state.
 
 `gradle --offline compileJava/test --rerun-tasks` after this fix: `BUILD
 SUCCESSFUL`, 648 tests, 0 failures, 0 errors (unchanged).
+
+## Installed tire-specific grip overrides (MINECRAFT-529, added 2026-11-15)
+
+Extends the existing part-override contract (`Overrides.parts`,
+`Overrides.resolvedPart`/`effectivePartOverride`, MINECRAFT-505) so an
+installed tire/ground-device PART can override its own contact grip, not
+only the whole-car `friction` field - the bounded deliverable this ticket
+names. Deliberately reused `friction` itself as the part-level field name
+(rather than inventing a new one): it is already Gson-mapped, already
+range-validated (`friction>0 && friction<=3` in `Tuning.validate()`), and
+avoids any field-name collision risk with the three sibling tickets
+(M528/M530/M531) working the same shared files concurrently this sprint.
+The only schema change is deleting the one `throw` line in
+`Tuning.validateSupportedForPart()` that previously rejected a part-level
+`friction` entry outright - every other unsupported-field rejection in
+that method is untouched, and `friction`'s bounds/`extends`-inheritance
+machinery were already fully wired for every other field, so no new
+validation code was needed at all.
+
+**Production wiring.** `PhysicsBridge.tirePartFriction(partKey,
+vehicleFriction)` mirrors `enginePartDriveForce` (MINECRAFT-505) exactly
+in spirit and in precedence: an explicit part-level `friction` override,
+if this specific installed tire part has one, REPLACES (never multiplies)
+the vehicle's own resolved `friction` for that one wheel; otherwise the
+vehicle's value passes through completely unchanged. `stepGround`'s own
+`FrictionContact`-construction stream (immediately before the
+`MultiContactFrictionSolver.solveFriction` call) now computes, per wheel,
+`tireKey = wheel.definition.packID+":"+wheel.definition.systemName` (the
+same key shape `enginePartDriveForce`'s own call site already uses for
+`engine.definition`) and composes `tirePartFriction(tireKey,
+tuning.friction)/tuning.friction` - a pure ratio that is exactly `1.0`
+(a true no-op) whenever no part override is set - multiplicatively into
+the EXISTING `frictionMultiplier` slot on `FrictionContact`, alongside
+the ground-surface multiplier already living there (MINECRAFT-508):
+`h.surface().frictionMultiplier()*tireGripRatio`. No new record
+component, no change to `MultiContactFrictionSolver`'s public API/
+constructors - confirmed deliberately to avoid touching the one file
+M531 (shared reload entry point) and M530 (hitch) are also working this
+sprint, and to avoid breaking any existing `FrictionContact`-constructing
+test. Doc comments on `FrictionContact`'s own class doc and on the
+`stepGround` composition site were updated to make explicit that this
+slot now carries BOTH ground-surface and tire-part contributions
+multiplicatively, so a future reader isn't confused into treating it as
+ground-surface-only.
+
+This reads each wheel's own currently-installed part key fresh every
+tick inside `stepGround`'s existing per-wheel loop (never cached at
+vehicle-construction time, and never routed through
+`applyLiveSafeFields` - that mechanism only ever operates on vehicle-
+level `Tuning`, confirmed by inspection before writing any code here;
+part-level overrides were already being read live and uncached for
+`enginePartDriveForce`, and this field needs nothing different). A wheel
+that misses the ground ray this tick (`HitResult.Type.MISS`) never
+reaches the `FrictionContact`-construction stream at all - its
+`WheelHit` is never built, `wheel.contactThisTick` is set `false`, and
+the loop `continue`s before anything in this ticket's new code runs - so
+an airborne/phantom/spare tire's configured override can never
+contribute any grip, satisfying the ticket's explicit "no phantom/
+airborne contribution" requirement structurally, by the pre-existing
+control flow this ticket left untouched.
+
+**Tests.** `Body.stepGround` itself cannot be driven by a plain unit test
+without a live Minecraft/IV/Sable runtime (`PhysicsBridgeWheelLoadShare
+SimulationTest`'s own doc explains why every PhysicsBridge-level test in
+this project already substitutes the real production pure-function path
+instead of a live runtime) - the same substitution strategy is used here:
+
+- `OverridesTest` (6 new cases): part-level `friction` now passes
+  `validateSupportedForPart` (previously threw); every other
+  previously-rejected field (`brakeForce`/`selfRightStrength`/`massKg`)
+  still throws; an out-of-range part-level `friction` (3.5, 0.0) still
+  fails plain `validate()` - the bounds check runs before
+  `validateSupportedForPart` ever sees the merged entry, so no new/
+  different bound was introduced; `friction` set via an `extends`
+  template still folds in and still passes the supported-fields check;
+  `PhysicsBridge.tirePartFriction` wins outright over the vehicle's
+  resolved value when a part override exists, falls through unchanged
+  when none exists, and resolves three different tire keys on the same
+  vehicle (grippy/slick/unconfigured) to three independently correct
+  values in one test - the ticket's "independent wheel identities"
+  requirement at the `Overrides`/`PhysicsBridge` boundary. One
+  pre-existing test (`partEntrySettingAnUnsupportedFieldFailsTheSupported
+  FieldsCheck`) that asserted `friction` throws was updated to assert a
+  still-genuinely-unsupported field (`massKg`) instead, since `friction`
+  throwing is no longer the correct behavior this ticket intentionally
+  changes; one pre-existing test (`partEntryInheritingAnUnsupportedField
+  ThroughExtendsStillFailsTheSupportedFieldsCheck`) that used `friction`
+  as its "still-unsupported-through-extends" example was switched to
+  `brakeForce` for the same reason - no other existing assertion anywhere
+  in the suite depended on `friction` being rejected on a part.
+- `MultiContactFrictionSolverTirePartGripTest` (new, 4 cases): exercises
+  the exact solver-facing composition `stepGround` performs (surface
+  multiplier times the resolved-tire-friction ratio) against the real
+  production `MultiContactFrictionSolver.solveFriction` - no part
+  override anywhere composes to the byte-identical pre-ticket ground-
+  surface-only multiplier; two differently-gripped tires plus an
+  unconfigured third wheel in the SAME `solveFriction` call produce
+  measurably different achieved lateral force from each other and from
+  the unconfigured wheel (mirrors `MultiContactFrictionSolverGroundSurface
+  Test`'s own "real force-consumer proof" pattern, MINECRAFT-508);
+  swapping the resolved tire friction (standing in for installing a
+  different part definition) changes the composed multiplier; ground-
+  surface and tire-part contributions compose multiplicatively (0.2 ice
+  times 0.5 slick tire = 0.1), neither one silently overriding the other.
+
+Not covered by a plain unit test (requires a live runtime, same
+limitation every other MISS/ground-contact-dependent behavior in this
+project already carries, per `PhysicsBridgeWheelLoadShareSimulationTest`'s
+own doc): the actual airborne-wheel-gets-zero-contribution behavior is
+verified by inspection of the unchanged `HitResult.Type.MISS` control
+flow (see above), not a driven integration test; in-game acceptance
+(spawning a vehicle with two differently-configured installed tires and
+observing measurably different handling) is out of scope here the same
+way it was for every other MINECRAFT-5xx ticket's own "not yet performed"
+note in this document.
+
+Local slot-lock coordination (per this ticket's own brief - `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle invocation, no
+`gradlew` wrapper present in this checkout so `/tmp/gradle-8.14/bin/gradle
+--offline` was used directly against this project's own `build.gradle`/
+`settings.gradle`/`gradle.properties`, Gradle 8.14). `compileJava`
+succeeded first in isolation, then `test --offline -q` ran the FULL suite
+with zero console output (quiet mode prints nothing on an all-green run).
+The real JUnit XML reports total **662 tests**, 0 skipped, 0 failures, 0
+errors across the whole suite (10 net-new - 6 in `OverridesTest`, 4 in
+the new `MultiContactFrictionSolverTirePartGripTest` - plus every
+pre-existing test run unchanged alongside them -
+confirming this change introduces no regression anywhere else in the
+suite, including every other ticket's own friction/part-override/ground-
+surface coverage).
+
+**Valid/invalid reload regression (review finding, PR #28).** The tests
+above exercise `PhysicsBridge.tirePartFriction`'s precedence directly
+against a map installed via `Overrides.setForTest` - real, but not the
+same claim as a genuine RELOAD actually swapping in a new part override
+or rejecting a bad one. Added
+`validThenInvalidPartFrictionReloadAppliesThenRetainsThePriorGoodTireOverride`
+(`OverridesTest`), mirroring the existing stallAngleDegrees/liftSlope/
+controlSurfaceSlope "invalid reload retains last-known-good" regression's
+exact structure, over `Overrides.apply(Supplier<Config>)` - the real
+validate-then-swap-or-reject path `reload()` itself delegates through,
+with no file I/O/Gson needed: applies a valid `parts.<tire>.friction`
+(1.7) and asserts `PhysicsBridge.tirePartFriction` observes it; then
+applies an invalid one (0.0, then separately 3.5 - both already-documented
+out-of-range values for `friction`) and asserts each reload is rejected
+AND the prior good 1.7 override is retained, not the invalid value or the
+vehicle's flat fallback. Full suite re-run after adding this test:
+**663 tests**, 0 skipped, 0 failures, 0 errors (662 + this 1 net-new case).
+
+## Ground-surface config hot-reload (MINECRAFT-531)
+
+Bounded deliverable: wire the already-implemented, already-non-throwing/
+last-known-good `GroundSurfaceOverrides.reload()` (MINECRAFT-508) into the
+existing periodic `OverridesHotReload` mechanism `Overrides.reload()`
+(MINECRAFT-505) already uses, so editing
+`dynamic-immersive-vehicles-surfaces.json` while the server is running
+takes effect without a restart - the one thing `GroundSurfaceOverrides`'s
+own class doc explicitly disclosed as missing.
+
+`OverridesHotReload` now independently tracks and checks BOTH files' own
+last-modified time (`lastSeenModifiedMillis` for the vehicle file,
+`lastSeenSurfacesModifiedMillis` for the surfaces file - each read/compared
+in its own try/catch, over its own file) on the SAME shared 100-tick check
+period - an edit to one file can never mask, or be masked by, an edit to
+the other, since neither's own detection depends on the other's state at
+all. Confirmed by reading `GroundSurfaces.atState` (the real production
+ground-contact entry point): it already calls
+`GroundSurfaceOverrides.effective` fresh on every call, with no per-vehicle
+caching layer in between - unlike vehicle `Tuning` (cached per-body,
+selectively live-mutated via `PhysicsBridge.applyLiveSafeFields`), so
+swapping `GroundSurfaceOverrides`'s own static map is already "live" for
+every active vehicle's very next ground-contact tick. No change to
+`PhysicsBridge.reloadOverrides()`'s signature or behavior was needed - the
+"shared reload entry point" the sprint coordination comment named stays
+exactly what it was; this ticket only adds a second, independent reload
+call inside `OverridesHotReload` itself.
+
+Adds `experimental/GroundSurfaceHotReloadProbe.java`: opt-in
+(`-Ddiv.experimentalGroundSurfaceHotReload=true`, env-gated in
+`build.gradle` as `DIV_GROUND_SURFACE_HOT_RELOAD_PROBE`), dev/isolated-
+host-only, OFF by default - the same convention every other probe in this
+package already uses. Unlike every ground-domain probe in this package, it
+spawns no vehicle at all: "actual contacted-surface response" is read via
+`GroundSurfaces.atState` against a real registered block's
+`defaultBlockState()` (`minecraft:ice`/`minecraft:gravel`), the exact same
+production entry point `GroundSurfaceTagProbe` (MINECRAFT-508) already
+established as valid live evidence - no wheel/vehicle fixture is needed
+since this file's own override map has no per-vehicle caching layer to
+exercise. Four sequential phases, each writing to BOTH the surfaces file
+and the vehicle-overrides file in the same step (non-destructive read-
+merge-write, same convention `FlightRotorRuntimeFixtureProbe` uses) then
+reloading BOTH via their real production entry points
+(`GroundSurfaceOverrides.reload()`, `PhysicsBridge.reloadOverrides()` - the
+same ones `OverridesHotReload` itself calls on its own mtime-poll, not a
+re-derivation): BASELINE (establishes a known starting point for both
+files together), VALID_SURFACE_VALID_VEHICLE (ordinary concurrent edit,
+both succeed), INVALID_SURFACE_VALID_VEHICLE (a malformed surfaces edit is
+rejected - last-known-good retained - while the concurrent valid vehicle
+edit is NOT masked by that failure), VALID_SURFACE_INVALID_VEHICLE (the
+mirror - an out-of-range vehicle edit is rejected while the concurrent
+valid surfaces edit is NOT masked). Both files' pre-probe content is
+snapshotted and restored verbatim (plus a final live reload of the
+restored content) once done, reached from every exit path including a
+mid-run failure - same `restoreConfigOnce` pattern
+`FlightRotorRuntimeFixtureProbe` established.
+
+**Self-found/self-fixed defect in this probe itself (not production code),
+found by actually running it against a real dedicated server rather than
+trusting code inspection alone:** the first live run's
+INVALID_SURFACE_VALID_VEHICLE phase correctly asserted the rejected
+`gravel` entry's last-known-good retention, but never repaired that
+rejected entry back to valid ON DISK afterward - since
+`GroundSurfaceOverrides.reload()` validates the WHOLE surfaces file as one
+unit (same as `Overrides.reload()` does for vehicles), that still-broken
+on-disk entry then poisoned the NEXT phase's own reload of the same shared
+file, exactly the failure mode `FlightRotorRuntimeFixtureProbe`'s own
+`applyInvalidConfig` doc already found and fixed for the vehicle file. Real
+live-server evidence of the actual failure (first run, before the fix):
+```
+[DIV groundSurfaceHotReload] FAILED - VALID_VEHICLE_INVALID: the concurrent VALID surfaces edit was masked by the vehicle failure: ReloadResult[success=false, message=Cannot apply surface overrides: frictionMultiplier out of range, surfaceCount=-1]
+```
+Fixed by repairing the on-disk `gravel` entry back to its last-known-good
+value immediately after that phase's retention assertion (mirroring the
+established fix). Rerun after the fix, same real dedicated server, all four
+phases passed:
+```
+[DIV groundSurfaceHotReload] BASELINE PASSED - surfaces reloaded (reloaded 1 surface override(s)) and vehicle reloaded (reloaded 3 vehicle override(s), 0 part override(s)) independently, both live-resolved correctly
+[DIV groundSurfaceHotReload] VALID_SURFACE_VALID_VEHICLE PASSED - concurrent edits to both files both reloaded live and independently
+[DIV groundSurfaceHotReload] INVALID_SURFACE_VALID_VEHICLE PASSED - invalid surfaces edit correctly rejected (last-known-good retained) while the concurrent valid vehicle edit applied, unmasked
+[DIV groundSurfaceHotReload] VALID_SURFACE_INVALID_VEHICLE PASSED - invalid vehicle edit correctly rejected (last-known-good retained) while the concurrent valid surfaces edit applied, unmasked
+[DIV groundSurfaceHotReload] original surfaces config restored and reloaded: reloaded 0 surface override(s)
+[DIV groundSurfaceHotReload] original vehicle config restored and reloaded: reloaded 2 vehicle override(s), 0 part override(s)
+[DIV groundSurfaceHotReload] COMPLETE (PASSED) - cleanup successful
+```
+(`gradle runServer` locally on Servy, under the required
+`/tmp/div-gradle-slot.lock` flock, held through bounded cleanup and never
+unlinked - a real headless dedicated server, `Done (6.7s)!`, this mod's own
+mixins/physics pipeline actually initialized, not a mock.) This worktree's
+`run/` directory is gitignored and private to this ticket; the probe's own
+snapshot/restore left both shared config files byte-identical to their
+pre-run content, verified by reading them back after the run.
+
+**What this proves:** both files are independently detected and reloaded
+without one masking the other, in both failure directions; a malformed
+edit to either file is rejected with last-known-good retained; a valid
+edit reaches the real production ground-contact resolution path with no
+restart. **What this does NOT change:** no new surface model, erosion,
+asset sampling, or vehicle-tuning field was added, and `PhysicsBridge`'s
+existing vehicle live/respawn-field reporting (`applyLiveSafeFields`/
+`reportFieldsNeedingRespawn`) is untouched - this ticket only adds the
+second, independent surfaces-file check inside `OverridesHotReload`.
+
+**Evidence gathered this pass:** `gradle --offline compileJava` (`BUILD
+SUCCESSFUL`); `gradle --offline test --rerun-tasks` - `BUILD SUCCESSFUL`,
+the real JUnit XML reports **652 tests**, 0 skipped, 0 failures, 0 errors
+(this ticket adds no new unit tests of its own beyond what the real
+dedicated-server probe above already exercises - `OverridesHotReload`'s
+only pure/unit-testable seam, `isCheckTick`, is unchanged by this ticket
+and already covered); the real dedicated-server `gradle runServer` probe
+run above, both before and after the probe's own self-found/self-fixed
+defect.

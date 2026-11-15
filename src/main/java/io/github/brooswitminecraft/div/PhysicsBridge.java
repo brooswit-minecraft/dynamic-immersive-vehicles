@@ -296,6 +296,35 @@ public final class PhysicsBridge {
   return (partOverride != null && partOverride.driveForce != null) ? partOverride.driveForce : vehicleDriveForce;
  }
  /**
+  * MINECRAFT-529 (installed tire-specific grip overrides): the tire/ground-device counterpart to
+  * {@link #enginePartDriveForce} immediately above, same deliberate vehicle/part precedence - an
+  * explicit part-level {@code friction} override, if THIS SPECIFIC installed tire part has one,
+  * REPLACES the vehicle's own resolved {@code friction} for that one wheel's contact outright
+  * (not stacked/multiplied with it - a part saying "my own grip is X" is a complete replacement,
+  * exactly the same "replacement, not a modifier" precedence {@code driveForce} already
+  * established for engine parts); otherwise the vehicle's already-resolved value is used
+  * completely unchanged, so an installation with no {@code parts} friction entries at all behaves
+  * byte-identically to before this ticket. {@code partKey} is resolved fresh from {@code
+  * stepGround}'s own wheel loop every tick (never cached at vehicle-construction time), using the
+  * same {@code packID+":"+systemName} key shape {@link #enginePartDriveForce}'s own call site
+  * uses for {@code engine.definition} - so each wheel resolves its OWN currently-installed part's
+  * override independently, and swapping which part definition is installed on a wheel (a
+  * different key) changes which override applies on the very next tick, with no stale caching.
+  * {@code Overrides.effectivePartOverride} (unlike {@code resolvedPart}) returns {@code null} -
+  * never the flat documented fallback - for a field the part says nothing about, which is
+  * exactly the signal needed to tell "no override" apart from "override explicitly set it".
+  *
+  * <p>Callers must apply this ONLY to a wheel that actually has ground contact this tick (see
+  * {@code stepGround}'s own {@code HitResult.Type.MISS} continue, which skips building a {@code
+  * WheelHit} at all for an airborne wheel) - a wheel with no contact never reaches this method's
+  * call site, so a phantom/spare/airborne tire's configured override can never contribute any
+  * grip at all, matching this ticket's explicit "no phantom/airborne contribution" requirement.
+  */
+ static double tirePartFriction(String partKey, double vehicleFriction) {
+  var partOverride = Overrides.effectivePartOverride(partKey);
+  return (partOverride != null && partOverride.friction != null) ? partOverride.friction : vehicleFriction;
+ }
+ /**
   * Which {@code Overrides.Tuning} fields a currently-active {@code Body}/{@code BuoyantBody}
   * already re-reads fresh from its own live {@code tuning} object every tick/call, rather than
   * caching into a separate field at construction time (ticket 53518/MINECRAFT-505) - confirmed
@@ -2235,12 +2264,30 @@ public final class PhysicsBridge {
    // folds the configured front/rear DRIVE-force bias into the FrictionContact passed below -
    // solveFriction's own driveForcePerWheel*skidSteerMultiplier*driveShareRatio composition (see
    // its own doc) is the drive-side analog of this same brakeShareRatio pattern.
+   // MINECRAFT-529: FrictionContact.frictionMultiplier is deliberately reused (not a new record
+   // component - see MultiContactFrictionSolver.FrictionContact's own doc, updated by this
+   // ticket) to also carry THIS WHEEL'S own installed tire part's grip override, composed
+   // MULTIPLICATIVELY with the existing ground-surface frictionMultiplier: tirePartFriction(...)
+   // (PhysicsBridge.tirePartFriction's own doc) resolves this wheel's own currently-installed
+   // part key fresh every tick (never cached) to either that part's explicit friction override or
+   // the vehicle's own resolved tuning.friction unchanged; dividing that result back by
+   // tuning.friction yields a pure RATIO that is exactly 1.0 (a true no-op, byte-identical to
+   // before this ticket) whenever no part override is set, and otherwise rescales the shared
+   // `friction` scalar solveFriction receives below into this one contact's own effective value
+   // once solveFriction multiplies it back out at line ~211's `friction*c.frictionMultiplier()`.
+   // tuning.friction is always > 0 (Tuning.validate()'s own bound), so this division never
+   // degenerates. A wheel that misses the ground ray this tick never reaches this stream at all
+   // (its WheelHit was never built - see the HitResult.Type.MISS continue above), so an
+   // airborne/phantom tire's configured override can never contribute any grip, matching this
+   // ticket's explicit "no phantom/airborne contribution" requirement.
    var contacts=hits.stream().map(h->{
     double wheelBrakeMagnitude = perWheelBrakeMagnitude(h.wheel().placementDefinition.turnsWithSteer,
       v.parkingBrakeVar.isActive, brakeMagnitude, handbrakeMagnitudeThisTick, h.brakeShareRatio());
+    String tireKey = h.wheel().definition.packID+":"+h.wheel().definition.systemName;
+    double tireGripRatio = tirePartFriction(tireKey, tuning.friction)/tuning.friction;
     return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier(),h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude,h.driveShareRatio());
+     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier(),wheelBrakeMagnitude,h.driveShareRatio());
    }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
