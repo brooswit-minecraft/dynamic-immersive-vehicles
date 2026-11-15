@@ -1561,6 +1561,265 @@ PR merges, another integration-and-rereview round will be needed the same
 way this one was, and this ticket's own PR will need to check for that
 before merging, not assume it's already been accounted for here.
 
+## Fixed-wing/rotorcraft real-runtime regression fixtures (MINECRAFT-526)
+
+Closes the disclosed gap both MINECRAFT-521 (PR #19: "No live
+`EntityVehicleF_Physics`/Sable runtime fixture exists in this repo -
+`stepFlight`'s actual force/torque application is not unit-testable") and
+MINECRAFT-522 (PR #17: "In-game helicopter feel/calibration - not run this
+pass") carried in their own test plans. `FlightForcesTest`/`RotorForcesTest`
+already prove the pure math correct in isolation; nothing before this
+ticket exercised the actual live decision `PhysicsBridge.Body.step` makes -
+dispatching a real spawned vehicle to `stepFlight`/`stepRotor` via the
+`VehicleMovementMixin`/`VehicleForcesMixin` seam, against a real
+`Overrides`-resolved `tuning` object on a live Sable body.
+
+Adds `experimental/FlightRotorRuntimeFixtureProbe.java`: opt-in
+(`-Ddiv.experimentalFlightRotorRuntimeFixtureProbe=true`), dev/isolated-
+host-only, OFF by default - the same convention every other probe in this
+package already uses (`BrakeSweepProbe`, `TurnComparisonProbe`, etc.). Runs
+6 scenarios strictly sequentially (one fixed-wing, one rotorcraft, times
+three roles): `*-activation-default` (proves the vehicle is actually
+PhysicsBridge-managed and dispatched to the correct stepper - a
+misdispatched vehicle would simply free-fall at `g`=9.81 m/s^2 with no
+corrective force, trivially distinguishable from the damped response an
+engaged `stepFlight`/`stepRotor` actually produces - and logs that response
+as the unconfigured/FALLBACK baseline), `*-configured` (an operator
+override already in place at spawn - `liftSlope`/`controlSurfaceSlope` for
+fixed-wing, `cyclicLimitDegrees`/`cyclicAuthorityScale`/`yawAuthorityScale`
+for rotorcraft - re-runs the identical control input and logs the same
+metrics for comparison against the baseline), and `*-live-reload` (starts
+unconfigured, observes a baseline window, then calls the exact production
+hot-reload entrypoint `PhysicsBridge.reloadOverrides()` - the same one
+`OverridesHotReload` calls on its own mtime-poll - against a VALID edit to
+the live config file for this same still-active vehicle with no respawn,
+observes the response change in place, then calls it again against an
+INVALID edit (`liftSlope=-1` / `cyclicLimitDegrees=0`, both out of
+`Overrides.Tuning#validate`'s own range) and logs whether the VALID
+response was retained unchanged rather than falling back to FALLBACK or
+breaking).
+
+No block platform is built (unlike every ground-domain probe) - flight/
+rotor scenarios need no solid ground, only the chunk grid above to be
+loaded/generated. Writes to the shared
+`run/config/dynamic-immersive-vehicles.json` are read-merge-write (never a
+blind overwrite, so nothing an operator or another fixture already has
+there is lost) and the file's pre-probe content is snapshotted and restored
+verbatim once all scenarios finish - deterministic, bounded cleanup, same
+requirement this ticket's own scope names explicitly.
+
+**What this proves:** the dispatch/live-field-application seam actually
+works end to end on a real spawned vehicle, for both vehicle categories,
+across all four of this ticket's named cases (activation, default
+response, configured response, valid/invalid live reload). **What this
+does NOT prove:** that the resulting flight/hover feel is well-tuned,
+realistic, or calibrated - same disclosed limit `BrakeSweepProbe` itself
+already carries for ground feel, and no change to any production force
+model, default, or precedence/validation behavior is made by this ticket.
+
+**Evidence actually gathered this pass:** this file compiles against the
+real `mts.jar`/Sable/Sable Companion/joml/this repo's exact pinned NeoForge
+classpath (`gradle --offline compileJava`, `BUILD SUCCESSFUL`, rerun from
+clean with `--rerun-tasks`), and the full existing suite still passes
+unmodified: `gradle --offline test --rerun-tasks` - `BUILD SUCCESSFUL`, the
+real JUnit XML reports **605 tests**, 0 skipped, 0 failures, 0 errors
+(unchanged from the pre-existing combined head above - this ticket adds no
+new unit tests of its own, since the probe's entire point is exercising the
+one thing a plain JUnit test structurally cannot: a live
+`EntityVehicleF_Physics`/Sable runtime). **Disclosed limit, same category
+every prior flight/rotor ticket has carried:** this probe has NOT yet been
+run against an actual live dev server (hosted CI remains billing-blocked
+per this file's own repeated note, and no live Minecraft server/world is
+available in this engineering pass) - the scenario speeds/tilt angles/
+bounds chosen are reasoned from this repo's own force-model formulas
+(documented inline at each constant in the probe itself) to stay within the
+same loaded-chunk/world-generation budget `BrakeSweepProbe`'s own review
+history (53327/53330) already proved safe, not an empirically live-tuned
+value. An operator doing the first live run should treat a watchdog timeout
+or an out-of-bounds failure as a signal to shrink the observe-window tick
+counts or speeds further, the same iterative process that review history
+already went through for the ground domain.
+
+**Self-review correction (head `fe415f8` -> this head).** Two required
+fixes found by review before `wroosbit`'s substantive pass: (1)
+`waitTerrain` forced a 13x13 chunk grid via `setChunkForced(..., true)` but
+no path ever unforced it - both the normal-completion and terrain-timeout
+paths left all 169 chunks permanently forced. (2) Once
+`writeInitialConfigOnce` had snapshotted and started editing the shared
+`dynamic-immersive-vehicles.json`, an initial-reload failure jumped
+straight to `ALL_DONE` and a `mergeVehicleOverrideAndWrite` write failure
+was only logged, not treated as a reason to stop - both bypassed
+restoration and could leave the probe's own test overrides in the shared
+config. Fixed by adding a `RELEASE_CHUNKS` terminal phase (unconditionally
+unforces the whole grid - a no-op for any coordinate never actually
+forced) that every path now funnels through via `RESTORE_CONFIG`
+(`configWasWritten` tracks whether anything was actually written, so a
+failure before the first write correctly skips restoration instead of
+restoring a snapshot that was never taken); `mergeVehicleOverrideAndWrite`
+now returns a success boolean every caller checks before proceeding to
+reload/run. Re-verified after the fix: `gradle --offline compileJava
+--rerun-tasks` - `BUILD SUCCESSFUL`; `gradle --offline test --rerun-tasks`
+- `BUILD SUCCESSFUL`, 605 tests, 0 failures, 0 errors (unchanged).
+
+**Live-run evidence (independent review finding 53833/53853/53878) - actual
+real dev-server run, not just compile/unit evidence.** Five iterations
+against a real `gradle runServer` instance (shared `/tmp/div-gradle-slot.lock`
+flock, no duplicate dispatch), each diagnosing and fixing a real defect the
+previous run's own evidence exposed:
+
+1. First live run (head `1550ce3`): 0/6 scenarios passed - both vehicle
+   kinds free-fell identically with zero rotation response regardless of
+   kind or config. Proved the cleanup/restore/chunk-release machinery
+   itself works end to end, but proved the fixture's own activation premise
+   was broken.
+2. With `-Ddiv.debugGroundContact=true` enabled to see why: both vehicles
+   WERE correctly classified/activated/dispatched (`classify ... ground=true
+   decision=ACTIVATE`, `class=Body`, correct ROTOR/FLIGHT stepper) - but
+   `PhysicsBridge.Body`'s own `experimentalTwoBodyChassis` candidate
+   defaults to `true` (`System.getProperty("div.experimentalTwoBodyChassis",
+   "true")`) and unconditionally skips ALL force application for any
+   non-GROUND stepper (its own "selected a non-GROUND stepper - unsupported
+   for this candidate" log line) - a genuine production incompatibility
+   this ticket's own scope requires reporting distinctly, not silently
+   working around (see MINECRAFT-527, filed separately for the production
+   fix - this probe's own `-Ddiv.experimentalTwoBodyChassis=false` gate is
+   valid test isolation, not a claim that the default works).
+3. With that flag disabled: 1/6 passed (`rotor-activation-default`).
+   Fixed-wing tumbled violently (its own up-vector flipped sign within half
+   a second) - its 2x1 collision box gave a 900kg hull an unrealistically
+   tiny moment of inertia, so ordinary aerodynamic torque spun it instead
+   of producing a controlled response. Sized the fixed-wing box closer to
+   its own wingspan/a real fuselage length instead.
+4. With that fix: 4/6 passed. The remaining two LIVE_RELOAD failures traced
+   to `accelProxy` sampling its three points across the WHOLE 50/35-tick
+   window - long enough for the body to tumble through multiple full
+   rotations, aliasing a periodic quantity (`m11`/`m00` are periodic in the
+   actual rotation angle) into meaningless noise. Confined the three
+   samples to a much shorter early sub-window (`RESPONSE_SAMPLE_TICKS=8`,
+   right after control input turns on, before large-angle effects
+   dominate) where the proxy's own "proportional to current torque"
+   rationale actually holds.
+5. With that fix: 5/6 passed - the one remaining failure was the
+   INVALID-vs-VALID retention check itself, which had been comparing noisy
+   physical `accelProxy` readings across windows where the live body's own
+   translational state had, by the third consecutive window, drifted far
+   enough (observed: forward speed swinging between ~2 and ~25 m/s) that
+   the comparison was unreliable regardless of the config. Replaced it with
+   a deterministic check: read back `Overrides.resolved(key)`'s actual
+   live-resolved field directly (no physics involved at all) - strictly
+   more direct evidence of "retained the VALID config" than any further
+   physical re-derivation could be.
+
+**Final live run (head after fix 5): `/tmp/m526-live-run5.log`, 2026-11-14
+~05:22-05:28 UTC - `ALL SCENARIOS FINISHED - 6/6 PASSED`.** Every scenario's
+own PASSED line: `fw-activation-default` (dispatch confirmed, baseline
+recorded), `fw-configured` (response vs baseline PASSED), `fw-live-reload`
+(retention PASSED, live-resolved field confirmed `9.5`), `rotor-activation-
+default` (dispatch confirmed), `rotor-configured` (roll+yaw response vs
+baseline PASSED), `rotor-live-reload` (retention PASSED, live-resolved
+field confirmed `4.0`). Cleanup confirmed in the same run: "original config
+restored and reloaded" and "released 112 chunk(s) this probe itself
+forced" both logged before `ALL_DONE`. The only `ERROR`-level log lines in
+the full run are MTS's own startup banner and an unrelated Sable warning
+about a `create:flywheel` block tag from a mod not installed - neither
+from this probe. `gradle --offline compileJava/test --rerun-tasks` after
+this final fix: `BUILD SUCCESSFUL`, 605 tests, 0 failures, 0 errors
+(unchanged - no new unit tests, consistent with every prior pass on this
+ticket).
+
+This closes the ticket's own disclosed-gap requirement with actual,
+reproducible, real-dev-server PASS evidence for all four named cases
+(activation, default response, configured response, valid/invalid live
+reload) across both vehicle categories - not merely a compiled, never-run
+fixture. MINECRAFT-527 (filed separately) tracks the real production
+defect this process discovered; fixing that production behavior is
+explicitly out of this ticket's own scope.
+
+**Second independent rereview (head `a6d4314`, comment 53897) and fixes.**
+Three further gaps found on the already-6/6 head: (1) the INVALID-retention
+check asserted `Overrides.resolved(key)` only AFTER this probe's own disk
+repair had already rewritten the file back to the valid values and after a
+further 35-tick `OBSERVE_INVALID` window had elapsed - during which
+`OverridesHotReload`'s own background mtime poll could independently
+re-read and reapply the (already-repaired) file, so the assertion risked
+proving only that the repair itself worked, not that the REJECTED reload
+had actually preserved the live state. Moved the assertion to immediately
+after the rejection is confirmed, before any repair or further ticks (kept
+a second assertion at the window's own end too, now correctly documented
+as proving retention PERSISTS through the window rather than being the
+only evidence). (2) `applyValidConfig` logged `vehiclesUpdatedLive` without
+asserting on it - now requires exactly `1` (this scenario's own still-
+active body; scenarios are strictly sequential, so no other vehicle is
+alive to update). (3) `waitTerrain`'s chunk-ownership tracking inferred
+"this probe forced it" from "it was unloaded", but unloaded and
+not-already-forced are different things (loading is deferred/async, so an
+unloaded chunk can already carry someone else's force-ticket) - now checks
+`ServerLevel.getForcedChunks()` directly before forcing, so
+`chunksForcedByThisProbe` (and therefore `releaseChunksOnce`) only ever
+contains coordinates this probe itself actually added a ticket for.
+
+Re-verified after all three fixes: `gradle --offline compileJava/test
+--rerun-tasks` - `BUILD SUCCESSFUL`, 605 tests, 0 failures, 0 errors
+(unchanged). Live run 6 (`/tmp/m526-live-run6.log`, 2026-11-14 ~05:37-05:43
+UTC): `ALL SCENARIOS FINISHED - 6/6 PASSED` again, confirming the fixes
+didn't regress the already-passing behavior.
+
+Remaining disclosed, accepted limitations (same review, not further
+addressed this pass - noted rather than silently claimed covered): the
+`accelProxy` roll/yaw metric is a matrix-component second difference, not
+a true angular acceleration - it remains orientation/rate-dependent to
+some degree even confined to `RESPONSE_SAMPLE_TICKS`, so its claims are
+about relative magnitude/direction of response, not a calibrated physical
+quantity. This probe also cannot assert on `PhysicsBridge.Body`'s own
+internal stepper selection directly (that state is package-private) -
+`ACTIVATION_DEFAULT`'s dispatch evidence is the vertical-speed-vs-free-fall
+proxy only, not a direct read of which stepper ran. Extending either would
+need a new PhysicsBridge-side read-only diagnostic hook, which is outside
+this ticket's own scope (no production code changes).
+
+**Third independent review round (comments 53905/53907) - minimal, explicitly-
+authorized read-only production diagnostic hooks added.** Review correctly
+found two remaining gaps even at 6/6: (1) `liveResolvedRepresentativeField`
+read the GLOBAL `Overrides.resolved(key)`, not the active Body's own cached
+tuning - those are two different things that merely happen to usually agree,
+and a merely-SELECTED stepper (the only thing this file could previously
+observe) does not prove force application actually ran - M527's own root
+cause is exactly a selected non-GROUND stepper whose execution a candidate
+unconditionally skips. (2) No assertion proved the SAME live body persisted
+across BASELINE/VALID/INVALID (never silently respawned/rebuilt).
+
+Added three minimal, explicitly-scoped, read-only diagnostic additions to
+`PhysicsBridge.java` (same established pattern as the pre-existing
+`debugInjectAngularVelocity`/`debugReadAngularVelocity` - "Never called from
+any production code path - only from this experimental test probe"):
+`Body.lastExecutedStepper`/`executedStepCount` are set ONLY at the exact
+point `step()` actually calls `stepGround`/`stepFlight`/`stepRotor` (never
+on a tick `skipNonGroundForTwoBody` skipped), and
+`PhysicsBridge.debugExecutedStepSnapshot(vehicle)` returns a small public
+record bundling the active Body's own identity (opaque `Object`, `==`-
+comparable only), that real executed-stepper name/counter, and the Body's
+own actual live `tuning()` reference. No physics mutation, no API redesign,
+no change to any production code PATH (only two new fields written at an
+existing call site, read by nothing in production).
+
+The probe now uses this directly: `beginWindow` asserts
+`debugExecutedStepSnapshot(...).bodyIdentity()` is unchanged (`==`) every
+time a scenario enters a new window, failing immediately if the live body
+was ever replaced; `ACTIVATION_DEFAULT` asserts `executedStepCount>0` and
+`lastExecutedStepperName` matches the expected mode BEFORE trusting the
+physical free-fall proxy; the VALID/INVALID retention checks now read the
+representative field from this snapshot's own `tuning()` instead of
+`Overrides.resolved`.
+
+Re-verified: `gradle --offline compileJava/test --rerun-tasks` - `BUILD
+SUCCESSFUL`, 605 tests, 0 failures, 0 errors (unchanged). Live run 7
+(`/tmp/m526-live-run7.log`, 2026-11-14 ~06:02-06:09 UTC): `ALL SCENARIOS
+FINISHED - 6/6 PASSED` again, now with concrete evidence lines like
+`ACTIVATION PASSED (dispatch confirmed: executedStepCount=65
+lastExecutedStepperName=FLIGHT)` and `retention confirmed immediately after
+rejection - live-resolved representative field=9.5` (read from the real
+active Body, not the global resolver).
+
 ## Configurable front/rear drive-force distribution (MINECRAFT-524, added 2026-11-13)
 
 Bounded M507 slice (the bounded-scope instruction on the ticket itself):
@@ -1762,3 +2021,64 @@ exercised together for the first time at this combined head).
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` was produced
 again. This is the final combined head presented for formal approval -
 `9f4e737dd18b2e48dc5f292ef4baff11cbc55d64`.
+
+**MINECRAFT-527 landed on main (PR #25) - removed this ticket's own workaround,
+validated the real production fix instead.** `PhysicsBridge.Body.useTwoBody`
+now excludes any non-GROUND stepper (and any buoyancy-applying one)
+automatically, regardless of the global `experimentalTwoBodyChassis`
+property's own value - exactly the fix review 53878/comment history on this
+ticket called for. Merged current `main` (`df6e5db`) into this branch
+(clean auto-merge, no conflicts); removed this probe's own
+`-Ddiv.experimentalTwoBodyChassis=false` override from its `build.gradle`
+gate, since it is no longer necessary - the real, unmodified default now
+correctly routes flight/rotor vehicles to one-body.
+
+Re-verified: `gradle --offline compileJava/test --rerun-tasks` - `BUILD
+SUCCESSFUL`, 648 tests, 0 failures, 0 errors (further net-new tests from
+main's own M527 merge). Live run 8 (`/tmp/m526-live-run8.log`, 2026-11-14
+~06:18-06:23 UTC, shared-slot flock) with the override REMOVED: `ALL
+SCENARIOS FINISHED - 6/6 PASSED`, and the per-vehicle `chassisReceipt`
+diagnostic lines confirm `experimentalTwoBodyChassis=true` - the real,
+unmodified production default - for every scenario, not a forced-off test
+isolation flag. This is now the strongest evidence this ticket can offer:
+the real production default, unmodified, correctly manages fixed-wing and
+rotorcraft vehicles end to end.
+
+**Targeted live evidence for the config-restore-failure path (review
+53958/53959).** Review correctly found that even after the
+"don't reload/claim restoration on a write failure" fix (`b7e8f05`), the
+overall completion logging still looked success-shaped: `runScenarios()`
+already logs `ALL SCENARIOS FINISHED` before cleanup starts, and
+`releaseChunksOnce()`'s own final line always said `- ALL_DONE` regardless
+of whether the config restore actually succeeded. Added `configRestoreFailed`
+(set only in `restoreConfigOnce`'s own `IOException` branch) so
+`releaseChunksOnce` now logs an explicit `CLEANUP FAILED, not a clean
+ALL_DONE` ERROR line instead of the plain success line on that path.
+
+To actually exercise this failure path live (not just reason about it), a
+one-off local harness (outside the probe itself - a host-side `chmod 444`
+on this worktree's own gitignored `run/config/dynamic-immersive-vehicles.json`,
+timed via log-watching, restored to `644` immediately after capturing the
+evidence) deliberately forced the restore write to throw. Captured from
+`/tmp/m526-live-run9.log`:
+
+```
+[DIV flightRotorFixture] FAILED to restore original config at .../dynamic-immersive-vehicles.json - NOT reloading (would apply the known-still-probe-mutated file) - manual cleanup needed. Original content this probe is preserving for that cleanup: {...}
+[DIV flightRotorFixture] released 115 chunk(s) this probe itself forced, but config restore FAILED (see the earlier FAILED-to-restore error above for manual cleanup) - CLEANUP FAILED, not a clean ALL_DONE
+```
+
+This proves, from an actual forced failure rather than code inspection
+alone: no reload of the unrestored file, no false "restored and reloaded"
+claim, chunk release still ran and is reported as unconditional, and the
+terminal outcome is explicitly flagged as a cleanup failure rather than a
+plain `ALL_DONE`. (The forced read-only permission also broke several
+earlier in-run config writes as a side effect of firing early rather than
+precisely at the final restore step - expected collateral of this blunt
+harness technique, not a probe defect; the targeted final-restore-failure
+lines above are what this evidence is for.) Permissions were restored and
+the file's actual content verified intact immediately after capturing this
+evidence - this worktree's own `run/` directory is gitignored and private
+to this ticket, not shared repository state.
+
+`gradle --offline compileJava/test --rerun-tasks` after this fix: `BUILD
+SUCCESSFUL`, 648 tests, 0 failures, 0 errors (unchanged).

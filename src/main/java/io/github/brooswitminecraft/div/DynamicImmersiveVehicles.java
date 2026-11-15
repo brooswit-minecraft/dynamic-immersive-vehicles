@@ -99,6 +99,16 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.BuoyancyAngularDragProbe.maybeRun(overworld);
   });
+  // Opt-in, dev/isolated-host-only fixed-wing/rotorcraft activation, default-response,
+  // configured-response and valid/invalid live-reload probe (MINECRAFT-526) - OFF by default, a
+  // strict no-op otherwise. Closes the disclosed "no live EntityVehicleF_Physics/Sable runtime
+  // fixture exists" gap both MINECRAFT-521 (PR #19) and MINECRAFT-522 (PR #17) carried in their
+  // own test plans. Never touches any real vehicle, Zippy, or world content - see
+  // FlightRotorRuntimeFixtureProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.FlightRotorRuntimeFixtureProbe.maybeRun(overworld);
+  });
   // Opt-in, CI/isolated-host-only hitch rotation-frame composition probe (MINECRAFT-525, review
   // comment 53817/53832) - OFF by default, a strict no-op otherwise. Never touches any real
   // vehicle or world content - see HitchRotationFrameProbe's own doc.
