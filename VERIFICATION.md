@@ -2590,6 +2590,25 @@ the prior reconciled state + 19 from MINECRAFT-533's own merged work).
 `gradle --offline build -q` succeeded again; jar SHA-256
 `f272eedb061f57e0b1ee21a6fd887452da22c6e8c39c86080a049cdbc3194be3`.
 
+**Post-merge (2026-11-15).** Wroosbit approved exact head
+`353a523fa4da3537970ddbb1d9ccd38eaa963037` (review comment Jira 54102);
+merged PR #30 into `main` at merge commit
+`4538d5184c517309a6f161f68d35bb26abedf061`. Post-merge hosted CI (run
+43760732717, triggered by the merge push) failed with all 5 jobs
+executing zero steps - the same pre-existing, already-disclosed
+hosted-CI billing/spending-limit blockage every recent DIV ticket on
+this repo has hit (most recently MINECRAFT-533's own merge, run
+43759185283). No `release.yml` or tag-based release workflow exists in
+this repo beyond that billing-blocked CI, and this change (an internal
+part-override/rolling-resistance-composition change, no version bump)
+does not warrant inventing one. Retained exact-head local evidence
+stands in its place: a fresh `gradle --offline clean test build` at the
+merged head (flock-protected on `/tmp/div-gradle-slot.lock`) reproduced
+**741 tests**, 0 skipped, 0 failures, 0 errors, and produced
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
+checksum
+`b4624b6ea3f33227b8ffb389bf8f7d141dfb5c9e80ffa88d2365b0a3ea487a83`.
+
 ## Contact-aware axle drive-force sharing (MINECRAFT-532, added 2026-11-15)
 
 Bounded deliverable: opt-in redistribution of a wheel's own already-assigned
