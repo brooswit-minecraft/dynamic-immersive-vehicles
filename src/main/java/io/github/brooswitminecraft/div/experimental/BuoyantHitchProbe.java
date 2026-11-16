@@ -144,13 +144,13 @@ public final class BuoyantHitchProbe {
  private static final int PART_PAIR_OFFSET = 40; // blocks - a second, independent pool well clear of the main pair's own
  private static final Logger LOGGER = LogUtils.getLogger();
 
- private enum Phase { WAIT_TERRAIN, SPAWN, ATTACH, DETACH, TOWING_UNAVAILABLE, DESPAWN_TRAILER, LEVEL_UNLOAD, INSTALLED_PART_ATTACH, DONE, FAILED }
+ private enum Phase { WAIT_TERRAIN, SPAWN, ATTACH, DETACH, TOWING_UNAVAILABLE, TOWING_REPLACEMENT, DESPAWN_TRAILER, LEVEL_UNLOAD, INSTALLED_PART_ATTACH, DONE, FAILED }
 
  private static Phase phase = Phase.WAIT_TERRAIN;
  private static int ticksInPhase = 0, terrainWaitTicksElapsed = 0;
  private static double spawnX, spawnZ, spawnSurfaceY;
- private static EntityVehicleF_Physics towing, towed;
- private static JSONVehicle towingDefinition, towedDefinition;
+ private static EntityVehicleF_Physics towing, towed, towing2;
+ private static JSONVehicle towingDefinition, towedDefinition, towing2Definition;
  // Independent third pair, own pool, spawned only for INSTALLED_PART_ATTACH (after the main
  // pair's own lifecycle completes) - see that phase's own doc for why this is kept separate
  // from the main pair rather than interleaved with it.
@@ -176,6 +176,7 @@ public final class BuoyantHitchProbe {
     case DETACH -> detach();
     case TOWING_UNAVAILABLE -> towingUnavailable();
     case DESPAWN_TRAILER -> despawnTrailer();
+    case TOWING_REPLACEMENT -> towingReplacement(level);
     case LEVEL_UNLOAD -> levelUnload(level);
     case INSTALLED_PART_ATTACH -> installedPartAttach(level);
     case DONE, FAILED -> {}
@@ -471,28 +472,67 @@ public final class BuoyantHitchProbe {
   if (!boundedOrFail("towingUnavailable/towed", towed)) return;
   if (ticksInPhase >= SHORT_PHASE_TICKS) {
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE PASS - towed stayed finite/bounded " + SHORT_PHASE_TICKS
-     + " ticks after its towing vehicle despawned - despawning towed itself for DESPAWN_TRAILER/LEVEL_UNLOAD");
+     + " ticks after its towing vehicle despawned - spawning towing2 for TOWING_REPLACEMENT");
+   phase = Phase.TOWING_REPLACEMENT; ticksInPhase = 0;
+  }
+ }
+
+ /**
+  * Diagnostic restoration of the towing-body-REPLACEMENT lifecycle (John's own directive,
+  * comment 54210: "restore deterministic replacement assertion... diagnose... from evidence, not
+  * rerun-until-green or remove the phase"). Does NOT despawn `towed` after TOWING_UNAVAILABLE -
+  * spawns a fresh `towing2` and reconnects, logging per-TICK (not just every 20) linear speed
+  * for both bodies from the very first tick, specifically to catch the exact tick the previously
+  * observed runaway (settled anchor, then 24-35 block divergence within 5-10 ticks) begins, not
+  * merely its aftermath.
+  */
+ private static void towingReplacement(ServerLevel level) {
+  ticksInPhase++;
+  if (ticksInPhase == 1) {
+   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
+   towing2Definition = buildHullDefinition("buoyanthitch-towing2", true, false);
+   Point3D towedHookupAnchor = anchorWorld(towed, towedDefinition.connectionGroups.get(0).connections.get(0));
+   Point3D towardHookupAnchor = towedHookupAnchor.copy().subtract(towed.position).normalize();
+   Point3D towing2Spawn = towed.position.copy().addScaled(towardHookupAnchor, 4.0);
+   // Pin Y to a safe resting height instead of the raw extrapolated value - the 3D direction
+   // vector's own Y component (from towed's current pitch/roll at this moment) previously
+   // placed towing2 PARTLY SUBMERGED (e.g. Y=104.75 against a water top at Y=105, barely below
+   // the surface but enough for a fresh, zero-velocity body to take a real one-tick buoyant
+   // correction) rather than resting ON the surface like every other hull in this probe spawns.
+   towing2Spawn.y = towed.position.y;
+   towing2 = spawnHull(world, towing2Definition, towing2Spawn.x, towing2Spawn.y, towing2Spawn.z, 0);
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT pre-connect towing2=" + towing2.position + " towing2.motion=" + towing2.motion
+     + " towed=" + towed.position + " towed.motion=" + towed.motion + " towedHookupAnchor=" + towedHookupAnchor);
+   var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
+   towing2.connectTrailer(connection, false);
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position);
+  }
+  if (!boundedOrFail("towingReplacement/towing2", towing2) || !boundedOrFail("towingReplacement/towed", towed)) return;
+  double distance = anchorDistance(towing2, towing2Definition);
+  double towing2Speed = towing2.motion.length() * 20 * towing2.speedFactor;
+  double towedSpeed = towed.motion.length() * 20 * towed.speedFactor;
+  // Every SINGLE tick for the first 20 (not just every 20) - the previously observed runaway
+  // begins and ends within that window; a coarser log would only ever show the aftermath.
+  if (ticksInPhase <= 20 || ticksInPhase % 20 == 0 || ticksInPhase == SETTLE_TICKS) {
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT tick=" + ticksInPhase + " anchorDistance=" + distance
+     + " towing2.pos=" + towing2.position + " towing2.speed(blocks/s)=" + towing2Speed
+     + " towed.pos=" + towed.position + " towed.speed(blocks/s)=" + towedSpeed);
+  }
+  if (ticksInPhase >= SETTLE_TICKS) {
+   if (distance > ANCHOR_TOLERANCE) {
+    LOGGER.error("[DIV buoyantHitchProbe] FAILED - TOWING_REPLACEMENT anchorDistance=" + distance + " did not settle within tolerance=" + ANCHOR_TOLERANCE);
+    phase = Phase.FAILED;
+    return;
+   }
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT PASS anchorDistance=" + distance + " - despawning towed for DESPAWN_TRAILER");
    towed.remove();
    phase = Phase.DESPAWN_TRAILER; ticksInPhase = 0;
   }
  }
 
- /**
-  * DESPAWN_TRAILER/LEVEL_UNLOAD exercise cleanup with nothing left alive from the main pair -
-  * `towed` already despawned above, `towing` despawned by TOWING_UNAVAILABLE. A live
-  * towing-body-REPLACEMENT demo (spawn a fresh towing hull, reconnect `towed` to it, settle) was
-  * attempted here in earlier iterations of this probe and reproducibly crashed
-  * {@code BuoyantBody.step} with a {@code NullPointerException} within ~6 ticks of connecting -
-  * confirmed-live, deterministic (five separate runs, including with doubled spawn clearance),
-  * NOT explained by any geometry/overlap/reuse hypothesis tried (see this ticket's VERIFICATION.md
-  * and ticket comment for the full reproduction record) - genuinely unresolved within this
-  * ticket's own bounded "float-only towing/attach/detach" scope and budget, filed as a follow-up
-  * rather than silently dropped or claimed working. "Towing body UNAVAILABLE" (this phase's own
-  * despawn-while-jointed case, immediately above) is still live-proven; "towing body REPLACEMENT"
-  * specifically is not, and is disclosed as such rather than papered over with a flaky demo.
-  */
  private static void despawnTrailer() {
   ticksInPhase++;
+  if (!boundedOrFail("despawnTrailer/towing2", towing2)) return;
   if (ticksInPhase >= SHORT_PHASE_TICKS) {
    LOGGER.info("[DIV buoyantHitchProbe] DESPAWN_TRAILER PASS - " + SHORT_PHASE_TICKS
      + " ticks after despawning the (already-unjointed) trailer raised no exception - exercising PhysicsBridge.unload(level) for LEVEL_UNLOAD");

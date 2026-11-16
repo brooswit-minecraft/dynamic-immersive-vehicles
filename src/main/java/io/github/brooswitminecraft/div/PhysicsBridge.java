@@ -884,7 +884,22 @@ public final class PhysicsBridge {
     connectionRotationVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.rot),
     connectionRotationVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.rot).invert(),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
-  return SubLevelContainer.getContainer(towing.level()).physicsSystem().getPipeline().addConstraint(towing.box(), trailer.box(), config);
+  var handle = SubLevelContainer.getContainer(towing.level()).physicsSystem().getPipeline().addConstraint(towing.box(), trailer.box(), config);
+  // MINECRAFT-545/547: a newly-created joint must not leave either side ASLEEP. Confirmed live
+  // (BuoyantHitchProbe's own TOWING_REPLACEMENT evidence): jointing a brand-new body to one that
+  // has been calmly settled (and so likely asleep) for many prior ticks produced an immediate,
+  // explosive one-tick position jump (tens of blocks in a single 1/20s step) the very next tick
+  // after connectTrailer - a sleeping body's effectively-infinite inertia to the solver, combined
+  // with a real (non-zero) initial anchor gap this joint must still correct, is the same failure
+  // mode an un-woken rigid body produces in any iterative constraint solver. BuoyantBody.step
+  // already wakes its own box conditionally on BuoyantForces' own verdict, but that is a
+  // per-tick buoyancy decision, not a hitch-creation guarantee - a calmly-floating body can stay
+  // asleep right through the tick this joint is created. Explicitly waking both sides here,
+  // every time a joint is (re)created, removes that race regardless of either body's own prior
+  // sleep state.
+  towing.box().wakeUp();
+  trailer.box().wakeUp();
+  return handle;
  }
  /**
   * A hitch/hookup connection's own {@code pos}, converted to vehicle-root-local: unchanged when

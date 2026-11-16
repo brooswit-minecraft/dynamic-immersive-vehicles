@@ -3136,19 +3136,51 @@ blocks within ~10 ticks, ending in a `BuoyantBody.step`
 region.
 
 **Disclosed, NOT resolved: "towing body replacement" has no reliable live
-evidence.** After fixing the geometry bugs above, the SAME reconnect
-(fresh towing hull, ordinary connection, well-clear spawn separation)
-still crashed identically - reproduced 5 times, including with doubled
-spawn clearance (4 vs 8 blocks, no change in outcome) - with no further
-geometry/overlap/reuse hypothesis explaining it. One earlier run of
-byte-identical code did complete successfully (anchor settled to `0.0057`
-blocks), so this may be timing/host-load sensitive (concurrent sprint
-agents were observed competing for CPU on this host) rather than a pure
-logic bug, but that was not confirmed. Rather than ship a flaky demo or
-silently drop the acceptance item, this is disclosed plainly and filed as
-MINECRAFT-547 (linked). "Towing body unavailable" (above) remains fully
-live-proven; "replacement" specifically does not have live evidence within
-this ticket's own bounded scope/budget.
+evidence, now with a confirmed-deterministic, mechanistic diagnosis (not
+timing/host-load, as first suspected).** Per-tick diagnostic logging
+(position + linear speed, every tick) across multiple runs with
+byte-identical code produced bit-identical trajectories - ruling out the
+timing-sensitivity theory entirely. The actual sequence: tick 1 (joint
+just created) is unremarkable (initial anchor gap ~2.0 blocks, both
+bodies' speeds normal); by tick 2 `towed` alone jumps ~9 blocks in one
+step; by tick 3 BOTH bodies are moving at 230-300+ blocks/s; within 5-8
+ticks one leaves Sable's own active region and the next `step()` call
+crashes on the now-handle-less body. Three further hypotheses were tested
+and ruled out: spawn clearance (4 vs 8 blocks, no change), explicit
+`box.wakeUp()` on both sides right after `addConstraint` (now shipped as
+a genuine defensive improvement in `PhysicsBridge.createHitch` regardless
+- see below - but did not change this crash's trajectory at all, bit-
+identical with or without), and `towing2` spawning partially submerged
+(pinned its spawn Y to the water surface - no change).
+
+Leading hypothesis: the fully-rigid (always-linear-locked)
+`GenericConstraintConfiguration` joint applies its FIRST solve as a
+single, undamped correction sized by the full initial anchor gap, and
+this is disproportionately violent specifically when joining a freshly-
+spawned, zero-velocity body to an already-settled, actively-simulating
+one - unlike this ticket's own `ATTACH` phase, where BOTH sides are fresh
+(spawned the same tick) with a similar-or-larger initial gap and settle
+gently. If true, this would NOT be float-specific: no existing DIV probe
+or test (MINECRAFT-525/530 included) appears to have ever exercised a
+live "reconnect to a freshly-spawned towing vehicle" case for ANY body
+type, ground included - this may be a pre-existing, general hitch-joint-
+creation gap this ticket's own live testing happened to be the first to
+exercise, not a defect this ticket introduced. Recorded on MINECRAFT-547
+with the suggestion to test the identical sequence against a ground
+vehicle pair next, to confirm or rule out the float-specific framing.
+"Towing body unavailable" (above) remains fully live-proven; "replacement"
+specifically does not have live evidence within this ticket's own bounded
+scope/budget - continued per John's own explicit direction not to waive
+this named requirement (ticket comment history), diagnosed from evidence
+rather than retried blindly or silently dropped.
+
+**Defensive production improvement (unrelated to resolving the crash
+above, but shipped anyway):** `PhysicsBridge.createHitch` now explicitly
+wakes both sides' Sable boxes immediately after `addConstraint`, so a
+newly-created joint can never leave either side asleep regardless of its
+prior sleep state. Confirmed by direct A/B test to have no effect on the
+replacement crash's own trajectory, but a reasonable defensive guarantee
+in its own right, independent of that unresolved question.
 
 **Disclosed, deliberate scope limit:** the probe's connections are ordinary
 (unmounted, unrestricted) rather than `restricted`/`mounted` with a
