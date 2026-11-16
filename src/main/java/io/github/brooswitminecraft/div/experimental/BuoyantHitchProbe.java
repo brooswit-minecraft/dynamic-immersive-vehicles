@@ -471,27 +471,29 @@ public final class BuoyantHitchProbe {
    // native state too" - before AND after towing.remove() itself, in the same tick, not just
    // the first later sample) - real native state on both sides right before the despawn call.
    // MINECRAFT-545/547 (John's comment 54337): pose/orientation and world-space anchor position,
-   // alongside the existing velocity/ID reads. This log line runs from this probe's own
-   // ServerTickEvent.Post listener - AFTER entity ticking (where step()/box.updatePose() already
-   // ran for both bodies THIS SAME tick) - so this pose read IS current for this tick, NOT stale
-   // the way the createHitchDiagnostic sample (captured earlier, during active(), before step())
-   // is. gameTime is the real tick-number marker this comment asked for, not log adjacency.
-   // MINECRAFT-545/547 (John's comments 54337/54357/54359): BOTH bodies' pose/COM/anchor-world
-   // captured at this same bracket (towing's own pose, and ANY anchor-world here at all, were
-   // both missing before - real gaps, not removed with a claim they were unnecessary). Anchor-
-   // world is computed via HitchJoint.anchorLocalOffset against this probe's OWN authored
-   // HITCH_POS/HOOKUP_POS connection constants and each body's real debugReadCenter() - the SAME
-   // pure function createHitch itself uses, with this exact connection's own real inputs, not a
-   // hardcoded final vector guessed to match. Freshness is labeled ASSUMED, not asserted as
-   // proven: this call site's own ordering reasoning (active() before step(), cited in an
-   // earlier entry) is NOT an independent refresh/event/tick marker - createHitch's own
-   // insertion moment is likewise not itself proof of when the native impulse was actually
-   // applied, per 54359 - so both samples carry an explicit UNVERIFIED_AGE label here rather
-   // than a confident ONE_TICK_STALE/CURRENT_THIS_TICK claim.
+   // alongside the existing velocity/ID reads. gameTime is the real tick-number marker this
+   // comment asked for, not log adjacency. (Superseded below, 54365: whether this read is
+   // actually current for this tick is now a logged, checkable comparison, not asserted here.)
+   // MINECRAFT-545/547 (John's comments 54337/54357/54359/54365): BOTH bodies' pose/COM/anchor-
+   // world captured at this same bracket. Anchor-world is computed via
+   // HitchJoint.anchorLocalOffset against this probe's OWN authored HITCH_POS/HOOKUP_POS
+   // connection constants and each body's real debugReadCenter() - the SAME pure function
+   // createHitch itself uses. Per 54365's correction, freshness is no longer an inferred label
+   // (UNVERIFIED_AGE/ONE_TICK_STALE/CURRENT_THIS_TICK) - it is the REAL
+   // debugLastPoseUpdateGameTime for each body (the tick its own step() actually last called
+   // box.updatePose()), logged alongside this read's own sampleGameTime so the two can be
+   // compared directly instead of asserted from call-ordering. This listener fires from
+   // ServerTickEvent.Post, i.e. AFTER entity ticking (where both bodies' own step() already ran
+   // this same tick) - that IS a known event phase, stated as such, not an assumed freshness
+   // label; whether lastPoseUpdateGameTime == sampleGameTime below is the actual check, not an
+   // assertion.
    var towedPoseHere = PhysicsBridge.debugReadPose(towed);
    var towingPoseHere = PhysicsBridge.debugReadPose(towing);
    var towedCenter = PhysicsBridge.debugReadCenter(towed);
    var towingCenter = PhysicsBridge.debugReadCenter(towing);
+   long towedLastPoseUpdateGameTime = PhysicsBridge.debugLastPoseUpdateGameTime(towed);
+   long towingLastPoseUpdateGameTime = PhysicsBridge.debugLastPoseUpdateGameTime(towing);
+   long sampleGameTime = towed.world.getTime();
    var towedHookupOffset = towedCenter != null
      ? HitchJoint.anchorLocalOffset(towedCenter, new org.joml.Vector3d(HOOKUP_POS.x, HOOKUP_POS.y, HOOKUP_POS.z), new org.joml.Vector3d()) : null;
    var towingHitchOffset = towingCenter != null
@@ -501,15 +503,16 @@ public final class BuoyantHitchProbe {
    var towingAnchorWorldHere = (towingPoseHere != null && towingHitchOffset != null)
      ? new org.joml.Vector3d(towingHitchOffset).rotate(new org.joml.Quaterniond(towingPoseHere.orientation())).add(towingPoseHere.position()) : null;
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE pre-remove() real native state"
-     + " gameTime=" + towed.world.getTime() + " towing.id=" + towing.uniqueUUID
+     + " sampleGameTime=" + sampleGameTime + " knownEventPhase=ServerTickEvent.Post(after-entity-ticking) substepIndex=UNAVAILABLE"
+     + " towing.id=" + towing.uniqueUUID
      + " towing.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towing)
      + " towing.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towing)
-     + " towing.center=" + towingCenter + " towing.pose(UNVERIFIED_AGE)=" + towingPoseHere
+     + " towing.center=" + towingCenter + " towing.lastPoseUpdateGameTime=" + towingLastPoseUpdateGameTime + " towing.pose=" + towingPoseHere
      + " towing.hitchAnchorWorld=" + towingAnchorWorldHere
      + " towed.id=" + towed.uniqueUUID
      + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
      + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed)
-     + " towed.center=" + towedCenter + " towed.pose(UNVERIFIED_AGE)=" + towedPoseHere
+     + " towed.center=" + towedCenter + " towed.lastPoseUpdateGameTime=" + towedLastPoseUpdateGameTime + " towed.pose=" + towedPoseHere
      + " towed.hookupAnchorWorld=" + towedAnchorWorldHere);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE despawning towing while towed remains jointed");
    towing.remove();

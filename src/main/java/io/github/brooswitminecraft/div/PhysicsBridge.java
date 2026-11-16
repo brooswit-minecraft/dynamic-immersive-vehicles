@@ -934,31 +934,41 @@ public final class PhysicsBridge {
    Logger diagnosticLogger = LogUtils.getLogger();
    RigidBodyHandle towingHandle = towing instanceof Body b ? b.handle : towing instanceof BuoyantBody bb ? bb.handle() : null;
    RigidBodyHandle trailerHandle = trailer instanceof Body b ? b.handle : trailer instanceof BuoyantBody bb ? bb.handle() : null;
-   // MINECRAFT-545/547 (John's comment 54359): pose is the box's own CACHED Pose3d, last
+   // MINECRAFT-545/547 (John's comments 54359/54365): pose is the box's own CACHED Pose3d, last
    // refreshed by that body's own PRIOR step() call (box.updatePose()) - this createHitch call
    // itself never refreshes it. Call-ordering alone (active() precedes step() in
-   // VehicleMovementMixin.div$move) is NOT itself proof of exactly when the native impulse
-   // that produced this cached pose was applied - only that this read happens before this
-   // tick's own step(). So this is labeled UNVERIFIED_AGE, not a confident "one tick stale"
-   // claim: no independent refresh/tick/substep/event marker backs a precise age here.
-   // World-space anchor position is computed from that same (age-unverified) pose + the local
-   // offset already logged. gameTime is MTS/MC's own absolute tick counter - a real ordering
-   // marker, not mere log adjacency, usable to verify exactly how many ticks separate any two
-   // samples - but it does not by itself establish this pose's staleness in substeps.
+   // VehicleMovementMixin.div$move) is NOT itself proof of exactly when the native impulse that
+   // produced this cached pose was applied - it only places createHitch's own KNOWN event phase
+   // (before this tick's own step()); it is NOT an assertion about which native substep produced
+   // the cached value. Per 54365's correction, those two facts are now logged SEPARATELY rather
+   // than merged into one inferred staleness label:
+   //  - lastPoseUpdateGameTime: the REAL, independently-checkable tick at which this body's own
+   //    step() last ran box.updatePose() (debugLastPoseUpdateGameTime/field set there directly,
+   //    not inferred from ordering).
+   //  - sampleGameTime/knownEventPhase: this read's own tick and the one ordering fact that IS
+   //    actually known (createHitch runs before this tick's own step()).
+   //  - substepIndex: explicitly UNAVAILABLE - no accessor exposes which of
+   //    config.substepsPerTick native substeps last touched this value.
    var towingPose = towing instanceof Body b ? b.box.getPose() : towing instanceof BuoyantBody bb ? bb.box().getPose() : null;
    var trailerPose = trailer instanceof Body b ? b.box.getPose() : trailer instanceof BuoyantBody bb ? bb.box().getPose() : null;
    var towingAnchorWorld = towingPose != null ? new Vector3d(hitchOffset).rotate(new Quaterniond(towingPose.orientation())).add(towingPose.position()) : null;
    var trailerAnchorWorld = trailerPose != null ? new Vector3d(hookupOffset).rotate(new Quaterniond(trailerPose.orientation())).add(trailerPose.position()) : null;
+   long towingSampleGameTime = towing.level().getGameTime();
+   long trailerSampleGameTime = trailer.level().getGameTime();
    diagnosticLogger.info("[DIV createHitchDiagnostic] towing=" + connection.towingVehicle.uniqueUUID + " class=" + towing.getClass().getSimpleName()
-     + " gameTime=" + towing.level().getGameTime()
+     + " sampleGameTime=" + towingSampleGameTime
+     + " lastPoseUpdateGameTime=" + debugLastPoseUpdateGameTime(connection.towingVehicle)
+     + " knownEventPhase=createHitch(before-this-ticks-step) substepIndex=UNAVAILABLE"
      + " center=" + towing.center() + " hitchLocalOffset=" + hitchOffset
-     + " cachedPose(UNVERIFIED_AGE)=" + towingPose + " hitchAnchorWorld(fromCachedPose)=" + towingAnchorWorld
+     + " cachedPose=" + towingPose + " hitchAnchorWorld(fromCachedPose)=" + towingAnchorWorld
      + " linearVelocity=" + (towingHandle != null ? towingHandle.getLinearVelocity(new Vector3d()) : "n/a")
      + " angularVelocity=" + (towingHandle != null ? towingHandle.getAngularVelocity(new Vector3d()) : "n/a"));
    diagnosticLogger.info("[DIV createHitchDiagnostic] trailer=" + connection.towedVehicle.uniqueUUID + " class=" + trailer.getClass().getSimpleName()
-     + " gameTime=" + trailer.level().getGameTime()
+     + " sampleGameTime=" + trailerSampleGameTime
+     + " lastPoseUpdateGameTime=" + debugLastPoseUpdateGameTime(connection.towedVehicle)
+     + " knownEventPhase=createHitch(before-this-ticks-step) substepIndex=UNAVAILABLE"
      + " center=" + trailer.center() + " hookupLocalOffset=" + hookupOffset
-     + " cachedPose(UNVERIFIED_AGE)=" + trailerPose + " hookupAnchorWorld(fromCachedPose)=" + trailerAnchorWorld
+     + " cachedPose=" + trailerPose + " hookupAnchorWorld(fromCachedPose)=" + trailerAnchorWorld
      + " linearVelocity=" + (trailerHandle != null ? trailerHandle.getLinearVelocity(new Vector3d()) : "n/a")
      + " angularVelocity=" + (trailerHandle != null ? trailerHandle.getAngularVelocity(new Vector3d()) : "n/a"));
   }
@@ -1142,22 +1152,37 @@ public final class PhysicsBridge {
   return null;
  }
  /**
-  * Diagnostic/test-only (MINECRAFT-545/547, John's comments 54290/54337: pose/orientation was a
-  * named missing quantity, and any sample must explicitly state whether it reflects a fresh
-  * native read or a cached Java value, not leave that implicit). Returns {@code box().getPose()}
-  * - the box's own cached {@code Pose3d}, refreshed ONLY by that body's own {@code step()} call
-  * (via {@code box.updatePose()}), NOT by this accessor itself. Since {@code createHitch} runs
-  * during {@code active()}, strictly BEFORE that same tick's own {@code step()} call
-  * ({@code VehicleMovementMixin.div$move} calls {@code active} then {@code step}, in that order),
-  * a sample taken inside {@code createHitch} is EXACTLY one tick stale relative to the box's true
-  * native pose at that instant - callers MUST label it as such, not as a fresh read. Returns
-  * {@code null} if there is no active body right now. Never called from any production code path.
+  * Diagnostic/test-only (MINECRAFT-545/547, John's comments 54290/54337/54359/54365: pose/
+  * orientation was a named missing quantity, and any sample must explicitly state whether it
+  * reflects a fresh native read or a cached Java value, not leave that implicit). Returns
+  * {@code box().getPose()} - the box's own cached {@code Pose3d}, refreshed ONLY by that body's
+  * own {@code step()} call (via {@code box.updatePose()}), NOT by this accessor itself.
+  * CORRECTED (54359): call-ordering alone ({@code active()} running before {@code step()} in
+  * {@code VehicleMovementMixin.div$move}) shows only that a {@code createHitch}-time sample
+  * predates THIS tick's own {@code step()} - it is NOT independent proof of exactly when the
+  * native impulse behind this cached pose was applied, so callers must NOT assert a precise
+  * "one tick stale" age from this reasoning alone. Use {@link #debugLastPoseUpdateGameTime} for
+  * the real, independently-checkable freshness marker instead. Returns {@code null} if there is
+  * no active body right now. Never called from any production code path.
   */
  public static dev.ryanhcode.sable.companion.math.Pose3dc debugReadPose(EntityVehicleF_Physics v) {
   var body = registry.get(v);
   if (body instanceof Body b) return b.box.getPose();
   if (body instanceof BuoyantBody bb) return bb.box().getPose();
   return null;
+ }
+ /** Diagnostic/test-only companion to {@link #debugReadPose} (John's comment 54365: "record the
+  * tick/event of each body's last box.updatePose... associate sampled pose with it"). Returns the
+  * Minecraft {@code gameTime} at which this body's own {@code step()} last actually called
+  * {@code box.updatePose()} - the real freshness marker for whatever {@link #debugReadPose}
+  * returns, not an age inferred from call-ordering. Returns {@code -1} if there is no active body
+  * right now, or if that body has never run {@code step()} yet (hitch created on its very first
+  * tick, before its own step has run). Never called from any production code path. */
+ public static long debugLastPoseUpdateGameTime(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.debugLastPoseUpdateGameTime;
+  if (body instanceof BuoyantBody bb) return bb.debugLastPoseUpdateGameTime;
+  return -1;
  }
  /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
   * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL
@@ -2060,8 +2085,15 @@ public final class PhysicsBridge {
    if (twoBodyActive) TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
    else c.physicsSystem().removeObject(box);
   }
+  // MINECRAFT-545/547 (John's comment 54365): a real, independently-checkable freshness marker
+  // for box.getPose()'s cached value - the Minecraft gameTime at which THIS body's own
+  // box.updatePose() last actually ran, set immediately below it. Diagnostic bookkeeping only
+  // (a plain field write every tick); does not change what step() computes or applies.
+  long debugLastPoseUpdateGameTime = -1;
+
   public void step(EntityVehicleF_Physics v) {
    box.updatePose();
+   debugLastPoseUpdateGameTime = level.getGameTime();
    Pose3d pose=new Pose3d(box.getPose());
    if (twoBodyActive) {
     // box/pose here is the LOWER half-body's own pose (its own center), NOT G - every other

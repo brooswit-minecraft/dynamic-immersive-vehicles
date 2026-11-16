@@ -92,8 +92,15 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
  // change - log-only.
  RigidBodyHandle handle() { return handle; }
 
+ // MINECRAFT-545/547 (John's comment 54365): a real, independently-checkable freshness marker
+ // for box.getPose()'s cached value - the Minecraft gameTime at which THIS body's own
+ // box.updatePose() last actually ran, set immediately below it. Diagnostic bookkeeping only
+ // (a plain field write every tick); does not change what step() computes or applies.
+ long debugLastPoseUpdateGameTime = -1;
+
  public void step(EntityVehicleF_Physics v) {
   box.updatePose();
+  debugLastPoseUpdateGameTime = level.getGameTime();
   Pose3d pose = new Pose3d(box.getPose());
   Quaterniond q = new Quaterniond(pose.orientation()), inverse = new Quaterniond(q).invert();
   Vector3d velocity = handle.getLinearVelocity(new Vector3d()), angular = handle.getAngularVelocity(new Vector3d());

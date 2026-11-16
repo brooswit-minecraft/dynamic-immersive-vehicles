@@ -4613,3 +4613,91 @@ Written to
 - This diff (build.gradle `gameDirectory` fix, `PhysicsBridge`/`BuoyantForces`/
   `BuoyantHitchProbe` relabeling and association changes) is about to be
   committed alongside this VERIFICATION.md entry, as its own commit.
+
+## 54365 follow-up: real freshness markers, corrected substep claim, corrected cleanup predicate
+
+John's comment 54365 reviewed the prior packet: approved the isolated-
+directory/non-aliasing work and the gameDirectory fix, but found three
+further concrete gaps on top of 54359's four. Addressed here, still no
+Minecraft launch performed.
+
+**(1) Real pose-freshness markers, not an inferred label.** Added a plain
+diagnostic field, `debugLastPoseUpdateGameTime`, to both `BuoyantBody`
+and `PhysicsBridge.Body`, set immediately after their own
+`box.updatePose()` call to `level.getGameTime()` - the REAL tick at
+which that body's cached pose was last refreshed, not inferred from call
+order. Exposed via a new `PhysicsBridge.debugLastPoseUpdateGameTime(v)`
+accessor. `createHitch`'s diagnostic log and `BuoyantHitchProbe`'s own
+`TOWING_UNAVAILABLE` pre-remove() bracket now log this value alongside
+the read's own `sampleGameTime`, so staleness is a checkable comparison
+in the log, not an asserted label (`UNVERIFIED_AGE` is gone). Also found
+and fixed a real correctness error while doing this: `createHitch`'s
+companion javadoc (`debugReadPose`) still asserted the pose sample is
+"EXACTLY one tick stale" from call-ordering alone - the same overclaim
+54359 already corrected in the log line itself, missed in the javadoc.
+Corrected to point at the new accessor instead of asserting an age.
+
+**(2) Corrected, and previously WRONG-direction, substep-scheduling
+claim.** The prior round's `BuoyantForces` diagnostic comment claimed this
+method runs "before Sable's native substeps run." Re-checked against this
+ticket's own established facts (`ServerLevelMixin` injects Sable's native
+step at the HEAD of `ServerLevel.tick()`, strictly BEFORE entity ticking,
+and `BuoyantForces.apply` runs FROM entity ticking) - the claim had the
+direction backwards: this tick's native substeps have ALREADY run by the
+time this line executes; the impulse applied here is consumed by the NEXT
+tick's substeps, not this tick's. Fixed the comment and the log's own
+label to state that single known event-phase fact, with
+`substepIndex=UNAVAILABLE` logged as an explicitly separate field (per
+54365: "log actual known event phase and unavailable substep index
+separately," not one merged/inferred label). Same correction applied to
+`createHitch`'s own log (known event phase: before this tick's own
+`step()`; substep index: unavailable - logged as two fields, not one).
+
+**(3) Corrected cleanup terminal predicate + prelaunch manifest, in
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-rundir-20261116T224049Z`:**
+- `CLEANUP_PLAN.md` rewritten: the real terminal predicate is
+  `[DIV buoyantHitchProbe] (COMPLETE|FAILED)` (confirmed verbatim against
+  this exact scenario's own prior log line, `M545-authrun-probe2/server.log`
+  line 1050: "FAILED - left bounded area ... phase=TOWING_REPLACEMENT"),
+  not a generic COMPLETE/CRASHED placeholder. Added explicit, bounded
+  startup-failure (180s with no log at all) and no-progress (900s total)
+  handling. Retention is now UNCONDITIONAL - no delete branch at all, per
+  54365's explicit correction.
+- `launch-wrapper.sh` (new, executable, NOT yet run): the actual bounded
+  launch/monitor/orderly-stop commands, not a description of them - FIFO
+  read-write open, polls for the real terminal pattern or either bound,
+  sends `stop\n` via the process's own stdin only (never a signal, never
+  a peer process), and if an orderly stop doesn't exit within 120s it
+  STOPS (exit 3) rather than escalating to SIGKILL automatically - a
+  human/coordinator decision point, not an automatic destructive action.
+  Lock lifetime documented: the caller claims/releases
+  `/tmp/div-gradle-slot.lock` around this wrapper; the wrapper itself
+  never touches that lock.
+- `MANIFEST.md` (new) indexes the fuller prelaunch manifest 54365 asked
+  for: `generated-launch-artifacts.sha256` (hashes of the actual
+  `runServer.sh`/classpath/VM-args/program-args files), 
+  `effective-classpath-entries.txt` (101 entries, one per line),
+  `compiled-instrumentation.sha256` (SHA-256 of every compiled `.class`
+  under `io/github/brooswitminecraft/div`, taken AFTER a fresh
+  `gradle test` compile of this round's edits - the actual bytecode, not
+  a source-level claim), and baseline hashes of the ORIGINAL (shared)
+  `run/config`/`run/world/level.dat` for comparison.
+- Verified (not merely asserted): VM args file contains ONLY this probe's
+  own two flags, no other probe's; none of the three generated args/
+  classpath files reference the shared `run/` path (grepped, zero
+  matches); the 8 copied config-file hashes match the CURRENT original
+  `run/config` hashes (re-verified live, not just at copy time); the
+  resolved full isolated world path
+  (`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-rundir-20261116T224049Z/rundir/world`,
+  from `server.properties`' `level-name=world`) does not exist yet.
+
+**Validation:** `gradle test` BUILD SUCCESSFUL after each source edit in
+this round; `prepareServerRun createServerLaunchScript` re-run once more
+under the lock after recompiling, to regenerate the launch artifacts
+against the current commit's compiled classes (confirmed still resolves
+to the isolated directory). Lock claims/releases logged in
+`/tmp/div-gradle-slot.owner` as `M545-gatefix2-test`,
+`M545-isolated-dryrun3`, `M545-gatefix3-test`.
+
+**Not yet done:** the isolated diagnostic run itself - still gated on
+independent review of this packet.

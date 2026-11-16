@@ -104,16 +104,24 @@ final class BuoyantForces {
    // from this impulse (applied synchronously into Sable's own native state, not read back here),
    // nor any OTHER force source (gravity, the joint's own impulse, propeller thrust below) -
    // those remain unavailable native/other-source terms, not claimed to be covered by this line.
-   // MINECRAFT-545/547 (John's comment 54359: "lacks tick/substep/event association") - gameTime
-   // is this call's own Minecraft-tick marker (level.getGameTime(), the same absolute counter used
-   // elsewhere in this diagnostic work). This method itself runs exactly ONCE per Minecraft tick,
-   // from BuoyantBody.step/PhysicsBridge - BEFORE Sable's native substeps (config.substepsPerTick)
-   // run - so there is no finer substep index available to attach at this call site; that absence
-   // is stated here, not silently omitted.
+   // MINECRAFT-545/547 (John's comments 54359/54365: "lacks tick/substep/event association",
+   // "do not assert [substep] scheduling merely from call order; log actual known event phase
+   // and unavailable substep index separately") - gameTime is this call's own Minecraft-tick
+   // marker (level.getGameTime()). Re-checked the actual ordering rather than re-asserting the
+   // prior (WRONG-direction) claim that this runs "before" native substeps: ServerLevelMixin
+   // injects Sable's own native step() at the HEAD of ServerLevel.tick(), strictly BEFORE entity
+   // ticking - and this method runs from BuoyantBody.step, called via
+   // VehicleMovementMixin.div$move during entity ticking. So THIS tick's native substeps have
+   // ALREADY run by the time this line executes; the impulse applied here lands in native state
+   // to be consumed by the NEXT tick's native substeps, not this tick's (already-completed) ones.
+   // That is the one known event-phase fact - stated on its own, separate from substepIndex,
+   // which stays explicitly UNAVAILABLE (no accessor exposes which of config.substepsPerTick
+   // substeps last touched/will touch this body).
    if (GroundContactDiagnostics.ENABLED) {
     Vector3d dragOnlyForce = new Vector3d(force).sub(buoyancyOnlyForce);
     com.mojang.logging.LogUtils.getLogger().info("[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID
-      + " gameTime=" + level.getGameTime() + " substep=UNAVAILABLE_PRE_SUBSTEP"
+      + " gameTime=" + level.getGameTime()
+      + " knownEventPhase=BuoyantForces.apply(after-this-ticks-native-step,before-next-ticks) substepIndex=UNAVAILABLE"
       + " floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
       + " submergedFraction=" + fraction + " worldArm=" + arm
       + " buoyancyOnlyForce=" + buoyancyOnlyForce + " dragOnlyForce=" + dragOnlyForce
@@ -163,7 +171,8 @@ final class BuoyantForces {
     // besides the per-float buoyancy/linear-drag already logged above, this method applies.
     if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
       "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
-        + " substep=UNAVAILABLE_PRE_SUBSTEP rotationalDragDeltaAngular=" + deltaAngular + " retention=" + retention);
+        + " knownEventPhase=BuoyantForces.apply(after-this-ticks-native-step,before-next-ticks) substepIndex=UNAVAILABLE"
+        + " rotationalDragDeltaAngular=" + deltaAngular + " retention=" + retention);
     handle.addLinearAndAngularVelocity(new Vector3d(), deltaAngular);
    }
   } else if (GroundContactDiagnostics.ENABLED) {
@@ -174,7 +183,8 @@ final class BuoyantForces {
    // itself applies this tick - confirmed, not merely assumed from the default's own value.
    com.mojang.logging.LogUtils.getLogger().info(
      "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
-       + " substep=UNAVAILABLE_PRE_SUBSTEP rotationalDrag=INACTIVE_THIS_TICK angularWaterDrag=" + tuning.angularWaterDrag);
+       + " knownEventPhase=BuoyantForces.apply(after-this-ticks-native-step,before-next-ticks) substepIndex=UNAVAILABLE"
+       + " rotationalDrag=INACTIVE_THIS_TICK angularWaterDrag=" + tuning.angularWaterDrag);
   }
   // Per-propeller drive, keyed by actual engine linkage (PartEngineAccessor.linkedPropellers -
   // IV's own private field, not reachable through any public API) rather than one vehicle-wide
