@@ -180,17 +180,20 @@ public final class Overrides {
   // velocity, never the pilot's cyclic/yaw input, so it cannot be mistaken for (or substitute for)
   // auto-level, a hover autopilot, or cyclic response filtering.
   public Double rotorAngularDampingCoefficient;
-  // MINECRAFT-543: optional, rotorcraft-only bounded quadratic drag opposing the body's OWN
-  // actual linear (translational) velocity - see RotorForces.translationalDragForce's own doc
-  // for the full dissipative-drag model and the no-reversal/no-free-force contract, and
+  // MINECRAFT-543: optional, rotorcraft-only bounded quadratic (aerodynamic) drag opposing the
+  // body's OWN actual linear (translational) velocity - see RotorForces.translationalDragForce's
+  // own doc for the full model and the no-reversal/no-free-force contract, and
   // PhysicsBridge.stepRotor for how it is ADDED to (never substituted for) the existing thrust
-  // force. 0.0 (FALLBACK below) is the documented off value -
-  // RotorForces.translationalDragForce already returns an exact-zero vector for a non-positive
-  // coefficient, so an unconfigured rotorcraft's force - and therefore
-  // handle.applyLinearImpulse - is byte-identical to before this ticket. Deliberately
-  // independent of cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522) and
-  // rotorAngularDampingCoefficient (MINECRAFT-537) - this only ever opposes the body's OWN
-  // existing linear velocity, never attitude/yaw authority or angular rate.
+  // force. This is a MULTIPLIER on a native-geometry-derived force (airDensity*motorized.
+  // dragCoefficient*referenceArea, the SAME pieces stepFlight's own parasitic drag already uses -
+  // not a raw drag-strength scalar), the same "multiplier against an existing calibrated/native
+  // number" shape parasiticDragMultiplier/suspensionSpringMultiplier already establish. 0.0
+  // (FALLBACK below) is the documented off value - RotorForces.translationalDragForce already
+  // returns an exact-zero vector for a non-positive multiplier, so an unconfigured rotorcraft's
+  // force - and therefore handle.applyLinearImpulse - is byte-identical to before this ticket.
+  // Deliberately independent of cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale
+  // (MINECRAFT-522) and rotorAngularDampingCoefficient (MINECRAFT-537) - this only ever opposes
+  // the body's OWN existing linear velocity, never attitude/yaw authority or angular rate.
   public Double rotorAirDragCoefficient;
   // MINECRAFT-520: configurable front/rear SERVICE-brake distribution - 0.0 sends the whole
   // tuning.brakeForce budget to the geometric rear axle group, 1.0 sends it all to the front

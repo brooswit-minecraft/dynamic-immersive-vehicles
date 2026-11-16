@@ -281,7 +281,7 @@ class OverridesTest {
   assertDoesNotThrow(zero::validate);
   var atCap = new Overrides.Tuning(); atCap.rotorAirDragCoefficient = RotorForces.MAX_AIR_DRAG_COEFFICIENT; // the cap itself is allowed
   assertDoesNotThrow(atCap::validate);
-  var inRange = new Overrides.Tuning(); inRange.rotorAirDragCoefficient = 5.0;
+  var inRange = new Overrides.Tuning(); inRange.rotorAirDragCoefficient = 2.0;
   assertDoesNotThrow(inRange::validate);
  }
 

@@ -177,29 +177,50 @@ public final class RotorForces {
   * (MINECRAFT-543), the same usability/sanity-cap role {@link #MAX_ANGULAR_DAMPING_COEFFICIENT}
   * plays for the rotational damping coefficient: {@link #translationalDragForce}'s own
   * no-reversal clamp already bounds one tick's drag impulse to at most this body's existing
-  * momentum along its velocity direction REGARDLESS of how large the coefficient is, so no
-  * finite coefficient can ever inject energy, reverse velocity, or destabilize the body. The cap
-  * exists only so a config value stays a meaningful dial and {@code validate()} rejects a
-  * plainly mistyped value, mirroring {@code MAX_ANGULAR_DAMPING_COEFFICIENT}'s own reasoning. */
- public static final double MAX_AIR_DRAG_COEFFICIENT = 1000.0;
+  * momentum along its velocity direction REGARDLESS of how large the multiplier is, so no finite
+  * multiplier can ever inject energy, reverse velocity, or destabilize the body. The cap exists
+  * only so a config value stays a meaningful dial and {@code validate()} rejects a plainly
+  * mistyped value - the same multiplier-cap shape {@code Overrides.Tuning#parasiticDragMultiplier}
+  * already uses (5x the native-derived budget), since {@code rotorAirDragCoefficient} is now
+  * exactly that kind of field: a multiplier on a native-geometry-derived aerodynamic force, not a
+  * raw drag-strength scalar. */
+ public static final double MAX_AIR_DRAG_COEFFICIENT = 5.0;
 
  /**
-  * Bounded, dissipative quadratic drag force opposing a rotorcraft's OWN actual linear body
-  * velocity (MINECRAFT-543) - the translational analogue of {@link #angularDampingTorque}
-  * (MINECRAFT-537): the only input is the body's current velocity (never the pilot's collective/
-  * cyclic/yaw input), so this can only ever oppose/reduce existing translational motion, never
-  * add net kinetic energy or substitute for rotor thrust. Deliberately independent of {@code
-  * Overrides.Tuning#cyclicLimitDegrees}/{@code cyclicAuthorityScale}/{@code yawAuthorityScale}
-  * (MINECRAFT-522) and {@code rotorAngularDampingCoefficient} (MINECRAFT-537) - this never
-  * touches attitude/yaw authority or angular damping, only the linear force budget added
-  * alongside {@code PhysicsBridge.stepRotor}'s existing thrust force.
+  * Bounded, dissipative quadratic (aerodynamic) drag force opposing a rotorcraft's OWN actual
+  * linear body velocity (MINECRAFT-543) - the translational analogue of
+  * {@link #angularDampingTorque} (MINECRAFT-537): the only input is the body's current velocity
+  * (never the pilot's collective/cyclic/yaw input), so this can only ever oppose/reduce existing
+  * translational motion, never add net kinetic energy or substitute for rotor thrust.
+  * Deliberately independent of {@code Overrides.Tuning#cyclicLimitDegrees}/{@code
+  * cyclicAuthorityScale}/{@code yawAuthorityScale} (MINECRAFT-522) and {@code
+  * rotorAngularDampingCoefficient} (MINECRAFT-537) - this never touches attitude/yaw authority or
+  * angular damping, only the linear force budget added alongside {@code PhysicsBridge.stepRotor}'s
+  * existing thrust force.
   *
-  * <p>Modeled as quadratic (aerodynamic) drag: {@code force = -coefficient * |velocity| *
-  * velocity}, the standard explicit air-density/area/drag-coefficient model collapsed into one
-  * documented scalar (the same simplified single-scalar shape {@code Overrides.Tuning#waterDrag}
-  * already uses for an analogous quadratic drag budget) - no native per-vehicle frontal-area/Cd
-  * field exists for a rotorcraft fuselage the way {@code motorized.dragCoefficient} does for a
-  * fixed wing, so this ticket does not fabricate one.
+  * <p>Modeled as the ticket's own requested explicit air-density/area/drag-coefficient
+  * formulation, {@code force = -multiplier * 0.5*airDensity*Cd*A * |velocity| * velocity}, built
+  * entirely from the SAME pieces {@code PhysicsBridge.stepFlight}/{@link FlightForces} already use
+  * for fixed-wing parasitic drag rather than inventing a parallel model: {@code airDensity} is the
+  * same sea-level-ISA constant {@code PhysicsBridge.Body.AIR_DENSITY} passes to {@link
+  * FlightForces#dynamicPressure}; {@code nativeDragCoefficient} is IV's own {@code
+  * motorized.dragCoefficient}, floored via {@link FlightForces#dragCoefficient} exactly the way a
+  * no-wing (blimp) vehicle's parasitic drag already is (passing {@code aspectRatio=0} short-
+  * circuits that method before its {@code liftCoefficient}/{@code parasiticDragMultiplier}/{@code
+  * oswaldEfficiency} parameters are ever read, so {@code 0}/{@code 1.0}/{@code 1.0} below are
+  * inert placeholders, not a second drag model); {@code referenceArea} is IV's own {@code
+  * motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea} - a rotorcraft has no
+  * wing, so this is the SAME native {@code crossSectionalArea} geometry a blimp's own parasitic
+  * drag already falls back to, satisfying the ticket's "existing applicable native geometry"
+  * requirement directly rather than fabricating a new per-vehicle field; and {@link
+  * FlightForces#aeroForce} computes the exact {@code coefficient*area*dynamicPressure} =
+  * {@code Cd*A*0.5*airDensity*v^2} magnitude. {@code multiplier} ({@code
+  * Overrides.Tuning#rotorAirDragCoefficient}) is the one NEW, operator-configurable dial this
+  * ticket adds: {@code 0} (the documented FALLBACK) is a true no-op leaving every unconfigured
+  * rotorcraft's force byte-identical to before this ticket - the "default off" requirement - while
+  * a positive value scales this native-geometry-derived force up or down, the same "multiplier
+  * against an existing calibrated/native number" shape {@code parasiticDragMultiplier}/{@code
+  * suspensionSpringMultiplier} already established elsewhere in this class.
   *
   * <p>Clamped so a single tick's drag impulse ({@code |force|*dt}) can never remove more linear
   * momentum along the velocity direction than the body already has - i.e. it can bring the body
@@ -208,10 +229,10 @@ public final class RotorForces {
   * no-reversal bound: reversing existing velocity under a term whose entire premise is removing
   * kinetic energy would itself be a net energy INJECTION, which is physically backward for a drag
   * term and is exactly the instability an unbounded proportional drag force could otherwise
-  * produce at a large coefficient or a large/variable {@code dt}. The bound is {@code mass *
-  * |velocity| / dt}, which holds at ANY dt (including the "extreme dt" stability requirement) and
-  * ANY coefficient (including {@link #MAX_AIR_DRAG_COEFFICIENT}) - see this method's own
-  * no-reversal unit tests.
+  * produce at a large multiplier/area/dragCoefficient or a large/variable {@code dt}. The bound is
+  * {@code mass * |velocity| / dt}, which holds at ANY dt (including the "extreme dt" stability
+  * requirement) and ANY multiplier (including {@link #MAX_AIR_DRAG_COEFFICIENT}) - see this
+  * method's own no-reversal unit tests.
   *
   * @param velocity this body's current linear velocity, WORLD frame (m/s) - orientation-
   *                 independent by construction: real translational air drag opposes actual
@@ -221,16 +242,29 @@ public final class RotorForces {
   *                 trivially - the result is identical for any orientation given the same
   *                 world-frame velocity
   * @param mass this body's own mass, kg - must be strictly positive
-  * @param dragCoefficient per-(m/s) quadratic drag strength, {@code >= 0}; {@code 0} (the
-  *                         documented {@code Overrides.Tuning} FALLBACK) returns an exact-zero
-  *                         vector - the zero-velocity/off-parity requirement
+  * @param airDensity air density, kg/m^3 ({@code PhysicsBridge.Body.AIR_DENSITY}, sea-level ISA) -
+  *                    must be strictly positive
+  * @param nativeDragCoefficient IV's own raw {@code motorized.dragCoefficient} (unfloored) - this
+  *                               method floors it itself via {@link FlightForces#dragCoefficient},
+  *                               the exact same floor a blimp's own parasitic drag gets
+  * @param referenceArea IV's own native reference area ({@code motorized.wingArea>0 ?
+  *                        motorized.wingArea : motorized.crossSectionalArea}), m^2 - must be
+  *                        strictly positive, or this returns an exact-zero vector (a vehicle whose
+  *                        native geometry claims no frontal area gets no drag, regardless of
+  *                        {@code multiplier})
+  * @param multiplier the resolved, bounded {@code Overrides.Tuning#rotorAirDragCoefficient},
+  *                    {@code >= 0}; {@code 0} (the documented FALLBACK) returns an exact-zero
+  *                    vector - the zero-velocity/off-parity requirement
   * @param dt the physics tick length this force will be integrated over (as an impulse, {@code
   *           force*dt}), consistent with every other force in {@code PhysicsBridge}
   */
- public static Vector3d translationalDragForce(Vector3d velocity, double mass, double dragCoefficient, double dt) {
+ public static Vector3d translationalDragForce(Vector3d velocity, double mass, double airDensity,
+     double nativeDragCoefficient, double referenceArea, double multiplier, double dt) {
   double speed = velocity.length();
-  if (!(dragCoefficient > 0) || !(dt > 0) || !(mass > 0) || speed == 0) return new Vector3d(0, 0, 0);
-  double unboundedMagnitude = dragCoefficient * speed * speed;
+  if (!(multiplier > 0) || !(dt > 0) || !(mass > 0) || !(airDensity > 0) || !(referenceArea > 0) || speed == 0) return new Vector3d(0, 0, 0);
+  double dragCoefficient = FlightForces.dragCoefficient(0, nativeDragCoefficient, 0, 1.0, 1.0);
+  double dynamicPressure = FlightForces.dynamicPressure(airDensity, speed);
+  double unboundedMagnitude = multiplier * FlightForces.aeroForce(dragCoefficient, referenceArea, dynamicPressure);
   double maxMagnitude = mass * speed / dt;
   double magnitude = Math.min(unboundedMagnitude, maxMagnitude);
   return new Vector3d(velocity).mul(-magnitude / speed);

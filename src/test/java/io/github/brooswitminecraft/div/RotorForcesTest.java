@@ -283,29 +283,41 @@ class RotorForcesTest {
   }
  }
 
- // MINECRAFT-543: translationalDragForce - bounded, dissipative quadratic drag opposing a
- // rotorcraft's own linear body velocity.
+ // MINECRAFT-543: translationalDragForce - bounded, dissipative quadratic (aerodynamic) drag
+ // opposing a rotorcraft's own linear body velocity, built from the same air-density/native-
+ // geometry pieces (AIR_DENSITY, motorized.dragCoefficient, motorized.crossSectionalArea)
+ // PhysicsBridge.stepFlight's own parasitic drag already uses - see the method's own doc. A
+ // representative sea-level air density and plausible fuselage Cd/frontal-area stand in for
+ // PhysicsBridge.Body.AIR_DENSITY/motorized.dragCoefficient/motorized.crossSectionalArea below.
+ private static final double AIR_DENSITY = 1.225;
+ private static final double REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT = 0.8;
+ private static final double REPRESENTATIVE_FRONTAL_AREA = 3.0;
 
- @Test void zeroCoefficientProducesExactlyZeroForceVector_zeroOffParity() {
-  var force = RotorForces.translationalDragForce(new Vector3d(12.0, -3.0, 7.0), 2200.0, 0.0, PhysicsBridge.DT);
+ @Test void zeroMultiplierProducesExactlyZeroForceVector_zeroOffParity() {
+  var force = RotorForces.translationalDragForce(new Vector3d(12.0, -3.0, 7.0), 2200.0, AIR_DENSITY,
+    REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, 0.0, PhysicsBridge.DT);
   assertEquals(0, force.x, 0); assertEquals(0, force.y, 0); assertEquals(0, force.z, 0);
  }
 
  @Test void zeroVelocityProducesExactlyZeroForceVector_zeroVelocityParity() {
-  var force = RotorForces.translationalDragForce(new Vector3d(0, 0, 0), 2200.0, 1.5, PhysicsBridge.DT);
+  var force = RotorForces.translationalDragForce(new Vector3d(0, 0, 0), 2200.0, AIR_DENSITY,
+    REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, 1.5, PhysicsBridge.DT);
   assertEquals(0, force.x, 0); assertEquals(0, force.y, 0); assertEquals(0, force.z, 0);
  }
 
  @Test void negativeNonFiniteOrNonPositiveInputsProduceExactlyZero() {
-  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), -10.0, 1.0, PhysicsBridge.DT).length(), "a non-positive mass must never produce a force");
-  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), 2200.0, -1.0, PhysicsBridge.DT).length(), "a negative coefficient must never produce an energy-ADDING force");
-  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), 2200.0, 1.0, 0.0).length());
-  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), 2200.0, 1.0, -0.05).length());
+  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), -10.0, AIR_DENSITY, 0.8, 3.0, 1.0, PhysicsBridge.DT).length(), "a non-positive mass must never produce a force");
+  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), 2200.0, AIR_DENSITY, 0.8, 3.0, -1.0, PhysicsBridge.DT).length(), "a negative multiplier must never produce an energy-ADDING force");
+  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), 2200.0, AIR_DENSITY, 0.8, 3.0, 1.0, 0.0).length());
+  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), 2200.0, AIR_DENSITY, 0.8, 3.0, 1.0, -0.05).length());
+  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), 2200.0, 0.0, 0.8, 3.0, 1.0, PhysicsBridge.DT).length(), "non-positive air density must never produce a force");
+  assertEquals(0, RotorForces.translationalDragForce(new Vector3d(5,0,0), 2200.0, AIR_DENSITY, 0.8, 0.0, 1.0, PhysicsBridge.DT).length(), "a vehicle whose native geometry claims zero frontal area must get zero drag");
  }
 
  @Test void forceOpposesVelocityDirectionExactly() {
   Vector3d velocity = new Vector3d(30.0, 10.0, -20.0);
-  Vector3d force = RotorForces.translationalDragForce(velocity, 2200.0, 0.02, PhysicsBridge.DT);
+  Vector3d force = RotorForces.translationalDragForce(velocity, 2200.0, AIR_DENSITY,
+    REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, 1.0, PhysicsBridge.DT);
   assertTrue(force.length() > 1e-9);
   Vector3d normalizedForce = new Vector3d(force).normalize();
   Vector3d normalizedOpposingVelocity = new Vector3d(velocity).normalize().mul(-1);
@@ -318,32 +330,72 @@ class RotorForcesTest {
   // axes at all, so the exact same world-frame velocity must give the exact same result whether
   // the caller is a rotorcraft at identity orientation or tumbled to an arbitrary attitude.
   Vector3d velocity = new Vector3d(18.0, -4.0, 9.0);
-  Vector3d forceIdentity = RotorForces.translationalDragForce(velocity, 2200.0, 0.02, PhysicsBridge.DT);
-  Vector3d forceAgain = RotorForces.translationalDragForce(new Vector3d(velocity), 2200.0, 0.02, PhysicsBridge.DT);
+  Vector3d forceIdentity = RotorForces.translationalDragForce(velocity, 2200.0, AIR_DENSITY,
+    REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, 1.0, PhysicsBridge.DT);
+  Vector3d forceAgain = RotorForces.translationalDragForce(new Vector3d(velocity), 2200.0, AIR_DENSITY,
+    REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, 1.0, PhysicsBridge.DT);
   assertEquals(0, new Vector3d(forceIdentity).sub(forceAgain).length(), 1e-12, "the same world-frame velocity must always produce the same drag force, independent of any orientation this method is never even given");
  }
 
  @Test void unboundedDragGrowsWithSpeedSquared() {
-  double mass = 2200.0, coefficient = 0.02, dt = PhysicsBridge.DT;
-  double slowMagnitude = RotorForces.translationalDragForce(new Vector3d(5,0,0), mass, coefficient, dt).length();
-  double fastMagnitude = RotorForces.translationalDragForce(new Vector3d(10,0,0), mass, coefficient, dt).length();
+  double mass = 2200.0, dt = PhysicsBridge.DT;
+  double slowMagnitude = RotorForces.translationalDragForce(new Vector3d(5,0,0), mass, AIR_DENSITY,
+    REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, 1.0, dt).length();
+  double fastMagnitude = RotorForces.translationalDragForce(new Vector3d(10,0,0), mass, AIR_DENSITY,
+    REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, 1.0, dt).length();
   // Below the no-reversal bound for both speeds at this mass/dt, so the quadratic relationship is observable.
   assertEquals(4 * slowMagnitude, fastMagnitude, 1e-6, "quadratic drag magnitude must scale with the square of speed while unbounded");
+ }
+
+ @Test void dragScalesLinearlyWithTheNativeReferenceArea_provesNativeGeometryIsConsumed() {
+  // Ticket/review requirement: direct evidence the selected native geometry factor
+  // (motorized.wingArea>0?wingArea:crossSectionalArea, passed here as referenceArea) is actually
+  // consumed, not ignored - doubling it (holding everything else fixed, safely below the
+  // no-reversal bound) must exactly double the unbounded drag magnitude.
+  double mass = 2200.0, dt = PhysicsBridge.DT;
+  Vector3d velocity = new Vector3d(10.0, 0, 0);
+  double smallArea = RotorForces.translationalDragForce(velocity, mass, AIR_DENSITY, 0.8, 3.0, 1.0, dt).length();
+  double doubleArea = RotorForces.translationalDragForce(velocity, mass, AIR_DENSITY, 0.8, 6.0, 1.0, dt).length();
+  assertEquals(2 * smallArea, doubleArea, 1e-9, "doubling the native reference area must exactly double the drag magnitude");
+ }
+
+ @Test void dragScalesWithTheFlooredNativeDragCoefficient_provesNativeGeometryIsConsumed() {
+  // Same direct-evidence requirement as the area test above, for the native
+  // motorized.dragCoefficient input (floored via FlightForces.dragCoefficient, the exact same
+  // floor a blimp's own parasitic drag already gets): a higher native Cd above the 0.02 floor
+  // must produce proportionally more drag.
+  double mass = 2200.0, dt = PhysicsBridge.DT;
+  Vector3d velocity = new Vector3d(10.0, 0, 0);
+  double lowCd = RotorForces.translationalDragForce(velocity, mass, AIR_DENSITY, 0.4, 3.0, 1.0, dt).length();
+  double doubleCd = RotorForces.translationalDragForce(velocity, mass, AIR_DENSITY, 0.8, 3.0, 1.0, dt).length();
+  assertEquals(2 * lowCd, doubleCd, 1e-9, "doubling the native drag coefficient (both above the 0.02 floor) must exactly double the drag magnitude");
+ }
+
+ @Test void nativeDragCoefficientBelowTheFloorStillProducesDragViaTheSharedFloor() {
+  // FlightForces.dragCoefficient floors the native value at 0.02 (the exact same floor a no-wing
+  // blimp's own parasitic drag gets) - a rotorcraft whose native motorized.dragCoefficient is
+  // 0 or unset must still get the floored 0.02 drag, not zero, once the multiplier is nonzero.
+  Vector3d velocity = new Vector3d(10.0, 0, 0);
+  Vector3d force = RotorForces.translationalDragForce(velocity, 2200.0, AIR_DENSITY, 0.0, 3.0, 1.0, PhysicsBridge.DT);
+  assertTrue(force.length() > 1e-9, "a zero native dragCoefficient must still produce drag via the 0.02 floor");
+  Vector3d flooredExplicitly = RotorForces.translationalDragForce(velocity, 2200.0, AIR_DENSITY, 0.02, 3.0, 1.0, PhysicsBridge.DT);
+  assertEquals(0, new Vector3d(force).sub(flooredExplicitly).length(), 1e-12, "an unfloored-zero native coefficient must produce the IDENTICAL force to explicitly passing the 0.02 floor value");
  }
 
  @Test void extremeSpeedAndDtStayBoundedAndNeverReverseMomentum() {
   double mass = 2200.0;
   for (double dt : new double[]{1e-6, 0.05, 10.0}) {
-   for (double coeff : new double[]{RotorForces.MAX_AIR_DRAG_COEFFICIENT, 1e9}) {
+   for (double multiplier : new double[]{RotorForces.MAX_AIR_DRAG_COEFFICIENT, 1e9}) {
     for (double speed : new double[]{1e-6, 50.0, 1e6}) {
      Vector3d velocity = new Vector3d(speed, 0, 0);
-     Vector3d force = RotorForces.translationalDragForce(velocity, mass, coeff, dt);
+     Vector3d force = RotorForces.translationalDragForce(velocity, mass, AIR_DENSITY,
+       REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, multiplier, dt);
      assertTrue(Double.isFinite(force.x) && Double.isFinite(force.y) && Double.isFinite(force.z),
-       "dt="+dt+" coeff="+coeff+" speed="+speed+" produced a non-finite drag vector");
+       "dt="+dt+" multiplier="+multiplier+" speed="+speed+" produced a non-finite drag vector");
      double impulseMagnitude = force.length()*dt;
      double maxPossibleImpulseMagnitude = mass*speed;
      assertTrue(impulseMagnitude <= maxPossibleImpulseMagnitude + 1e-6,
-       "dt="+dt+" coeff="+coeff+" speed="+speed+" produced an impulse ("+impulseMagnitude+") exceeding this body's own momentum bound ("+maxPossibleImpulseMagnitude+")");
+       "dt="+dt+" multiplier="+multiplier+" speed="+speed+" produced an impulse ("+impulseMagnitude+") exceeding this body's own momentum bound ("+maxPossibleImpulseMagnitude+")");
     }
    }
   }
@@ -351,21 +403,23 @@ class RotorForcesTest {
 
  @Test void monotonicKineticEnergyReductionOverRepeatedTicksNeverOvershootsPastRest() {
   // Bounded real Sable response (ticket requirement): a representative ~2200kg light helicopter
-  // mass, moving at a believable forward-flight cruise speed, repeatedly integrated through this
-  // exact force/impulse shape (force*dt / mass = delta-velocity, matching
-  // PhysicsBridge.stepRotor's own handle.applyLinearImpulse(force.mul(DT)) contract) - confirms
-  // strictly non-increasing kinetic energy and substantial measurable decay without ever
-  // overshooting past zero into reverse travel. Unlike MINECRAFT-537's linear/viscous angular
-  // damping, quadratic (aerodynamic) drag decays HYPERBOLICALLY, not exponentially - dv/dt =
-  // -(coefficient/mass)*v^2 integrates to v(t) = v0/(1+v0*(coefficient/mass)*t), which approaches
-  // but never actually reaches zero in finite time, so this deliberately asserts substantial
-  // decay (half-speed or below, matching the analytic prediction at this coefficient/duration),
-  // not "close to rest" - a different and incorrect claim for this drag model.
-  double mass = 2200.0, coefficient = 2.0, dt = PhysicsBridge.DT;
+  // mass with a plausible fuselage Cd/frontal area, moving at a believable forward-flight cruise
+  // speed, repeatedly integrated through this exact force/impulse shape (force*dt / mass =
+  // delta-velocity, matching PhysicsBridge.stepRotor's own
+  // handle.applyLinearImpulse(force.mul(DT)) contract) - confirms strictly non-increasing kinetic
+  // energy and substantial measurable decay without ever overshooting past zero into reverse
+  // travel. Unlike MINECRAFT-537's linear/viscous angular damping, quadratic (aerodynamic) drag
+  // decays HYPERBOLICALLY, not exponentially - dv/dt = -(k/mass)*v^2 (k = multiplier*0.5*
+  // airDensity*Cd*area) integrates to v(t) = v0/(1+v0*(k/mass)*t), which approaches but never
+  // actually reaches zero in finite time, so this deliberately asserts substantial decay
+  // (half-speed or below, matching the analytic prediction at this k/duration), not "close to
+  // rest" - a different and incorrect claim for this drag model.
+  double mass = 2200.0, dt = PhysicsBridge.DT, multiplier = 1.0;
   Vector3d velocity = new Vector3d(40.0, 0, 0); // ~144 km/h forward cruise
   double previousEnergy = 0.5*mass*velocity.lengthSquared();
   for (int tick=0; tick<3000; tick++) {
-   Vector3d force = RotorForces.translationalDragForce(velocity, mass, coefficient, dt);
+   Vector3d force = RotorForces.translationalDragForce(velocity, mass, AIR_DENSITY,
+     REPRESENTATIVE_FUSELAGE_DRAG_COEFFICIENT, REPRESENTATIVE_FRONTAL_AREA, multiplier, dt);
    double speedBefore = velocity.x;
    velocity.fma(dt/mass, force);
    assertTrue(velocity.x*speedBefore >= -1e-9, "tick "+tick+": velocity reversed sign");

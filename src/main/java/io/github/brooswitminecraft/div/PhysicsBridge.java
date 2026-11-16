@@ -2904,13 +2904,17 @@ public final class PhysicsBridge {
    // throttle/cyclic/yaw input), so it cannot be mistaken for reduced thrust or an autopilot.
    // Overrides.resolved always fills this from FALLBACK (0.0) when unconfigured, and
    // RotorForces.translationalDragForce returns an exact-zero vector for a non-positive
-   // coefficient, so an unconfigured rotorcraft's force - and therefore
-   // handle.applyLinearImpulse below - is byte-identical to before this ticket. Orientation-
-   // independent by construction (RotorForces.translationalDragForce's own doc): it opposes the
-   // actual world-frame velocity regardless of this body's attitude, so a rotated body/frame
-   // needs no special handling here.
+   // multiplier, so an unconfigured rotorcraft's force - and therefore handle.applyLinearImpulse
+   // below - is byte-identical to before this ticket. Orientation-independent by construction
+   // (RotorForces.translationalDragForce's own doc): it opposes the actual world-frame velocity
+   // regardless of this body's attitude, so a rotated body/frame needs no special handling here.
+   // Review correction (Wroosbit, PR #40): reuses the SAME native air-density/area/drag-
+   // coefficient pieces stepFlight's own parasitic drag already consumes (AIR_DENSITY,
+   // motorized.dragCoefficient, the wingArea/crossSectionalArea reference-area fallback - see
+   // stepFlight's own identical pattern just below this method) rather than an arbitrary scalar.
    Vector3d linearVelocity=handle.getLinearVelocity(new Vector3d());
-   force.add(RotorForces.translationalDragForce(linearVelocity,mass,tuning.rotorAirDragCoefficient,DT));
+   double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
+   force.add(RotorForces.translationalDragForce(linearVelocity,mass,AIR_DENSITY,motorized.dragCoefficient,referenceArea,tuning.rotorAirDragCoefficient,DT));
    handle.applyLinearImpulse(force.mul(DT));
    double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
    double rotorRadiusMeters=RotorForces.rotorRadiusMeters(installedPropellers.stream()
