@@ -873,6 +873,12 @@ public final class Overrides {
   * any - mirrors {@link #get} for vehicles. See {@link #resolvedPart} for the key shape and the
   * actual precedence-resolved value callers should use instead of this raw entry. */
  public static Tuning getPart(String key) { return parts.get(key); }
+ /** The raw, unresolved (no {@code extends} applied) template entry for {@code key}, if any -
+  * mirrors {@link #get}/{@link #getPart} for the third {@link #templates} namespace. Ticket
+  * MINECRAFT-546 (tuning-provenance diagnostic): the only way to name which template in an
+  * {@code extends} chain actually supplied a given field - {@link #effective} itself returns
+  * only the already-merged result, never a per-field source. */
+ public static Tuning getTemplate(String key) { return templates.get(key); }
  /**
   * Review finding (John's comment 53539/self-review 53542): {@link #resolvedPart} alone cannot
   * tell a caller "this part explicitly overrides field X" apart from "no part entry exists, so
