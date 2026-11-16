@@ -4904,3 +4904,128 @@ proposed without new direction, per 54371/54373. No instrumentation,
 physics, or fixture changes were made as part of this run or this report.
 All evidence (isolated world, server.log, wrapper stdout) is retained
 UNCONDITIONALLY at the path above.
+
+## Bounded read-only comparison: isolated (non-reproducing) run vs. authrun-probe2 (crash) (54379)
+
+John's comment 54379: one bounded, READ-ONLY comparison/accounting between
+the successful isolated run and the prior `authrun-probe2` crash. No
+runtime/build/physics change; nothing executed this round beyond reading
+the two already-retained logs.
+
+### First available divergence, by phase-local tick
+
+Comparing `TOWING_UNAVAILABLE tick=N towed.linearVelocity/angularVelocity`
+(the only field logged in BOTH runs across this whole phase - towing is
+despawned so has no comparable state here) tick-by-tick:
+
+- **Ticks 1 through 59 are IDENTICAL between the two runs** (to the
+  logged/displayed precision) - e.g. tick=59:
+  `towed.linearVelocity=(7.543E-2 -4.489E+0 -2.021E+0)
+  angularVelocity=(-3.431E+1 -1.786E+1 2.703E+1)` in BOTH logs
+  (`authrun-probe2/server.log:997`, isolated `logs/latest.log:2123`).
+- **First divergence is at tick=60** - the SAME tick that also fires the
+  phase-transition (`TOWING_UNAVAILABLE PASS ... spawning towing2`) and
+  the subsequent `TOWING_REPLACEMENT pre-connect`/`pre-connectTrailer`
+  calls, all within this one tick:
+  - prior (`server.log:998`): `towed.linearVelocity=(7.543E-2 -5.039E+0
+    -2.021E+0) angularVelocity=(-6.341E+0 -3.029E-2 -1.173E-1)`
+  - isolated (`logs/latest.log:2124`): `towed.linearVelocity=(1.976E-1
+    -4.881E+0 -2.441E+0) angularVelocity=(-5.812E+0 -6.604E-1 -2.379E-1)`
+- Checked one candidate mechanism for this specific tick-60 divergence
+  (towed drifting past the probe's own deterministically-built pool into
+  natural, seed-dependent terrain): does NOT appear to hold. `towed`'s
+  position at the immediately-following `TOWING_REPLACEMENT pre-connect`
+  line is `(17608.956, 105.682, 17605.683)` in BOTH runs (position itself
+  still matches here even though native velocity already differs) -
+  displaced only ~0.5-1.2 blocks from its spawn point
+  `(17608.5, ~105.5, 17604.5)`, far inside `POOL_RADIUS=14` and within the
+  platform's own explicitly-placed block range (`PLATFORM_Y=100` through
+  `PLATFORM_Y+WATER_DEPTH+6=111`) - so this is NOT explained by leaving
+  the deterministic, seed-independent pool. No other mechanism for this
+  specific tick is confirmed; left as unexplained, not attributed.
+- Connection/entity IDs are necessarily different UUIDs each run (fresh
+  random identity per spawn) - noted as an expected, uninteresting
+  non-divergence, not evidence of anything.
+- From tick=60 onward both logs diverge further and qualitatively at
+  TOWING_REPLACEMENT tick=2-3 (prior: `towing2.speed=260`blocks/s runaway
+  by tick=3; isolated: `towing2.speed=0.15` blocks/s, settling) - already
+  reported in the non-reproduction section above.
+
+### A real, previously-unidentified confound: logging volume itself differs sharply between the two compared runs
+
+Per John's own caution ("logging can perturb timing... does NOT prove zero
+behavioral influence"), checked directly rather than assumed negligible:
+
+- `authrun-probe2/server.log` (the crash run, 1136 total lines) contains
+  **ZERO** `[DIV buoyantForcesDiagnostic]` lines - that logging did not
+  exist yet at the commit it ran (predates this ticket's 371e63f).
+- The isolated (non-crash) run's `logs/latest.log` (6217 total lines)
+  contains **3445** `[DIV buoyantForcesDiagnostic]` lines alone, and 5933
+  total DIV-diagnostic lines overall (vs. 872 in the crash run) - roughly
+  a 6.8x increase in diagnostic logging volume between the two runs being
+  compared.
+- This is a REAL, measured difference, not a hypothetical one: the two
+  runs do NOT differ ONLY in "fresh isolated world vs. reused shared
+  world" - they also differ in how much synchronous logging I/O happens
+  on the server thread every single tick. This cannot currently be
+  separated from the world-identity difference with the data in hand -
+  **both remain open, unattributed candidates**, exactly as uncertain as
+  before this comparison, per the standing instruction not to claim a
+  cause.
+
+### Isolated run's own per-float impulse accounting over the TOWING_REPLACEMENT bracket (no cross-run comparison possible - field missing, not substituted)
+
+The crash run (`authrun-probe2`) has NO `buoyantForcesDiagnostic` lines at
+all for this or any phase, so NO comparable per-float impulse data exists
+for it. Per instruction, this missing field is reported as missing, not
+invented or substituted. The sum below is therefore descriptive of the
+isolated run ALONE:
+
+Bracket: `logs/latest.log` lines 2129 (TOWING_REPLACEMENT tick=1) through
+3683 (tick=140, `PASS`), inclusive both endpoints. All `appliedImpulse`/
+`worldArm` values summed are WORLD-FRAME quantities exactly as logged
+(confirmed from source: `BuoyantForces.apply` logs `force` and `arm`
+BEFORE the `inverse.transform(...)` that converts them to body-local for
+the actual native `applyImpulseAtPoint` call) - NOT the native solver's
+own measured response (no read-back of Rapier's resulting velocity change
+is included; this is the COMMANDED Java-side impulse only). Pose-refresh
+age: these lines do not themselves carry a `lastPoseUpdateGameTime` field
+(that marker exists only on the `createHitch`/probe reconnect-bracket
+logs) - not claimed or substituted here either.
+
+- `towed` (05fddcea): 278 per-float log lines, `gameTime` range
+  [264, 402]. SUM commanded linear impulse (world) =
+  `(-69.468, 50363.400, 1428.443)`. SUM lever-arm angular impulse
+  (`Σ worldArm × appliedImpulse` per float-tick, world frame) =
+  `(6092.755, 140.064, 4638.743)`.
+- `towing2` (c27f6492): 272 per-float log lines (fewer than towed's 278 -
+  consistent with one or more early ticks where a float's own
+  `submergedFraction<=0` suppressed that line, per the source's own
+  `if (fraction <= 0) continue`, not a gap in logging), same `gameTime`
+  range [264, 402]. SUM commanded linear impulse (world) =
+  `(0.936, 48035.800, 1.620)`. SUM lever-arm angular impulse =
+  `(16515.811, -0.891, 17175.995)`.
+- Missing/excluded from both sums: gravity, the joint's own constraint
+  impulse, propeller thrust (inactive for this fixture), and the native
+  solver's own resulting velocity change - none of these is available
+  from retained data for this bracket, stated as missing rather than
+  assumed zero or substituted. Rotational water drag is confirmed
+  genuinely inactive throughout this bracket (`angularWaterDrag=0.0`
+  logged every tick, both bodies), so its absence from the sum is a
+  confirmed zero, not a gap.
+
+### Decision (not another run)
+
+The retained evidence does **not** cleanly narrow the next experiment to
+"environment/history" vs. "fresh-run variability" as a clean two-way
+choice - it surfaces a THIRD, independently verified difference (the
+~6.8x logging-volume increase between the two compared runs) that
+confounds both candidates and was not previously accounted for. Given
+that, the one actionable next-step decision is about EXPERIMENT DESIGN,
+not a new run: any future comparison run should be deliberately
+logging-matched between arms (same diagnostic verbosity in both) so that
+world-identity/environment can be isolated from logging-volume effects,
+rather than attributing a result to either while they remain entangled.
+This is a design note for whenever a next run is separately authorized -
+no run is requested or proposed here, and no solver-cause conclusion is
+drawn from any of the above.
