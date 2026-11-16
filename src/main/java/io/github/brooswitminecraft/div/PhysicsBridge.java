@@ -363,6 +363,9 @@ public final class PhysicsBridge {
   * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
   * rotorAngularDampingCoefficient (MINECRAFT-537, stepRotor only - read fresh every tick via
   * rotorAngularDampingTorque, same as the MINECRAFT-522 fields immediately above)/
+  * rotorAirDragCoefficient (MINECRAFT-543, stepRotor only - read fresh every tick via
+  * RotorForces.translationalDragForce, same reasoning as rotorAngularDampingCoefficient
+  * immediately above)/
   * brakeBiasFront (MINECRAFT-520, same reasoning)/driveBiasFront (MINECRAFT-524, same reasoning -
   * stepGround reads tuning.driveBiasFront fresh every tick via DriveBiasDistribution#shareRatios)/
   * suspensionDampingRatio (MINECRAFT-523, stepGround reads tuning.suspensionDampingRatio fresh
@@ -418,6 +421,10 @@ public final class PhysicsBridge {
   // rotorAngularDampingTorque, same "no separate cached field" shape as cyclicLimitDegrees/
   // cyclicAuthorityScale/yawAuthorityScale immediately above.
   if (!java.util.Objects.equals(target.rotorAngularDampingCoefficient, fresh.rotorAngularDampingCoefficient)) { target.rotorAngularDampingCoefficient = fresh.rotorAngularDampingCoefficient; appliedOut.add("rotorAngularDampingCoefficient"); }
+  // MINECRAFT-543: stepRotor reads tuning.rotorAirDragCoefficient fresh every tick via
+  // RotorForces.translationalDragForce, same "no separate cached field" shape as
+  // rotorAngularDampingCoefficient immediately above.
+  if (!java.util.Objects.equals(target.rotorAirDragCoefficient, fresh.rotorAirDragCoefficient)) { target.rotorAirDragCoefficient = fresh.rotorAirDragCoefficient; appliedOut.add("rotorAirDragCoefficient"); }
   if (!java.util.Objects.equals(target.brakeBiasFront, fresh.brakeBiasFront)) { target.brakeBiasFront = fresh.brakeBiasFront; appliedOut.add("brakeBiasFront"); }
   if (!java.util.Objects.equals(target.driveBiasFront, fresh.driveBiasFront)) { target.driveBiasFront = fresh.driveBiasFront; appliedOut.add("driveBiasFront"); }
   if (!java.util.Objects.equals(target.suspensionDampingRatio, fresh.suspensionDampingRatio)) { target.suspensionDampingRatio = fresh.suspensionDampingRatio; appliedOut.add("suspensionDampingRatio"); }
@@ -995,6 +1002,29 @@ public final class PhysicsBridge {
   */
  public static Vector3d debugReadAngularVelocity(EntityVehicleF_Physics v) {
   return registry.get(v) instanceof Body body ? body.handle.getAngularVelocity(new Vector3d()) : null;
+ }
+ /**
+  * Diagnostic/test-only (MINECRAFT-543, {@code RotorAirDragRuntimeProbe}): the translational
+  * twin of {@link #debugInjectAngularVelocity} - directly injects a KNOWN linear velocity into
+  * this vehicle's currently-active Body's live Sable handle, so a test/probe can establish a
+  * real, nonzero, precisely-known translational speed WITHOUT needing thrust/control input to
+  * produce one. A no-op if this vehicle has no active Body right now. Never called from any
+  * production code path.
+  */
+ public static void debugInjectLinearVelocity(EntityVehicleF_Physics v, Vector3d linearVelocity) {
+  if (registry.get(v) instanceof Body body) {
+   body.handle.addLinearAndAngularVelocity(linearVelocity, new Vector3d());
+   if (body.twoBodyActive) body.upperHandle.addLinearAndAngularVelocity(linearVelocity, new Vector3d());
+  }
+ }
+ /**
+  * Diagnostic/test-only companion to {@link #debugInjectLinearVelocity} - reads back this
+  * vehicle's CURRENT actual native linear velocity directly from its live Sable handle, the
+  * translational twin of {@link #debugReadAngularVelocity}. Returns null if there is no active
+  * Body.
+  */
+ public static Vector3d debugReadLinearVelocity(EntityVehicleF_Physics v) {
+  return registry.get(v) instanceof Body body ? body.handle.getLinearVelocity(new Vector3d()) : null;
  }
  /**
   * Diagnostic/test-only snapshot (MINECRAFT-526 review 53897/53905/53907) bundling everything a
@@ -2898,6 +2928,15 @@ public final class PhysicsBridge {
    * it cannot substitute for the pilot's own control authority. 0.0 (the FALLBACK) is a true
    * no-op, so an unconfigured rotorcraft's torque - and the resulting
    * {@code handle.applyTorqueImpulse} below - is byte-identical to before this ticket.
+   *
+   * <p>MINECRAFT-543: {@code tuning.rotorAirDragCoefficient} additionally ADDS (never replaces)
+   * a bounded, dissipative quadratic drag force on top of the thrust force above, via {@link
+   * RotorForces#translationalDragForce} - independent of the MINECRAFT-522/537 fields, which only
+   * ever touch attitude/yaw authority or angular rate. It opposes only this body's OWN current
+   * linear velocity (read fresh from {@code handle.getLinearVelocity} every tick, never the
+   * pilot's throttle/cyclic input), so it cannot substitute for the pilot's own thrust authority.
+   * 0.0 (the FALLBACK) is a true no-op, so an unconfigured rotorcraft's force - and the resulting
+   * {@code handle.applyLinearImpulse} below - is byte-identical to before this ticket.
    */
   private boolean stepRotor(EntityVehicleF_Physics v, Quaterniond q, Vector3d up, List<JSONPart.JSONPartPropeller> installedPropellers) {
    var motorized = v.definition.motorized;
@@ -2919,6 +2958,24 @@ public final class PhysicsBridge {
    double forwardComp=RotorForces.horizontalComponent(thrust,tiltPitch);
    double lateralComp=RotorForces.horizontalComponent(thrust,tiltRoll);
    Vector3d force=new Vector3d(up).mul(vertical).fma(forwardComp,forward).fma(lateralComp,right);
+   // MINECRAFT-543: tuning.rotorAirDragCoefficient is read live off this tick's tuning object,
+   // same as driveForce/cyclicLimitDegrees/etc. above - see applyLiveSafeFields. ADDED to (never
+   // substituted for) the thrust force just assembled above - it only ever opposes this body's
+   // OWN current linear velocity (read fresh here via handle.getLinearVelocity, never the pilot's
+   // throttle/cyclic/yaw input), so it cannot be mistaken for reduced thrust or an autopilot.
+   // Overrides.resolved always fills this from FALLBACK (0.0) when unconfigured, and
+   // RotorForces.translationalDragForce returns an exact-zero vector for a non-positive
+   // multiplier, so an unconfigured rotorcraft's force - and therefore handle.applyLinearImpulse
+   // below - is byte-identical to before this ticket. Orientation-independent by construction
+   // (RotorForces.translationalDragForce's own doc): it opposes the actual world-frame velocity
+   // regardless of this body's attitude, so a rotated body/frame needs no special handling here.
+   // Review correction (Wroosbit, PR #40): reuses the SAME native air-density/area/drag-
+   // coefficient pieces stepFlight's own parasitic drag already consumes (AIR_DENSITY,
+   // motorized.dragCoefficient, the wingArea/crossSectionalArea reference-area fallback - see
+   // stepFlight's own identical pattern just below this method) rather than an arbitrary scalar.
+   Vector3d linearVelocity=handle.getLinearVelocity(new Vector3d());
+   double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
+   force.add(RotorForces.translationalDragForce(linearVelocity,mass,AIR_DENSITY,motorized.dragCoefficient,referenceArea,tuning.rotorAirDragCoefficient,DT));
    handle.applyLinearImpulse(force.mul(DT));
    double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
    double rotorRadiusMeters=RotorForces.rotorRadiusMeters(installedPropellers.stream()

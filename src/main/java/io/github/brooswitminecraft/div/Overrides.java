@@ -180,6 +180,21 @@ public final class Overrides {
   // velocity, never the pilot's cyclic/yaw input, so it cannot be mistaken for (or substitute for)
   // auto-level, a hover autopilot, or cyclic response filtering.
   public Double rotorAngularDampingCoefficient;
+  // MINECRAFT-543: optional, rotorcraft-only bounded quadratic (aerodynamic) drag opposing the
+  // body's OWN actual linear (translational) velocity - see RotorForces.translationalDragForce's
+  // own doc for the full model and the no-reversal/no-free-force contract, and
+  // PhysicsBridge.stepRotor for how it is ADDED to (never substituted for) the existing thrust
+  // force. This is a MULTIPLIER on a native-geometry-derived force (airDensity*motorized.
+  // dragCoefficient*referenceArea, the SAME pieces stepFlight's own parasitic drag already uses -
+  // not a raw drag-strength scalar), the same "multiplier against an existing calibrated/native
+  // number" shape parasiticDragMultiplier/suspensionSpringMultiplier already establish. 0.0
+  // (FALLBACK below) is the documented off value - RotorForces.translationalDragForce already
+  // returns an exact-zero vector for a non-positive multiplier, so an unconfigured rotorcraft's
+  // force - and therefore handle.applyLinearImpulse - is byte-identical to before this ticket.
+  // Deliberately independent of cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale
+  // (MINECRAFT-522) and rotorAngularDampingCoefficient (MINECRAFT-537) - this only ever opposes
+  // the body's OWN existing linear velocity, never attitude/yaw authority or angular rate.
+  public Double rotorAirDragCoefficient;
   // MINECRAFT-520: configurable front/rear SERVICE-brake distribution - 0.0 sends the whole
   // tuning.brakeForce budget to the geometric rear axle group, 1.0 sends it all to the front
   // group, 0.5 is the neutral/even axle split. No FALLBACK entry (like selfRight*/massKg/
@@ -419,6 +434,12 @@ public final class Overrides {
    // angularDampingTorque's own no-reversal clamp is unconditionally safe for any finite,
    // non-negative coefficient).
    if (rotorAngularDampingCoefficient != null && !(Double.isFinite(rotorAngularDampingCoefficient) && rotorAngularDampingCoefficient >= 0 && rotorAngularDampingCoefficient <= io.github.brooswitminecraft.div.RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-543: inclusive 0 (the FALLBACK/off value, same reasoning rotorAngularDampingCoefficient's
+   // own inclusive-zero bound immediately above uses) through RotorForces.MAX_AIR_DRAG_COEFFICIENT -
+   // see that constant's own doc for why this cap is a usability/sanity ceiling rather than a
+   // load-bearing safety bound (RotorForces.translationalDragForce's own no-reversal clamp is
+   // unconditionally safe for any finite, non-negative coefficient).
+   if (rotorAirDragCoefficient != null && !(Double.isFinite(rotorAirDragCoefficient) && rotorAirDragCoefficient >= 0 && rotorAirDragCoefficient <= io.github.brooswitminecraft.div.RotorForces.MAX_AIR_DRAG_COEFFICIENT)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Inclusive at both ends (0.0 all-rear, 1.0 all-front are the documented, legitimate
    // extremes - see BrakeBiasDistributionTest's own front/rear-extreme coverage), unlike
    // lateralGripMultiplier's exclusive-zero: a brake bias of exactly 0 or 1 is a normal,
@@ -621,6 +642,7 @@ public final class Overrides {
    if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
    if (rotorAngularDampingCoefficient != null) throw new IllegalArgumentException("part overrides do not support 'rotorAngularDampingCoefficient' (vehicle-only concept - no part-level consumer yet)");
+   if (rotorAirDragCoefficient != null) throw new IllegalArgumentException("part overrides do not support 'rotorAirDragCoefficient' (vehicle-only concept - no part-level consumer yet)");
    if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (driveBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'driveBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (suspensionDampingRatio != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatio' (no part-level consumer yet)");
@@ -674,6 +696,7 @@ public final class Overrides {
   // cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale above, which preserve a prior
   // non-zero hardcoded behavior).
   FALLBACK.rotorAngularDampingCoefficient=0.0;
+  FALLBACK.rotorAirDragCoefficient=0.0;
   // MINECRAFT-523: the exact ratio PhysicsBridge.suspensionDamper/suspensionDamperForShare/
   // effectiveMassDamper previously hardcoded - an unconfigured vehicle settles byte-identically
   // to before this ticket.
@@ -710,6 +733,7 @@ public final class Overrides {
   c.stallAngleDegrees=t.stallAngleDegrees; c.liftSlope=t.liftSlope; c.controlSurfaceSlope=t.controlSurfaceSlope;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.rotorAngularDampingCoefficient=t.rotorAngularDampingCoefficient;
+  c.rotorAirDragCoefficient=t.rotorAirDragCoefficient;
   c.brakeBiasFront=t.brakeBiasFront;
   c.driveBiasFront=t.driveBiasFront;
   c.suspensionDampingRatio=t.suspensionDampingRatio;
@@ -759,6 +783,7 @@ public final class Overrides {
   m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
   m.rotorAngularDampingCoefficient = child.rotorAngularDampingCoefficient!=null?child.rotorAngularDampingCoefficient:parent.rotorAngularDampingCoefficient;
+  m.rotorAirDragCoefficient = child.rotorAirDragCoefficient!=null?child.rotorAirDragCoefficient:parent.rotorAirDragCoefficient;
   m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
   m.suspensionDampingRatio = child.suspensionDampingRatio!=null?child.suspensionDampingRatio:parent.suspensionDampingRatio;
@@ -965,6 +990,7 @@ public final class Overrides {
   result.cyclicAuthorityScale = firstNonNull(override!=null?override.cyclicAuthorityScale:null, packMetadata!=null?packMetadata.cyclicAuthorityScale:null, ivAdapted!=null?ivAdapted.cyclicAuthorityScale:null, physicallyDerived!=null?physicallyDerived.cyclicAuthorityScale:null, FALLBACK.cyclicAuthorityScale);
   result.yawAuthorityScale = firstNonNull(override!=null?override.yawAuthorityScale:null, packMetadata!=null?packMetadata.yawAuthorityScale:null, ivAdapted!=null?ivAdapted.yawAuthorityScale:null, physicallyDerived!=null?physicallyDerived.yawAuthorityScale:null, FALLBACK.yawAuthorityScale);
   result.rotorAngularDampingCoefficient = firstNonNull(override!=null?override.rotorAngularDampingCoefficient:null, packMetadata!=null?packMetadata.rotorAngularDampingCoefficient:null, ivAdapted!=null?ivAdapted.rotorAngularDampingCoefficient:null, physicallyDerived!=null?physicallyDerived.rotorAngularDampingCoefficient:null, FALLBACK.rotorAngularDampingCoefficient);
+  result.rotorAirDragCoefficient = firstNonNull(override!=null?override.rotorAirDragCoefficient:null, packMetadata!=null?packMetadata.rotorAirDragCoefficient:null, ivAdapted!=null?ivAdapted.rotorAirDragCoefficient:null, physicallyDerived!=null?physicallyDerived.rotorAirDragCoefficient:null, FALLBACK.rotorAirDragCoefficient);
   // No FALLBACK entry (mirrors selfRight*/enabled/massKg above) - stays null unless some level
   // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
   // needs to reproduce the pre-ticket even split.

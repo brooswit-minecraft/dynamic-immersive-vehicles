@@ -77,6 +77,7 @@ class OverridesTest {
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(0.0, r.rotorAngularDampingCoefficient, "rotorAngularDampingCoefficient's fallback is 0 - no angular-rate damping term at all unless configured (MINECRAFT-537 zero/off parity)");
+  assertEquals(0.0, r.rotorAirDragCoefficient, "rotorAirDragCoefficient's fallback is 0 - no translational drag term at all unless configured (MINECRAFT-543 zero/off parity)");
   assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertEquals(1.0, r.suspensionSpringMultiplier, "suspensionSpringMultiplier's fallback is a pure no-op - an unconfigured vehicle's calibrated spring rate is unchanged");
   assertEquals(1.0, r.longitudinalWaterDragMultiplier, "longitudinalWaterDragMultiplier's fallback is a pure no-op - an unconfigured vehicle's isotropic water drag is unchanged");
@@ -99,6 +100,7 @@ class OverridesTest {
   assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
   assertNotNull(r.rotorAngularDampingCoefficient);
+  assertNotNull(r.rotorAirDragCoefficient);
   assertNotNull(r.suspensionDampingRatio);
   assertNotNull(r.suspensionSpringMultiplier);
   assertNotNull(r.longitudinalWaterDragMultiplier); assertNotNull(r.lateralWaterDragMultiplier); assertNotNull(r.verticalWaterDragMultiplier);
@@ -259,6 +261,76 @@ class OverridesTest {
    assertFalse(badResult.success(), "a negative rotorAngularDampingCoefficient reload must be rejected, not silently applied");
    assertEquals(3.0, Overrides.resolved("examplepack:reloadable_helicopter").rotorAngularDampingCoefficient,
      "a rejected reload must retain the PRIOR GOOD rotorAngularDampingCoefficient, not the invalid value or the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-543: rotorAirDragCoefficient - bounded, optional, rotorcraft-only translational
+ // (linear) air-drag force, independent of rotorAngularDampingCoefficient (MINECRAFT-537, which
+ // only ever damps angular rate) and the MINECRAFT-522 cyclic/yaw authority fields above.
+
+ @Test void rotorAirDragCoefficientOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.rotorAirDragCoefficient = -0.1;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.rotorAirDragCoefficient = RotorForces.MAX_AIR_DRAG_COEFFICIENT + 0.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nonFinite = new Overrides.Tuning(); nonFinite.rotorAirDragCoefficient = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nonFinite::validate);
+  var zero = new Overrides.Tuning(); zero.rotorAirDragCoefficient = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zero::validate);
+  var atCap = new Overrides.Tuning(); atCap.rotorAirDragCoefficient = RotorForces.MAX_AIR_DRAG_COEFFICIENT; // the cap itself is allowed
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.rotorAirDragCoefficient = 2.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void rotorAirDragCoefficientParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.rotorAirDragCoefficient = 1.2;
+   Overrides.setForTest(java.util.Map.of("packid:drag_rotor_vehicle", override));
+   assertEquals(1.2, Overrides.resolved("packid:drag_rotor_vehicle").rotorAirDragCoefficient,
+     "an explicit operator override must take precedence over the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAirDragCoefficientInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.rotorAirDragCoefficient = 0.8;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "air-drag-base"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("air-drag-base", template), java.util.Map.of("packid:inherited_air_drag", child), java.util.Map.of());
+   assertEquals(0.8, Overrides.resolved("packid:inherited_air_drag").rotorAirDragCoefficient,
+     "a field the child never set must inherit the template's value, same as every other tuning field");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAirDragCoefficientIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.rotorAirDragCoefficient = 0.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart,
+    "this is a vehicle-only concept - a rotorcraft part has no own translational-drag consumer");
+ }
+
+ @Test void validThenInvalidRotorAirDragReloadAppliesThenRetainsThePriorGoodOverride() {
+  // Same "invalid reload retains last-known-good" structure as
+  // validThenInvalidRotorAngularDampingReloadAppliesThenRetainsThePriorGoodOverride above -
+  // exercises the REAL Overrides.apply(Supplier<Config>) seam, not merely setForTest.
+  try {
+   var goodHelicopter = new Overrides.Tuning(); goodHelicopter.rotorAirDragCoefficient = 0.6;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:draggy_helicopter", goodHelicopter), java.util.Map.of()));
+   assertTrue(goodResult.success(), "a valid rotorAirDragCoefficient reload must apply cleanly");
+   assertEquals(0.6, Overrides.resolved("examplepack:draggy_helicopter").rotorAirDragCoefficient);
+
+   var invalidHelicopter = new Overrides.Tuning(); invalidHelicopter.rotorAirDragCoefficient = -1.0; // out of range
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:draggy_helicopter", invalidHelicopter), java.util.Map.of()));
+   assertFalse(badResult.success(), "a negative rotorAirDragCoefficient reload must be rejected, not silently applied");
+   assertEquals(0.6, Overrides.resolved("examplepack:draggy_helicopter").rotorAirDragCoefficient,
+     "a rejected reload must retain the PRIOR GOOD rotorAirDragCoefficient, not the invalid value or the 0.0 fallback");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }

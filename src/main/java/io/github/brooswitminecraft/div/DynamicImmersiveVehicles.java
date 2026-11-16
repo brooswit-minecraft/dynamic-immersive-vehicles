@@ -141,6 +141,16 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSurfaceHotReloadProbe.maybeRun(overworld);
   });
+  // Opt-in, dev/isolated-host-only real-Sable-handle rotor translational air drag probe
+  // (MINECRAFT-543 review, comments 54188/54189) - OFF by default, a strict no-op otherwise.
+  // Closes the disclosed gap that RotorForcesTest's own bounded-response coverage manually
+  // integrates a Vector3d rather than exercising the real PhysicsBridge.stepRotor dispatch on a
+  // live Sable handle. Never touches any real vehicle or world content - see
+  // RotorAirDragRuntimeProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.RotorAirDragRuntimeProbe.maybeRun(overworld);
+  });
   // Ticket MINECRAFT-546 review (comment 54231/54232): opt-in, CI/isolated-host-only real
   // end-to-end /div tuning command/adapter probe, proving the fixed wrapper/entity lookup
   // against a real spawned vehicle - OFF by default, a strict no-op otherwise. Spawns and

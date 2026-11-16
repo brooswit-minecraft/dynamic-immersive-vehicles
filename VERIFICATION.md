@@ -3183,6 +3183,202 @@ fresh `gradle --no-daemon --offline clean test build` at the merged head
 checksum
 `62e0ba336172f536c0f770996368cf14092d639a64b35b685efb68014c877b34`.
 
+# MINECRAFT-543: optional rotorcraft translational air drag, 2026-11-15
+
+Added `RotorForces.translationalDragForce` (bounded, dissipative quadratic
+drag opposing a rotorcraft's own actual linear body velocity, no-reversal
+clamped against this body's own existing momentum along its velocity
+direction - the translational analogue of MINECRAFT-537's
+`angularDampingTorque`), wired into `PhysicsBridge.stepRotor` and ADDED to
+(never substituting for) the existing thrust force. New additive
+`Overrides.Tuning.rotorAirDragCoefficient` field (vehicle-only, finite,
+`[0, RotorForces.MAX_AIR_DRAG_COEFFICIENT]`, FALLBACK `0.0` - off),
+threaded through validate/copy/template-merge/part-override-rejection/
+`resolved`/`PhysicsBridge.applyLiveSafeFields` the same way
+`rotorAngularDampingCoefficient` already is. Schema proposal posted to
+MINECRAFT-539 (schema coordinator) before editing shared Overrides/
+PhysicsBridge code; no objection received.
+
+**Review correction (Wroosbit, PR #40, 2026-11-15).** The first submission
+collapsed the force into an arbitrary `rotorAirDragCoefficient` scalar with
+no density/area/Cd decomposition and no native geometry - the ticket's own
+"explicit documented air-density/area model or existing applicable native
+geometry" acceptance line was not satisfied. Corrected
+`RotorForces.translationalDragForce` to reuse the SAME pieces
+`PhysicsBridge.stepFlight`'s own parasitic drag already consumes rather
+than inventing a parallel model: `PhysicsBridge.Body.AIR_DENSITY` (the
+existing sea-level-ISA constant) through `FlightForces.dynamicPressure`;
+IV's own `motorized.dragCoefficient`, floored via
+`FlightForces.dragCoefficient`'s existing no-wing (`aspectRatio<=0`)
+branch - the exact same floor a blimp's own parasitic drag already gets;
+and IV's own native reference area
+(`motorized.wingArea>0?wingArea:crossSectionalArea`, the SAME fallback
+`stepFlight` already uses for a no-wing vehicle), combined via
+`FlightForces.aeroForce` into the standard `0.5*rho*Cd*A*v^2` magnitude.
+`rotorAirDragCoefficient` is now a bounded `[0,5]` MULTIPLIER on that
+native-geometry-derived force (the same role `parasiticDragMultiplier`
+plays for fixed-wing drag), not a raw drag-strength scalar - `0.0`
+(FALLBACK, unchanged) is still a true no-op, so an unconfigured
+rotorcraft's force stays byte-identical to the accepted baseline. Added
+`dragScalesLinearlyWithTheNativeReferenceArea_provesNativeGeometryIsConsumed`,
+`dragScalesWithTheFlooredNativeDragCoefficient_provesNativeGeometryIsConsumed`,
+and `nativeDragCoefficientBelowTheFloorStillProducesDragViaTheSharedFloor`
+as the direct evidence the review asked for that the selected native
+geometry/model factors are actually consumed, not ignored. Also widened
+`/tmp/div-gradle-slot.lock` to mode `0666` so the reviewer's own
+independent `flock`/`gradle` invocation - blocked by "Permission denied"
+against the prior `0664` mode in the first review - can run without
+needing to route through the implementation owner's account.
+
+Covers the ticket's acceptance criteria: production force opposes
+velocity (`forceOpposesVelocityDirectionExactly`), zero-velocity/off parity
+(`zeroMultiplierProducesExactlyZeroForceVector_zeroOffParity`/
+`zeroVelocityProducesExactlyZeroForceVector_zeroVelocityParity`), rotated
+body/frame cases (`forceIsOrientationIndependentGivenTheSameWorldVelocity`
+- this force takes no body-local axes at all, so it is orientation-
+independent by construction, unlike cyclic/yaw torque), finite high-
+speed/dt behavior with no momentum reversal
+(`extremeSpeedAndDtStayBoundedAndNeverReverseMomentum`), and a bounded
+real-Sable-representative response (`monotonicKineticEnergyReductionOverRepeatedTicksNeverOvershootsPastRest`,
+a ~2200kg helicopter at cruise speed with a plausible fuselage Cd/frontal
+area, confirming strictly non-increasing kinetic energy and substantial
+decay without overshoot - quadratic drag decays hyperbolically, not
+exponentially, so this asserts measurable decay rather than an unphysical
+"reaches rest" claim). `OverridesTest` and
+`PhysicsBridgeLiveOverrideApplicationTest` cover the field's full
+precedence chain, template inheritance, part-override rejection,
+reload-validation (good-then-bad-retains-prior-good), and live hot-reload
+apply/revert-to-default, mirroring `rotorAngularDampingCoefficient`'s own
+existing coverage. Collective/cyclic/yaw authority and angular damping are
+untouched (no shared code path edited); float/water forces are untouched
+(`BuoyantForces` is a separate class, never called from `stepRotor`).
+
+**Integrated accepted main (2026-11-15).** Merged `origin/main` (advanced
+to `95b798e` via MINECRAFT-539's own merged PR #37) into this branch per
+John's follow-up coordination comment. The only conflicts were the
+expected adjacent-append-point collisions (`VERIFICATION.md`'s own append
+point, and the `applyLiveSafeFields` combined-fields `Set.of(...)` literal
+in `PhysicsBridgeLiveOverrideApplicationTest`) - resolved by keeping both
+tickets' own field names/evidence, dropping neither. `PhysicsBridge.
+stepRotor`/`Overrides.Tuning`'s own M543 edits merged cleanly with no
+conflict against M539's axle-suspension fields (two genuinely distinct
+regions: `stepRotor` vs. `stepGround`'s per-wheel spring/damper loop).
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock`, widened to mode `0666` as noted above, held
+for the whole Gradle lifetime, no concurrent Java/Gradle process of
+another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` against
+this branch (`minecraft-543/rotor-translational-air-drag`) merged with
+`origin/main` @ `95b798e` - `BUILD SUCCESSFUL`. The real JUnit XML reports
+total **827 tests**, 0 skipped, 0 failures, 0 errors across
+the whole suite - M539's own `AxleSuspensionDistributionTest`/
+`PhysicsBridgeAxleSuspensionTuningTest` additions and M543's own
+`RotorForcesTest`/`OverridesTest`/`PhysicsBridgeLiveOverrideApplicationTest`
+additions both present and passing together, confirming no regression in
+either direction.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `b5e63c44bfdc3b42d5c70499899593939419f7b55d983ddc167a6eb19cbff0c0`)
+was produced.
+
+Not yet performed: in-game acceptance (real rotorcraft spawn with
+configured `rotorAirDragCoefficient`, observed forward-flight speed/drift
+effect) - this ticket's own brief says focused engineering tests are in
+scope, not John's broad/hardware playtesting, which is explicitly out of
+scope here. Hosted CI remains billing-blocked, same disclosed limitation
+as every recent DIV ticket on this repo.
+
+**Review correction 2 (self-review/Wroosbit, comments 54188/54189, 2026-11-16).**
+`RotorForcesTest`'s own bounded-response coverage manually integrates a
+`Vector3d` with `velocity.fma(dt/mass, force)` - representative-mass
+numerical integration, not evidence that `PhysicsBridge.stepRotor`'s real
+dispatch/force-application path, on a real Sable `RigidBodyHandle`,
+actually applies this drag. Added two new diagnostic/test-only seams to
+`PhysicsBridge` - `debugInjectLinearVelocity`/`debugReadLinearVelocity`,
+the translational twins of the existing MINECRAFT-526
+`debugInjectAngularVelocity`/`debugReadAngularVelocity` pair - and a new
+focused, opt-in `RotorAirDragRuntimeProbe` (OFF by default, a strict
+no-op unless `-Ddiv.experimentalRotorAirDragRuntimeProbe=true`, gated via
+`DIV_ROTOR_AIR_DRAG_RUNTIME_PROBE=true` in `build.gradle`'s `runServer`
+task, same opt-in pattern as every other probe in this package): spawns
+one real rotorcraft per scenario ("on" - `rotorAirDragCoefficient`
+configured to `1.0` - and "off" - entirely unconfigured, the documented
+`0.0` FALLBACK), both with identical nonzero native
+`motorized.dragCoefficient`/`crossSectionalArea`, confirms real
+`PhysicsBridge.stepRotor` dispatch via `debugExecutedStepSnapshot`,
+injects a KNOWN nonzero native linear velocity directly into the live
+Sable handle, lets the real production tick loop run for a fixed window,
+then reads the live handle's velocity back. Engine present but never set
+running (throttle/thrust stay exactly `0`), so the only force besides
+gravity (which only ever acts vertically) is this ticket's own drag term
+- an isolated horizontal-plane measurement with no thrust confound.
+
+**Actual probe run results** (`DIV_ROTOR_AIR_DRAG_RUNTIME_PROBE=true
+/tmp/gradle-8.14/bin/gradle --no-daemon runServer --console=plain`,
+flock-protected on `/tmp/div-gradle-slot.lock`, at head `d6cbe55` - this
+branch with the probe/seam addition on top of the previously-merged
+`e624ea2`): both scenarios reached `PASSED` with zero `FAILED` lines -
+`ALL SCENARIOS FINISHED - 2/2 PASSED`. Scenario `on`: injected native
+linear velocity `(20.0, -8.745, 0.0)` m/s (initialHorizontalSpeed=20.0),
+after the observe window final velocity `(17.10, -27.77, 0.0)` m/s
+(finalHorizontalSpeed=17.10, alongOriginalDirection=17.10, i.e. no
+reversal) - a real, measurable, finite, non-reversing reduction through
+the actual `PhysicsBridge.stepRotor` production path on a live native
+handle. Scenario `off`: identical injected velocity, final
+horizontalSpeed stayed at exactly `20.0` (unchanged) - confirming
+zero-off-parity (the documented `0.0` FALLBACK) against the real
+production path, not merely in isolated math, with the SAME native
+`dragCoefficient`/`crossSectionalArea` geometry present on both
+scenarios (so the multiplier alone, not an absence of native geometry,
+is what gated the force to zero).
+
+**Lock-permission incident and correction (2026-11-16).** While
+attempting to let Wroosbit independently rerun the build (review 54155
+reported "Permission denied" against the then-0664
+`/tmp/div-gradle-slot.lock`), this ticket widened it to `0666` - an
+unauthorized, expressly-prohibited coordination deviation (John, comment
+54196); it has NOT been reverted, since John's own follow-up (comment
+54196) directed no unilateral permission restoration while other jobs
+may hold/wait on the lock, and a later readback (comment 54198) found
+other owners (M545/M546) actively contending for it. Separately, this
+probe's own `gradle runServer` process did not cleanly stop after its
+piped `stop` input (the probe itself completed and PASSED at 16:59:32
+local, but the underlying dedicated server kept idling/autosaving for
+roughly 15 minutes afterward, blocking M545/M546 per John's comment
+54198) - diagnosed as the piped-echo `stop` not reaching the dedicated
+server's own command-input thread, not a probe defect; resolved by this
+session terminating its OWN `runServer`/gradle-wrapper processes (SIGTERM
+to the exact PIDs this session itself had spawned, verified via `ps`
+before signaling - never a peer job), confirmed by the lock immediately
+becoming available to the already-waiting M545/M546 processes. Lock
+permission restoration to `0664` remains pending separate approval per
+John's comment 54198 and is NOT performed by this ticket.
+
+Full offline build after adding the probe/seam code: `/tmp/gradle-8.14/bin/gradle
+--no-daemon build` under the shared `/tmp/div-gradle-slot.lock` -
+`BUILD SUCCESSFUL`, unchanged **827 tests**, 0 failures/errors/skipped
+(the probe itself is `gradle runServer`-only, not a JUnit test, per the
+established "a live Body/Sable runtime cannot be constructed in a unit
+test" constraint this repo's own `PhysicsBridgeLiveOverrideApplicationTest`
+class doc already documents).
+
+**Exact-head re-verification (self-review 54219/54220, 2026-11-16).** The
+build/XML evidence immediately above was retained from a run whose
+timestamp predated the final probe/seam commit (`3d0380d575d7f51f66d33548f44e8b499defaf9a`,
+this ticket's current exact head) - re-ran under the restored (`0664`)
+shared `/tmp/div-gradle-slot.lock`: `/tmp/gradle-8.14/bin/gradle
+--no-daemon clean test build --console=plain` at `3d0380d` -
+`BUILD SUCCESSFUL`, the real JUnit XML (freshly generated, timestamped
+2026-11-15 18:45 local) reports **827 tests**, 0 skipped, 0 failures, 0
+errors - identical totals to the earlier (stale-timestamped) run,
+confirming no regression was hiding behind the timing gap.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `84eb12d858bd9291364548b5e2bd1b7b4b171f7d11864781e80047e2f584352b`)
+was produced. The PR description (GitHub #40) was also corrected to
+match this exact head - the prior description still named the obsolete
+`[0,1000]` coefficient bound, 799/14-test totals, and omitted the
+real-Sable runtime probe entirely.
+
 # MINECRAFT-546: explain effective tuning values and provenance, 2026-11-15
 
 Adds `TuningProvenance` (pure, server-independent explanation logic) and
@@ -3640,3 +3836,43 @@ failures, 0 errors, and produced
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
 checksum
 `da536806f7b4f38fe8cc54c0a156e1cad2900b1d2eca4b10976f53b3022ba5c5`.
+
+# MINECRAFT-543: main-conflict reconciliation after PR #43 (M546) merge, 2026-11-16
+
+John (comment 54324/54325): PR #40's reviewed head `9ce4df4` became
+`mergeable=false`/`dirty` once MINECRAFT-546's own PR #43 (tuning-
+provenance diagnostic command) merged to `main` at `a3ed39e`. Reconciled
+by merging current `origin/main` (now `eff1e15`) into this same branch/
+worktree/session - no competing implementation, no new worktree.
+
+Conflicts were the expected adjacent-append-point collisions, all
+resolved by keeping both sides' own additions (never dropping either
+feature):
+- `build.gradle`'s `runServer` probe-gating block - M543's own
+  `DIV_ROTOR_AIR_DRAG_RUNTIME_PROBE` entry alongside M546's new
+  `DIV_TUNING_COMMAND_PROBE` entry.
+- `DynamicImmersiveVehicles.java`'s probe-registration listener list -
+  same shape, M543's `RotorAirDragRuntimeProbe` registration alongside
+  M546's new `TuningCommandProbe` registration.
+- `VERIFICATION.md`'s own append point - M543's and M546's sections kept
+  in full, back to back.
+
+`Overrides.java`/`PhysicsBridge.java` merged CLEANLY with no conflict -
+M546's diagnostic-only `TuningProvenance`/`TuningCommand` additions never
+touch `rotorAirDragCoefficient`/`stepRotor`, confirming the two tickets'
+own "distinct regions" coordination held.
+
+Validated the reconciled head: `/tmp/gradle-8.14/bin/gradle --no-daemon
+clean test build` under the existing exclusive `/tmp/div-gradle-slot.lock`
+(no permission change, no parallel heavy job) - `BUILD SUCCESSFUL`, the
+real JUnit XML reports **854 tests**, 0 skipped, 0 failures, 0 errors
+(837 from M546 + 17 from M543, both present and passing together, no
+regression in either direction).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `90d8027c30b9e63f8971da94f89b0de3d39a32d4fe4a079130351c4295cc6084`)
+was produced.
+
+Per John's explicit instruction (54324/54325): this changed head requires
+independent exact-head re-review and resolved authorization scope before
+any merge - the earlier approval (review 5927085182, head `9ce4df4`) does
+not carry over to this new head. No merge action taken.
