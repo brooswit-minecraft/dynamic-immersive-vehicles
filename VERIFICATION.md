@@ -3739,3 +3739,114 @@ reading the actual solver code
 (`src/dynamics/solver/island_solver.rs`/`parallel_island_solver.rs` and
 the velocity/position constraint types beneath them), a deeper dive than
 what has been done so far.
+
+**Three corrections, John's comment 54270 (read-only, no live run or
+edit performed in response to this comment - exactly as instructed).**
+
+1. **Cleanup-disposition claim was overbroad - corrected with per-probe
+   evidence.** The retained `diag3`/`diag5` logs DO show a clean
+   shutdown: `server.log` lines 183/240/252 (`diag3`) and 1045/1107/1119
+   (`diag5`) read "released terrain chunk grid" / "Stopping server" /
+   "ThreadedAnvilChunkStorage: All dimensions are saved" - confirmed by
+   direct re-read, contradicting the earlier blanket "no probe... every
+   run has been ended by killing the process" claim. Checked why:
+   `BuoyantHitchProbe` (the probe both of those runs used) DOES call its
+   own `unforceChunkGrid(level)` unconditionally, exactly once, the
+   moment `phase` reaches `DONE` or `FAILED` (confirmed by reading its
+   source directly, not assumed) - a real, working cleanup path this
+   ticket's own earliest probe has had all along. What triggers
+   "Stopping server" itself is NOT this probe's own code (no
+   `server.halt`/stop call found anywhere in `BuoyantHitchProbe`) - an
+   external mechanism (outside this Java source) sent that stop for
+   those two specific runs; not fully traced, and not needed to correct
+   the factual claim. **Checked the two NEWER probes this ticket wrote
+   (`GroundHitchReplacementProbe`, `AlreadyActiveUnsafeFallbackProbe`):
+   neither one calls `setChunkForced(..., false)` anywhere - confirmed
+   by grep, zero matches for "unforce" in either file.** So the
+   corrected, now per-probe-accurate claim is: `BuoyantHitchProbe`
+   cleans up its own chunk-force grid correctly; the two newer probes
+   this ticket added do not - a real, specific gap in code this agent
+   wrote, not a ticket-wide pattern. `run4` (the sustained fallback
+   probe PASS) specifically still lacks any release/shutdown receipt,
+   as flagged - consistent with it using the newer, non-cleaning probe.
+
+2. **Sable source revision correspondence - relabeled PROVISIONAL, not
+   confirmed, per instruction.** The local checkout's own tag
+   (`mc1.21.1-2.0.5-fabric-3-geb2a698`) is a FABRIC tag, three commits
+   past it, which does not by itself establish NeoForge artifact/source
+   correspondence - a fair catch. Checked what IS locally verifiable:
+   the cached `sable-neoforge-1.21.1-2.0.5.jar`
+   (`~/.gradle/caches/modules-2/files-2.1/dev.ryanhcode.sable/...`) has
+   SHA-256 `c8710f85bc780bbf523e6726ceaaf76dd0b8c61479db497b382c6bb34317e7ab`
+   - confirmed to match John's own independently-computed value, and it
+   matches the PUBLISHED Gradle module's own declared checksum (read
+   directly from the cached `.module` file) - so this IS genuinely the
+   published 2.0.5 artifact, not a corrupted/substituted one. The
+   `sable-sable_rapier-1.21.1:2.0.5` runtime dependency John flagged as
+   having no corresponding Gradle cache directory is explained: it is
+   NOT a separate resolved artifact at all for this build - it is
+   bundled INSIDE `sable-neoforge-1.21.1-2.0.5.jar` itself via
+   NeoForge's own jar-in-jar mechanism
+   (`META-INF/jarjar/dev.ryanhcode.sable.sable-sable_rapier-1.21.1-2.0.5.jar`,
+   extracted and separately checksummed:
+   `f7a89044a47bf0b766b460c8784e5f81b255f6806177d8d357a8c3c01362961b`).
+   That embedded jar's own manifest, README, and the vendored Rapier
+   LICENSE file contain NO commit hash or other source-provenance
+   marker anywhere - confirmed by reading all three directly. The
+   actual native binary itself
+   (`natives/sable_rapier/sable_rapier_binaries.zip.l4z`, LZ4-compressed)
+   was NOT decompressed to search for an embedded build-id string (no
+   `lz4` CLI or Python `lz4` module available in this sandbox, and
+   installing one was not attempted further given the bounded, read-only
+   scope of this check). **Conclusion: the loaded artifact is confirmed
+   genuine (checksum-verified against the published module), but its
+   correspondence to the specific git commit `eb2a698` this analysis
+   read source from is, at most, a same-declared-version-number match
+   (`2.0.5` on both sides) - not a cryptographically or provenance-proven
+   exact match. The `joints.rs`/Rapier-core analysis above should be read
+   as PROVISIONAL on that basis, not confirmed**, per instruction.
+
+3. **Proposed discriminating measurement for joint impulse/warm-start
+   initialization and existing-body solver state - NOT executed, no live
+   run or edit performed, per explicit instruction to identify this
+   BEFORE proposing either.** `ImpulseJointSet::insert` (read directly,
+   same source as above) initializes every joint's own `impulses` field
+   via `Default::default()` regardless of either body's history - so the
+   JOINT's own warm-start state starts at zero identically for a fresh-
+   vs-already-active pairing; no asymmetry there. The candidate that
+   remains is BODY-side state: an already-active body free-floating for
+   many ticks (no joint, no engine) accumulates real velocity/angular-
+   velocity and positional/orientation drift from ordinary force
+   integration (gravity, buoyancy, drag) that a freshly-constructed body
+   (zero ticks old) never has time to accumulate - already partly
+   evidenced by this file's own retained data (e.g. `TOWING_REPLACEMENT`
+   tick 1: `anchorDistance=1.995` blocks, `towed.angularVelocity`
+   already substantial). **Proposed measurement:** for a given reconnect
+   event, compute the EXPECTED velocity/angular-velocity change a single
+   rigid (fully linear-locked, undamped) constraint solve would produce
+   from the KNOWN pre-solve anchor-gap (position error) and pre-solve
+   velocity alone - via basic momentum/impulse arithmetic
+   (impulse ≈ effective-mass × positional-error / `PhysicsBridge.DT`,
+   per axis) - and compare that EXPECTED magnitude against the ACTUAL
+   observed post-solve velocity jump (already capturable via the
+   existing `debugReadLinearVelocity`/`debugReadAngularVelocity`
+   accessors, one tick before and one tick after a reconnect).
+   **Expected alternatives:** (a) if the observed jump is the same
+   order of magnitude as the value basic momentum arithmetic from the
+   KNOWN anchor gap/pre-solve velocity predicts, the explosion is the
+   ordinary, mathematically-expected consequence of snapping a real,
+   large position/velocity error with a fully rigid, undamped joint in
+   one step - not a defect in Sable/Rapier at all, and the real fix
+   would be at the DIV/joint-configuration level (a softer/staged
+   engagement, not a "bug fix") - squarely back in this ticket's own
+   scope, not Sable's; (b) if the observed jump is orders of magnitude
+   LARGER than that basic arithmetic predicts, that is positive evidence
+   of an actual solver-internal anomaly (warm-start poisoning, an
+   incorrect effective-mass/inertia computation, or similar), and
+   reading the actual solver code
+   (`island_solver.rs`/`parallel_island_solver.rs`) becomes justified
+   rather than speculative. This measurement requires no new live run
+   for alternative (a)'s rough check (existing retained data already
+   has some of the needed numbers) but a clean one-tick-before/one-tick-
+   after capture of BOTH anchor-gap and velocity for the SAME event would
+   make it rigorous - not run here, awaiting direction per instruction.
