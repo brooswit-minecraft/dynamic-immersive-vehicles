@@ -4585,3 +4585,28 @@ implementation owner, as required. GitHub #44 (M542's reviewer's own
 nonblocking follow-up) can now be closed/updated to reflect that this
 ticket's own fields are fixed, independent of whatever scope #44 still
 tracks for other fields, if any remain.
+
+## Post-merge (2026-11-16)
+
+Independent review (`5929277383`) approved exact head `ba0093a`; the
+coordinator, with John's explicit latest-head authorization under the
+disclosed hosted-CI billing limitation (comment 54376), merged PR #36
+into `main` at merge commit `81db9d1b0e9e5e764a3d266c3890335cbba6b0d6` - a
+clean merge (`git diff --stat ba0093a 81db9d1` is empty: the merged tree
+is byte-identical to the reviewed/approved head). No branch-protection
+bypass or settings change; this repo has no required status checks.
+
+Post-merge hosted CI on this merge commit (run `43980628420`, triggered by
+the push) failed in 3 seconds - the same pre-existing, already-disclosed
+zero-runner-inventory billing blockage every recent DIV ticket on this
+repo has hit (most recently MINECRAFT-542's own merge). `.github/
+workflows/` contains only `ci.yml` (triggered on `pull_request`/
+`push: [main]`, no tag/`workflow_dispatch` trigger) - no `release.yml` or
+tag-based release workflow exists in this repo beyond that billing-
+blocked CI, and this change (an additive `Overrides`/`FlightForces`/
+`PhysicsBridge` schema change, no version bump) does not warrant inventing
+one. Retained exact-head local evidence stands in its place: the
+**882-test, 0-failure/error/skip** JUnit XML and `build/libs/dynamic-
+immersive-vehicles-0.1.0-SNAPSHOT.jar` (sha256 `d395ff539c62981b337a254
+28612e49008373f9e0f1d44a07f6fa06e393d85dc`) recorded above, at the exact
+approved/merged head (confirmed identical by the empty `git diff --stat`).
