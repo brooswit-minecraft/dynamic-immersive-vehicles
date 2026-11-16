@@ -3515,14 +3515,28 @@ combination end to end through `deferToNativeHitch`/`decide()`.
 (the MINECRAFT-498 regression test) still passes unchanged, confirming no
 regression. `gradle test`: 791 tests, 0 failures.
 
-Not yet separately verified live (no new `BuoyantHitchProbe` phase added
-for this specific scenario this cycle) - this is pure, deterministic
-boolean logic, fully covered by the unit tests above, unlike the
-still-open native-solver question elsewhere in this file. A realistic live
-trigger would be: a buoyant trailer safely `mounted`-connected to a GROUND
-towing vehicle (towingIsBuoyant=false, so `unsafeLock` is false and the
-trailer becomes `alreadyActive`), then that towing vehicle replaced
-mid-tow by a fresh BUOYANT towing vehicle on the SAME mounted connection
-(now `unsafeLock` becomes true for the first time while the trailer is
-already active) - a reasonable next bounded live check if wanted, not
-attempted here.
+**Live end-to-end verification (John's comment 54259: the unit tests only
+exercise the pure `deferToNativeHitch`/`decide` boolean helpers - they
+don't demonstrate actual body removal, joint release, or authority
+handoff through the real `PhysicsBridge.active` entry point).** Added
+`AlreadyActiveUnsafeFallbackProbe` (opt-in,
+`-Ddiv.experimentalAlreadyActiveUnsafeFallback=true`): spawns `towed` (a
+buoyant hull) completely standalone - no hitch, no towing vehicle at all -
+confirms via `PhysicsBridge.debugReadLinearVelocity` that it settles into
+a real, active Sable body purely from standalone float eligibility (no
+prior hitch history to confound the result), then connects a FRESH
+buoyant `towing2` on a `mounted` hitch connection for the FIRST time this
+trailer has ever had a `towedByConnection` - exercising exactly the
+(`alreadyActive=true`, `towingVehicleActive=false`, `unsafeLock=true`)
+combination the fix targets, live, through the real `active()` entry
+point, not a fake registry.
+
+Result: **PASS at tick 1.** `towed`'s real native Sable body is ACTUALLY
+REMOVED - `debugReadLinearVelocity`/`debugReadAngularVelocity` both
+return `null` the very first tick after the unsafe connect - not merely
+unjointed. `towed.isValid` stays `true` and its position stays sane (no
+crash, no explosion, no leaked handle) - confirming the fix reaches real
+existing-body authority/joint lifecycle removal, not just the boolean
+predicate. Full raw log retained at
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-fallbackprobe-run3-20261116T122843Z/server.log`
+(head `cf65a3b` + this probe's own uncommitted diff at run time, checksummed).

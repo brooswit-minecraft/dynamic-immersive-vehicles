@@ -193,6 +193,13 @@ neoForge {
     jvmArgument('-Ddiv.experimentalGroundHitchReplacement=true')
     jvmArgument('-Ddiv.debugGroundContact=true')
    }
+   // MINECRAFT-545/547 (John's comment 54259): opt-in already-active unsafe-fallback lifecycle
+   // probe - same gating pattern as every other probe above; OFF for every normal
+   // `gradle runServer`. See AlreadyActiveUnsafeFallbackProbe's own doc.
+   if (System.getenv('DIV_ALREADY_ACTIVE_UNSAFE_FALLBACK_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalAlreadyActiveUnsafeFallback=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
