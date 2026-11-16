@@ -78,6 +78,7 @@ class OverridesTest {
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(0.0, r.rotorAngularDampingCoefficient, "rotorAngularDampingCoefficient's fallback is 0 - no angular-rate damping term at all unless configured (MINECRAFT-537 zero/off parity)");
+  assertEquals(0.0, r.fixedWingAngularDampingCoefficient, "fixedWingAngularDampingCoefficient's fallback is 0 - no angular-rate damping term at all unless configured (MINECRAFT-542 zero/off parity), a wholly separate field from rotorAngularDampingCoefficient");
   assertEquals(0.0, r.rotorAirDragCoefficient, "rotorAirDragCoefficient's fallback is 0 - no translational drag term at all unless configured (MINECRAFT-543 zero/off parity)");
   assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertEquals(1.0, r.suspensionSpringMultiplier, "suspensionSpringMultiplier's fallback is a pure no-op - an unconfigured vehicle's calibrated spring rate is unchanged");
@@ -102,6 +103,7 @@ class OverridesTest {
   assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
   assertNotNull(r.rotorAngularDampingCoefficient);
+  assertNotNull(r.fixedWingAngularDampingCoefficient);
   assertNotNull(r.rotorAirDragCoefficient);
   assertNotNull(r.suspensionDampingRatio);
   assertNotNull(r.suspensionSpringMultiplier);
@@ -263,6 +265,77 @@ class OverridesTest {
    assertFalse(badResult.success(), "a negative rotorAngularDampingCoefficient reload must be rejected, not silently applied");
    assertEquals(3.0, Overrides.resolved("examplepack:reloadable_helicopter").rotorAngularDampingCoefficient,
      "a rejected reload must retain the PRIOR GOOD rotorAngularDampingCoefficient, not the invalid value or the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-542: fixedWingAngularDampingCoefficient - bounded, optional, fixed-wing-only
+ // angular-rate damping torque, reusing M537's dissipative-drag formula/no-reversal clamp but a
+ // wholly separate field from rotorAngularDampingCoefficient above (deliberately never shared).
+
+ @Test void fixedWingAngularDampingCoefficientOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.fixedWingAngularDampingCoefficient = -0.1;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.fixedWingAngularDampingCoefficient = FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT + 0.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nonFinite = new Overrides.Tuning(); nonFinite.fixedWingAngularDampingCoefficient = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nonFinite::validate);
+  var zero = new Overrides.Tuning(); zero.fixedWingAngularDampingCoefficient = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zero::validate);
+  var atCap = new Overrides.Tuning(); atCap.fixedWingAngularDampingCoefficient = FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT; // the cap itself is allowed
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.fixedWingAngularDampingCoefficient = 5.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void fixedWingAngularDampingCoefficientParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.fixedWingAngularDampingCoefficient = 4.5;
+   Overrides.setForTest(java.util.Map.of("packid:damped_fixed_wing_vehicle", override));
+   assertEquals(4.5, Overrides.resolved("packid:damped_fixed_wing_vehicle").fixedWingAngularDampingCoefficient,
+     "an explicit operator override must take precedence over the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void fixedWingAngularDampingCoefficientInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.fixedWingAngularDampingCoefficient = 2.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "fixed-wing-damping-base"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("fixed-wing-damping-base", template), java.util.Map.of("packid:inherited_fixed_wing_damping", child), java.util.Map.of());
+   assertEquals(2.0, Overrides.resolved("packid:inherited_fixed_wing_damping").fixedWingAngularDampingCoefficient,
+     "a field the child never set must inherit the template's value, same as every other tuning field");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void fixedWingAngularDampingCoefficientIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.fixedWingAngularDampingCoefficient = 1.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart,
+    "this is a vehicle-only concept - a fixed-wing part has no own angular-damping consumer");
+ }
+
+ @Test void validThenInvalidFixedWingAngularDampingReloadAppliesThenRetainsThePriorGoodOverride() {
+  // Same "invalid reload retains last-known-good" structure as rotorAngularDampingCoefficient
+  // above - exercises the REAL Overrides.apply(Supplier<Config>) seam, not merely setForTest, so
+  // a bad edit mid-session cannot silently corrupt an already-good fixed-wing damping
+  // configuration.
+  try {
+   var goodAirplane = new Overrides.Tuning(); goodAirplane.fixedWingAngularDampingCoefficient = 3.0;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_airplane", goodAirplane), java.util.Map.of()));
+   assertTrue(goodResult.success(), "a valid fixedWingAngularDampingCoefficient reload must apply cleanly");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_airplane").fixedWingAngularDampingCoefficient);
+
+   var invalidAirplane = new Overrides.Tuning(); invalidAirplane.fixedWingAngularDampingCoefficient = -1.0; // out of range
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_airplane", invalidAirplane), java.util.Map.of()));
+   assertFalse(badResult.success(), "a negative fixedWingAngularDampingCoefficient reload must be rejected, not silently applied");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_airplane").fixedWingAngularDampingCoefficient,
+     "a rejected reload must retain the PRIOR GOOD fixedWingAngularDampingCoefficient, not the invalid value or the 0.0 fallback");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }
