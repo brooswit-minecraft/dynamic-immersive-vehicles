@@ -3471,3 +3471,58 @@ constructed `RigidBodyHandle`, which is outside this codebase and is what
 the assigned read-only specialist is positioned to inspect. The
 already-active unsafe-fallback correction (54237) remains open and in
 scope, not dropped, not addressed in this update.
+
+**Already-active unsafe-fallback correction (John's comment 54256) - now
+fixed, independently of the ordinary-reconnect diagnosis above.** The gap
+from 54237: `PhysicsBridge.active()`'s own `towingVehicleActive` boolean
+conflated two different reasons a trailer's joint can't reconcile - "the
+towing vehicle simply has no Sable body" (transient; MINECRAFT-498's own
+regression fix correctly keeps an already-active trailer Sable-
+authoritative and unjointed for this reason, waiting for a body to
+reappear) versus "the towing vehicle DOES have a body, but
+`unsafeBuoyantAngularLock` refuses this specific pair" (a DIFFERENT
+condition whose own doc says it should fall back to IV's native hitch for
+the pair - the SAME fallback a first-activation wait gets). Previously,
+`deferToNativeHitch` never deferred an already-active trailer for EITHER
+reason - correct for the first, wrong for the second: an already-active
+trailer caught by the unsafe-lock gate stayed Sable-authoritative,
+unjointed, with `towedByConnection` still pointing at a pair this bridge
+itself judged unsafe, and IV's own native hitch code never got a chance
+to run.
+
+Fix: split `towingVehicleActive` into `towingHasHitchableBody` (the pure
+"is there a body at all" fact) and `unsafeLock` (the separate "is this
+PAIR unsafe" fact) in `active()`; `deferToNativeHitch` and `decide()` both
+take the new `unsafeLock` parameter, and now defer
+(`towed && !towingVehicleActive && (!alreadyActive || unsafeLock)`)
+whenever `unsafeLock` is the reason, regardless of `alreadyActive` -
+routing through the EXISTING, already-correct `active()` ->
+`deactivate(v)` path (`decision == DEFER_TO_NATIVE`), which actually
+removes the Sable body and releases the joint via `hitches.release(v)` -
+not a new mechanism, the same native-fallback path a first-activation
+wait already uses. MINECRAFT-498's own regression (an already-active
+trailer must never be torn down merely because its towing vehicle has no
+body at all) is unaffected: `unsafeLock` is `false` for that case, so
+`deferToNativeHitch` still returns `false` there, exactly as before.
+
+Verified by unit tests (`PhysicsBridgeClassificationTest`):
+`anAlreadyActiveTrailerIsDeferredWhenTheUnsafeAngularLockIsTheReason` and
+`serverDefersAnAlreadyActiveTowedVehicleWhenTheUnsafeAngularLockFires` -
+both new, covering exactly the previously-unreachable
+(`alreadyActive=true`, `towingVehicleActive=false`, `unsafeLock=true`)
+combination end to end through `deferToNativeHitch`/`decide()`.
+`anAlreadyActiveTrailerIsNeverDeferredEvenIfItsTowingVehicleLosesItsBody`
+(the MINECRAFT-498 regression test) still passes unchanged, confirming no
+regression. `gradle test`: 791 tests, 0 failures.
+
+Not yet separately verified live (no new `BuoyantHitchProbe` phase added
+for this specific scenario this cycle) - this is pure, deterministic
+boolean logic, fully covered by the unit tests above, unlike the
+still-open native-solver question elsewhere in this file. A realistic live
+trigger would be: a buoyant trailer safely `mounted`-connected to a GROUND
+towing vehicle (towingIsBuoyant=false, so `unsafeLock` is false and the
+trailer becomes `alreadyActive`), then that towing vehicle replaced
+mid-tow by a fresh BUOYANT towing vehicle on the SAME mounted connection
+(now `unsafeLock` becomes true for the first time while the trailer is
+already active) - a reasonable next bounded live check if wanted, not
+attempted here.

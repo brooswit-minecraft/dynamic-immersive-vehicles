@@ -67,11 +67,11 @@ class PhysicsBridgeClassificationTest {
  @Test void firstActivationDefersUntilTheTowingVehicleHasABody() {
   // A trailer's very first activation must wait for its towing vehicle to already have an
   // active body - the joint it needs connects to that body, not to IV's raw position.
-  assertTrue(PhysicsBridge.deferToNativeHitch(true, false, false));
+  assertTrue(PhysicsBridge.deferToNativeHitch(true, false, false, false));
  }
 
  @Test void firstActivationProceedsOnceTheTowingVehicleHasABody() {
-  assertFalse(PhysicsBridge.deferToNativeHitch(true, false, true));
+  assertFalse(PhysicsBridge.deferToNativeHitch(true, false, true, false));
  }
 
  @Test void anAlreadyActiveTrailerIsNeverDeferredEvenIfItsTowingVehicleLosesItsBody() {
@@ -79,13 +79,23 @@ class PhysicsBridgeClassificationTest {
   // unconditionally and would deactivate (destroy) an already-active trailer's own body the
   // moment its towing vehicle's body disappeared (opt-out, despawn, chunk unload), instead of
   // leaving the trailer as an unjointed, free-rolling Sable vehicle and only releasing the
-  // stale joint (reconcileHitch's job, not active()'s).
-  assertFalse(PhysicsBridge.deferToNativeHitch(true, true, false));
+  // stale joint (reconcileHitch's job, not active()'s). Still true here: towingVehicleActive is
+  // false because there is simply no body, not because of unsafeLock.
+  assertFalse(PhysicsBridge.deferToNativeHitch(true, true, false, false));
+ }
+
+ @Test void anAlreadyActiveTrailerIsDeferredWhenTheUnsafeAngularLockIsTheReason() {
+  // MINECRAFT-545/547 fix (John's comment 54237/54256): unlike "towing vehicle has no body at
+  // all" above, an already-active trailer whose towingVehicleActive is false BECAUSE
+  // unsafeBuoyantAngularLock refuses this specific pair must defer - that gate's own contract is
+  // to fall back to IV's native hitch, not to leave the trailer Sable-authoritative, unjointed,
+  // with towedByConnection still pointing at a pair this bridge itself judged unsafe.
+  assertTrue(PhysicsBridge.deferToNativeHitch(true, true, false, true));
  }
 
  @Test void ineligibleAlwaysDecidesIneligibleRegardlessOfOtherFlags() {
-  assertEquals(INELIGIBLE, PhysicsBridge.decide(false, false, true, true, true));
-  assertEquals(INELIGIBLE, PhysicsBridge.decide(false, true, true, true, true));
+  assertEquals(INELIGIBLE, PhysicsBridge.decide(false, false, true, true, true, false));
+  assertEquals(INELIGIBLE, PhysicsBridge.decide(false, true, true, true, true, false));
  }
 
  @Test void clientNeverConsultsTheServerOnlyHitchOrderingWait() {
@@ -95,17 +105,24 @@ class PhysicsBridgeClassificationTest {
   // only ever populated by server-side code - deferred to IV's native hitch code forever, even
   // once the server had actually built and jointed its Sable body. decide() must return
   // CLIENT_ACTIVE for any eligible client call, never DEFER_TO_NATIVE, regardless of towed/
-  // alreadyActive/towingVehicleActive.
-  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, true, false, false));
-  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, false, false, false));
-  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, true, true, false));
+  // alreadyActive/towingVehicleActive/unsafeLock.
+  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, true, false, false, false));
+  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, false, false, false, false));
+  assertEquals(CLIENT_ACTIVE, PhysicsBridge.decide(true, true, true, true, false, true));
  }
 
  @Test void serverDefersToNativeHitchOnlyOnFirstActivationOfATowedVehicle() {
-  assertEquals(DEFER_TO_NATIVE, PhysicsBridge.decide(true, false, true, false, false));
-  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, true, false, true));
-  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, true, true, false));
-  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, false, false, false));
+  assertEquals(DEFER_TO_NATIVE, PhysicsBridge.decide(true, false, true, false, false, false));
+  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, true, false, true, false));
+  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, true, true, false, false));
+  assertEquals(ACTIVATE, PhysicsBridge.decide(true, false, false, false, false, false));
+ }
+
+ @Test void serverDefersAnAlreadyActiveTowedVehicleWhenTheUnsafeAngularLockFires() {
+  // The MINECRAFT-545/547 fix end to end through decide(): previously ACTIVATE for this exact
+  // combination (alreadyActive=true, towingVehicleActive=false) regardless of why - now
+  // DEFER_TO_NATIVE specifically when unsafeLock is the reason.
+  assertEquals(DEFER_TO_NATIVE, PhysicsBridge.decide(true, false, true, true, false, true));
  }
 
  @Test void unjointedUnmountedConnectionsAreCompensable() {
@@ -135,8 +152,8 @@ class PhysicsBridgeClassificationTest {
  }
 
  @Test void anUntowedVehicleNeverDefersRegardlessOfTheOtherFlags() {
-  assertFalse(PhysicsBridge.deferToNativeHitch(false, false, false));
-  assertFalse(PhysicsBridge.deferToNativeHitch(false, true, true));
+  assertFalse(PhysicsBridge.deferToNativeHitch(false, false, false, false));
+  assertFalse(PhysicsBridge.deferToNativeHitch(false, true, true, true));
  }
 
  @Test void mountedOrRestrictedAngularLockIsUnsafeOnlyBetweenTwoBuoyantBodies() {

@@ -649,9 +649,23 @@ public final class PhysicsBridge {
   // `ground || floating` is always true here (the deactivate return above already excludes
   // neither), so `decide` alone (its own isClient/towed handling already matches the previous
   // per-branch ternary exactly) replaces it.
-  boolean towingVehicleActive = towed && isHitchableBody(towedByConnection.towingVehicle)
-    && !unsafeBuoyantAngularLock(registry.get(towedByConnection.towingVehicle) instanceof BuoyantBody, floating,
-        towedByConnection.hitchConnection.mounted, towedByConnection.hitchConnection.restricted);
+  // MINECRAFT-545/547 (John's comment 54237/54256): `towingHasHitchableBody` alone used to BE
+  // `towingVehicleActive` - but that conflated two different reasons a trailer's joint can't
+  // reconcile right now: the towing vehicle simply has no Sable body yet/anymore (transient -
+  // MINECRAFT-498's own regression fix below is exactly about THIS reason, and still applies to
+  // it), versus the towing vehicle DOES have a body but `unsafeBuoyantAngularLock` refuses this
+  // specific pair. For an already-active trailer, `deferToNativeHitch` previously never deferred
+  // for EITHER reason - correct for the first (free-floating on Sable while waiting for a body to
+  // reappear is the intended, reviewed behavior), but wrong for the second: `unsafeBuoyantAngularLock`'s
+  // own doc says it "falls back to IV's native hitch for that pair" - the SAME native fallback a
+  // first-activation wait gets - not "stay Sable-authoritative, unjointed, with towedByConnection
+  // still pointing at a pair this bridge itself judged unsafe." `unsafeLock` is split out so
+  // `deferToNativeHitch` can defer for this reason regardless of `alreadyActive`, while still
+  // never deferring an already-active trailer merely because its towing vehicle has no body at all.
+  boolean towingHasHitchableBody = towed && isHitchableBody(towedByConnection.towingVehicle);
+  boolean unsafeLock = towingHasHitchableBody && unsafeBuoyantAngularLock(registry.get(towedByConnection.towingVehicle) instanceof BuoyantBody, floating,
+      towedByConnection.hitchConnection.mounted, towedByConnection.hitchConnection.restricted);
+  boolean towingVehicleActive = towingHasHitchableBody && !unsafeLock;
   // MINECRAFT-545/547 diagnostic (John's comment 54250: trace actual tick-relative cleanup/
   // remove/joint-release/step ordering, not just a before/after sample) - log-only, every tick a
   // towed vehicle's own active() recomputes this decision, so the exact tick `isHitchableBody`
@@ -660,9 +674,9 @@ public final class PhysicsBridge {
   if (towed && GroundContactDiagnostics.ENABLED) {
    com.mojang.logging.LogUtils.getLogger().info("[DIV lifecycleDiagnostic] v=" + v.uniqueUUID + " towingVehicle=" + towedByConnection.towingVehicle.uniqueUUID
      + " towingValid=" + towedByConnection.towingVehicle.isValid + " isHitchableBody=" + isHitchableBody(towedByConnection.towingVehicle)
-     + " alreadyActive=" + alreadyActive + " towingVehicleActive=" + towingVehicleActive);
+     + " alreadyActive=" + alreadyActive + " towingVehicleActive=" + towingVehicleActive + " unsafeLock=" + unsafeLock);
   }
-  var decision = decide(true, isClient, towed, alreadyActive, towingVehicleActive);
+  var decision = decide(true, isClient, towed, alreadyActive, towingVehicleActive, unsafeLock);
   GroundContactDiagnostics.logClassification(v.uniqueUUID, isClient, key, ground, floating, decision.toString());
   if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
   if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
@@ -791,10 +805,10 @@ public final class PhysicsBridge {
   * This was a real regression found by external review: an earlier revision evaluated the
   * hitch-ordering wait before the client/server branch instead of after it.
   */
- static ActivationDecision decide(boolean eligible, boolean isClient, boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
+ static ActivationDecision decide(boolean eligible, boolean isClient, boolean towed, boolean alreadyActive, boolean towingVehicleActive, boolean unsafeLock) {
   if (!eligible) return ActivationDecision.INELIGIBLE;
   if (isClient) return ActivationDecision.CLIENT_ACTIVE;
-  if (deferToNativeHitch(towed, alreadyActive, towingVehicleActive)) return ActivationDecision.DEFER_TO_NATIVE;
+  if (deferToNativeHitch(towed, alreadyActive, towingVehicleActive, unsafeLock)) return ActivationDecision.DEFER_TO_NATIVE;
   return ActivationDecision.ACTIVATE;
  }
  /**
@@ -810,9 +824,22 @@ public final class PhysicsBridge {
   * self-review before this ticket's first external review: an earlier revision applied this wait
   * unconditionally, deactivating (destroying) an already-active trailer's body the moment its
   * towing vehicle's body disappeared.
+  *
+  * <p>MINECRAFT-545/547 (John's comment 54237/54256): {@code unsafeLock} is a SEPARATE reason
+  * {@code towingVehicleActive} can be false - the towing vehicle DOES have a body, but
+  * {@code PhysicsBridge.unsafeBuoyantAngularLock} refuses this specific pair - and unlike "the
+  * towing vehicle simply has no body (yet/anymore)", that gate's own doc says it should fall back
+  * to IV's native hitch for the pair, exactly like a first-activation wait does. Without this,
+  * an ALREADY-active trailer caught by the gate stayed Sable-authoritative and unjointed forever
+  * (the {@code !alreadyActive} half above still true), with {@code towedByConnection} still
+  * pointing at a pair this bridge itself judged unsafe and IV's own native hitch code never
+  * getting a chance to run - the real gap this fixes. {@code unsafeLock} on its own, independent
+  * of {@code alreadyActive}, now also triggers the defer (and so the {@code deactivate(v)} path
+  * in {@code active()}, which actually removes the Sable body and releases the joint - the SAME
+  * native-fallback mechanism a first-activation wait already uses, not a new one).
   */
- static boolean deferToNativeHitch(boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
-  return towed && !alreadyActive && !towingVehicleActive;
+ static boolean deferToNativeHitch(boolean towed, boolean alreadyActive, boolean towingVehicleActive, boolean unsafeLock) {
+  return towed && !towingVehicleActive && (!alreadyActive || unsafeLock);
  }
  /**
   * Brings this trailer's hitch joint in line with {@code connection}: builds one against its
