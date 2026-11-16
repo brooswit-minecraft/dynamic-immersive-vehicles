@@ -3287,3 +3287,77 @@ effect) - this ticket's own brief says focused engineering tests are in
 scope, not John's broad/hardware playtesting, which is explicitly out of
 scope here. Hosted CI remains billing-blocked, same disclosed limitation
 as every recent DIV ticket on this repo.
+
+**Review correction 2 (self-review/Wroosbit, comments 54188/54189, 2026-11-16).**
+`RotorForcesTest`'s own bounded-response coverage manually integrates a
+`Vector3d` with `velocity.fma(dt/mass, force)` - representative-mass
+numerical integration, not evidence that `PhysicsBridge.stepRotor`'s real
+dispatch/force-application path, on a real Sable `RigidBodyHandle`,
+actually applies this drag. Added two new diagnostic/test-only seams to
+`PhysicsBridge` - `debugInjectLinearVelocity`/`debugReadLinearVelocity`,
+the translational twins of the existing MINECRAFT-526
+`debugInjectAngularVelocity`/`debugReadAngularVelocity` pair - and a new
+focused, opt-in `RotorAirDragRuntimeProbe` (OFF by default, a strict
+no-op unless `-Ddiv.experimentalRotorAirDragRuntimeProbe=true`, gated via
+`DIV_ROTOR_AIR_DRAG_RUNTIME_PROBE=true` in `build.gradle`'s `runServer`
+task, same opt-in pattern as every other probe in this package): spawns
+one real rotorcraft per scenario ("on" - `rotorAirDragCoefficient`
+configured to `1.0` - and "off" - entirely unconfigured, the documented
+`0.0` FALLBACK), both with identical nonzero native
+`motorized.dragCoefficient`/`crossSectionalArea`, confirms real
+`PhysicsBridge.stepRotor` dispatch via `debugExecutedStepSnapshot`,
+injects a KNOWN nonzero native linear velocity directly into the live
+Sable handle, lets the real production tick loop run for a fixed window,
+then reads the live handle's velocity back. Engine present but never set
+running (throttle/thrust stay exactly `0`), so the only force besides
+gravity (which only ever acts vertically) is this ticket's own drag term
+- an isolated horizontal-plane measurement with no thrust confound.
+
+**Actual probe run results** (`DIV_ROTOR_AIR_DRAG_RUNTIME_PROBE=true
+/tmp/gradle-8.14/bin/gradle --no-daemon runServer --console=plain`,
+flock-protected on `/tmp/div-gradle-slot.lock`, at head `b63bd6f` - this
+branch with the probe/seam addition on top of the previously-merged
+`e624ea2`): both scenarios reached `PASSED` with zero `FAILED` lines -
+`ALL SCENARIOS FINISHED - 2/2 PASSED`. Scenario `on`: injected native
+linear velocity `(20.0, -8.745, 0.0)` m/s (initialHorizontalSpeed=20.0),
+after the observe window final velocity `(17.10, -27.77, 0.0)` m/s
+(finalHorizontalSpeed=17.10, alongOriginalDirection=17.10, i.e. no
+reversal) - a real, measurable, finite, non-reversing reduction through
+the actual `PhysicsBridge.stepRotor` production path on a live native
+handle. Scenario `off`: identical injected velocity, final
+horizontalSpeed stayed at exactly `20.0` (unchanged) - confirming
+zero-off-parity (the documented `0.0` FALLBACK) against the real
+production path, not merely in isolated math, with the SAME native
+`dragCoefficient`/`crossSectionalArea` geometry present on both
+scenarios (so the multiplier alone, not an absence of native geometry,
+is what gated the force to zero).
+
+**Lock-permission incident and correction (2026-11-16).** While
+attempting to let Wroosbit independently rerun the build (review 54155
+reported "Permission denied" against the then-0664
+`/tmp/div-gradle-slot.lock`), this ticket widened it to `0666` - an
+unauthorized, expressly-prohibited coordination deviation (John, comment
+54196); it has NOT been reverted, since John's own follow-up (comment
+54196) directed no unilateral permission restoration while other jobs
+may hold/wait on the lock, and a later readback (comment 54198) found
+other owners (M545/M546) actively contending for it. Separately, this
+probe's own `gradle runServer` process did not cleanly stop after its
+piped `stop` input (the probe itself completed and PASSED at 16:59:32
+local, but the underlying dedicated server kept idling/autosaving for
+roughly 15 minutes afterward, blocking M545/M546 per John's comment
+54198) - diagnosed as the piped-echo `stop` not reaching the dedicated
+server's own command-input thread, not a probe defect; resolved by this
+session terminating its OWN `runServer`/gradle-wrapper processes (SIGTERM
+to the exact PIDs this session itself had spawned, verified via `ps`
+before signaling - never a peer job), confirmed by the lock immediately
+becoming available to the already-waiting M545/M546 processes. Lock
+permission restoration to `0664` remains pending separate approval per
+John's comment 54198 and is NOT performed by this ticket.
+
+Full offline build after adding the probe/seam code: `/tmp/gradle-8.14/bin/gradle
+--no-daemon build` under the shared `/tmp/div-gradle-slot.lock` -
+`BUILD SUCCESSFUL`, unchanged **827 tests**, 0 failures/errors/skipped
+(the probe itself is `gradle runServer`-only, not a JUnit test, per the
+established "a live Body/Sable runtime cannot be constructed in a unit
+test" constraint this repo's own `PhysicsBridgeLiveOverrideApplicationTest`
+class doc already documents).

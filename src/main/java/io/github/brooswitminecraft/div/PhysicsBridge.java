@@ -989,6 +989,29 @@ public final class PhysicsBridge {
   return registry.get(v) instanceof Body body ? body.handle.getAngularVelocity(new Vector3d()) : null;
  }
  /**
+  * Diagnostic/test-only (MINECRAFT-543, {@code RotorAirDragRuntimeProbe}): the translational
+  * twin of {@link #debugInjectAngularVelocity} - directly injects a KNOWN linear velocity into
+  * this vehicle's currently-active Body's live Sable handle, so a test/probe can establish a
+  * real, nonzero, precisely-known translational speed WITHOUT needing thrust/control input to
+  * produce one. A no-op if this vehicle has no active Body right now. Never called from any
+  * production code path.
+  */
+ public static void debugInjectLinearVelocity(EntityVehicleF_Physics v, Vector3d linearVelocity) {
+  if (registry.get(v) instanceof Body body) {
+   body.handle.addLinearAndAngularVelocity(linearVelocity, new Vector3d());
+   if (body.twoBodyActive) body.upperHandle.addLinearAndAngularVelocity(linearVelocity, new Vector3d());
+  }
+ }
+ /**
+  * Diagnostic/test-only companion to {@link #debugInjectLinearVelocity} - reads back this
+  * vehicle's CURRENT actual native linear velocity directly from its live Sable handle, the
+  * translational twin of {@link #debugReadAngularVelocity}. Returns null if there is no active
+  * Body.
+  */
+ public static Vector3d debugReadLinearVelocity(EntityVehicleF_Physics v) {
+  return registry.get(v) instanceof Body body ? body.handle.getLinearVelocity(new Vector3d()) : null;
+ }
+ /**
   * Diagnostic/test-only snapshot (MINECRAFT-526 review 53897/53905/53907) bundling everything a
   * test needs to assert real dispatch/retention without re-deriving any of it: {@code
   * bodyIdentity} is the active {@code Body} instance itself as a plain reference-equality-
