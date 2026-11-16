@@ -38,6 +38,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.parasiticDragMultiplier = 1.3; fresh.oswaldEfficiency = 0.65;
   // MINECRAFT-537: rotorAngularDampingCoefficient must go through this same live-mutation path too.
   fresh.rotorAngularDampingCoefficient = 3.5;
+  // MINECRAFT-543: rotorAirDragCoefficient must go through this same live-mutation path too.
+  fresh.rotorAirDragCoefficient = 0.9;
   // MINECRAFT-533: toeFrontDegrees/toeRearDegrees must go through this same live-mutation path.
   fresh.toeFrontDegrees = 2.5; fresh.toeRearDegrees = -1.5;
   // MINECRAFT-532: axleDriveForceSharing must go through this same live-mutation path too.
@@ -66,6 +68,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.1, target.suspensionDampingRatio);
   assertEquals(1.3, target.parasiticDragMultiplier); assertEquals(0.65, target.oswaldEfficiency);
   assertEquals(3.5, target.rotorAngularDampingCoefficient);
+  assertEquals(0.9, target.rotorAirDragCoefficient);
   assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
   assertEquals(true, target.axleDriveForceSharing);
   assertEquals(true, target.ackermannSteering);
@@ -73,7 +76,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.2, target.suspensionDampingRatioFront); assertEquals(0.9, target.suspensionDampingRatioRear);
   assertEquals(1.8, target.suspensionSpringMultiplierFront); assertEquals(0.75, target.suspensionSpringMultiplierRear);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing","ackermannSteering",
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","rotorAirDragCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing","ackermannSteering",
       "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier",
       "suspensionDampingRatioFront","suspensionDampingRatioRear","suspensionSpringMultiplierFront","suspensionSpringMultiplierRear"),
     new TreeSet<>(applied));
@@ -138,6 +141,20 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.0, target.rotorAngularDampingCoefficient, "must revert to the documented off (0.0) default once the override is removed");
   assertTrue(applied.contains("rotorAngularDampingCoefficient"), "the revert-to-default must itself be reported as an applied live change");
+ }
+
+ @Test void removingARotorAirDragCoefficientOverrideLiveAppliesBackDownToOffDefault() {
+  // MINECRAFT-543: same "revert to documented default on removal" requirement as
+  // rotorAngularDampingCoefficient above - an operator who previously configured this and then
+  // removes that config entry entirely must see the live vehicle actually fall back to the
+  // documented off default (0.0) on the next reload, the zero/off-parity hot-reload requirement.
+  var target = Overrides.defaultTuning();
+  target.rotorAirDragCoefficient = 0.9;
+  var fresh = Overrides.defaultTuning(); // no override at all -> FALLBACK default (0.0)
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(0.0, target.rotorAirDragCoefficient, "must revert to the documented off (0.0) default once the override is removed");
+  assertTrue(applied.contains("rotorAirDragCoefficient"), "the revert-to-default must itself be reported as an applied live change");
  }
 
  @Test void removingAToeOverrideLiveAppliesBackDownToTheUnconfiguredNullNoOp() {
