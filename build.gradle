@@ -177,6 +177,12 @@ neoForge {
    if (System.getenv('DIV_INSTALLED_PART_HITCH_FRAME_PROBE') == 'true') {
     jvmArgument('-Ddiv.experimentalInstalledPartHitchFrameProbe=true')
    }
+   // Ticket MINECRAFT-546 review (comment 54231/54232): opt-in real end-to-end /div tuning
+   // command/adapter probe - same gating pattern as every other probe above; OFF for every
+   // normal `gradle runServer`.
+   if (System.getenv('DIV_TUNING_COMMAND_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalTuningCommandProbe=true')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }

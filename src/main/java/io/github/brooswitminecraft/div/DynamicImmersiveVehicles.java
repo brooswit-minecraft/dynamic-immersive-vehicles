@@ -141,5 +141,13 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSurfaceHotReloadProbe.maybeRun(overworld);
   });
+  // Ticket MINECRAFT-546 review (comment 54231/54232): opt-in, CI/isolated-host-only real
+  // end-to-end /div tuning command/adapter probe, proving the fixed wrapper/entity lookup
+  // against a real spawned vehicle - OFF by default, a strict no-op otherwise. Spawns and
+  // removes its own bounded test vehicle only - see TuningCommandProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.TuningCommandProbe.maybeRun(overworld);
+  });
  }
 }

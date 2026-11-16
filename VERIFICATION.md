@@ -3531,3 +3531,54 @@ new cases).
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `0fd62848020956792499d965cf6839c67848ec7c9981b82eb4cc88fbc170acaa`)
 was produced.
+
+**Live probe proof of the fixed wrapper/entity lookup (2026-11-16, John's
+comment 54231/review 54232).** John asked that the bounded live probe
+(abandoned earlier in this ticket's history once the seam-based approach
+looked sufficient) be revived specifically to demonstrate the fresh-
+wrapper lookup and actual command output at this fix's exact head, since
+`TuningCommandAdapterTest`'s null-safety/field-existence cases alone do
+not exercise a real `BuilderEntityExisting` holding a freshly spawned
+`EntityVehicleF_Physics`. Restored `TuningCommandProbe` (opt-in via
+`-Ddiv.experimentalTuningCommandProbe=true`, same convention as every
+other probe in this package): spawns one minimal real vehicle, selects
+it via the REAL wrapping Minecraft entity's own UUID (never `vehicle.
+uniqueUUID` - the exact mismatch comment 54227's fix addressed), and
+dispatches `div tuning <uuid>` through the REAL registered dispatcher
+with a real `CommandSourceStack` wrapping a capturing `CommandSource`.
+
+Two real fixture problems were found and fixed along the way, both in
+the PROBE itself, not production code: (1) `level.getEntities(Entity,
+AABB,Predicate)` returned empty even over an astronomically large AABB
+and after confirming chunk-readiness via `getChunkNow` - replaced with
+`ServerLevel.getAllEntities()` (a direct iterable over every tracked
+entity, no AABB/section lookup involved), which found it immediately;
+(2) force-loading a chunk is not synchronously complete - polling
+`getChunkNow` (the same real readiness check `FlightRotorRuntimeFixtureProbe`'s
+own spawn-gating already uses) instead of a fixed tick count was the
+actual fix for an earlier "No entity was found" failure.
+
+Live run result: `vehicle.uniqueUUID` and the wrapping Minecraft entity's
+own `getUUID()` were CONFIRMED DIFFERENT (`sameUUID=false`) - direct live
+confirmation of comment 54227's own finding, now observed on an actual
+running server, not only from decompiled bytecode. Dispatching `div
+tuning <the real Minecraft-side UUID>` through the real dispatcher
+returned `result=1` (success) and captured 46 real rendered response
+lines through the real `sendSuccess` path, including the seeded operator
+override (`driveForce=4321.0`, tagged `operator override`) and the
+vehicle's own key - `[DIV tuningCommandProbe] COMPLETE - PASSED`. This is
+live, real proof that `TuningCommand.wrappedMtsEntity`'s reflective
+accessor correctly resolves a freshly-spawned (never saved/loaded)
+vehicle end-to-end through the real command, closing exactly the gap the
+review named.
+
+Local slot-lock coordination (`/tmp/div-gradle-slot.lock` flock held for
+the probe's own full `gradle runServer` lifetime, including bounded
+server cleanup via `stop`). Re-ran the full suite afterward at the same
+head: `/tmp/gradle-8.14/bin/gradle --no-daemon clean test build
+--console=plain` - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**837 tests** (unchanged - the probe is a live-server-only opt-in path,
+not a JUnit test), 0 skipped, 0 failures, 0 errors.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `939e7190385adf2547d64b723911914f5b753f778b03db9b07d5858229c0d10b`)
+was produced.
