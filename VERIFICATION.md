@@ -4097,3 +4097,101 @@ the remaining bounds. If it instead finds a coupled treatment, that
 would directly explain the Z-axis residual from source alone, without
 any new live run. Not performed in this pass - reported as the proposed
 next decision, not executed.
+
+**Authorized read of `generic_joint_constraint.rs`/
+`joint_velocity_constraint.rs`, John's comment 54298 - read-only, no
+run/build/instrumentation/edit performed.** Fetched both files at the
+confirmed-matching Rapier revision via `gh api`.
+
+**What the actual solver equations establish.** `GenericJointConstraint::
+lock_axes` (in `generic_joint_constraint.rs`) builds ONE SEPARATE scalar
+constraint row PER LOCKED AXIS - looping `for i in 0..DIM` (linear) and
+`for i in DIM..SPATIAL_DIM` (angular) independently, calling
+`lock_linear_generic`/`lock_angular_generic` once per set bit in
+`locked_axes`. For THIS fixture's ordinary connection (`LINEAR_X|
+LINEAR_Y|LINEAR_Z` only, no angular bits), this produces exactly 3
+per-axis rows (X, then Y, then Z, in that loop order) and ZERO angular
+rows - there is no explicit, separate angular-lock constraint for this
+connection type, confirming the earlier assumption that angular change
+comes only through the linear constraints' own coupling, not a direct
+angular lock.
+
+**However, each of those 3 rows is NOT a simple point-mass impulse.**
+`JointConstraint::solve_generic` (`joint_velocity_constraint.rs`)
+computes, per row, a SCALAR `delta_impulse` from the CURRENT
+`solver_vel` state of both bodies, then applies it via BOTH
+`lin_impulse = self.lin_jac * delta_impulse` (linear) AND
+`ii_ang_impulse1/2 = self.ii_ang_jac1/2 * delta_impulse` (angular,
+precomputed inverse-inertia×lever-arm Jacobian terms) - updating
+`solver_vel.angular` as part of EVERY axis's own solve, not only via a
+separate post-hoc `r×J` step. Critically, this happens SEQUENTIALLY
+(Gauss-Seidel) - axis X's solve updates both bodies' linear AND angular
+`solver_vel` state BEFORE axis Y's own `dangvel`/`dlinvel` terms (which
+read that same, now-updated `solver_vel`) are computed, and likewise
+into Z. Rapier's own default `IntegrationParameters` (read from
+`integration_parameters.rs` at the same revision) runs this full 3-row
+pass `num_solver_iterations` = 4 times per substep by default (NOT
+confirmed whether Sable overrides this default - not checked in this
+pass).
+
+**This changes the diagnostic plan's own model, not its conclusion.**
+The earlier hand check (`Δv_towed → J → Δω_towed` via a single combined
+`r×J`) is now confirmed to be a genuine SIMPLIFICATION of the real
+mechanism: the actual process is 3 sequential scalar per-axis solves,
+each independently coupling into angular velocity, repeated across
+(unconfirmed count of) solver iterations and 2 confirmed substeps. A
+sequential, iterated, per-axis process can plausibly diverge from a
+single simultaneous 3D impulse's prediction, particularly for large
+errors/velocities - **but per instruction, this structural difference is
+NOT concluded to explain the measured Z residual by itself.** Doing that
+would still require the blocked/assumed quantities already listed
+(actual orientation, actual per-axis effective masses/Jacobians from
+real world-space state, the actual solver iteration count, and each
+axis's own intermediate `solver_vel` state after the PRECEDING axis's
+solve within the same iteration) - none of which are available from
+retained data, and reading this source cannot retroactively produce
+them, exactly as instructed.
+
+**Four provenance/claim corrections to the previous two entries, John's
+comment 54298:**
+
+1. The embedded `38e92f1` debug paths are evidence of **Rapier lineage
+   only** - they say nothing about Sable's OWN wrapper source
+   (`joints.rs`) or its `config.rs` spring constants (`550.0`/`4.0`),
+   which are Sable's own values, compiled separately from the Rapier
+   dependency. That correspondence remains at the same-declared-version
+   level stated earlier, not newly strengthened by this binary check.
+2. **Tick-ordering claim upgraded from provisional to bytecode-confirmed,
+   for the specific HEAD injection.** Extracted
+   `dev/ryanhcode/sable/mixin/plot/ServerLevelMixin.class` directly from
+   the cached jar (the actually-loaded artifact, not the separate source
+   checkout) and disassembled it (`javap -v -p`): its
+   `RuntimeVisibleAnnotations` show
+   `@Inject(method=["tick(Ljava/util/function/BooleanSupplier;)V"],
+   at=@At(value="HEAD"))` on `sable$tickPlotContainer`, which calls
+   `ServerSubLevelContainer.tick()` when `tickRateManager.runsNormally()`
+   - confirmed directly from the loaded bytecode, not assumed from
+   source. The FURTHER link from `ServerSubLevelContainer.tick()` down to
+   `SubLevelPhysicsSystem.tickPipelinePhysics`'s own substep loop was
+   NOT independently re-verified at the bytecode level in this pass -
+   that specific link remains sourced from the separate checkout only.
+3. **`substeps_per_tick=2` is this worktree's CURRENT config, not a
+   retained historical receipt for `diag5`'s own run.** No config
+   snapshot was captured as part of that run's own retained evidence;
+   whether it used the same value at that time is not established,
+   corrected from the prior entry's unqualified phrasing.
+4. **Mass/inertia relabeled: an assumption/input, not a numerical
+   bound.** The Java-side `BoxMassData` formula is what DIV/Sable's own
+   Java code SENDS to the native layer at construction - stating it as
+   a "bound" implied a proven constraint on the true value, which it is
+   not absent a read-back accessor (still blocked, as already stated).
+
+**Still not established; still the next decision, unchanged in
+substance:** reading these two files did not retroactively produce any
+of the actual historical state this specific event would need (real
+orientation, confirmed iteration count, confirmed native inertia). The
+smallest next measurement remains what the prior entry already named -
+logging orientation alongside the existing velocity capture for a NEW
+occurrence of the SAME reconnect event - now with the correct
+sequential-per-axis model in hand rather than the oversimplified
+single-impulse one, but still not run in this pass.
