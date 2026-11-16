@@ -119,6 +119,28 @@ public final class FlightForces {
   return (aspectRatio > 0 && !isBlimp) ? fixedWingAngularDampingCoefficient : 0.0;
  }
 
+ /**
+  * MINECRAFT-541 (review kickback correction, comment 54361): gates {@code Overrides.
+  * Tuning#aileron/elevator/rudderAuthorityScale} the exact same "fixed-wing only, never a
+  * blimp" way {@link #gatedFixedWingAngularDampingCoefficient} above already gates
+  * MINECRAFT-542's own field - on the authoritative {@code motorized.isBlimp} classification,
+  * not merely an aspect-ratio check, since a blimp definition can itself carry a positive
+  * {@code wingArea}/{@code wingSpan} (e.g. stabilizer fins, or a copied/mistaken config) and
+  * still have nonzero {@code aileron/elevatorArea}/{@code rudderArea} control-surface geometry.
+  * Returns the documented no-op {@code 1.0} (never the configured scale) for a blimp regardless
+  * of how it or its wing/control-surface geometry are configured, so {@code PhysicsBridge.
+  * stepFlight}'s resulting aileron/elevator/rudder torque - and therefore the blimp's angular
+  * motion - stays completely unaffected by this field, matching the ticket's "preserve non-
+  * fixed-wing/blimp behavior" requirement exactly rather than merely still-scaled-by-something.
+  * Only a non-blimp fixed wing gets the configured scale passed through unchanged. Extracted as
+  * its own pure, unit-testable function (same reasoning {@code
+  * gatedFixedWingAngularDampingCoefficient} above was extracted for) rather than an inline
+  * ternary at {@code stepFlight}'s own untestable live call site.
+  */
+ public static double gatedControlAuthorityScale(boolean isBlimp, double controlAuthorityScale) {
+  return isBlimp ? 1.0 : controlAuthorityScale;
+ }
+
  /** Aerodynamic force magnitude for one coefficient/area pair at this dynamic pressure. */
  public static double aeroForce(double coefficient, double area, double dynamicPressure) {
   return coefficient * area * dynamicPressure;

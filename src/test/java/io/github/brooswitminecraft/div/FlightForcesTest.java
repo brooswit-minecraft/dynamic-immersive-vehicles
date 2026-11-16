@@ -273,6 +273,40 @@ class FlightForcesTest {
   assertEquals(0, FlightForces.controlSurfaceForce(0,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,3.0));
  }
 
+ // Review kickback correction (comment 54361): aileron/elevator/rudderAuthorityScale must be
+ // gated the exact same "fixed-wing only, never a blimp" way MINECRAFT-542's own
+ // gatedFixedWingAngularDampingCoefficient already gates its field - a blimp that happens to
+ // carry nonzero control-surface geometry and a non-unit configured/inherited scale must still
+ // see exactly the unscaled (1.0) torque, never the configured scale applied.
+
+ @Test void gatedControlAuthorityScaleIsOneForABlimpRegardlessOfTheConfiguredScale() {
+  assertEquals(1.0, FlightForces.gatedControlAuthorityScale(true, 4.0), "a blimp must always get the 1.0 no-op regardless of the configured scale");
+  assertEquals(1.0, FlightForces.gatedControlAuthorityScale(true, 0.0), "even an explicit 0.0 configured scale must be gated to the 1.0 no-op for a blimp");
+  assertEquals(1.0, FlightForces.gatedControlAuthorityScale(true, 5.0), "even the maximum configured scale must be gated to the 1.0 no-op for a blimp");
+ }
+
+ @Test void gatedControlAuthorityScalePassesThroughUnchangedForAnActualNonBlimpWing() {
+  assertEquals(4.0, FlightForces.gatedControlAuthorityScale(false, 4.0), "a non-blimp fixed wing must pass the configured scale through unchanged");
+  assertEquals(0.0, FlightForces.gatedControlAuthorityScale(false, 0.0), "the explicit 0.0 (disable this axis) value must also pass through unchanged on an actual wing");
+ }
+
+ @Test void productionPathRegressionBlimpWithPositiveControlSurfaceGeometryAndNonUnitScaleSeesUnchangedTorque() {
+  // The actual production-path regression the review kickback required: a blimp with POSITIVE
+  // control-surface geometry (e.g. stabilizer fins with a real aileronArea) and a non-unit
+  // configured/inherited aileronAuthorityScale must still produce EXACTLY the same torque a
+  // non-blimp fixed wing would get at the documented 1.0 no-op scale - proving the gate, not
+  // merely the gate function's return value in isolation, actually reaches the real production
+  // controlSurfaceForce call this ticket added.
+  double deflection = 0.15, area = 3.0, dynamicPressure = 400.0, controlSurfaceSlope = FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE;
+  double configuredNonUnitScale = 2.5;
+  double blimpEffectiveScale = FlightForces.gatedControlAuthorityScale(true, configuredNonUnitScale);
+  double blimpForce = FlightForces.controlSurfaceForce(deflection, area, dynamicPressure, controlSurfaceSlope, blimpEffectiveScale);
+  double unscaledBaselineForce = FlightForces.controlSurfaceForce(deflection, area, dynamicPressure, controlSurfaceSlope, 1.0);
+  assertEquals(unscaledBaselineForce, blimpForce, 1e-9, "a blimp with positive control-surface geometry and a non-unit configured scale must still see exactly the unscaled baseline torque");
+  double unguardedScaledForce = FlightForces.controlSurfaceForce(deflection, area, dynamicPressure, controlSurfaceSlope, configuredNonUnitScale);
+  assertNotEquals(unguardedScaledForce, blimpForce, 1e-9, "sanity check: the configured non-unit scale must actually differ from 1.0's effect, so this regression is not vacuous");
+ }
+
  @Test void thrustIsZeroAtZeroThrottle() {
   assertEquals(0, FlightForces.thrust(0,10000));
  }

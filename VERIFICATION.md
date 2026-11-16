@@ -4518,3 +4518,70 @@ fresh independent exact-head re-review and authorization before any merge
 - the prior approval at `03a9624` does not carry over. No merge action
 taken by this entry; reported on the ticket for the existing
 parent-arranged independent reviewer.
+
+## Review kickback correction: blimp unit-gate (MINECRAFT-541, 2026-11-16)
+
+**Required change (self-review kickback, comment 54361).** The item
+earlier recorded above as M542's reviewer's own "nonblocking" PR #44
+follow-up was escalated by this ticket's own reviewer to a REQUIRED
+correction at exact head `f69a643`: `PhysicsBridge.java` passed
+`aileron/elevator/rudderAuthorityScale` unconditionally in `stepFlight`,
+which serves both fixed-wing aircraft AND blimps - a blimp with nonzero
+control-surface geometry and a configured/inherited non-`1.0` scale
+therefore received changed torque, violating the ticket's own explicit
+"preserve non-fixed-wing/blimp behavior" requirement and the documented
+fixed-wing-only contract. The review named the exact fix shape: gate via
+the authoritative classification (mirroring MINECRAFT-542's own
+established pattern for exactly this class of bug) while preserving
+fixed-wing per-axis behavior and the `rudderDeflection - sideslip`
+ordering, plus a production-path regression for a blimp with positive
+geometry and a non-unit configured scale.
+
+Fix: new `FlightForces.gatedControlAuthorityScale(boolean isBlimp, double
+controlAuthorityScale)` - returns the documented `1.0` no-op for a blimp
+regardless of its configured/inherited scale or wing/control-surface
+geometry, the configured scale unchanged otherwise. Same shape as
+MINECRAFT-542's own `gatedFixedWingAngularDampingCoefficient` (gated on
+the authoritative `motorized.isBlimp`, not merely a geometry check, since
+a blimp can itself carry positive wing/control-surface geometry).
+`PhysicsBridge.stepFlight` now computes `effectiveAileron/Elevator/
+RudderAuthorityScale` through this gate before each axis's existing
+`FlightForces.controlSurfaceForce` call - the shared `controlSurfaceSlope`,
+native areas, externally-applied `wingArm`/`tailArm` lever arms, and the
+`rudderDeflection - sideslip` ordering (still computed and passed in
+exactly as before, unchanged) are all untouched; only which authority
+scale reaches the existing call site changed.
+
+`FlightForcesTest` covers the gate in isolation
+(`gatedControlAuthorityScaleIsOneForABlimpRegardlessOfTheConfiguredScale`/
+`gatedControlAuthorityScalePassesThroughUnchangedForAnActualNonBlimpWing`,
+mirroring `gatedFixedWingAngularDampingCoefficient`'s own two tests
+exactly) plus the actual production-path regression the review required
+(`productionPathRegressionBlimpWithPositiveControlSurfaceGeometryAndNonUnitScaleSeesUnchangedTorque`):
+a blimp with a POSITIVE `area` (representing real control-surface
+geometry, e.g. stabilizer fins) and a non-unit configured scale (`2.5`)
+run through the real `FlightForces.controlSurfaceForce` production call
+produces EXACTLY the same force as the unscaled (`1.0`) baseline would -
+proving the gate reaches the actual production formula, not merely that
+the gate function itself returns the right value in isolation - with an
+explicit non-vacuousness check that the configured scale actually would
+have differed if left unguarded.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+at this fix's head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**882 tests**, 0 skipped, 0 failures, 0 errors (879 from the prior head
+plus these 3 new tests, confirming no regression anywhere else in the
+suite).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `d395ff539c62981b337a25428612e49008373f9e0f1d44a07f6fa06e393d85dc`)
+was produced.
+
+No code, tests, or merge action was taken by the reviewer per their own
+disclosure; this fix and its evidence are produced solely by the
+implementation owner, as required. GitHub #44 (M542's reviewer's own
+nonblocking follow-up) can now be closed/updated to reflect that this
+ticket's own fields are fixed, independent of whatever scope #44 still
+tracks for other fields, if any remain.

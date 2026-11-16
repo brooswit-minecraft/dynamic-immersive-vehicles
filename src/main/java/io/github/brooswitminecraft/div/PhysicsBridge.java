@@ -2880,6 +2880,15 @@ public final class PhysicsBridge {
    * tick, same as every other live-safe field below; FALLBACK 1.0 reproduces the exact prior
    * controlSurfaceSlope-only torque for an unconfigured vehicle.
    *
+   * <p>MINECRAFT-541 (review kickback correction, comment 54361): each axis's scale is passed
+   * through {@link FlightForces#gatedControlAuthorityScale} first - gated on {@code
+   * motorized.isBlimp} (the authoritative classification, same reasoning MINECRAFT-542's own
+   * {@code gatedFixedWingAngularDampingCoefficient} gate below already uses for a blimp that can
+   * itself carry positive wing/control-surface geometry) - so a blimp always gets the documented
+   * {@code 1.0} no-op regardless of its configured/inherited scale, preserving this ticket's own
+   * "preserve non-fixed-wing/blimp behavior" requirement exactly. Only a non-blimp fixed wing
+   * gets its configured scale passed through unchanged.
+   *
    * <p>MINECRAFT-542: {@code tuning.fixedWingAngularDampingCoefficient} additionally ADDS (never
    * replaces) a bounded, dissipative angular-rate damping torque on top of the aileron/elevator/
    * rudder control torque above, via {@link #rotorAngularDampingTorque} / {@link
@@ -2943,9 +2952,17 @@ public final class PhysicsBridge {
    double aileronDeflection=Math.toRadians(v.aileronInputVar.currentValue);
    double elevatorDeflection=Math.toRadians(v.elevatorInputVar.currentValue);
    double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
-   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope,tuning.aileronAuthorityScale)*wingArm;
-   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope,tuning.elevatorAuthorityScale)*tailArm;
-   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope,tuning.rudderAuthorityScale)*tailArm;
+   // MINECRAFT-541 (review kickback correction, comment 54361): gate each axis's authority
+   // scale on the authoritative motorized.isBlimp classification via
+   // FlightForces.gatedControlAuthorityScale (same shape as MINECRAFT-542's own
+   // gatedFixedWingAngularDampingCoefficient immediately below) - a blimp always gets the
+   // documented 1.0 no-op regardless of configured scale or wing/control-surface geometry.
+   double effectiveAileronAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.aileronAuthorityScale);
+   double effectiveElevatorAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.elevatorAuthorityScale);
+   double effectiveRudderAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.rudderAuthorityScale);
+   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveAileronAuthorityScale)*wingArm;
+   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveElevatorAuthorityScale)*tailArm;
+   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveRudderAuthorityScale)*tailArm;
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
    // MINECRAFT-542: tuning.fixedWingAngularDampingCoefficient is read live off this tick's tuning
    // object, same as stallAngleDegrees/liftSlope/controlSurfaceSlope/parasiticDragMultiplier/
