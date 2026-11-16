@@ -4290,4 +4290,106 @@ claim/release logged to `/tmp/div-gradle-slot.owner` exactly as every
 prior run in this ticket. Only after a clean stop and lock release:
 copy the run's complete log into the new evidence directory as above.
 
-Not executed. Awaiting explicit authorization to run, per instruction.
+**John's comment 54337 authorized exactly this ONE run; executed.**
+Acknowledging scope: one bounded instrumented rerun of the ORIGINAL
+`BuoyantHitchProbe` reconnect scenario, under the existing lock, no
+fixture/tuning substitution, no new worker.
+
+Added `PhysicsBridge.debugReadPose` (explicitly documented as the box's
+own cached `Pose3dc`, refreshed only by that body's own prior `step()`
+call) and logged pose/world-space-anchor-position/`gameTime` at the
+existing `createHitchDiagnostic` (both bodies) and the probe's own
+`pre-remove()` sample. Pre-launch snapshot captured first: `HEAD`
+(`bda28b0` + this diff), uncommitted diff, `run/config/*` files, and
+checksums of the actual native binary/jar.
+
+Ran under the exclusive lock (after a legitimate ~3-minute wait for two
+other concurrent sprint agents' own test runs to finish - never forced).
+One real operational mistake, corrected before any gradle process
+started: the first FIFO-based stdin attempt deadlocked (opening a FIFO
+for read blocks until a writer exists) - no gradle process ever
+launched, no world/log ever created, nothing needed restoring; logged
+honestly in `/tmp/div-gradle-slot.owner` and the stuck wrapper killed to
+free the lock before retrying with a read-write FIFO open that doesn't
+block. The actual run: `BuoyantHitchProbe` reproduced the known
+`TOWING_REPLACEMENT` crash exactly as every prior run (`FAILED - left
+bounded area`, tick 8) - same reproducer, unmodified. Sent an orderly
+`stop` via the FIFO once the probe's own terminal phase and chunk-
+release log line were confirmed; verified "Stopping server" / "All
+dimensions are saved" / `BUILD SUCCESSFUL` in the log, then released the
+lock (confirmed free via `flock -n`). No leftover `java`/`gradle`
+processes; no `server.log`/`server.stdin` left in the worktree. Full
+evidence retained at
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-authrun-probe2-20261116T140742Z/`
+(server.log, pre-launch HEAD/diff/config/artifact-checksum snapshot,
+post-run checksums).
+
+**Coverage/verification gaps, per John's comments 54344/54346 (received
+mid-run; the run had already started by 22:05 UTC, so per 54346's own
+"do not interrupt/duplicate" instruction it was allowed to complete -
+not re-run to patch these, reported honestly instead):**
+- Both bodies' pose/anchor-world ARE captured at the RECONNECT bracket
+  (`createHitchDiagnostic` logs both `towing` and `trailer`). At the
+  POST bracket (`pre-remove()`), only `towed`'s pose was added -
+  `towing`'s own pose at that second point was NOT captured. This run
+  cannot speak to `towing`'s own orientation change across the interval,
+  only `towed`'s.
+- The `ONE_TICK_STALE`/`CURRENT_THIS_TICK` labels are based on source-
+  level call-ordering reasoning (`active()` precedes `step()` in
+  `VehicleMovementMixin.div$move`, and Sable's own physics step runs at
+  `ServerLevel.tick()`'s `HEAD` - the latter bytecode-confirmed in an
+  earlier entry, the former not independently re-verified via an actual
+  event/tick marker AT this exact sampling site). `gameTime` DOES
+  numerically confirm the two brackets are exactly one Minecraft tick
+  apart (9703→9704) - that part is solid; the PRECISE staleness of the
+  POSE value itself within that tick is still inferred from source, not
+  from a dedicated marker - more honestly "assumed one-tick stale by
+  call-ordering reasoning," not independently proven.
+- The probe's own `pre-remove()` anchor-world calculation uses a
+  HARDCODED `(0,-0.3,1.0)` offset rather than reading the actual
+  `hookupLocalOffset` this exact connection computed (logged separately,
+  inside `createHitch`) - it happens to match that logged value exactly
+  for this fixture, but is not derived/verified from the connection
+  object at that call site. A real, specific limitation, not fixed in
+  this run.
+
+**Measured result, using the RECONNECT-bracket data only (where both
+bodies' real orientation IS captured) - redone with the ACTUAL measured
+quaternions this time, not the identity-orientation shortcut:**
+`towing` orientation `(-0.563,-0.142,0.807,-0.11)`, `trailer` orientation
+`(0.148,0.11,-0.982,0.036)` (both far from identity - confirming the
+earlier flagged assumption was indeed wrong for both bodies, not just
+`towed`). Rotating each body's own lever arm by its REAL measured
+orientation and recomputing the same `Δv=J/m`, `Δω=I⁻¹(r×J)` check:
+linear momentum balance tightens (X/Z now match closely; Y's ~7.6%
+residual is unchanged, consistent with it coming from independent per-
+tick forces, not orientation). **Angular: the residual PERSISTS
+substantially on both bodies even with the real, correctly-rotated
+lever arm** - `towed`'s predicted `Δω≈(-49.5,-18.0,-14.5)` vs actual
+`(-73.1,-13.9,+88.0)` (one axis wrong-signed and ~6x too large);
+`towing`'s predicted `≈(-12.6,-7.4,-49.4)` vs actual
+`(-41.4,-12.5,-3.3)` (one axis right-signed but ~15x too small).
+
+**Per John's explicit interpretation guidance, stated as given, not
+reinterpreted:** orientation capture eliminates a major unknown but is
+NOT itself a solver-defect discriminator; native inertia and unmeasured
+force contributions remain unknown; convergence is not inferred from
+iteration count; this residual is NOT called a solver anomaly; aggregate
+impulse accounting remains valid under fixed Jacobians regardless of
+scalar solve ordering - the persisting residual is consistent with
+EITHER a genuine Sable/Rapier-side effect OR this simple model's own
+remaining gaps (still-unconfirmed native inertia, un-isolated per-
+substep external force/torque contributions from `BuoyantForces` acting
+independently of the joint, and the true sequential multi-axis solve
+structure - not a single combined impulse - found in the prior entry).
+Reproduction/non-reproduction: reproduced, exactly as every prior run.
+
+**ONE next decision:** the smallest remaining unaccounted variable that
+is tractable without a new live run is isolating `BuoyantForces.apply`'s
+own per-substep force/torque contribution (a bound computable from its
+already-known Java formula against the measured pre-interval
+pose/velocity, as scoped in the prior entry) - not yet done. Confirming
+or ruling out native inertia and the true per-axis sequential solve's
+own aggregate effect both remain blocked/require further source reading
+respectively, not a new run. No further live measurement proposed or
+executed beyond the one authorized here.
