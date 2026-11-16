@@ -3663,3 +3663,79 @@ codebase, and genuinely beyond what this agent's own sandboxed
 environment and scope provide. No further live experiment is attempted
 here on this specific question, consistent with the standing instruction
 against blind experimentation once a seam this precise has been located.
+
+**Retraction and correction (John's comment 54267): external source was
+NOT actually unreachable (`gh api` against `github.com/ryanhcode/rapier`
+at the pinned revision works fine - confirmed live), and Sable has its
+OWN in-repo Rust JNI implementation
+(`sable_rapier/src/main/rust/rapier/src/joints.rs`) that a keyword-only
+grep had skimmed past without reading its actual control flow - an
+overlooked, in-scope seam, not an external one. First verified the exact
+installed Sable revision: the local checkout at
+`sable-local` is tagged `mc1.21.1-2.0.5-fabric-3-geb2a698` (commit
+`eb2a698`), matching this worktree's own dependency
+(`dev.ryanhcode.sable:sable-neoforge-1.21.1:2.0.5`) exactly - so the
+earlier reading WAS of the correct revision, just not read carefully
+enough.**
+
+Read `joints.rs` in full: `Java_..._addGenericConstraint` builds the
+joint via `GenericJointBuilder` (which leaves `local_anchor1`/
+`local_anchor2` at their zero/origin default - the REAL anchor offsets,
+`pos_a`/`pos_b` minus center-of-mass, are only installed later by a
+SEPARATE function, `joints::tick`), then calls
+`sim_data.impulse_joint_set.insert(rb_a, rb_b, joint.build(), true)` -
+this is a genuinely real, previously-overlooked detail: the joint is
+inserted with WRONG (origin-to-origin) anchors at `insert()` time.
+
+**Discriminating check performed (not an asserted cause, per
+instruction): does a native solve ever run against those wrong
+default anchors before `joints::tick` installs the real ones?** Found
+`joints::tick(scene)` is called from exactly one place that also calls
+the actual solve, `Java_..._step` (the sole call site for
+`sim.pipeline.step(...)`, confirmed by grep - no other call site
+exists) - and `joints::tick` runs IMMEDIATELY BEFORE `pipeline.step()`,
+in the same native function, every single invocation, no gap. So by the
+time any solve happens, the real anchors are always already installed.
+
+**Followed the SAME question into Rapier's own upstream source itself**
+(fetched directly via `gh api repos/ryanhcode/rapier/contents/...?ref=
+38e92f117590862481a53df6fc69a5d893e29186` - confirming external source
+access works fine): `rapier3d`'s own `ImpulseJointSet::insert` (`src/
+dynamics/joint/impulse_joint/impulse_joint_set.rs`) adds both bodies to
+`to_wake_up` and the pair to `to_join` - its own doc comment: "A set of
+rigid-body pairs to join in the island manager during the next
+timestep" - a genuinely deferred operation, not immediate. Checked
+`PhysicsPipeline::step` (`src/pipeline/physics_pipeline.rs`): both
+`to_wake_up` and `to_join` are drained and applied at the very START of
+`step()` (the "user_changes" stage), unconditionally, BEFORE collision
+detection or any solving - every single `step()` call, regardless of
+whether a body was just inserted this exact tick or has been resident
+for thousands of ticks.
+
+**Result: this specific discriminating question is answered NO, at
+both the Sable-wrapper layer and the Rapier-core layer, with exact
+source citations rather than inference.** Neither the deferred-anchor-
+install mechanism in `joints.rs` nor the deferred-island-join mechanism
+in `ImpulseJointSet`/`PhysicsPipeline` introduces any gap, and neither
+treats a freshly-inserted body differently from an already-resident
+one - both are flushed unconditionally before the first solve, every
+time. This retracts the premature "all Java/Rust-side candidates
+exhausted, must be external Rapier" framing from the previous
+subsection - that framing was reached without having actually read
+Sable's own in-repo Rust code at all, only grepped it for keywords. Now
+having read it (and the relevant upstream Rapier source it calls into),
+this SPECIFIC timing-gap mechanism is cleanly ruled out, not merely
+assumed unreachable.
+
+What remains unexamined, and is the next genuinely narrower candidate:
+the actual numerical solver/constraint-resolution passes themselves
+(warm-started impulse state, velocity/position solver iteration order)
+once a joint IS correctly installed and its island correctly joined -
+whether an already-stepped body carries forward solver state (e.g. from
+its own prior settling) that interacts differently with a brand-new
+joint's zero-initialized impulse than a freshly-inserted body (which has
+no such history) would. Not yet investigated - this would require
+reading the actual solver code
+(`src/dynamics/solver/island_solver.rs`/`parallel_island_solver.rs` and
+the velocity/position constraint types beneath them), a deeper dive than
+what has been done so far.
