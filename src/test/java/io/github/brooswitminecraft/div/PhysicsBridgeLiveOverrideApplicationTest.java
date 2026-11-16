@@ -49,6 +49,10 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   // PhysicsBridge.applyLiveSafeFields mutations but never actually exercised them here, so the
   // test stayed green even if those lines were removed).
   fresh.longitudinalWaterDragMultiplier = 2.5; fresh.lateralWaterDragMultiplier = 0.4; fresh.verticalWaterDragMultiplier = 3.0;
+  // MINECRAFT-539: suspensionDampingRatioFront/Rear and suspensionSpringMultiplierFront/Rear
+  // must go through this same live-mutation path too.
+  fresh.suspensionDampingRatioFront = 1.2; fresh.suspensionDampingRatioRear = 0.9;
+  fresh.suspensionSpringMultiplierFront = 1.8; fresh.suspensionSpringMultiplierRear = 0.75;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
@@ -66,9 +70,12 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
   assertEquals(true, target.axleDriveForceSharing);
   assertEquals(2.5, target.longitudinalWaterDragMultiplier); assertEquals(0.4, target.lateralWaterDragMultiplier); assertEquals(3.0, target.verticalWaterDragMultiplier);
+  assertEquals(1.2, target.suspensionDampingRatioFront); assertEquals(0.9, target.suspensionDampingRatioRear);
+  assertEquals(1.8, target.suspensionSpringMultiplierFront); assertEquals(0.75, target.suspensionSpringMultiplierRear);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","marineSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
       "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing",
-      "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier"),
+      "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier",
+      "suspensionDampingRatioFront","suspensionDampingRatioRear","suspensionSpringMultiplierFront","suspensionSpringMultiplierRear"),
     new TreeSet<>(applied));
  }
 
@@ -177,6 +184,25 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(30.0, target.marineSteerDegrees, "must revert to inheriting the resolved maxSteerDegrees (the FALLBACK, 30.0) once the override is removed");
   assertEquals(30.0, target.maxSteerDegrees, "fresh's own maxSteerDegrees (the FALLBACK) must also apply live, same as any other reload");
   assertTrue(applied.containsAll(List.of("marineSteerDegrees","maxSteerDegrees")), "the revert-to-inherited must itself be reported as an applied live change");
+ }
+
+ @Test void removingAnAxleSuspensionOverrideLiveAppliesBackDownToTheUnconfiguredNullNoOp() {
+  // MINECRAFT-539: same "no FALLBACK entry" shape as toeFrontDegrees/toeRearDegrees above - an
+  // operator who removes a previously-configured axle-specific spring/damping entry must see the
+  // live vehicle actually go back to null (inherit the vehicle-wide base value via
+  // AxleSuspensionDistribution), not get stuck at its last explicit axle-specific value.
+  var target = Overrides.defaultTuning();
+  target.suspensionDampingRatioFront = 1.2; target.suspensionDampingRatioRear = 0.9;
+  target.suspensionSpringMultiplierFront = 1.8; target.suspensionSpringMultiplierRear = 0.75;
+  var fresh = Overrides.defaultTuning(); // no override at all -> stays null, same as unconfigured
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertNull(target.suspensionDampingRatioFront, "must revert to unconfigured (null, inherit base ratio) once the override is removed");
+  assertNull(target.suspensionDampingRatioRear, "must revert to unconfigured (null, inherit base ratio) once the override is removed");
+  assertNull(target.suspensionSpringMultiplierFront, "must revert to unconfigured (null, inherit base multiplier) once the override is removed");
+  assertNull(target.suspensionSpringMultiplierRear, "must revert to unconfigured (null, inherit base multiplier) once the override is removed");
+  assertTrue(applied.containsAll(List.of("suspensionDampingRatioFront","suspensionDampingRatioRear","suspensionSpringMultiplierFront","suspensionSpringMultiplierRear")),
+    "the revert-to-unconfigured must itself be reported as an applied live change");
  }
 
  @Test void unchangedFieldsAreNotReportedAsApplied() {

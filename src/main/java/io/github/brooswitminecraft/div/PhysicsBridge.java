@@ -430,6 +430,13 @@ public final class PhysicsBridge {
   // suspensionSpring/suspensionSpringForShare, same "no separate cached field" shape as
   // suspensionDampingRatio immediately above.
   if (!java.util.Objects.equals(target.suspensionSpringMultiplier, fresh.suspensionSpringMultiplier)) { target.suspensionSpringMultiplier = fresh.suspensionSpringMultiplier; appliedOut.add("suspensionSpringMultiplier"); }
+  // MINECRAFT-539: stepGround reads tuning.suspensionDampingRatioFront/Rear and
+  // suspensionSpringMultiplierFront/Rear fresh every tick via AxleSuspensionDistribution, same
+  // "no separate cached field" shape as suspensionDampingRatio/suspensionSpringMultiplier above.
+  if (!java.util.Objects.equals(target.suspensionDampingRatioFront, fresh.suspensionDampingRatioFront)) { target.suspensionDampingRatioFront = fresh.suspensionDampingRatioFront; appliedOut.add("suspensionDampingRatioFront"); }
+  if (!java.util.Objects.equals(target.suspensionDampingRatioRear, fresh.suspensionDampingRatioRear)) { target.suspensionDampingRatioRear = fresh.suspensionDampingRatioRear; appliedOut.add("suspensionDampingRatioRear"); }
+  if (!java.util.Objects.equals(target.suspensionSpringMultiplierFront, fresh.suspensionSpringMultiplierFront)) { target.suspensionSpringMultiplierFront = fresh.suspensionSpringMultiplierFront; appliedOut.add("suspensionSpringMultiplierFront"); }
+  if (!java.util.Objects.equals(target.suspensionSpringMultiplierRear, fresh.suspensionSpringMultiplierRear)) { target.suspensionSpringMultiplierRear = fresh.suspensionSpringMultiplierRear; appliedOut.add("suspensionSpringMultiplierRear"); }
   // MINECRAFT-535: BuoyantForces.apply reads tuning.longitudinal/lateral/verticalWaterDragMultiplier
   // fresh every tick, same "no separate cached field" shape as waterDrag/angularWaterDrag above.
   if (!java.util.Objects.equals(target.longitudinalWaterDragMultiplier, fresh.longitudinalWaterDragMultiplier)) { target.longitudinalWaterDragMultiplier = fresh.longitudinalWaterDragMultiplier; appliedOut.add("longitudinalWaterDragMultiplier"); }
@@ -2115,6 +2122,14 @@ public final class PhysicsBridge {
    // convention. Unset tuning.toeFrontDegrees/toeRearDegrees (both null) reproduces the exact
    // pre-ticket all-zero offset.
    double[] toeRadians=AxleToeDistribution.toeRadians(loadShareX,loadShareZ,tuning.toeFrontDegrees,tuning.toeRearDegrees);
+   // MINECRAFT-539: each wheel's own EFFECTIVE spring multiplier/damping ratio - the vehicle-wide
+   // tuning.suspensionSpringMultiplier/suspensionDampingRatio resolved above, overridden per
+   // geometric axle when suspensionSpringMultiplierFront/Rear or suspensionDampingRatioFront/Rear
+   // is configured (see AxleSuspensionDistribution's own doc for the inheritance/ambiguous-layout
+   // fallback). Unset axle fields (or an ambiguous layout) reproduce the exact pre-ticket uniform
+   // per-wheel value on every wheel.
+   double[] axleSpringMultipliers=AxleSuspensionDistribution.springMultipliers(loadShareZ,tuning.suspensionSpringMultiplier,tuning.suspensionSpringMultiplierFront,tuning.suspensionSpringMultiplierRear);
+   double[] axleDampingRatios=AxleSuspensionDistribution.dampingRatios(loadShareZ,tuning.suspensionDampingRatio,tuning.suspensionDampingRatioFront,tuning.suspensionDampingRatioRear);
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
@@ -2122,8 +2137,10 @@ public final class PhysicsBridge {
     double loadShare=loadShares[wheelIdx];
     double brakeShareRatio=brakeShareRatios[wheelIdx];
     double driveShareRatio=driveShareRatios[wheelIdx];
-    double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
-    double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring,tuning.suspensionDampingRatio);
+    double wheelSpringMultiplier=axleSpringMultipliers[wheelIdx];
+    double wheelDampingRatio=axleDampingRatios[wheelIdx];
+    double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity,wheelSpringMultiplier);
+    double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring,wheelDampingRatio);
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
     boolean upperOwned=twoBodyActive && io.github.brooswitminecraft.div.experimental.TwoBodyChassis.isUpperHalf(anchor.y);
@@ -2167,7 +2184,7 @@ public final class PhysicsBridge {
     // disappear when this experimental candidate is opted in.
     Vector3d predictorPoint=new Vector3d(point).add(predictorLeverArmCorrection);
     var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
-      ? effectiveMassDamper(wheelSpring,mass,predictorPoint,up,inverse,aggregateInertiaBody,tuning.suspensionDampingRatio,wheelDamper)
+      ? effectiveMassDamper(wheelSpring,mass,predictorPoint,up,inverse,aggregateInertiaBody,wheelDampingRatio,wheelDamper)
       : new EffectiveMassDamperResult(wheelDamper, Double.NaN);
     // The vehicle-wide mass*gravity safety cap is UNCHANGED (not tightened to mass*gravity*
     // loadShare) - it is documented as a safety cap, not a load-distribution model (see
@@ -2280,8 +2297,14 @@ public final class PhysicsBridge {
      int hi=hitIndexForWheel[wi], hj=hitIndexForWheel[partnerWi];
      if (hi<0 || hj<0) continue; // one or both sides not actually grounded this tick - leave both alone
      double normalA=hits.get(hi).normal(), normalB=hits.get(hj).normal();
-     double rateA=suspensionSpringForShare(mass,loadShares[wi],tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
-     double rateB=suspensionSpringForShare(mass,loadShares[partnerWi],tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
+     // MINECRAFT-539: each side's own EFFECTIVE (axle-resolved) spring multiplier, not the flat
+     // vehicle-wide tuning.suspensionSpringMultiplier - this is the SAME per-wheel rate Phase 1
+     // above already used to build that wheel's own wheelSpring, so an anti-roll pair with an
+     // axle-specific multiplier configured sees the same calibrated rate anti-roll's own
+     // restoring-force conversion already depends on (see this class's own doc immediately above
+     // for why using the pair's own rate, not a shared one, matters).
+     double rateA=suspensionSpringForShare(mass,loadShares[wi],tuning.suspensionTravel,gravity,axleSpringMultipliers[wi]);
+     double rateB=suspensionSpringForShare(mass,loadShares[partnerWi],tuning.suspensionTravel,gravity,axleSpringMultipliers[partnerWi]);
      double t=AntiRoll.transfer(hits.get(hi).compression(),hits.get(hj).compression(),rateA,rateB,normalA,normalB,tuning.antiRollStiffness);
      newNormal[hi]=normalA+t;
      newNormal[hj]=normalB-t;
