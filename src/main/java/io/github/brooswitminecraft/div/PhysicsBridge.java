@@ -934,12 +934,28 @@ public final class PhysicsBridge {
    Logger diagnosticLogger = LogUtils.getLogger();
    RigidBodyHandle towingHandle = towing instanceof Body b ? b.handle : towing instanceof BuoyantBody bb ? bb.handle() : null;
    RigidBodyHandle trailerHandle = trailer instanceof Body b ? b.handle : trailer instanceof BuoyantBody bb ? bb.handle() : null;
+   // MINECRAFT-545/547 (John's comment 54337): pose is the box's own CACHED Pose3d, last
+   // refreshed by that body's own PRIOR step() call (box.updatePose()) - this createHitch call
+   // itself never refreshes it, and runs strictly BEFORE this same tick's own step() (active()
+   // precedes step() in VehicleMovementMixin.div$move) - so this is explicitly ONE TICK STALE
+   // relative to the box's true native pose at this instant, not a fresh read. World-space
+   // anchor position is computed from that same (stale) pose + the local offset already logged.
+   // gameTime is MTS/MC's own absolute tick counter - a real ordering marker, not mere log
+   // adjacency, usable to verify exactly how many ticks separate any two samples.
+   var towingPose = towing instanceof Body b ? b.box.getPose() : towing instanceof BuoyantBody bb ? bb.box().getPose() : null;
+   var trailerPose = trailer instanceof Body b ? b.box.getPose() : trailer instanceof BuoyantBody bb ? bb.box().getPose() : null;
+   var towingAnchorWorld = towingPose != null ? new Vector3d(hitchOffset).rotate(new Quaterniond(towingPose.orientation())).add(towingPose.position()) : null;
+   var trailerAnchorWorld = trailerPose != null ? new Vector3d(hookupOffset).rotate(new Quaterniond(trailerPose.orientation())).add(trailerPose.position()) : null;
    diagnosticLogger.info("[DIV createHitchDiagnostic] towing=" + connection.towingVehicle.uniqueUUID + " class=" + towing.getClass().getSimpleName()
+     + " gameTime=" + towing.level().getGameTime()
      + " center=" + towing.center() + " hitchLocalOffset=" + hitchOffset
+     + " cachedPose(ONE_TICK_STALE)=" + towingPose + " hitchAnchorWorld(fromCachedPose)=" + towingAnchorWorld
      + " linearVelocity=" + (towingHandle != null ? towingHandle.getLinearVelocity(new Vector3d()) : "n/a")
      + " angularVelocity=" + (towingHandle != null ? towingHandle.getAngularVelocity(new Vector3d()) : "n/a"));
    diagnosticLogger.info("[DIV createHitchDiagnostic] trailer=" + connection.towedVehicle.uniqueUUID + " class=" + trailer.getClass().getSimpleName()
+     + " gameTime=" + trailer.level().getGameTime()
      + " center=" + trailer.center() + " hookupLocalOffset=" + hookupOffset
+     + " cachedPose(ONE_TICK_STALE)=" + trailerPose + " hookupAnchorWorld(fromCachedPose)=" + trailerAnchorWorld
      + " linearVelocity=" + (trailerHandle != null ? trailerHandle.getLinearVelocity(new Vector3d()) : "n/a")
      + " angularVelocity=" + (trailerHandle != null ? trailerHandle.getAngularVelocity(new Vector3d()) : "n/a"));
   }
@@ -1120,6 +1136,24 @@ public final class PhysicsBridge {
  public static Boolean debugCapturedBoxIsActive(Object capturedBody) {
   if (capturedBody instanceof Body b) return b.box.isActive();
   if (capturedBody instanceof BuoyantBody bb) return bb.box().isActive();
+  return null;
+ }
+ /**
+  * Diagnostic/test-only (MINECRAFT-545/547, John's comments 54290/54337: pose/orientation was a
+  * named missing quantity, and any sample must explicitly state whether it reflects a fresh
+  * native read or a cached Java value, not leave that implicit). Returns {@code box().getPose()}
+  * - the box's own cached {@code Pose3d}, refreshed ONLY by that body's own {@code step()} call
+  * (via {@code box.updatePose()}), NOT by this accessor itself. Since {@code createHitch} runs
+  * during {@code active()}, strictly BEFORE that same tick's own {@code step()} call
+  * ({@code VehicleMovementMixin.div$move} calls {@code active} then {@code step}, in that order),
+  * a sample taken inside {@code createHitch} is EXACTLY one tick stale relative to the box's true
+  * native pose at that instant - callers MUST label it as such, not as a fresh read. Returns
+  * {@code null} if there is no active body right now. Never called from any production code path.
+  */
+ public static dev.ryanhcode.sable.companion.math.Pose3dc debugReadPose(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.box.getPose();
+  if (body instanceof BuoyantBody bb) return bb.box().getPose();
   return null;
  }
  /**

@@ -469,11 +469,21 @@ public final class BuoyantHitchProbe {
    // MINECRAFT-545/547 diagnostic (John's comment 54250: "record the immediately preceding
    // native state too" - before AND after towing.remove() itself, in the same tick, not just
    // the first later sample) - real native state on both sides right before the despawn call.
+   // MINECRAFT-545/547 (John's comment 54337): pose/orientation and world-space anchor position,
+   // alongside the existing velocity/ID reads. This log line runs from this probe's own
+   // ServerTickEvent.Post listener - AFTER entity ticking (where step()/box.updatePose() already
+   // ran for both bodies THIS SAME tick) - so this pose read IS current for this tick, NOT stale
+   // the way the createHitchDiagnostic sample (captured earlier, during active(), before step())
+   // is. gameTime is the real tick-number marker this comment asked for, not log adjacency.
+   var towedPoseHere = PhysicsBridge.debugReadPose(towed);
+   var towedAnchorWorldHere = towedPoseHere != null
+     ? new org.joml.Vector3d(0, -0.3, 1.0).rotate(new org.joml.Quaterniond(towedPoseHere.orientation())).add(towedPoseHere.position()) : null;
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE pre-remove() real native state"
-     + " towing.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towing)
+     + " gameTime=" + towed.world.getTime() + " towing.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towing)
      + " towing.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towing)
      + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
-     + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
+     + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed)
+     + " towed.pose(CURRENT_THIS_TICK)=" + towedPoseHere + " towed.hookupAnchorWorld(fromCurrentPose)=" + towedAnchorWorldHere);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE despawning towing while towed remains jointed");
    towing.remove();
    // Same-tick, same Java call, immediately AFTER remove() returns - whether remove() itself
