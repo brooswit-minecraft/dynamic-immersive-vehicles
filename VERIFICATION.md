@@ -3616,3 +3616,27 @@ live-server-only), 0 skipped, 0 failures, 0 errors.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `975cb8394e7093d964671c621f6fd2ae7f6de34abd17539328c9eb6211115bf7`)
 was produced.
+
+**Post-merge (2026-11-16).** Independent reviewer `brooswit` approved
+exact head `1544a0b46a23d85ddd4d63136ece978f498ccc0a` (GitHub PR review
+5927086140, verified via `gh pr view 43 --json headRefOid,reviews` -
+`MERGE OK: approved @ 1544a0b4 == head`, per this repo's own documented
+pre-merge verification query); merged PR #43 into `main` at merge commit
+`a3ed39e78bd677d52e89bb5f803d13e913b06a03` (clean merge, no conflicts).
+Post-merge hosted CI (run 43951376282, triggered by the merge push)
+failed with all 5 jobs executing zero steps each - the same pre-
+existing, already-disclosed hosted-CI billing/spending-limit blockage
+every recent DIV ticket on this repo has hit (most recently
+MINECRAFT-539's own merge, run 43779308182). No `release.yml` or tag-
+based release workflow exists in this repo beyond that billing-blocked
+CI (confirmed: `.github/workflows/` contains only `ci.yml`, triggered on
+`pull_request`/`push: [main]`, no tag/`workflow_dispatch` trigger), and
+this change (a new read-only diagnostic command plus two small additive
+accessors, no version bump) does not warrant inventing one. Retained
+exact-head local evidence stands in its place: a fresh `gradle --no-
+daemon clean test build` at the merged head (flock-protected on
+`/tmp/div-gradle-slot.lock`) reproduced **837 tests**, 0 skipped, 0
+failures, 0 errors, and produced
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
+checksum
+`da536806f7b4f38fe8cc54c0a156e1cad2900b1d2eca4b10976f53b3022ba5c5`.
