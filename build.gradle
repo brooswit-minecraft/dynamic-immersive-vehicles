@@ -180,6 +180,19 @@ neoForge {
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
+ // Ticket MINECRAFT-546 review (comment 54202): the plain `test` source set has no Minecraft/
+ // NeoForge classes on its classpath at all (confirmed: merely referencing a class that imports
+ // net.minecraft.* from a test throws NoClassDefFoundError on class load - see
+ // TuningCommandTest's own doc), so no test anywhere in this project could previously reference
+ // TuningCommand (or any class importing those types) at all. This is the moddev plugin's own
+ // official, documented mechanism for exactly that gap - not a custom classpath hack - wiring
+ // the real Minecraft/NeoForge/registered-mod runtime into `test` so JUnit can bootstrap it.
+ // Enables ONLY the registration-shape/permission-gate coverage that needed real Brigadier/
+ // CommandSourceStack classes to even compile; constructing a real EntityVehicleF_Physics/Sable
+ // body remains infeasible in ANY unit test context regardless (see
+ // PhysicsBridgeStepperTest's own doc) - this does not change that, only the previously-
+ // impossible "does register() even wire up the right command tree/permission gate" question.
+ unitTest { enable(); testedMod = mods.dynamicimmersivevehicles }
 }
 
 dependencies {

@@ -3374,3 +3374,56 @@ from the prior head plus these 4 new cases).
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `e33a538c447e9d1a04d82caec5f0c4076c57929c4efeae98ddfa460b84658de7`)
 was produced.
+
+**Third self-review kickback fix (2026-11-16, comment Jira 54202).**
+Finding: the explicit acceptance requirement to test the actual command/
+adapter path was still unmet - `TuningCommandTest` exercised only
+`TuningProvenance`, never registering/executing `TuningCommand` itself.
+Investigated the neoForge moddev plugin's own `net.neoforged.moddevgradle.
+dsl.UnitTest` class (confirmed present via `javap` against the cached
+plugin jar) - an OFFICIAL, documented mechanism for exactly this gap
+(wiring the real Minecraft/NeoForge/registered-mod runtime onto the
+`test` source set), not a custom classpath hack. This is the same
+pattern this very `build.gradle` already used for a narrower case
+(`testImplementation 'org.joml:joml:1.10.5'`, added specifically because
+a main class importing JOML could not otherwise be loaded from a test).
+
+Enabled it: `neoForge { unitTest { enable(); testedMod = mods.
+dynamicimmersivevehicles } }` (pure addition to the existing `neoForge{}`
+block). First attempt under `--offline` failed - `net.neoforged.
+fancymodloader:junit-fml:4.0.45` was not yet cached; a plain (non-offline)
+`gradle test` fetched it successfully (one-time, this machine's Gradle
+cache now has it for every future `--offline` run, including CI's own
+`gradle clean build` once network is available there again - currently
+blocked by the same disclosed hosted-CI billing/spending-limit issue
+every recent DIV ticket has hit, independent of this change).
+
+New `TuningCommandRegistrationTest`: a REAL `CommandDispatcher<
+CommandSourceStack>`, the REAL `TuningCommand.register`, asserting the
+resulting Brigadier tree has the right shape - `div` -> `tuning` ->
+an argument node named `target`, with a non-null permission requirement
+on `div`. This is the actual command/adapter path the ticket's
+acceptance requires for registration/permission-gate coverage, closing
+the gap comment 54202 named. Full command EXECUTION against a real
+spawned `EntityVehicleF_Physics`/Sable body, or a real `CommandSourceStack`
+instance, remains infeasible in ANY unit test context regardless of this
+change - that needs a live, running dedicated server/world (the same
+pre-existing constraint `PhysicsBridgeStepperTest`'s own doc already
+states) - `CommandDispatcher.register` itself never executes anything,
+so no such instance was ever needed for THIS test; the response-assembly
+DECISION logic a real execution would exercise is already covered via
+`TuningProvenance`/`TuningCommandTest`, as documented in the prior fix.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+(the FIRST non-`--offline` run needed only to fetch `junit-fml` once, as
+above; every run since, including the final one below, used the now-
+populated local cache) at this fix's head - `BUILD SUCCESSFUL`. The real
+JUnit XML reports total **830 tests**, 0 skipped, 0 failures, 0 errors
+(829 from the prior head plus this one new registration test) - every
+pre-existing test (including the 829 that ran before `unitTest` was
+enabled) still passes unchanged, confirming enabling it introduced no
+regression anywhere else in the suite.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `401bd778991662045577fde4c97c604ac027110cf1d64e4fac388a7aabe38b9e`)
+was produced.
