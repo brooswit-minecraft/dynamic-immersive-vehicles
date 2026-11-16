@@ -3361,3 +3361,20 @@ Full offline build after adding the probe/seam code: `/tmp/gradle-8.14/bin/gradl
 established "a live Body/Sable runtime cannot be constructed in a unit
 test" constraint this repo's own `PhysicsBridgeLiveOverrideApplicationTest`
 class doc already documents).
+
+**Exact-head re-verification (self-review 54219/54220, 2026-11-16).** The
+build/XML evidence immediately above was retained from a run whose
+timestamp predated the final probe/seam commit (`3d0380d575d7f51f66d33548f44e8b499defaf9a`,
+this ticket's current exact head) - re-ran under the restored (`0664`)
+shared `/tmp/div-gradle-slot.lock`: `/tmp/gradle-8.14/bin/gradle
+--no-daemon clean test build --console=plain` at `3d0380d` -
+`BUILD SUCCESSFUL`, the real JUnit XML (freshly generated, timestamped
+2026-11-15 18:45 local) reports **827 tests**, 0 skipped, 0 failures, 0
+errors - identical totals to the earlier (stale-timestamped) run,
+confirming no regression was hiding behind the timing gap.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `84eb12d858bd9291364548b5e2bd1b7b4b171f7d11864781e80047e2f584352b`)
+was produced. The PR description (GitHub #40) was also corrected to
+match this exact head - the prior description still named the obsolete
+`[0,1000]` coefficient bound, 799/14-test totals, and omitted the
+real-Sable runtime probe entirely.
