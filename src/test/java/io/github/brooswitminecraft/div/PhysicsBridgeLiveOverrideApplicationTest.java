@@ -42,6 +42,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.toeFrontDegrees = 2.5; fresh.toeRearDegrees = -1.5;
   // MINECRAFT-532: axleDriveForceSharing must go through this same live-mutation path too.
   fresh.axleDriveForceSharing = true;
+  // MINECRAFT-540: ackermannSteering must go through this same live-mutation path too.
+  fresh.ackermannSteering = true;
   // MINECRAFT-535: longitudinal/lateral/verticalWaterDragMultiplier must go through this same
   // live-mutation path too (Wroosbit review, comment 54117: the original revision added the
   // PhysicsBridge.applyLiveSafeFields mutations but never actually exercised them here, so the
@@ -62,9 +64,10 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(3.5, target.rotorAngularDampingCoefficient);
   assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
   assertEquals(true, target.axleDriveForceSharing);
+  assertEquals(true, target.ackermannSteering);
   assertEquals(2.5, target.longitudinalWaterDragMultiplier); assertEquals(0.4, target.lateralWaterDragMultiplier); assertEquals(3.0, target.verticalWaterDragMultiplier);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing",
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing","ackermannSteering",
       "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier"),
     new TreeSet<>(applied));
  }
@@ -142,6 +145,20 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertNull(target.toeFrontDegrees, "must revert to unconfigured (null, no toe applied) once the override is removed");
   assertNull(target.toeRearDegrees, "must revert to unconfigured (null, no toe applied) once the override is removed");
   assertTrue(applied.containsAll(List.of("toeFrontDegrees","toeRearDegrees")), "the revert-to-unconfigured must itself be reported as an applied live change");
+ }
+
+ @Test void removingAnAckermannSteeringOverrideLiveAppliesBackDownToOffDefault() {
+  // MINECRAFT-540: same "revert to documented default on removal" requirement as
+  // axleDriveForceSharing above - an operator who previously opted in and then removes that
+  // config entry entirely must see the live vehicle actually fall back to the uniform pre-ticket
+  // steer angle on the next reload (null/false), not get stuck opted in.
+  var target = Overrides.defaultTuning();
+  target.ackermannSteering = true;
+  var fresh = Overrides.defaultTuning(); // no override at all -> stays null, same as unconfigured
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertNull(target.ackermannSteering, "must revert to unconfigured (null, uniform steer angle) once the override is removed");
+  assertTrue(applied.contains("ackermannSteering"), "the revert-to-unconfigured must itself be reported as an applied live change");
  }
 
  @Test void removingADirectionalWaterDragMultiplierOverrideLiveAppliesBackDownToItsDocumentedDefault() {

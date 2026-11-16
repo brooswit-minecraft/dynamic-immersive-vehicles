@@ -546,6 +546,32 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
  }
 
+ @Test void ackermannSteeringHasNoFallbackAndStaysNullWhenNeverConfigured() {
+  // Same "stays null, not a default value" shape as axleDriveForceSharing above -
+  // AckermannSteeringDistribution's own caller treats null/false as "disabled uniform steer".
+  assertNull(Overrides.resolved("packid:not_configured").ackermannSteering);
+  assertNull(Overrides.defaultTuning().ackermannSteering);
+ }
+
+ @Test void ackermannSteeringParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.ackermannSteering = true;
+   Overrides.setForTest(java.util.Map.of("packid:ackermann_vehicle", override));
+   assertEquals(true, Overrides.resolved("packid:ackermann_vehicle").ackermannSteering,
+     "an explicit operator override must be used instead of staying null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+  var packMetadata = new Overrides.Tuning(); packMetadata.ackermannSteering = true;
+  assertEquals(true, Overrides.resolved("packid:not_configured", packMetadata, null, null).ackermannSteering,
+    "with no operator override, pack DIV metadata must still be used over staying null");
+ }
+
+ @Test void ackermannSteeringIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.ackermannSteering = true;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
  @Test void packMetadataFillsAGapBelowAMissingOperatorOverrideButAboveTheFallback() {
   var packMetadata = new Overrides.Tuning();
   packMetadata.suspensionTravel = 0.45;

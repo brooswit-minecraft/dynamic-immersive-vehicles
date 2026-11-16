@@ -375,7 +375,10 @@ public final class PhysicsBridge {
   * parasiticDragMultiplier/oswaldEfficiency (MINECRAFT-536, stepFlight only, same reasoning as
   * stallAngleDegrees/liftSlope/controlSurfaceSlope above)/axleDriveForceSharing (MINECRAFT-532,
   * stepGround reads tuning.axleDriveForceSharing fresh every tick via
-  * AxleDriveForceSharing#shareRatios, same as every other field in this list)/rollingResistance
+  * AxleDriveForceSharing#shareRatios, same as every other field in this list)/ackermannSteering
+  * (MINECRAFT-540, stepGround reads tuning.ackermannSteering fresh every tick via
+  * AckermannSteeringDistribution#steerRadians, same as every other field in this list)/
+  * rollingResistance
   * (MINECRAFT-534, stepGround reads tuning.rollingResistance fresh every tick at the
   * FrictionContact-construction call site, same as every other field in this list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
@@ -443,6 +446,10 @@ public final class PhysicsBridge {
   // MINECRAFT-532: stepGround reads tuning.axleDriveForceSharing fresh every tick via
   // AxleDriveForceSharing#shareRatios, same "no separate cached field" shape as driveBiasFront.
   if (!java.util.Objects.equals(target.axleDriveForceSharing, fresh.axleDriveForceSharing)) { target.axleDriveForceSharing = fresh.axleDriveForceSharing; appliedOut.add("axleDriveForceSharing"); }
+  // MINECRAFT-540: stepGround reads tuning.ackermannSteering fresh every tick via
+  // AckermannSteeringDistribution#steerRadians, same "no separate cached field" shape as
+  // axleDriveForceSharing immediately above.
+  if (!java.util.Objects.equals(target.ackermannSteering, fresh.ackermannSteering)) { target.ackermannSteering = fresh.ackermannSteering; appliedOut.add("ackermannSteering"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
@@ -2077,10 +2084,15 @@ public final class PhysicsBridge {
    // rounding for every currently-accepted default/symmetric vehicle - only an asymmetric
    // layout (COM offset toward one axle/corner) actually changes any wheel's calibrated rate.
    double[] loadShareX=new double[wheels.size()], loadShareZ=new double[wheels.size()];
+   // MINECRAFT-540: each wheel's own turnsWithSteer flag, read once here alongside loadShareX/
+   // loadShareZ so AckermannSteeringDistribution.steerRadians below never needs a Minecraft/IV
+   // type either, same "pure x/z/flag arrays" shape AxleToeDistribution already uses.
+   boolean[] turnsWithSteerArr=new boolean[wheels.size()];
    for (int i=0;i<wheels.size();i++) {
     var w=wheels.get(i);
     loadShareX[i]=w.localOffset.x-center.x;
     loadShareZ[i]=w.localOffset.z-center.z;
+    turnsWithSteerArr[i]=w.placementDefinition.turnsWithSteer;
    }
    double[] loadShares=WheelLoadDistribution.shares(loadShareX,loadShareZ);
    // MINECRAFT-520: each wheel's own SERVICE-BRAKE budget share, from the same per-wheel `z`
@@ -2110,6 +2122,20 @@ public final class PhysicsBridge {
    // convention. Unset tuning.toeFrontDegrees/toeRearDegrees (both null) reproduces the exact
    // pre-ticket all-zero offset.
    double[] toeRadians=AxleToeDistribution.toeRadians(loadShareX,loadShareZ,tuning.toeFrontDegrees,tuning.toeRearDegrees);
+   // MINECRAFT-540: the existing uniform steer angle (radians) every turnsWithSteer wheel used
+   // pre-ticket, unchanged - still the fallback value below whenever Ackermann is disabled or
+   // the layout is ambiguous, and still the SAME input AckermannSteeringDistribution redistributes
+   // per wheel when enabled (never a second independent reading of the rudder/maxSteerDegrees).
+   double uniformSteerRadians=(-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees);
+   // MINECRAFT-540: opt-in per-wheel Ackermann steer angle (radians), from the same loadShareX/
+   // loadShareZ anchor positions used for the load/brake/drive/toe shares above - see
+   // AckermannSteeringDistribution's own doc for the bicycle-model geometry and the full
+   // ambiguous-layout fallback list (null means "keep uniformSteerRadians unchanged for every
+   // turnsWithSteer wheel", the exact pre-ticket behavior). tuning.ackermannSteering unset/false
+   // (the documented default) never even calls into the geometry - a byte-identical no-op.
+   double[] ackermannSteerRadians=Boolean.TRUE.equals(tuning.ackermannSteering)
+     ? AckermannSteeringDistribution.steerRadians(loadShareX,loadShareZ,turnsWithSteerArr,skidSteer,uniformSteerRadians)
+     : null;
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
@@ -2175,7 +2201,14 @@ public final class PhysicsBridge {
     // it) - a steering wheel still toes at center and continues to sweep with rudder input
     // exactly as before, just around a toed-in/out neutral rather than dead-ahead; a non-
     // steering wheel (turnsWithSteer false, steer==0 above) still gets its own configured toe.
-    double steer=(wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0)+toeRadians[wheelIdx];
+    // MINECRAFT-540: ackermannSteerRadians (non-null only when tuning.ackermannSteering is
+    // opted in AND the layout qualifies - see AckermannSteeringDistribution's own doc) replaces
+    // ONLY the uniform per-wheel steer term below, never the toe addition immediately after it -
+    // disabled/ambiguous falls back to uniformSteerRadians unchanged, byte-identical to before
+    // this ticket.
+    double steer=(wheel.placementDefinition.turnsWithSteer
+        ? (ackermannSteerRadians!=null ? ackermannSteerRadians[wheelIdx] : uniformSteerRadians)
+        : 0)+toeRadians[wheelIdx];
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;

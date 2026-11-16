@@ -288,6 +288,18 @@ public final class Overrides {
   // contact load - never across the front/rear axle boundary. Re-read live every tick by
   // PhysicsBridge.stepGround, same as driveBiasFront - see PhysicsBridge.applyLiveSafeFields.
   public Boolean axleDriveForceSharing;
+  // MINECRAFT-540: opt-in geometry-based Ackermann steering - see AckermannSteeringDistribution's
+  // own doc for the full bicycle-model geometry. null/false (the documented default) is a
+  // byte-identical no-op: unset reproduces the exact pre-ticket uniform per-wheel steer angle,
+  // same "unset means untouched" shape axleDriveForceSharing already uses, not merely a
+  // conservative default value. true opts a vehicle INTO mirrored inner/outer steer angles for
+  // its two turnsWithSteer wheels on a conventional two-axle layout, computed fresh from the
+  // same maxSteerDegrees-scaled uniform angle and composed additively with M533 toe exactly as
+  // before - never on skid-steer, multi-axle, centered or otherwise ambiguous layouts (an
+  // explicit fallback to the unchanged uniform angle, not a crash or a silent wrong answer). Re-
+  // read live every tick by PhysicsBridge.stepGround, same as axleDriveForceSharing - see
+  // PhysicsBridge.applyLiveSafeFields.
+  public Boolean ackermannSteering;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -579,6 +591,7 @@ public final class Overrides {
    if (toeFrontDegrees != null) throw new IllegalArgumentException("part overrides do not support 'toeFrontDegrees' (vehicle-only concept - a part has no own axle position)");
    if (toeRearDegrees != null) throw new IllegalArgumentException("part overrides do not support 'toeRearDegrees' (vehicle-only concept - a part has no own axle position)");
    if (axleDriveForceSharing != null) throw new IllegalArgumentException("part overrides do not support 'axleDriveForceSharing' (vehicle-only concept - a part has no own axle position)");
+   if (ackermannSteering != null) throw new IllegalArgumentException("part overrides do not support 'ackermannSteering' (vehicle-only concept - a part has no own axle position)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -668,6 +681,7 @@ public final class Overrides {
   c.toeFrontDegrees=t.toeFrontDegrees;
   c.toeRearDegrees=t.toeRearDegrees;
   c.axleDriveForceSharing=t.axleDriveForceSharing;
+  c.ackermannSteering=t.ackermannSteering;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -714,6 +728,7 @@ public final class Overrides {
   m.toeFrontDegrees = child.toeFrontDegrees!=null?child.toeFrontDegrees:parent.toeFrontDegrees;
   m.toeRearDegrees = child.toeRearDegrees!=null?child.toeRearDegrees:parent.toeRearDegrees;
   m.axleDriveForceSharing = child.axleDriveForceSharing!=null?child.axleDriveForceSharing:parent.axleDriveForceSharing;
+  m.ackermannSteering = child.ackermannSteering!=null?child.ackermannSteering:parent.ackermannSteering;
   return m;
  }
  /**
@@ -921,6 +936,7 @@ public final class Overrides {
   // MINECRAFT-532: no FALLBACK entry (mirrors brakeBiasFront/driveBiasFront above) - stays null
   // (treated as "off", see AxleDriveForceSharing's own doc) unless some level actually sets it.
   result.axleDriveForceSharing = firstNonNullBoolean(override!=null?override.axleDriveForceSharing:null, packMetadata!=null?packMetadata.axleDriveForceSharing:null, ivAdapted!=null?ivAdapted.axleDriveForceSharing:null, physicallyDerived!=null?physicallyDerived.axleDriveForceSharing:null);
+  result.ackermannSteering = firstNonNullBoolean(override!=null?override.ackermannSteering:null, packMetadata!=null?packMetadata.ackermannSteering:null, ivAdapted!=null?ivAdapted.ackermannSteering:null, physicallyDerived!=null?physicallyDerived.ackermannSteering:null);
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}
