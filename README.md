@@ -552,7 +552,10 @@ after changes.
       "driveForce": 9000.0,
       "stallAngleDegrees": 15.0,
       "liftSlope": 6.283185307179586,
-      "controlSurfaceSlope": 6.283185307179586
+      "controlSurfaceSlope": 6.283185307179586,
+      "aileronAuthorityScale": 1.2,
+      "elevatorAuthorityScale": 1.0,
+      "rudderAuthorityScale": 0.8
     }
   }
 }
@@ -818,6 +821,23 @@ cyclic/yaw authority - only on a fixed-wing vehicle's own wing lift and
 control-surface torque. Every field above the documented default (the exact
 prior hardcoded behavior) is omittable independently of the other two.
 
+`aileronAuthorityScale`, `elevatorAuthorityScale`, and
+`rudderAuthorityScale` (MINECRAFT-541, fixed-wing only - same "ignored by a
+ground, blimp, or rotorcraft vehicle" scope as the three fields above) each
+independently multiply the roll/pitch/yaw control torque `controlSurfaceSlope`
+already produces for that one axis, so changing one axis's authority never
+scales the others, the shared `controlSurfaceSlope` baseline, or either
+control surface's own native area/lever-arm geometry. All three are
+non-negative, capped at `5` (unlike `cyclicAuthorityScale`/
+`yawAuthorityScale` below, `0` is explicitly valid here too - there is no
+other per-axis knob to turn off just one axis's authority, e.g. a glider
+with no rudder authority at all), and default to `1.0` - a pure no-op
+reproducing the exact prior shared-`controlSurfaceSlope`-only torque for an
+unconfigured vehicle. `rudderAuthorityScale` scales the yaw torque AFTER the existing
+sideslip-restoring term (`rudderDeflection - sideslip`) is already folded
+in, so it changes that combined torque's magnitude only, never the
+sideslip-restoring term's own semantics.
+
 ### Part overrides, templates, and `extends`
 
 Alongside `vehicles`, the config accepts two more top-level maps:
@@ -869,7 +889,8 @@ A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `marineSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
-`controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
+`controlSurfaceSlope`, `aileronAuthorityScale`, `elevatorAuthorityScale`, `rudderAuthorityScale`,
+`cyclicLimitDegrees`, `cyclicAuthorityScale`,
 `yawAuthorityScale`, `rotorAngularDampingCoefficient`, `rotorAirDragCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
 `suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
 `verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `fixedWingAngularDampingCoefficient`, `toeFrontDegrees`,
