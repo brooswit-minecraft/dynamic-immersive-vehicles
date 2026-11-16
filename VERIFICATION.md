@@ -3163,3 +3163,22 @@ axle-specific spring/damping settings, observed ride-height/settling
 difference between axles) - this ticket's own brief says focused
 engineering tests are in scope, not John's broad/hardware playtesting,
 which is explicitly out of scope here.
+
+**Post-merge (2026-11-15).** Wroosbit approved exact head
+`c186906977ad7078e2e61cd87b7eab3e22fca7d2` (review comment Jira 54152);
+merged PR #37 into `main` at merge commit
+`5b1cc57d7f9cb1de9cb756f28fe41b1a1a9745b0` (clean fast-forward, no
+conflicts). Post-merge hosted CI (run 43778708686, triggered by the merge
+push) failed with all 5 jobs executing zero steps - the same pre-existing,
+already-disclosed hosted-CI billing/spending-limit blockage every recent
+DIV ticket on this repo has hit (most recently MINECRAFT-535's own merge,
+run 43766508214). No `release.yml` or tag-based release workflow exists in
+this repo beyond that billing-blocked CI, and this change (an additive
+Overrides/PhysicsBridge schema change, no version bump) does not warrant
+inventing one. Retained exact-head local evidence stands in its place: a
+fresh `gradle --no-daemon --offline clean test build` at the merged head
+(flock-protected on `/tmp/div-gradle-slot.lock`) reproduced **810 tests**,
+0 skipped, 0 failures, 0 errors, and produced
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
+checksum
+`62e0ba336172f536c0f770996368cf14092d639a64b35b685efb68014c877b34`.
