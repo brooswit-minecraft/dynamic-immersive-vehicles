@@ -3540,3 +3540,62 @@ existing-body authority/joint lifecycle removal, not just the boolean
 predicate. Full raw log retained at
 `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-fallbackprobe-run3-20261116T122843Z/server.log`
 (head `cf65a3b` + this probe's own uncommitted diff at run time, checksummed).
+
+**Sharpened per John's comment 54262: the above only proved DIV's own
+registry stopped tracking a body - it did NOT establish release of a
+PREEXISTING joint, sustained native towing, or actual native-object
+destruction (as opposed to inferring it from `deactivate`/`remove`'s own
+source).** Rewrote the probe: `towed` now gets a REAL preexisting joint
+from spawn (towed by `towing1` on an ORDINARY/safe connection, matching
+`BuoyantHitchProbe`'s own proven-safe `ATTACH` pattern), confirmed via a
+new `PhysicsBridge.debugIsJointed` (a direct `HitchRegistry.isJointed`
+observation) and a captured native box reference
+(`debugCaptureBody`/`debugCapturedBoxIsActive`, reading the SAME
+`BoxPhysicsObject.isActive()` before and after, a live observation of
+object destruction rather than an inference). `towing1` is then replaced
+by a fresh MOUNTED buoyant `towing2` - exercising the fix with a genuine
+joint to release - and `VERIFY_FALLBACK` now holds for a SUSTAINED
+100-tick window, re-checking all of: DIV registry absence, joint release,
+native-object destruction, and `towed.towedByConnection` persistence
+(sustained native IV authority), every tick, not once.
+
+**Live result: PASS, sustained for the full 100-tick window.** At tick 1
+post-reconnect: `debugIsJointed=false` (the preexisting joint was
+actually released), the captured native box's own `isActive()`
+transitioned to `false` (the SAME object, actually destroyed - not
+inferred), `debugReadLinearVelocity`/`debugReadAngularVelocity` both
+`null`, `towed.towedByConnection != null` stays `true` throughout (IV's
+own native connection persists). `towed` settles to a stable resting
+position (falls under gravity to the platform surface, Y≈101, under IV's
+OWN native handling - not Sable) and stays finite/valid for the entire
+100-tick window with no further change. Full raw log retained at
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-fallbackprobe-run4-20261116T160229Z/server.log`
+(head `5cb21fb`, checksummed). This item is now complete: fixed,
+unit-tested, AND live-verified end to end with a genuine preexisting
+joint, sustained over many ticks, with direct native-object-destruction
+evidence rather than source inference.
+
+**Honest cleanup-disposition audit (John's comment 54262: "no matching
+server/lock holder now does not prove restoration").** None of this
+ticket's probes (`BuoyantHitchProbe`, `GroundHitchReplacementProbe`,
+`AlreadyActiveUnsafeFallbackProbe`, or any other) call
+`level.setChunkForced(..., false)` to un-force their own chunk grid,
+remove their own spawned entities, or restore `ConfigSystem`'s
+`packSpeedFactors`/`packVehicleScales` map entries at the end of a run -
+every probe run across this entire ticket has been ended by a bounded
+`timeout` killing the `gradle runServer` process, never by a graceful
+`/stop`. Confirmed directly in this run's own log: no "Stopping
+server"/"Saving worlds" line appears anywhere in it. `run/world` (the
+shared, reused world save directory under this worktree) currently holds
+~17MB across 13 region files, accumulated across every probe run this
+ticket has performed - nothing in this workflow has ever reset or
+inspected it between runs. `ConfigSystem`'s maps are in-memory,
+per-JVM-process state that does reset naturally when a new `gradle
+runServer` process starts (not a persistent leak across runs by itself),
+but within any given run nothing un-sets the entries either. A clean
+process-list/lock-file check (as reported in earlier cycles) confirms
+only that no SERVER PROCESS is currently running - it says nothing about
+whether forced-chunk flags or fixture entities were actually written
+back out by an autosave before the process was killed, or remain in
+`run/world` on disk. Not remediated here per instruction ("do not
+perform destructive cleanup") - reported factually for the record.
