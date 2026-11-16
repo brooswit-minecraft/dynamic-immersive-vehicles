@@ -119,6 +119,28 @@ public final class FlightForces {
   return (aspectRatio > 0 && !isBlimp) ? fixedWingAngularDampingCoefficient : 0.0;
  }
 
+ /**
+  * MINECRAFT-541 (review kickback correction, comment 54361): gates {@code Overrides.
+  * Tuning#aileron/elevator/rudderAuthorityScale} the exact same "fixed-wing only, never a
+  * blimp" way {@link #gatedFixedWingAngularDampingCoefficient} above already gates
+  * MINECRAFT-542's own field - on the authoritative {@code motorized.isBlimp} classification,
+  * not merely an aspect-ratio check, since a blimp definition can itself carry a positive
+  * {@code wingArea}/{@code wingSpan} (e.g. stabilizer fins, or a copied/mistaken config) and
+  * still have nonzero {@code aileron/elevatorArea}/{@code rudderArea} control-surface geometry.
+  * Returns the documented no-op {@code 1.0} (never the configured scale) for a blimp regardless
+  * of how it or its wing/control-surface geometry are configured, so {@code PhysicsBridge.
+  * stepFlight}'s resulting aileron/elevator/rudder torque - and therefore the blimp's angular
+  * motion - stays completely unaffected by this field, matching the ticket's "preserve non-
+  * fixed-wing/blimp behavior" requirement exactly rather than merely still-scaled-by-something.
+  * Only a non-blimp fixed wing gets the configured scale passed through unchanged. Extracted as
+  * its own pure, unit-testable function (same reasoning {@code
+  * gatedFixedWingAngularDampingCoefficient} above was extracted for) rather than an inline
+  * ternary at {@code stepFlight}'s own untestable live call site.
+  */
+ public static double gatedControlAuthorityScale(boolean isBlimp, double controlAuthorityScale) {
+  return isBlimp ? 1.0 : controlAuthorityScale;
+ }
+
  /** Aerodynamic force magnitude for one coefficient/area pair at this dynamic pressure. */
  public static double aeroForce(double coefficient, double area, double dynamicPressure) {
   return coefficient * area * dynamicPressure;
@@ -132,7 +154,23 @@ public final class FlightForces {
   * area. Shared by aileron roll torque, elevator pitch torque, and rudder yaw torque.
   */
  public static double controlSurfaceForce(double deflectionRadians, double area, double dynamicPressure, double controlSurfaceSlope) {
-  return controlSurfaceSlope * deflectionRadians * area * dynamicPressure;
+  return controlSurfaceForce(deflectionRadians, area, dynamicPressure, controlSurfaceSlope, 1.0);
+ }
+
+ /**
+  * {@link #controlSurfaceForce(double, double, double, double)} with an explicit, independent
+  * per-axis operator-configured authority multiplier ({@code Overrides.Tuning#
+  * aileronAuthorityScale}/{@code elevatorAuthorityScale}/{@code rudderAuthorityScale},
+  * MINECRAFT-541) applied on top of the unchanged {@code controlSurfaceSlope}/area/
+  * dynamic-pressure physics - same contract as {@link RotorForces#cyclicTorque(double, double,
+  * double, double)}/{@link RotorForces#yawTorque(double, double, double, double)}: {@code 1.0}
+  * is a pure no-op reproducing the exact prior shared-{@code controlSurfaceSlope}-only force,
+  * and the caller passes each axis its own independent scale, so changing one axis's authority
+  * can never affect another axis, the shared slope, or this surface's own native area - this
+  * method does not duplicate or re-derive any of those, only multiplies the final result.
+  */
+ public static double controlSurfaceForce(double deflectionRadians, double area, double dynamicPressure, double controlSurfaceSlope, double authorityScale) {
+  return controlSurfaceSlope * deflectionRadians * area * dynamicPressure * authorityScale;
  }
 
  /** Throttle-linear thrust; this model does not account for airspeed/advance-ratio falloff. */
