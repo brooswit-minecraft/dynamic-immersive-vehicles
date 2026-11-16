@@ -3169,3 +3169,33 @@ scope here. Hosted CI billing/spend-capacity restriction (ticket comment
 53620, reconfirmed by every sibling ticket this sprint) still blocks every
 hosted job from starting - this local build/test run is offered in its
 place, same as every sibling ticket in this sprint.
+
+**Self-review correction (comment 54147, added 2026-11-15/16).** `validate()`
+wrongly mirrored `maxSteerDegrees`' own strictly-positive lower bound for
+`marineSteerDegrees`, rejecting `0.0` even though both this ticket's own
+README prose and the field's documented range ("0-60 degrees") say 0 is
+in range. A zero marine limit is a real, sensible configuration - a
+vehicle whose water propellers physically cannot swivel at all (straight-
+only thrust) while its wheels still steer independently through
+`maxSteerDegrees` - not a degenerate one, same "exact 0 is a legitimate
+extreme" reasoning `brakeBiasFront`/`antiRollStiffness` already use.
+Fixed the bound to `marineSteerDegrees >= 0 && marineSteerDegrees <= 60`
+(inclusive lower, same 60 ceiling), replaced the zero-rejection test case
+with an acceptance case, and added a new
+`marineSteerDegreesZeroIsAValidInclusiveExtremeUnlikeMaxSteerDegreesItself`
+test proving a zero marine limit resolves exactly (never coerced) while a
+configured nonzero `maxSteerDegrees` on the SAME entry stays fully
+independent and nonzero - the ticket's own "actual applied propeller
+thrust direction changes independently of wheel steering" acceptance
+criterion, now also covered at this zero/nonzero extreme.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline build` against the
+corrected head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**793 tests**, 0 skipped, 0 failures, 0 errors across the whole suite (one
+more than the prior revision's 792, from the new zero-bound test, every
+pre-existing test still passing unchanged).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `eb86f3129be0e9965d86426f9db43b15c360bff9ed148f2114fc32415f869a4f`)
+was produced.

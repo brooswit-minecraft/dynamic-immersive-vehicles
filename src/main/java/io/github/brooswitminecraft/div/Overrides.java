@@ -72,7 +72,11 @@ public final class Overrides {
   // maxSteerDegrees instead of a second hardcoded constant, so an unconfigured (or amphibious,
   // wheel-steering) vehicle's propeller thrust direction is byte-identical to before this ticket.
   // Re-read live every tick by BuoyantForces.apply, same "no separate cached field" shape as
-  // waterDrag/maxSteerDegrees itself - see PhysicsBridge.applyLiveSafeFields.
+  // waterDrag/maxSteerDegrees itself - see PhysicsBridge.applyLiveSafeFields. Review correction:
+  // unlike maxSteerDegrees' own strictly-positive bound, 0.0 IS a valid value here (inclusive) -
+  // a vehicle whose propellers physically cannot swivel (straight thrust only) while its wheels
+  // still steer independently through maxSteerDegrees is a real, sensible configuration, not a
+  // degenerate one; see #validate's own bound.
   public Double marineSteerDegrees;
   // Float-only hulls (boats/pontoons) only: hullFillFactor shrinks the chassis bounding-box
   // volume down to the fraction of it the actual hull displaces (a real hull is not a solid
@@ -316,9 +320,14 @@ public final class Overrides {
    if (driveForce != null && !(driveForce >= 0 && driveForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (brakeForce != null && !(brakeForce >= 0 && brakeForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (maxSteerDegrees != null && !(maxSteerDegrees > 0 && maxSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
-   // MINECRAFT-544: same bounded steering-angle range as maxSteerDegrees itself - a marine
-   // steering limit is still a real steering angle, not a second kind of quantity.
-   if (marineSteerDegrees != null && !(marineSteerDegrees > 0 && marineSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-544: review correction - UNLIKE maxSteerDegrees' own strictly-positive bound,
+   // 0.0 is a valid, inclusive lower bound here: a vehicle whose water propellers physically
+   // cannot swivel at all (straight thrust only) while its wheels still steer independently
+   // through maxSteerDegrees is a real configuration this field must be able to express, not a
+   // degenerate one - same "exact 0 is a legitimate extreme" reasoning brakeBiasFront/
+   // antiRollStiffness already use. Upper bound stays the documentable 60deg ceiling, same as
+   // maxSteerDegrees.
+   if (marineSteerDegrees != null && !(marineSteerDegrees >= 0 && marineSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (hullFillFactor != null && !(hullFillFactor > 0 && hullFillFactor <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (waterDrag != null && !(waterDrag >= 0 && waterDrag <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (propellerForce != null && !(propellerForce >= 0 && propellerForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");

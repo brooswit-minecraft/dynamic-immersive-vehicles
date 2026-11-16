@@ -528,14 +528,33 @@ class OverridesTest {
  // resolved maxSteerDegrees rather than staying null or using a second flat constant.
 
  @Test void marineSteerDegreesOutOfRangeFailsValidation() {
-  var zero = new Overrides.Tuning(); zero.marineSteerDegrees = 0.0;
-  assertThrows(IllegalArgumentException.class, zero::validate);
+  var negative = new Overrides.Tuning(); negative.marineSteerDegrees = -0.01;
+  assertThrows(IllegalArgumentException.class, negative::validate);
   var tooLarge = new Overrides.Tuning(); tooLarge.marineSteerDegrees = 60.01;
   assertThrows(IllegalArgumentException.class, tooLarge::validate);
   var inRange = new Overrides.Tuning(); inRange.marineSteerDegrees = 45.0;
   assertDoesNotThrow(inRange::validate);
   var atCeiling = new Overrides.Tuning(); atCeiling.marineSteerDegrees = 60.0;
   assertDoesNotThrow(atCeiling::validate);
+ }
+
+ @Test void marineSteerDegreesZeroIsAValidInclusiveExtremeUnlikeMaxSteerDegreesItself() {
+  // Review correction: UNLIKE maxSteerDegrees (strictly positive), 0.0 must be an ACCEPTED
+  // marineSteerDegrees value - a vehicle whose propellers physically cannot swivel at all
+  // (straight-only thrust) is a real, sensible configuration, not a degenerate one.
+  var zeroMarine = new Overrides.Tuning(); zeroMarine.marineSteerDegrees = 0.0;
+  assertDoesNotThrow(zeroMarine::validate);
+  // And it must stay genuinely independent: a zero marine limit must not force (or require)
+  // maxSteerDegrees to also be zero - wheel steering can stay fully nonzero at the same time.
+  try {
+   var override = new Overrides.Tuning(); override.maxSteerDegrees = 35.0; override.marineSteerDegrees = 0.0;
+   Overrides.setForTest(java.util.Map.of("packid:straight_thrust_steerable_wheels_vehicle", override));
+   var r = Overrides.resolved("packid:straight_thrust_steerable_wheels_vehicle");
+   assertEquals(35.0, r.maxSteerDegrees, "wheel steering must stay fully nonzero");
+   assertEquals(0.0, r.marineSteerDegrees, "the explicit zero marine limit must resolve exactly, not get coerced to something nonzero");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
  }
 
  @Test void marineSteerDegreesInheritsTheResolvedMaxSteerDegreesWhenUnconfigured() {
