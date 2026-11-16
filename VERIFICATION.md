@@ -3245,3 +3245,56 @@ depends on which `HitchAnchor` implementation either side of the joint is.
 Not yet performed: broad/hardware playtesting with a real content pack and
 a real player (out of scope per this sprint's own brief - the user owns
 that, not a completion gate).
+
+**Pure diagnostic, per John's directive (comment 54230): real native
+linear/angular velocity at joint creation, `ATTACH` vs `TOWING_REPLACEMENT`.**
+No fix attempted here - this is measurement only, added as log-only
+instrumentation gated behind the existing `GroundContactDiagnostics.ENABLED`
+flag (`PhysicsBridge.createHitch`, reading each side's real
+`RigidBodyHandle.getLinearVelocity()`/`getAngularVelocity()` - NOT MTS's own
+`v.motion`, which is linear-only and, as shown below, can read calm while
+the real native body is not).
+
+Live `BuoyantHitchProbe` run, `createHitchDiagnostic` log lines in order:
+
+| joint created | towing linVel | towing angVel | trailer linVel | trailer angVel |
+|---|---|---|---|---|
+| `ATTACH` (both fresh) | (0, 0.883, 0) | (0,0,0) | (0,0,0) | (0,0,0) |
+| `TOWING_UNAVAILABLE` reconnect (same towing, same towed, after 140-tick settle) | (0.041,-0.067,0.025) | (-0.003,0.024,-0.098) | (-0.004,-0.327,-0.044) | (0.119,0.063,-0.032) |
+| `TOWING_REPLACEMENT` (fresh towing2, same towed, 60 ticks after towing1 despawned) | (0, 0.883, 0) | (0,0,0) | (0.075,**-5.589**,-2.021) | (**-6.341**,-0.030,-0.117) |
+
+The finding: `towed`'s real angular velocity grows from ~0.12 rad/s (normal
+post-settle residue, row 2) to **-6.34 rad/s** by the time the replacement
+joint is created (row 3) - a ~50x jump that happens DURING the 60-tick
+unjointed free-float window, BEFORE `TOWING_REPLACEMENT`'s `connectTrailer`
+is ever called. `towing2` itself is calm (identical to `ATTACH`'s fresh-spawn
+state) - the instability belongs entirely to `towed`, acquired while alone.
+MTS's own `.motion` field, read by the probe's own `TOWING_UNAVAILABLE`
+bound check at the same moment, reported `towed.motion.y=-0.047` - calm,
+and with no angular component at all - a >100x discrepancy from the real
+native state. The probe's own position-only bound check during
+`TOWING_UNAVAILABLE` cannot see this: `towed` never left the probe's
+position bounds, so `TOWING_UNAVAILABLE PASS` is truthful but blind to the
+rotational runaway building underneath it.
+
+This rules out the joint itself as the root cause: `HitchRegistry.release`
+(called the tick `towing1.isValid` goes false, via each body registry's own
+`removeIf`) correctly releases the trailer's joint through the
+towing-vehicle branch of its `partners` sweep, and does so BEFORE the native
+body is removed - the same ordering `GroundHitchReplacementProbe` exercises
+without incident. The divergence is therefore not in hitch bookkeeping but
+in `BuoyantForces.apply`'s own torque computation for a hull with nothing
+constraining it - no joint, no engine - over an extended window: `towed`
+destabilizes on its own, alone, well before any new joint touches it. This
+is the same code (`BuoyantForces`) already implicated in the retained
+`unsafeBuoyantAngularLock` fix (MINECRAFT-547) for the JOINTED
+mounted/restricted case; this diagnostic suggests a shared root mechanism
+in `BuoyantForces`'s torque/angular handling, now also observed UNJOINTED.
+
+Per comment 54230, no further fix is attempted here. Precise code seam for
+specialist review: `BuoyantForces.apply` (the torque/angular-velocity
+computation, not the hitch or joint-creation code), reproduced via
+`BuoyantHitchProbe`'s `TOWING_UNAVAILABLE` phase alone (despawn the towing
+side, let `towed` free-float ~60 ticks with `-Ddiv.debugGroundContact=true`,
+and log `handle.getAngularVelocity()` every tick - no replacement join
+needed to see the growth). Reported to MINECRAFT-547 and MINECRAFT-545.

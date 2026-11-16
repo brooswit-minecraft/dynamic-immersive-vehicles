@@ -880,6 +880,32 @@ public final class PhysicsBridge {
     connectionOffsetVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.pos), new Vector3d());
   var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center(),
     connectionOffsetVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.pos), new Vector3d());
+  // MINECRAFT-545/547 diagnostic logging only (John's own directive, comment 54230) - NOT a
+  // behavior change. Logs each side's real Sable-level linear/angular velocity (not MTS's own
+  // v.motion, which has no angular component) and the computed local anchor offsets right
+  // before the joint is created, so an ATTACH-time log line and a REPLACEMENT-time log line can
+  // be compared directly for whatever actually differs between the two live scenarios. Gated on
+  // the existing GroundContactDiagnostics.ENABLED flag (-Ddiv.debugGroundContact=true), the same
+  // opt-in this codebase already uses for per-tick diagnostic logging - never active otherwise.
+  if (GroundContactDiagnostics.ENABLED) {
+   // Logger fetched lazily, HERE only (never as a static field on this outer class) - a class-
+   // level `LogUtils.getLogger()` field was tried and reverted: it eagerly runs at
+   // PhysicsBridge's own static-init time, which plain unit tests also trigger just by
+   // referencing the class, and LogUtils needs Minecraft/Mojang bootstrap that is not present
+   // in that context - confirmed live (144 unrelated unit tests failed with
+   // ExceptionInInitializerError the moment that field was added).
+   Logger diagnosticLogger = LogUtils.getLogger();
+   RigidBodyHandle towingHandle = towing instanceof Body b ? b.handle : towing instanceof BuoyantBody bb ? bb.handle() : null;
+   RigidBodyHandle trailerHandle = trailer instanceof Body b ? b.handle : trailer instanceof BuoyantBody bb ? bb.handle() : null;
+   diagnosticLogger.info("[DIV createHitchDiagnostic] towing=" + connection.towingVehicle.uniqueUUID + " class=" + towing.getClass().getSimpleName()
+     + " center=" + towing.center() + " hitchLocalOffset=" + hitchOffset
+     + " linearVelocity=" + (towingHandle != null ? towingHandle.getLinearVelocity(new Vector3d()) : "n/a")
+     + " angularVelocity=" + (towingHandle != null ? towingHandle.getAngularVelocity(new Vector3d()) : "n/a"));
+   diagnosticLogger.info("[DIV createHitchDiagnostic] trailer=" + connection.towedVehicle.uniqueUUID + " class=" + trailer.getClass().getSimpleName()
+     + " center=" + trailer.center() + " hookupLocalOffset=" + hookupOffset
+     + " linearVelocity=" + (trailerHandle != null ? trailerHandle.getLinearVelocity(new Vector3d()) : "n/a")
+     + " angularVelocity=" + (trailerHandle != null ? trailerHandle.getAngularVelocity(new Vector3d()) : "n/a"));
+  }
   var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset,
     connectionRotationVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.rot),
     connectionRotationVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.rot).invert(),

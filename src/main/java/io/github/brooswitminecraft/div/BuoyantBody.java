@@ -83,6 +83,14 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
  // anchor against, exactly like PhysicsBridge.Body's own box/center fields.
  public BoxPhysicsObject box() { return box; }
  public Vector3dc center() { return center; }
+ // MINECRAFT-545/547 diagnostic seam (John's own directive, ticket comment 54230: "compare
+ // actual native body/joint lifecycle and linear/angular state at attach versus replacement"):
+ // read-only, package-private access to the SAME handle BuoyantBody.step already reads
+ // linear/angular velocity from every tick - exposed here so PhysicsBridge.createHitch can log
+ // real pre-constraint Sable-level state (not MTS's own v.motion, which has no angular
+ // component at all) for independent comparison between the two scenarios. Not a behavior
+ // change - log-only.
+ RigidBodyHandle handle() { return handle; }
 
  public void step(EntityVehicleF_Physics v) {
   box.updatePose();
