@@ -3437,6 +3437,31 @@ in either direction).
 (sha256 `a780c1412b65a51f66a34d47a663c7ab72ab4749b14fa4b5fbaae6382c78fe7a`)
 was produced.
 
+**Reconciliation onto M542 (added 2026-11-16).** Main advanced further,
+from `eff1e15` to `87b8380`, via MINECRAFT-542 (optional fixed-wing
+angular-rate damping). Merged `origin/main` into this branch; the only
+conflict was again `PhysicsBridgeLiveOverrideApplicationTest`'s combined-
+fields assertion `Set` (M542's `fixedWingAngularDampingCoefficient` and
+this ticket's `marineSteerDegrees` added on adjacent lines) - resolved by
+keeping both field names. `VERIFICATION.md`'s own append point also
+conflicted (large non-overlapping block on each side, same shape as every
+prior reconciliation) - resolved by keeping both sides, interleaved in
+whatever order git's three-way merge placed them (no content lost; a
+single missing blank line at the resulting section boundary was fixed).
+`Overrides.java`/`PhysicsBridge.java` again merged with no conflict.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline build` against the
+reconciled head (`minecraft-544/marine-propeller-steering-limit` merged
+with `origin/main` @ `87b8380`) - `BUILD SUCCESSFUL`. The real JUnit XML
+reports total **876 tests**, 0 skipped, 0 failures, 0 errors across the
+whole suite - M542's own new test class and this ticket's
+`marineSteerDegrees` coverage both present and passing together.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `df48286248af7a3b313a498e6ab2a4a4a1dd7a4ca05e7a04cf8885ba28157b7e`)
+was produced.
+
 ## Axle-specific spring and damping tuning (MINECRAFT-539, added 2026-11-15)
 
 Schema-coordinator slice for this sprint. Inspected the named seams first:
