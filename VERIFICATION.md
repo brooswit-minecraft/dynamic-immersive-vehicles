@@ -3356,4 +3356,65 @@ clean release path every tick (not the despawn-while-ticking path above),
 so it is likely a distinct, separate question from this specific crash's
 mechanism - not conflating the two without more evidence.
 
-Reported to MINECRAFT-547 and MINECRAFT-545.
+**Further follow-up run (John's comment 54250: "record the immediately
+preceding native state too" - before AND after `towing.remove()` itself,
+not just the first later sample) - this RETRACTS the despawn-lifecycle
+hypothesis above.** Added tick-relative logging: `active()`'s own
+`isHitchableBody`/`towingVehicleActive` decision every tick, the exact
+tick `cleanup()` actually releases/removes an invalidated vehicle,
+`BuoyantBody.step`'s own entry velocity every tick it runs, and both
+sides' real state immediately before AND after `towing.remove()` (not
+just the next probe-tick's sample). Full raw log retained at
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-diag5run-20261116T060313Z/server.log`
+(head `d90d336`, checksummed).
+
+**Result: the massive angular velocity is already present BEFORE
+`towing.remove()` is ever called.** The `pre-remove()` sample - logged at
+the top of `towingUnavailable()`, before the despawn call - already shows
+`towed.angularVelocity=(-73.0,-13.84,88.0)` AND `towing.angularVelocity=
+(-41.4,-12.5,-3.44)`. The despawn/`cleanup()` ordering hypothesis from the
+previous subsection is therefore WRONG as stated - there is no stale-
+constraint-against-a-removed-body mechanism needed to explain this, since
+both bodies are already violently spinning before either is removed.
+
+Tracing one tick further back: the `BuoyantBody.step` entry log for THIS
+exact tick, immediately after `towingUnavailable`'s own reconnect
+(`towing.connectTrailer(connection, false)`, called to keep `towed`
+jointed to the ORIGINAL `towing` one more time before despawning it - a
+step the probe performs, not production code, but using the exact same
+`createHitch`/`addConstraint` path every reconnect uses) - shows BOTH
+sides calm: `towing` `(0.0405,-0.0665,0.0247)` lin / near-zero ang,
+`towed` `(-0.0042,-0.327,-0.0436)` lin, `(0.119,0.063,-0.032)` ang. The
+NEXT sample (one game tick later, the `pre-remove()` line above) is
+already catastrophic. So the explosion happens in the single tick
+immediately following THIS RECONNECT's own native joint creation/first
+solve - independent of any despawn or cleanup-ordering question entirely.
+
+This matters because, unlike the fresh-vs-fresh `ATTACH` case (both
+bodies newly constructed via `BuoyantBody`'s own constructor, zero prior
+native state) and unlike `TOWING_REPLACEMENT` (one fresh `towing2`, one
+long-active `towed`), THIS reconnect joins two bodies that are BOTH
+already-active, long-stepped native handles (both went through `ATTACH`'s
+own settling, then 60 ticks fully unjointed during `DETACH`). The common
+factor between this reconnect and `TOWING_REPLACEMENT` - both unsafe - is
+that AT LEAST ONE side is an already-active (not freshly constructed)
+native body at the moment the joint is (re)created; `ATTACH` - the one
+safe case observed so far - has neither side already-active. This directly
+revives and sharpens MINECRAFT-547's own original leading hypothesis
+("joining a FRESH body to an already-settled one" - recorded in that
+ticket's description before the ground-comparison/gap-size detours), now
+generalized to "a joint (re)created where at least one side is already-
+active" and freshly evidenced by a case (this reconnect) that involves NO
+replacement, no despawn, and no fresh body being constructed anywhere -
+just a plain re-hitch of the same two already-settled vehicles.
+
+Not yet confirmed as the mechanism (still a hypothesis, now much better
+evidenced): what specifically differs, inside Sable's own native solver,
+between a constraint's first solve against a freshly-constructed
+`RigidBodyHandle` versus an already-stepped one - warm-start/contact-cache
+state, broad-phase registration timing, or something else entirely. That
+is the next bounded step, not attempted here - no fix, no speculative
+damping, per standing instruction.
+
+Reported to MINECRAFT-547 and MINECRAFT-545, retracting the
+despawn-lifecycle framing from the immediately preceding subsection.
