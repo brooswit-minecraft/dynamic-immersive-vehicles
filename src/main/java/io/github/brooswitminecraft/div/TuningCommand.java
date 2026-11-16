@@ -4,7 +4,6 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import minecrafttransportsimulator.entities.instances.APart;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
-import minecrafttransportsimulator.mcinterface.AWrapperWorld;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -28,9 +27,13 @@ import java.util.List;
  * <p>{@code target} is a vanilla entity selector ({@code EntityArgument.entity()}), resolving to
  * whatever real {@code net.minecraft.world.entity.Entity} Minecraft itself tracks - never the
  * MTS {@code EntityVehicleF_Physics} directly (IV's own {@code BuilderEntityExisting} wraps that
- * as a {@code protected}, non-public field). {@link #productionLookup} crosses that boundary via
- * the selected Minecraft entity's own UUID, looked up in the live MTS world through {@code
- * mcinterface1211.WrapperWorld.getWrapperFor(level)}'s inherited {@code EntityManager.getEntity}.
+ * as a {@code protected}, non-public field). {@link #productionLookup}/{@link #wrappedMtsEntity}
+ * cross that boundary via a bounded reflective read of that exact field - NOT UUID equality
+ * (review finding, comment 54227: a freshly-spawned vehicle's own MTS-side UUID and its
+ * wrapping Minecraft entity's own UUID are independently random-generated and never
+ * synchronized by the spawn path, so a UUID-based lookup silently failed for every vehicle that
+ * had not yet round-tripped through a real save/load - see {@link #productionLookup}'s own doc
+ * for the full finding).
  *
  * <p>Review (comment 54209/54213/54221): the actual DECISION logic this class makes - "is this a
  * DIV-eligible vehicle, and if so, what should the response say" - is exercised through real
@@ -110,18 +113,28 @@ final class TuningCommand {
   return 1;
  }
  /**
-  * The real live-world crossing {@link #run} cannot avoid: the selected Minecraft {@code
-  * Entity}'s own UUID, looked up in the live MTS world - documented (ticket comment,
-  * {@code AEntityB_Existing}'s own save/load contract) to mirror the wrapping Minecraft entity's
-  * UUID once persisted through at least one real save/load, the same identity {@code
-  * PhysicsBridge}'s own debug receipts already key vehicles by ({@code v.uniqueUUID}). Not
-  * reachable from a plain unit test (needs a live {@code ServerLevel}) - see {@link
-  * #VehicleLookup}'s own doc for how the rest of this command's logic is tested without it.
+  * The real live-world crossing {@link #run} cannot avoid. Review finding (comment 54227): an
+  * earlier version of this method looked the selected entity up by UUID in the live MTS world
+  * ({@code AWrapperWorld.getEntity(target.getUUID())}) - WRONG for exactly the common "just
+  * placed/spawned this vehicle" case, confirmed via decompiled {@code WrapperWorld.
+  * spawnEntityInternal} bytecode: a freshly-spawned MTS vehicle's own {@code AEntityA_Base#
+  * uniqueUUID} (randomUUID() when constructed with no NBT) is NEVER copied onto the wrapping
+  * Minecraft entity (itself independently randomUUID()-assigned by vanilla's own {@code Entity}
+  * constructor) - that UUID-equality lookup silently returned {@code NOT_FOUND} for every
+  * selected vehicle that had not yet round-tripped through at least one real NBT save/load.
+  *
+  * <p>Fixed by resolving through the ACTUAL wrapper/entity relationship instead of UUID equality:
+  * {@code mcinterface1211.BuilderEntityExisting} (confirmed, via decompiled {@code
+  * spawnEntityInternal}, to unconditionally hold the live wrapped {@code AEntityB_Existing} in
+  * its own {@code entity} field THE MOMENT it is constructed - before any save/load ever
+  * happens) holds that reference in a {@code protected} field with no public accessor anywhere
+  * in MTS's own API - {@link #wrappedMtsEntity} is the bounded reflective accessor this crossing
+  * needs, reading that exact field by name. Never throws: an entity that is not actually a
+  * {@code BuilderEntityExisting}, or a future MTS version renaming/removing the field, degrades
+  * to the same {@code NOT_FOUND} an actually-ineligible entity already gets - never a crash.
   */
  private static LookupResult productionLookup(Entity target) {
-  AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(target.level());
-  EntityVehicleF_Physics vehicle = world.getEntity(target.getUUID());
-  if (vehicle == null) return LookupResult.NOT_FOUND;
+  if (!(wrappedMtsEntity(target) instanceof EntityVehicleF_Physics vehicle)) return LookupResult.NOT_FOUND;
   var definition = vehicle.definition;
   if (definition == null) return LookupResult.NO_DEFINITION;
   String key = definition.packID+":"+definition.systemName;
@@ -132,6 +145,29 @@ final class TuningCommand {
    installedPartKeys.add(part.definition.packID+":"+part.definition.systemName);
   }
   return LookupResult.of(new ResolvedVehicle(key, liveTuning, installedPartKeys));
+ }
+ /**
+  * The bounded reflective accessor {@link #productionLookup} needs (review comment 54227's own
+  * "adding a bounded production accessor if necessary") - {@code mcinterface1211.
+  * BuilderEntityExisting#entity} (type {@code AEntityB_Existing}, confirmed via decompiled
+  * bytecode) is the live wrapped MTS entity, set unconditionally at construction, independent of
+  * any UUID relationship. Returns {@code null} - never throws - for any entity that is not
+  * actually a {@code BuilderEntityExisting}, or if the reflective read fails for any reason (a
+  * future MTS version renaming or removing the field): this crossing degrading to "not found"
+  * is exactly as safe as an actually-ineligible entity already is, never a command crash.
+  */
+ // Package-private, not private - lets TuningCommandAdapterTest directly exercise the
+ // reflective field lookup's own safety net (a non-BuilderEntityExisting entity, and the field's
+ // continued existence/type under the current MTS jar) without needing a live world.
+ static Object wrappedMtsEntity(Entity target) {
+  if (!(target instanceof mcinterface1211.BuilderEntityExisting builder)) return null;
+  try {
+   var field = mcinterface1211.BuilderEntityExisting.class.getDeclaredField("entity");
+   field.setAccessible(true);
+   return field.get(builder);
+  } catch (ReflectiveOperationException ex) {
+   return null;
+  }
  }
  private static void send(CommandSourceStack source, String line) {
   source.sendSuccess(() -> Component.literal(line), false);

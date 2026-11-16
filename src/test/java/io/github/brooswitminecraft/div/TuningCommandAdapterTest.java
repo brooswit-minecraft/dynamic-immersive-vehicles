@@ -39,11 +39,21 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code EntityVehicleF_Physics}/Sable body remains infeasible in any unit test (see {@code
  * PhysicsBridgeStepperTest}'s own doc).
  *
+ * <p>Also covers {@code TuningCommand.wrappedMtsEntity} - the bounded reflective accessor
+ * {@code productionLookup} uses to cross the Minecraft-entity/MTS-entity boundary (review
+ * finding, comment 54227: resolving by UUID equality instead, as an earlier version did, was a
+ * real production bug - see {@code productionLookup}'s own doc for the full finding) - its
+ * null-safety branch (no Entity/Level construction needed, since {@code instanceof} on
+ * {@code null} is always false), and a reflective existence/type check on the exact field it
+ * reads, so a future MTS jar update that renames or retypes it fails this test loudly rather
+ * than only ever being discovered live in-game.
+ *
  * <p>NOT covered, and not achievable from any unit test regardless: {@code TuningCommand.run}'s
- * own {@code EntityArgument.getEntity}/UUID-to-live-vehicle extraction, which needs a live,
- * running {@code ServerLevel} with a real spawned vehicle in it - the same pre-existing
- * constraint. That remaining glue is a few directly-inspectable lines; every DECISION it leads
- * to is covered here.
+ * own {@code EntityArgument.getEntity} extraction, and {@code wrappedMtsEntity}'s own happy path
+ * (an actual {@code BuilderEntityExisting} wrapping a real {@code EntityVehicleF_Physics}) -
+ * both need a live, running {@code ServerLevel} with a real spawned vehicle in it, the same
+ * pre-existing constraint. That remaining glue is a few directly-inspectable lines; every
+ * DECISION it leads to is covered here.
  */
 class TuningCommandAdapterTest {
  @AfterEach void resetOverrides() {
@@ -114,6 +124,27 @@ class TuningCommandAdapterTest {
   TuningCommand.respond(source, "ignored", TuningCommand.LookupResult.of(resolved));
   assertTrue(capture.lines.stream().anyMatch(l -> l.startsWith("[DIV] part divtest:tire")));
   assertTrue(capture.lines.stream().anyMatch(l -> l.contains("friction=2.5")));
+ }
+
+ // Review finding (comment 54227): wrappedMtsEntity (TuningCommand.productionLookup's own fix -
+ // resolving through the actual wrapper/entity relationship, never UUID equality, see its own
+ // doc) is the real production entry point for that crossing.
+
+ @Test void wrappedMtsEntityReturnsNullForANonBuilderTargetWithoutThrowing() {
+  // instanceof on null is always false in Java - this exercises the real "not actually a
+  // BuilderEntityExisting" branch with zero Entity/Level construction needed at all.
+  assertNull(TuningCommand.wrappedMtsEntity(null));
+ }
+
+ @Test void builderEntityExistingStillHasTheExpectedWrappedEntityFieldUnderTheCurrentMtsJar() {
+  // A reflective accessor is only as sound as the field it reads continuing to exist with the
+  // expected type - this fails loudly (not silently degrading to NOT_FOUND in production) the
+  // moment a future MTS jar renames/retypes/removes it, rather than only ever discovering that
+  // live in-game.
+  var field = assertDoesNotThrow(() -> mcinterface1211.BuilderEntityExisting.class.getDeclaredField("entity"),
+    "mcinterface1211.BuilderEntityExisting must still declare its own wrapped-entity field named 'entity'");
+  assertEquals(minecrafttransportsimulator.entities.components.AEntityB_Existing.class, field.getType(),
+    "the wrapped-entity field's own type must still be AEntityB_Existing");
  }
 
  private static CommandSourceStack sourceWithPermission(int level) {

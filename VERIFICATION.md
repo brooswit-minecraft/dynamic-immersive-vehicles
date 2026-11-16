@@ -3480,3 +3480,54 @@ at this fix's head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `366a8a50bae316d3476426aea7ee9e7c297b04e0e371f129119572b25908b7b1`)
 was produced.
+
+**Fifth self-review kickback fix (2026-11-16, comment Jira 54227) - a real
+production bug, not only a test-coverage gap.** Finding: `TuningCommand.
+productionLookup` resolved the selected Minecraft entity to its MTS
+vehicle by UUID equality (`AWrapperWorld.getEntity(target.getUUID())`).
+Per the prior fix's own finding (comment 54221/this file's own fourth
+entry above), a freshly-spawned MTS vehicle's own `uniqueUUID` and the
+wrapping Minecraft entity's own UUID are independently random-generated
+and never synchronized by the spawn path - so that lookup returned
+`NOT_FOUND` (the "not a DIV-eligible vehicle" message) for every selected
+vehicle that had not yet round-tripped through at least one real NBT
+save/load, which in practice is most vehicles an operator would actually
+want to diagnose. This was a correctly-identified production defect in
+the command itself, not merely a missing test.
+
+Fix: resolve through the ACTUAL wrapper/entity relationship instead of
+UUID equality - `mcinterface1211.BuilderEntityExisting` (confirmed, via
+the same decompiled `spawnEntityInternal` bytecode the prior finding
+already cited) unconditionally holds the live wrapped `AEntityB_Existing`
+in its own `entity` field the MOMENT it is constructed, independent of
+any UUID relationship and well before any save/load. That field is
+`protected` with no public accessor anywhere in MTS's own API, so
+`TuningCommand.wrappedMtsEntity` is a new, bounded reflective accessor
+reading it by name - exactly the "bounded production accessor" the
+review itself suggested. Never throws: an entity that is not actually a
+`BuilderEntityExisting`, or a future MTS version renaming/removing the
+field, degrades to the same `NOT_FOUND` an actually-ineligible entity
+already gets, never a crash. `productionLookup` no longer touches
+`AWrapperWorld`/UUID at all.
+
+Two new `TuningCommandAdapterTest` cases: `wrappedMtsEntity(null)`
+returns `null` without throwing (the real "not actually a
+`BuilderEntityExisting`" branch, exercised with zero `Entity`/`Level`
+construction needed, since `instanceof` on `null` is always `false` in
+Java); and a reflective existence/type check confirming
+`BuilderEntityExisting` still declares its own `entity` field as
+`AEntityB_Existing` under the current MTS jar - so a future MTS update
+that renames/retypes/removes it fails this test loudly, rather than only
+ever being discovered live in-game. `wrappedMtsEntity`'s own happy path
+(an actual `BuilderEntityExisting` wrapping a real
+`EntityVehicleF_Physics`) remains infeasible in any unit test, the same
+pre-existing constraint named throughout this ticket's own history.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+at this fix's head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**837 tests**, 0 skipped, 0 failures, 0 errors (835 prior plus these 2
+new cases).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `0fd62848020956792499d965cf6839c67848ec7c9981b82eb4cc88fbc170acaa`)
+was produced.
