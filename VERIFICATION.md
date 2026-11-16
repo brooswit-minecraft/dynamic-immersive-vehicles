@@ -3297,17 +3297,63 @@ in the retained `unsafeBuoyantAngularLock` fix, MINECRAFT-547, for the
 JOINTED mounted/restricted case) but is a hypothesis, not a demonstrated
 root cause.
 
-Per comment 54230/54237, no further fix is attempted here. Next bounded
-diagnostic requested by specialist review: trace body/joint IDs and
-validity, actual pose/velocity BEFORE `connectTrailer` is called (not just
-inside `createHitch`), before/after force impulses and physics step,
-resolved mass/inertia/drag fractions - separating buoyancy and drag
-impulses - and compare against MTS's own motion field only with units/
-timing properly converted. Not yet run this cycle. A lower-cost
-corroborating check worth running first: `BuoyantHitchProbe`'s
-`TOWING_UNAVAILABLE` phase alone (despawn the towing
-side, let `towed` free-float ~60 ticks with `-Ddiv.debugGroundContact=true`,
-logging `handle.getAngularVelocity()` every tick) - this would show whether
-any growth happens with no replacement join or second vehicle in the loop
-at all, but has not been run; whether it shows growth is still open.
-Reported to MINECRAFT-547 and MINECRAFT-545, with this retraction.
+Per comment 54230/54237, no further fix is attempted here.
+
+**Follow-up run (the "lower-cost corroborating check" above, now actually
+performed) - this changes the picture substantially.** Extended
+`PhysicsBridge.debugReadAngularVelocity`/added `debugReadLinearVelocity` to
+also cover `BuoyantBody` (previously `Body`-only; a diagnostic/test-only
+seam, same pattern as the existing `debugInjectAngularVelocity`), and used
+both from `BuoyantHitchProbe` to log `towed`'s real native state EVERY tick
+of `TOWING_UNAVAILABLE`'s free-float window, plus both sides' real state
+immediately BEFORE `TOWING_REPLACEMENT`'s `connectTrailer` call (addressing
+54237's exact complaint about the earlier, single-sample-after-the-fact
+diagnostic). Full raw log retained at
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-diag3run-20261116T051533Z/server.log`
+(head `e03c347`, checksummed).
+
+The result: **`towed`'s angular velocity is already massive - `(-73.0,
+-13.84, 88.0)` rad/s - on `TOWING_UNAVAILABLE`'s very FIRST tick**,
+immediately after `towing.remove()` is called while `towed` is still
+Sable-jointed to it. The immediately preceding sample (the reconnect
+`createHitchDiagnostic` line, one tick earlier, before `towing.remove()`)
+showed a calm `(0.119, 0.063, -0.032)` rad/s. This is not a 60-tick
+buildup - it is a single-tick jump, timed exactly to the despawn-while-
+jointed call, not to anything resembling gradual torque accumulation. The
+value then decays/steps down irregularly over the following ticks
+(`(-34.3,-17.9,27.0)` through tick 24, several further step-changes, down
+to the previously-seen `(-6.34,-0.03,-0.12)` by tick 53 - then EXACTLY
+constant through tick 60, consistent with the hull losing water contact
+and coasting with nothing to damp it further).
+
+This retracts the `BuoyantForces` torque-growth hypothesis as the primary
+suspect (there is no growth to explain - the spike is already present on
+tick 1) and instead points at the despawn/joint-release lifecycle itself,
+exactly the "stale constraints/handles" possibility 54230 asked to check
+and 54237 said had not been excluded. Precise code seam: `towing.remove()`
+is called directly by the probe (an ordinary MTS/IV entity removal, not
+through any `PhysicsBridge` API), which only marks the entity invalid;
+`PhysicsBridge.cleanup()` - registered on `ServerTickEvent.Post`, BEFORE
+the probe's own listener registration in `DynamicImmersiveVehicles`, so it
+already ran for the CURRENT tick by the time the probe's `remove()` call
+executes - is the only thing that calls `hitches.release`/`body.remove()`
+for an invalidated vehicle, and does not run again until the NEXT tick's
+`Post` event. For that one intervening tick, `towed`'s own `active()` still
+finds `towing`'s `BuoyantBody` present in the registry (`isHitchableBody`
+reads true), so `reconcileHitch` treats the joint as still coherently
+valid and leaves it alone, while `towing`'s own entity never ticks again
+(no more `step()` calls) - yet its native Sable box is still registered
+and the constraint is still live against it. This is a hypothesis
+supported directly by the timing evidence above, not yet confirmed by
+instrumenting `cleanup()`'s own tick-relative execution order or Sable's
+physics-step ordering directly - that is the next bounded step, not
+speculative damping/delay, and not attempted here.
+
+Separately, still open and NOT addressed by the above: the "already-active
+trailer fallback" gap from 54237 (`unsafeBuoyantAngularLock` firing for an
+already-active trailer) goes through `reconcileHitch`'s own synchronous,
+clean release path every tick (not the despawn-while-ticking path above),
+so it is likely a distinct, separate question from this specific crash's
+mechanism - not conflating the two without more evidence.
+
+Reported to MINECRAFT-547 and MINECRAFT-545.
