@@ -143,6 +143,23 @@ class FlightForcesTest {
   }
  }
 
+ // MINECRAFT-542: fixedWingAngularDampingCoefficient is gated the same "fixed-wing only, never a
+ // blimp/no-wing vehicle" way parasiticDragMultiplier/oswaldEfficiency are above (MINECRAFT-536).
+
+ @Test void gatedFixedWingAngularDampingCoefficientIsZeroForANoWingVehicle() {
+  // A blimp (aspectRatio<=0) must see exactly 0 regardless of the configured coefficient - its
+  // angular motion stays completely unaffected by this field, matching the ticket's "fixed-wing
+  // only, preserve blimps" scope.
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, 4.0));
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(-5, 4.0), "a negative aspectRatio must also gate off, not pass the coefficient through");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT), "even the maximum configured coefficient must be fully gated off for a no-wing vehicle");
+ }
+
+ @Test void gatedFixedWingAngularDampingCoefficientPassesThroughUnchangedForAnActualWing() {
+  assertEquals(4.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, 4.0), "a positive aspectRatio (a real wing) must pass the configured coefficient through unchanged");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, 0.0), "the off/unconfigured 0.0 value must also pass through unchanged on an actual wing");
+ }
+
  @Test void dragForceScalesQuadraticallyWithAirspeedAtAFixedCoefficient() {
   // Ticket's own "quadratic speed drag" acceptance requirement: aeroForce composed with
   // dynamicPressure (q = 1/2*rho*v^2) at a fixed, speed-independent drag coefficient must scale

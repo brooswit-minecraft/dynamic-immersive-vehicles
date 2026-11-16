@@ -37,6 +37,19 @@ public final class FlightForces {
   * to the old hardcoded 0.8 for an unconfigured vehicle.
   */
  public static final double DEFAULT_OSWALD_EFFICIENCY = 0.8;
+ /**
+  * Sane configuration ceiling on {@code Overrides.Tuning#fixedWingAngularDampingCoefficient}
+  * (MINECRAFT-542) - mirrors {@link RotorForces#MAX_ANGULAR_DAMPING_COEFFICIENT} exactly (same
+  * reasoning: {@link PhysicsBridge#rotorAngularDampingTorque}'s own no-reversal clamp, reused
+  * verbatim here via {@link RotorForces#angularDampingTorque}, already bounds one tick's damping
+  * impulse to at most the axis's existing angular momentum regardless of how large the
+  * coefficient is, so this cap is a usability ceiling, not a load-bearing safety bound). A
+  * SEPARATE constant, not a shared reference to {@link RotorForces#MAX_ANGULAR_DAMPING_COEFFICIENT} -
+  * this ticket reuses M537's dissipative-drag formula and no-reversal clamp, never its rotorcraft
+  * tuning field/bound, so a fixed-wing pack author's configured ceiling can never be confused
+  * with (or silently coupled to) a rotorcraft's.
+  */
+ public static final double MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT = 1000.0;
  private static final double GRAVITY = 9.81;
 
  /** Dynamic pressure q = 1/2 * rho * v^2, the common scale factor for every aerodynamic force. */
@@ -82,6 +95,24 @@ public final class FlightForces {
   double parasiticDrag = flooredParasiticDrag * parasiticDragMultiplier;
   double induced = (liftCoefficient * liftCoefficient) / (Math.PI * aspectRatio * oswaldEfficiency);
   return parasiticDrag + induced;
+ }
+
+ /**
+  * MINECRAFT-542: gates {@code Overrides.Tuning#fixedWingAngularDampingCoefficient} the exact
+  * same "fixed-wing only, never a blimp/no-wing vehicle" way {@link #dragCoefficient}'s own
+  * {@code parasiticDragMultiplier}/{@code oswaldEfficiency} are already gated (MINECRAFT-536,
+  * review correction) - {@code aspectRatio<=0} (no wing, e.g. a blimp hull) returns exactly 0
+  * regardless of the configured coefficient, so {@code PhysicsBridge.stepFlight}'s resulting
+  * {@link PhysicsBridge#rotorAngularDampingTorque} call (and therefore the blimp's angular
+  * motion) stays completely unaffected by this field, matching the ticket's "fixed-wing only,
+  * preserve blimps" scope exactly rather than merely still-damped-by-something. Only a
+  * positive-aspect-ratio fixed wing gets the configured coefficient passed through unchanged.
+  * Extracted as its own pure, unit-testable function (same reasoning {@code dragCoefficient}'s
+  * own gating was moved here for, MINECRAFT-536 review) rather than an inline ternary at
+  * {@code stepFlight}'s own untestable live call site.
+  */
+ public static double gatedFixedWingAngularDampingCoefficient(double aspectRatio, double fixedWingAngularDampingCoefficient) {
+  return aspectRatio > 0 ? fixedWingAngularDampingCoefficient : 0.0;
  }
 
  /** Aerodynamic force magnitude for one coefficient/area pair at this dynamic pressure. */

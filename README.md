@@ -36,7 +36,15 @@ each vehicle from IV's own definition at the moment it is needed:
   volume sized to displace the vehicle's mass) and not tied to
   `gravityFactor`, whose own IV runtime default actually resolves to full
   gravity when a pack leaves it unset. A blimp with no configured
-  `ballastVolume` gets ordinary gravity, matching IV. See
+  `ballastVolume` gets ordinary gravity, matching IV. An optional, independent,
+  bounded angular-rate damping torque (`fixedWingAngularDampingCoefficient` -
+  MINECRAFT-542) can additionally be configured on top of the control torques
+  above - a dissipative drag opposing the body's own existing roll/pitch/yaw
+  rate (never the pilot's aileron/elevator/rudder input), off by default,
+  reusing the same inertia-aware, no-reversal model `rotorAngularDampingCoefficient`
+  (MINECRAFT-537) uses but as a wholly separate, never-shared field. Fixed-wing
+  only - a blimp (no wing) is completely unaffected by this field regardless of
+  how it is configured. See
   [`FlightForces`](src/main/java/io/github/brooswitminecraft/div/FlightForces.java)
   for the exact model and its stated simplifications (no post-stall/spin
   behavior, no advance-ratio propeller falloff, no altitude/weather air
@@ -700,6 +708,21 @@ at all). See
 [`RotorForces#angularDampingTorque`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
 for the full model.
 
+`fixedWingAngularDampingCoefficient` (MINECRAFT-542, fixed-wing aircraft
+only - never a blimp, rotorcraft, or ground vehicle - finite, `[0, 1000]`,
+default `0.0` - off) is the same optional, bounded angular-rate damping
+torque as `rotorAngularDampingCoefficient` above, ADDED to (never
+replacing) the aileron/elevator/rudder control torque, reusing that exact
+dissipative viscous-drag, inertia-aware, no-reversal model
+(`RotorForces#angularDampingTorque`) - but as a wholly separate,
+never-shared field, so configuring one vehicle category's damping can
+never silently affect the other's. It is gated on the vehicle actually
+having a wing (`aspectRatio>0`, the same gate `parasiticDragMultiplier`/
+`oswaldEfficiency` below already use): a blimp's angular motion stays
+completely unaffected by this field regardless of how it is configured.
+`0.0` reproduces the model's exact prior behavior (no angular-rate damping
+term at all).
+
 A copyable example is also
 available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
@@ -781,7 +804,7 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
 `yawAuthorityScale`, `rotorAngularDampingCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
 `suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
-`verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `toeFrontDegrees`,
+`verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `fixedWingAngularDampingCoefficient`, `toeFrontDegrees`,
 `toeRearDegrees`, `axleDriveForceSharing`. Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
