@@ -934,14 +934,17 @@ public final class PhysicsBridge {
    Logger diagnosticLogger = LogUtils.getLogger();
    RigidBodyHandle towingHandle = towing instanceof Body b ? b.handle : towing instanceof BuoyantBody bb ? bb.handle() : null;
    RigidBodyHandle trailerHandle = trailer instanceof Body b ? b.handle : trailer instanceof BuoyantBody bb ? bb.handle() : null;
-   // MINECRAFT-545/547 (John's comment 54337): pose is the box's own CACHED Pose3d, last
+   // MINECRAFT-545/547 (John's comment 54359): pose is the box's own CACHED Pose3d, last
    // refreshed by that body's own PRIOR step() call (box.updatePose()) - this createHitch call
-   // itself never refreshes it, and runs strictly BEFORE this same tick's own step() (active()
-   // precedes step() in VehicleMovementMixin.div$move) - so this is explicitly ONE TICK STALE
-   // relative to the box's true native pose at this instant, not a fresh read. World-space
-   // anchor position is computed from that same (stale) pose + the local offset already logged.
-   // gameTime is MTS/MC's own absolute tick counter - a real ordering marker, not mere log
-   // adjacency, usable to verify exactly how many ticks separate any two samples.
+   // itself never refreshes it. Call-ordering alone (active() precedes step() in
+   // VehicleMovementMixin.div$move) is NOT itself proof of exactly when the native impulse
+   // that produced this cached pose was applied - only that this read happens before this
+   // tick's own step(). So this is labeled UNVERIFIED_AGE, not a confident "one tick stale"
+   // claim: no independent refresh/tick/substep/event marker backs a precise age here.
+   // World-space anchor position is computed from that same (age-unverified) pose + the local
+   // offset already logged. gameTime is MTS/MC's own absolute tick counter - a real ordering
+   // marker, not mere log adjacency, usable to verify exactly how many ticks separate any two
+   // samples - but it does not by itself establish this pose's staleness in substeps.
    var towingPose = towing instanceof Body b ? b.box.getPose() : towing instanceof BuoyantBody bb ? bb.box().getPose() : null;
    var trailerPose = trailer instanceof Body b ? b.box.getPose() : trailer instanceof BuoyantBody bb ? bb.box().getPose() : null;
    var towingAnchorWorld = towingPose != null ? new Vector3d(hitchOffset).rotate(new Quaterniond(towingPose.orientation())).add(towingPose.position()) : null;
@@ -949,13 +952,13 @@ public final class PhysicsBridge {
    diagnosticLogger.info("[DIV createHitchDiagnostic] towing=" + connection.towingVehicle.uniqueUUID + " class=" + towing.getClass().getSimpleName()
      + " gameTime=" + towing.level().getGameTime()
      + " center=" + towing.center() + " hitchLocalOffset=" + hitchOffset
-     + " cachedPose(ONE_TICK_STALE)=" + towingPose + " hitchAnchorWorld(fromCachedPose)=" + towingAnchorWorld
+     + " cachedPose(UNVERIFIED_AGE)=" + towingPose + " hitchAnchorWorld(fromCachedPose)=" + towingAnchorWorld
      + " linearVelocity=" + (towingHandle != null ? towingHandle.getLinearVelocity(new Vector3d()) : "n/a")
      + " angularVelocity=" + (towingHandle != null ? towingHandle.getAngularVelocity(new Vector3d()) : "n/a"));
    diagnosticLogger.info("[DIV createHitchDiagnostic] trailer=" + connection.towedVehicle.uniqueUUID + " class=" + trailer.getClass().getSimpleName()
      + " gameTime=" + trailer.level().getGameTime()
      + " center=" + trailer.center() + " hookupLocalOffset=" + hookupOffset
-     + " cachedPose(ONE_TICK_STALE)=" + trailerPose + " hookupAnchorWorld(fromCachedPose)=" + trailerAnchorWorld
+     + " cachedPose(UNVERIFIED_AGE)=" + trailerPose + " hookupAnchorWorld(fromCachedPose)=" + trailerAnchorWorld
      + " linearVelocity=" + (trailerHandle != null ? trailerHandle.getLinearVelocity(new Vector3d()) : "n/a")
      + " angularVelocity=" + (trailerHandle != null ? trailerHandle.getAngularVelocity(new Vector3d()) : "n/a"));
   }
@@ -1154,6 +1157,18 @@ public final class PhysicsBridge {
   var body = registry.get(v);
   if (body instanceof Body b) return b.box.getPose();
   if (body instanceof BuoyantBody bb) return bb.box().getPose();
+  return null;
+ }
+ /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
+  * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL
+  * anchor-world position at ANY bracket by rotating a connection's own authored local offset by
+  * whichever pose sample it already has, via {@code HitchJoint.anchorLocalOffset}, instead of
+  * hardcoding or re-deriving the offset a different way. Returns {@code null} if there is no
+  * active body right now. Never called from any production code path. */
+ public static Vector3dc debugReadCenter(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.center();
+  if (body instanceof BuoyantBody bb) return bb.center();
   return null;
  }
  /**

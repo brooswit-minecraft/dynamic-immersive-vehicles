@@ -74,6 +74,12 @@ final class BuoyantForces {
    Vector3d localVelocity = new Vector3d(angular).cross(arm).add(velocity);
    double speed = localVelocity.length();
    Vector3d force = new Vector3d(0, Buoyancy.buoyantForce(fraction, volumePerFloat), 0);
+   // MINECRAFT-545/547 (John's comment 54357: "capture actual buoyancy/drag inputs and applied
+   // force/torque contributions... identifying unavailable native terms") - diagnostic-only
+   // snapshot of the buoyancy force ALONE, before drag is added below, so the two contributions
+   // can be reported separately rather than only as their combined sum. Not a behavior change -
+   // read-only copy of a value already computed above.
+   Vector3d buoyancyOnlyForce = new Vector3d(force);
    // MINECRAFT-535: directional water drag - this point's own velocity, transformed into the
    // hull's body-local basis (x=lateral/port-starboard, y=vertical/heave, z=longitudinal/bow-
    // stern, matching the same basis `forward` below is built in), scaled per axis by
@@ -88,6 +94,30 @@ final class BuoyantForces {
     double lateral = Buoyancy.directionalDragForce(speed, bodyVelocity.x, fraction, tuning.waterDrag, tuning.lateralWaterDragMultiplier);
     double vertical = Buoyancy.directionalDragForce(speed, bodyVelocity.y, fraction, tuning.waterDrag, tuning.verticalWaterDragMultiplier);
     force.add(q.transform(new Vector3d(lateral, vertical, longitudinal)));
+   }
+   // MINECRAFT-545/547 (John's comment 54357) - diagnostic-only, gated behind the existing
+   // GroundContactDiagnostics flag (same opt-in every other per-tick diagnostic in this codebase
+   // already uses). Logs this float's own submerged fraction, world-space arm, buoyancy-only
+   // force, drag-only force (= combined - buoyancy, computed here only for the log line), and the
+   // actual impulse about to be applied - the SAME values `applyImpulseAtPoint` below uses, not a
+   // re-derivation. Explicitly does NOT capture: the native solver's own resulting velocity change
+   // from this impulse (applied synchronously into Sable's own native state, not read back here),
+   // nor any OTHER force source (gravity, the joint's own impulse, propeller thrust below) -
+   // those remain unavailable native/other-source terms, not claimed to be covered by this line.
+   // MINECRAFT-545/547 (John's comment 54359: "lacks tick/substep/event association") - gameTime
+   // is this call's own Minecraft-tick marker (level.getGameTime(), the same absolute counter used
+   // elsewhere in this diagnostic work). This method itself runs exactly ONCE per Minecraft tick,
+   // from BuoyantBody.step/PhysicsBridge - BEFORE Sable's native substeps (config.substepsPerTick)
+   // run - so there is no finer substep index available to attach at this call site; that absence
+   // is stated here, not silently omitted.
+   if (GroundContactDiagnostics.ENABLED) {
+    Vector3d dragOnlyForce = new Vector3d(force).sub(buoyancyOnlyForce);
+    com.mojang.logging.LogUtils.getLogger().info("[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID
+      + " gameTime=" + level.getGameTime() + " substep=UNAVAILABLE_PRE_SUBSTEP"
+      + " floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
+      + " submergedFraction=" + fraction + " worldArm=" + arm
+      + " buoyancyOnlyForce=" + buoyancyOnlyForce + " dragOnlyForce=" + dragOnlyForce
+      + " appliedImpulse=" + new Vector3d(force).mul(PhysicsBridge.DT));
    }
    handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(force).mul(PhysicsBridge.DT)));
   }
@@ -127,8 +157,24 @@ final class BuoyantForces {
    if (averageFraction > 0) {
     double retention = Buoyancy.angularDragRetention(angularSpeed, averageFraction, tuning.angularWaterDrag, PhysicsBridge.DT);
     Vector3d deltaAngular = new Vector3d(currentAngular).mul(retention - 1.0);
+    // MINECRAFT-545/547 (John's comment 54359) - diagnostic-only: this IS the rotational
+    // water-drag term's own contribution for this tick, applied as a direct velocity delta (not
+    // an impulse) via addLinearAndAngularVelocity below - the one OTHER force/torque source,
+    // besides the per-float buoyancy/linear-drag already logged above, this method applies.
+    if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+      "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
+        + " substep=UNAVAILABLE_PRE_SUBSTEP rotationalDragDeltaAngular=" + deltaAngular + " retention=" + retention);
     handle.addLinearAndAngularVelocity(new Vector3d(), deltaAngular);
    }
+  } else if (GroundContactDiagnostics.ENABLED) {
+   // MINECRAFT-545/547 (John's comment 54359) - explicit confirmation, not silent absence: this
+   // tick's rotational water-drag term did NOT fire for this body (tuning.angularWaterDrag
+   // defaults to 0 via Overrides.FALLBACK, and this fixture sets no override), so the per-float
+   // buoyancy/linear-drag impulses logged above are the ONLY force/torque source this method
+   // itself applies this tick - confirmed, not merely assumed from the default's own value.
+   com.mojang.logging.LogUtils.getLogger().info(
+     "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
+       + " substep=UNAVAILABLE_PRE_SUBSTEP rotationalDrag=INACTIVE_THIS_TICK angularWaterDrag=" + tuning.angularWaterDrag);
   }
   // Per-propeller drive, keyed by actual engine linkage (PartEngineAccessor.linkedPropellers -
   // IV's own private field, not reachable through any public API) rather than one vehicle-wide

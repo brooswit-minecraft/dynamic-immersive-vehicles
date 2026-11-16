@@ -1,5 +1,6 @@
 package io.github.brooswitminecraft.div.experimental;
 import com.mojang.logging.LogUtils;
+import io.github.brooswitminecraft.div.HitchJoint;
 import io.github.brooswitminecraft.div.PhysicsBridge;
 import minecrafttransportsimulator.baseclasses.Point3D;
 import minecrafttransportsimulator.baseclasses.RotationMatrix;
@@ -475,15 +476,41 @@ public final class BuoyantHitchProbe {
    // ran for both bodies THIS SAME tick) - so this pose read IS current for this tick, NOT stale
    // the way the createHitchDiagnostic sample (captured earlier, during active(), before step())
    // is. gameTime is the real tick-number marker this comment asked for, not log adjacency.
+   // MINECRAFT-545/547 (John's comments 54337/54357/54359): BOTH bodies' pose/COM/anchor-world
+   // captured at this same bracket (towing's own pose, and ANY anchor-world here at all, were
+   // both missing before - real gaps, not removed with a claim they were unnecessary). Anchor-
+   // world is computed via HitchJoint.anchorLocalOffset against this probe's OWN authored
+   // HITCH_POS/HOOKUP_POS connection constants and each body's real debugReadCenter() - the SAME
+   // pure function createHitch itself uses, with this exact connection's own real inputs, not a
+   // hardcoded final vector guessed to match. Freshness is labeled ASSUMED, not asserted as
+   // proven: this call site's own ordering reasoning (active() before step(), cited in an
+   // earlier entry) is NOT an independent refresh/event/tick marker - createHitch's own
+   // insertion moment is likewise not itself proof of when the native impulse was actually
+   // applied, per 54359 - so both samples carry an explicit UNVERIFIED_AGE label here rather
+   // than a confident ONE_TICK_STALE/CURRENT_THIS_TICK claim.
    var towedPoseHere = PhysicsBridge.debugReadPose(towed);
-   var towedAnchorWorldHere = towedPoseHere != null
-     ? new org.joml.Vector3d(0, -0.3, 1.0).rotate(new org.joml.Quaterniond(towedPoseHere.orientation())).add(towedPoseHere.position()) : null;
+   var towingPoseHere = PhysicsBridge.debugReadPose(towing);
+   var towedCenter = PhysicsBridge.debugReadCenter(towed);
+   var towingCenter = PhysicsBridge.debugReadCenter(towing);
+   var towedHookupOffset = towedCenter != null
+     ? HitchJoint.anchorLocalOffset(towedCenter, new org.joml.Vector3d(HOOKUP_POS.x, HOOKUP_POS.y, HOOKUP_POS.z), new org.joml.Vector3d()) : null;
+   var towingHitchOffset = towingCenter != null
+     ? HitchJoint.anchorLocalOffset(towingCenter, new org.joml.Vector3d(HITCH_POS.x, HITCH_POS.y, HITCH_POS.z), new org.joml.Vector3d()) : null;
+   var towedAnchorWorldHere = (towedPoseHere != null && towedHookupOffset != null)
+     ? new org.joml.Vector3d(towedHookupOffset).rotate(new org.joml.Quaterniond(towedPoseHere.orientation())).add(towedPoseHere.position()) : null;
+   var towingAnchorWorldHere = (towingPoseHere != null && towingHitchOffset != null)
+     ? new org.joml.Vector3d(towingHitchOffset).rotate(new org.joml.Quaterniond(towingPoseHere.orientation())).add(towingPoseHere.position()) : null;
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE pre-remove() real native state"
-     + " gameTime=" + towed.world.getTime() + " towing.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towing)
+     + " gameTime=" + towed.world.getTime() + " towing.id=" + towing.uniqueUUID
+     + " towing.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towing)
      + " towing.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towing)
+     + " towing.center=" + towingCenter + " towing.pose(UNVERIFIED_AGE)=" + towingPoseHere
+     + " towing.hitchAnchorWorld=" + towingAnchorWorldHere
+     + " towed.id=" + towed.uniqueUUID
      + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
      + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed)
-     + " towed.pose(CURRENT_THIS_TICK)=" + towedPoseHere + " towed.hookupAnchorWorld(fromCurrentPose)=" + towedAnchorWorldHere);
+     + " towed.center=" + towedCenter + " towed.pose(UNVERIFIED_AGE)=" + towedPoseHere
+     + " towed.hookupAnchorWorld=" + towedAnchorWorldHere);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE despawning towing while towed remains jointed");
    towing.remove();
    // Same-tick, same Java call, immediately AFTER remove() returns - whether remove() itself

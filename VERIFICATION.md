@@ -4485,3 +4485,131 @@ tick - not logged anywhere; confirmed per-float tuning constants for
 this fixture - not independently re-verified in this pass) are not
 available from retained data, so per instruction this is listed as a
 missing-input blocker, not a speculative numerical claim.
+
+## Gate-review packet for the one still-pending isolated instrumented rerun (54359)
+
+John's comment 54359 reviewed my prior uncommitted diff LIVE, before I'd
+even finished or reported it, and named four concrete gaps. "No run until
+independent packet review releases it" (54359) is honored as stated: this
+section is a PACKET for review, not a report of a run. No `runServer`
+invocation that launches the actual Minecraft/Java process has been made
+this round - only `prepareServerRun`/`createServerLaunchScript` (which only
+write config/launch-script files; they do not start the JVM) were run,
+specifically to verify item 1 below BEFORE any actual launch.
+
+### Gap 1: isolated run directory, non-aliasing proof, resolved target verified pre-launch
+
+- Directory created: `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-rundir-20261116T224049Z/rundir`
+  (never under this worktree's shared `run/`).
+- Populated only with `config/` (8 files), `eula.txt`, `server.properties`,
+  copied with `cp -L` (dereferencing any symlink) from the shared `run/`.
+  No `world/` directory present - a fresh world will be generated there if
+  this run is later authorized; it cannot alias `run/world`.
+- Non-aliasing proof:
+  - `realpath` on both directories differ (`.../minecraft-545/run` vs
+    `.../div-evidence/.../rundir`).
+  - Per-file `stat -c '%d:%i'` (device:inode) comparison for all 10 copied
+    files: every pair is DISTINCT between original and copy - no hardlink
+    aliasing.
+- Input hashes recorded in
+  `.../M545-isolated-rundir-20261116T224049Z/isolated-input-manifest.sha256`
+  (SHA-256 of all 10 copied files, listed above in this session's tool
+  output).
+- Resolved Gradle run target, verified BEFORE Minecraft itself starts:
+  - **Found and fixed a real defect in my own prior uncommitted diff**:
+    `build.gradle`'s override set `workingDirectory`, a property that does
+    not exist on ModDevGradle's `RunModel` - confirmed by actually running
+    `prepareServerRun` with `DIV_ISOLATED_RUN_DIR` set, which failed
+    configuration outright: "Could not set unknown property
+    'workingDirectory' for Run[server] of type
+    net.neoforged.moddevgradle.dsl.RunModel." This means the ORIGINAL
+    version of this override, if it had been run, would have failed before
+    ever reaching Minecraft - not a silent no-op, but it was never actually
+    exercised until this check.
+  - Fixed by decompiling the actual `RunModel.class` from the resolved
+    `moddev-gradle-2.0.148.jar` via `javap` (not guessing from
+    documentation) - the real property is `gameDirectory`
+    (`DirectoryProperty`). Changed the override to
+    `gameDirectory = project.file(System.getenv('DIV_ISOLATED_RUN_DIR'))`.
+  - Re-ran `prepareServerRun createServerLaunchScript` with
+    `DIV_ISOLATED_RUN_DIR`/`DIV_BUOYANT_HITCH_PROBE` set: `BUILD SUCCESSFUL`.
+    The generated `build/moddev/runServer.sh` (inspected directly, not
+    executed) resolves to
+    `(cd '/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-rundir-20261116T224049Z/rundir'; exec '.../java' ...)`
+    - the isolated directory, confirmed in the actual generated artifact,
+    before any `java` process runs.
+  - Checked that `prepareServerRun`'s own UP-TO-DATE status on the second
+    run is not masking anything: its outputs are build-directory-scoped
+    (classpath/assets files), not the game directory - confirmed the
+    isolated `rundir/` contains only the 10 originally-copied files after
+    this task ran, nothing written into it.
+  - Re-ran plain `gradle test` with NO env vars set afterward:
+    `BUILD SUCCESSFUL` - the default (shared `run/`) path is unaffected by
+    this fix.
+
+### Gap 2: `createHitch`'s own `ONE_TICK_STALE` label
+
+`PhysicsBridge.createHitch`'s diagnostic log (both the towing and trailer
+lines) and its surrounding comment previously asserted `ONE_TICK_STALE`
+based on call-ordering reasoning alone. Per 54359 ("createHitch insertion
+is not itself proof of when native impulse was applied"), both lines are
+now labeled `cachedPose(UNVERIFIED_AGE)`, and the comment states plainly
+that call-ordering shows only that this read happens before this tick's
+own `step()` - not a precise substep-level age - matching the same
+correction already applied to the probe's own log site in the prior round.
+
+### Gap 3: `BuoyantForces` diagnostic tick/substep/event association
+
+Both `buoyantForcesDiagnostic` log lines (per-float buoyancy/drag, and the
+rotational-drag term) now include `gameTime=` (the real Minecraft tick
+counter, `level.getGameTime()`) and an explicit `substep=UNAVAILABLE_PRE_SUBSTEP`
+marker - stating, not omitting, that this call site runs exactly once per
+Minecraft tick, before Sable's own native substeps, so no finer substep
+index exists to attach here. Additionally, an explicit "else" branch was
+added so that when the rotational-drag term does NOT fire (true for this
+fixture, since `tuning.angularWaterDrag` defaults to 0/`Overrides.FALLBACK`
+and this fixture sets no override), a log line explicitly confirms
+`rotationalDrag=INACTIVE_THIS_TICK` rather than leaving that absence
+silent/inferred.
+
+### Gap 4: cleanup-branch and shutdown design (plan only, not executed)
+
+Written to
+`.../M545-isolated-rundir-20261116T224049Z/CLEANUP_PLAN.md`:
+- Shutdown: reuse the already-proven FIFO read-write-open pattern
+  (`exec 3<>fifo` before launch, write `stop` to fd 3 once the probe's own
+  COMPLETE/CRASHED marker or a tick ceiling is observed in the ISOLATED
+  directory's own `logs/latest.log`), the same mechanism that produced the
+  clean "Stopping server / All dimensions are saved" shutdown evidence in
+  `M545-authrun-probe2`.
+- Cleanup: reduced to a single binary choice over the WHOLE isolated
+  directory (RETAIN by default, as evidence, consistent with "do not
+  alter/delete evidence" - or DELETE only on explicit request), because the
+  isolated directory shares no path/symlink/hardlink with `run/` or any
+  other retained evidence directory (proven in Gap 1) - no per-entity
+  fixture remediation is needed, unlike the still-open gap in the prior
+  shared-`run/`-world cleanup disposition noted above.
+
+### Validation performed this round
+
+- `gradle test`: `BUILD SUCCESSFUL` after all four gaps above were
+  addressed in the uncommitted diff (claimed/released
+  `/tmp/div-gradle-slot.lock` each time, logged in
+  `/tmp/div-gradle-slot.owner` as `M545-gatefix-test`/`M545-isolated-dryrun`/
+  `M545-isolated-dryrun2`/`M545-gatefix-test2`).
+- `prepareServerRun`/`createServerLaunchScript` (config/script generation
+  only, no JVM launch) under the same lock, twice: once reproducing the
+  `workingDirectory` failure, once confirming the `gameDirectory` fix
+  resolves to the isolated directory.
+- No `runServer` (actual Minecraft launch) was performed. No existing
+  evidence directory, world, or the shared `run/` directory was read from
+  or written to by this round's isolated-directory work.
+
+### What is NOT yet done
+
+- The isolated diagnostic run itself has not been launched - per 54359,
+  that requires a separate, later authorization after this packet is
+  reviewed.
+- This diff (build.gradle `gameDirectory` fix, `PhysicsBridge`/`BuoyantForces`/
+  `BuoyantHitchProbe` relabeling and association changes) is about to be
+  committed alongside this VERIFICATION.md entry, as its own commit.

@@ -41,6 +41,23 @@ neoForge {
   server {
    server()
    programArgument('nogui')
+   // MINECRAFT-545/547 (John's comment 54357): opt-in ISOLATED run-directory override for the
+   // one still-pending diagnostic rerun gate review - OFF for every normal `gradle runServer`
+   // (including the existing runtime-smoke CI job and every prior probe run in this ticket,
+   // which all used the shared `run/` directory unchanged). Only takes effect when
+   // DIV_ISOLATED_RUN_DIR is set to an absolute path to a FRESH, prepared directory (config/
+   // eula.txt/server.properties pre-populated, no world/ present) - never the shared `run/`
+   // itself. A world generated under that directory can never alias the shared one; nothing in
+   // `run/world`/`run/config` is read or written for an isolated run.
+   // CORRECTED: ModDevGradle's RunModel has no `workingDirectory` property - the first version
+   // of this override set an unknown property and failed configuration for EVERY gradle
+   // invocation once DIV_ISOLATED_RUN_DIR was set (confirmed via a live `prepareServerRun` dry
+   // run: "Could not set unknown property 'workingDirectory' for Run[server]"). The real,
+   // decompiled-confirmed property (javap on moddev-gradle-2.0.148.jar's RunModel.class) is
+   // `gameDirectory` (a DirectoryProperty).
+   if (System.getenv('DIV_ISOLATED_RUN_DIR') != null) {
+    gameDirectory = project.file(System.getenv('DIV_ISOLATED_RUN_DIR'))
+   }
    // Opt-in anchor-frame probe (ticket comment 53243/53244) - OFF for every normal
    // `gradle runServer` (including the existing runtime-smoke CI job); only a dedicated
    // CI job that sets DIV_ANCHOR_FRAME_PROBE=true before invoking this task turns it on.
