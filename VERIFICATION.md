@@ -3057,3 +3057,64 @@ either direction.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `65dd7fb988eaa35a954e739d6b2722a026b4b53b5aa5fcd02220b6e25d80da03`)
 was produced.
+
+# MINECRAFT-543: optional rotorcraft translational air drag, 2026-11-15
+
+Added `RotorForces.translationalDragForce` (bounded, dissipative quadratic
+drag opposing a rotorcraft's own actual linear body velocity, no-reversal
+clamped against this body's own existing momentum along its velocity
+direction - the translational analogue of MINECRAFT-537's
+`angularDampingTorque`), wired into `PhysicsBridge.stepRotor` and ADDED to
+(never substituting for) the existing thrust force. New additive
+`Overrides.Tuning.rotorAirDragCoefficient` field (vehicle-only, finite,
+`[0, RotorForces.MAX_AIR_DRAG_COEFFICIENT]`, FALLBACK `0.0` - off),
+threaded through validate/copy/template-merge/part-override-rejection/
+`resolved`/`PhysicsBridge.applyLiveSafeFields` the same way
+`rotorAngularDampingCoefficient` already is. Schema proposal posted to
+MINECRAFT-539 (schema coordinator) before editing shared Overrides/
+PhysicsBridge code; no objection received.
+
+Covers the ticket's acceptance criteria: production force opposes
+velocity (`forceOpposesVelocityDirectionExactly`), zero-velocity/off parity
+(`zeroCoefficientProducesExactlyZeroForceVector_zeroOffParity`/
+`zeroVelocityProducesExactlyZeroForceVector_zeroVelocityParity`), rotated
+body/frame cases (`forceIsOrientationIndependentGivenTheSameWorldVelocity`
+- this force takes no body-local axes at all, so it is orientation-
+independent by construction, unlike cyclic/yaw torque), finite high-
+speed/dt behavior with no momentum reversal
+(`extremeSpeedAndDtStayBoundedAndNeverReverseMomentum`), and a bounded
+real-Sable-representative response (`monotonicKineticEnergyReductionOverRepeatedTicksNeverOvershootsPastRest`,
+a ~2200kg helicopter at cruise speed, confirming strictly non-increasing
+kinetic energy and substantial decay without overshoot - quadratic drag
+decays hyperbolically, not exponentially, so this asserts measurable decay
+rather than an unphysical "reaches rest" claim). `OverridesTest` and
+`PhysicsBridgeLiveOverrideApplicationTest` cover the field's full
+precedence chain, template inheritance, part-override rejection,
+reload-validation (good-then-bad-retains-prior-good), and live hot-reload
+apply/revert-to-default, mirroring `rotorAngularDampingCoefficient`'s own
+existing coverage. Collective/cyclic/yaw authority and angular damping are
+untouched (no shared code path edited); float/water forces are untouched
+(`BuoyantForces` is a separate class, never called from `stepRotor`).
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` against
+this branch (`minecraft-543/rotor-translational-air-drag`) at the accepted
+baseline `4ee035a16fffe416d5543343df11f3d793a16dd6` (origin/main, verified
+current at pickup) - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**799 tests**, 0 skipped, 0 failures, 0 errors across the whole suite (14
+new: 8 in `RotorForcesTest`, 5 in `OverridesTest`, 1 in
+`PhysicsBridgeLiveOverrideApplicationTest`, plus every pre-existing test
+run unchanged alongside them - confirming no regression anywhere else in
+the suite, ground/boat/fixed-wing/existing-rotor paths included).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `80d93cd8f6b392f635b24e23e345ecf00305ddaab1a90b8c39152eea747f3c65`)
+was produced.
+
+Not yet performed: in-game acceptance (real rotorcraft spawn with
+configured `rotorAirDragCoefficient`, observed forward-flight speed/drift
+effect) - this ticket's own brief says focused engineering tests are in
+scope, not John's broad/hardware playtesting, which is explicitly out of
+scope here. Hosted CI remains billing-blocked, same disclosed limitation
+as every recent DIV ticket on this repo.
