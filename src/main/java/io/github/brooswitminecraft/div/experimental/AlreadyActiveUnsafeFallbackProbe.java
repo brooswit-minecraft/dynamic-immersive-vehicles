@@ -24,27 +24,37 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Bounded, opt-in, CI/isolated-host-only runtime probe (John's comment 54259: the two new
- * {@code PhysicsBridgeClassificationTest} cases for the MINECRAFT-545/547 already-active
- * unsafe-fallback fix only exercise the pure {@code deferToNativeHitch}/{@code decide} boolean
- * helpers - they do NOT demonstrate actual removal of an already-existing Sable body, actual
- * joint release, or actual native-authority handoff through the real {@code PhysicsBridge.active}
- * entry point. This probe closes that gap live.
+ * Bounded, opt-in, CI/isolated-host-only runtime probe (John's comment 54259, sharpened by
+ * 54262: the first version of this probe started `towed` completely UNJOINTED and declared PASS
+ * the moment both velocity lookups read null - that does NOT establish release of a PREEXISTING
+ * joint, sustained native towing, or actual native-object destruction, only that DIV's own
+ * registry no longer tracks a body). This revision closes all three gaps with direct
+ * OBSERVATIONS, not source inference:
  *
- * <p>Method: {@code towed} (a buoyant hull) is spawned COMPLETELY STANDALONE - no hitch, no
- * towing vehicle at all - and settles into a normal, ALREADY-ACTIVE Sable body purely from
- * {@code Classification.floatEligible}'s own standalone eligibility (confirmed by MINECRAFT-545's
- * own `floatEligibleNoLongerExcludesActivelyTowedHull` - a float hull activates whether towed or
- * not). A FRESH buoyant vehicle ({@code towing2}) with a `mounted` hitch connection is then
- * connected to `towed` for the FIRST time - the first time `towed.towedByConnection` is ever
- * non-null - so `unsafeBuoyantAngularLock` fires (both sides buoyant, `mounted`) while `towed` is
- * ALREADY active, exercising exactly the (`alreadyActive=true`, `towingVehicleActive=false`,
- * `unsafeLock=true`) combination the fix targets, with no ground vehicle, no replacement, and no
- * prior hitch history to confound the result. Confirms, via {@code
- * PhysicsBridge.debugReadLinearVelocity}/{@code debugReadAngularVelocity} (the same debug-only
- * seam the ordinary-reconnect diagnostics already use), that `towed`'s real native Sable body is
- * ACTUALLY REMOVED - not merely unjointed - within a few ticks of the connect call, and that
- * `towed` remains a finite, valid entity afterward (no crash, no leaked handle).
+ * <p>1) A REAL preexisting joint: `towed` is towed from the moment it spawns by `towing1`, a
+ * FRESH buoyant vehicle on an ORDINARY (unmounted, unrestricted) connection - SAFE regardless of
+ * both sides being buoyant, since `unsafeBuoyantAngularLock` only fires for `mounted`/`restricted`
+ * - matching `BuoyantHitchProbe`'s own proven-safe `ATTACH` pattern. `towed` settles into a real,
+ * ALREADY-ACTIVE Sable body WITH a real, live joint, confirmed via {@code
+ * PhysicsBridge.debugIsJointed} (a direct {@code HitchRegistry.isJointed} observation, not an
+ * inference). `towing1` then despawns and is replaced by a FRESH buoyant `towing2` on a `mounted`
+ * connection - now `unsafeBuoyantAngularLock` fires for the first time while `towed` is ALREADY
+ * active AND already carries a real joint to release, exercising the exact
+ * (`alreadyActive=true`, `towingVehicleActive=false`, `unsafeLock=true`) combination the fix
+ * targets with a genuine preexisting joint in the loop.
+ *
+ * <p>2) Actual native-object destruction, not just registry absence: {@code
+ * PhysicsBridge.debugCaptureBody} captures `towed`'s own active body as an opaque reference
+ * BEFORE the unsafe reconnect; {@code PhysicsBridge.debugCapturedBoxIsActive} then reads that
+ * SAME captured native {@code BoxPhysicsObject}'s own {@code isActive()} AFTER - a live
+ * observation of the SAME object transitioning active-&gt;inactive, not an inference from
+ * {@code deactivate}/{@code BuoyantBody.remove}'s own source.
+ *
+ * <p>3) Sustained native towing, not a momentary snapshot: `VERIFY_FALLBACK` runs for a much
+ * longer window ({@link #SUSTAINED_VERIFY_TICKS}), re-checking all three facts (DIV registry
+ * absence, joint release, native-object destruction) and `towed.towedByConnection != null`/
+ * `towed.isValid`/finiteness EVERY tick throughout - not just once at tick 1 - so a result that
+ * reverts, flickers, or crashes a few ticks later cannot pass.
  *
  * <p>Opt-in via {@code -Ddiv.experimentalAlreadyActiveUnsafeFallback=true} - OFF by default,
  * never runs during normal play, never touches any real vehicle, Zippy, or world content. Runs
@@ -60,7 +70,7 @@ public final class AlreadyActiveUnsafeFallbackProbe {
  private static final int PLATFORM_Y = 100;
  private static final int PLATFORM_RADIUS = 14;
  private static final int SETTLE_TICKS = 60;
- private static final int FALLBACK_VERIFY_TICKS = 40;
+ private static final int SUSTAINED_VERIFY_TICKS = 100;
  private static final double HALF_EXTENT_X = 0.6, HALF_HEIGHT_Y = 0.4, HALF_EXTENT_Z = 1.0;
  private static final Point3D CHASSIS_CENTER = new Point3D(0, 0.4, 0);
  private static final Point3D FLOAT_LEFT = new Point3D(-0.5, -0.2, 0), FLOAT_RIGHT = new Point3D(0.5, -0.2, 0);
@@ -69,11 +79,12 @@ public final class AlreadyActiveUnsafeFallbackProbe {
  private static final double PLATFORM_BOUND_HORIZONTAL = 60, PLATFORM_BOUND_VERTICAL = 20;
  private static final Logger LOGGER = LogUtils.getLogger();
 
- private enum Phase { WAIT_TERRAIN, SPAWN, CONFIRM_ALREADY_ACTIVE, CONNECT_UNSAFE_MOUNTED_TOW, VERIFY_FALLBACK, DONE, FAILED }
+ private enum Phase { WAIT_TERRAIN, SPAWN, CONFIRM_PREEXISTING_JOINT, REPLACE_WITH_MOUNTED_BUOYANT_TOWING, VERIFY_FALLBACK, DONE, FAILED }
  private static Phase phase = Phase.WAIT_TERRAIN;
  private static int ticksInPhase = 0, terrainWaitTicksElapsed = 0;
  private static double spawnX, spawnZ, spawnSurfaceY;
- private static EntityVehicleF_Physics towed, towing2;
+ private static EntityVehicleF_Physics towing1, towed, towing2;
+ private static Object capturedTowedBody;
  private static boolean configured = false;
 
  public static void maybeRun(ServerLevel level) {
@@ -88,8 +99,8 @@ public final class AlreadyActiveUnsafeFallbackProbe {
    switch (phase) {
     case WAIT_TERRAIN -> waitTerrain(level);
     case SPAWN -> spawn(level);
-    case CONFIRM_ALREADY_ACTIVE -> confirmAlreadyActive();
-    case CONNECT_UNSAFE_MOUNTED_TOW -> connectUnsafeMountedTow(level);
+    case CONFIRM_PREEXISTING_JOINT -> confirmPreexistingJoint();
+    case REPLACE_WITH_MOUNTED_BUOYANT_TOWING -> replaceWithMountedBuoyantTowing(level);
     case VERIFY_FALLBACK -> verifyFallback();
     case DONE, FAILED -> {}
    }
@@ -139,45 +150,55 @@ public final class AlreadyActiveUnsafeFallbackProbe {
   packSpeedFactors.putIfAbsent(PACK_ID, 1.0);
   packVehicleScales.putIfAbsent(PACK_ID, 1.0);
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
-  // towed has a hookup connection (ordinary, mounted=false - only the TOWING side's own
-  // connection's mounted flag is ever read by unsafeBuoyantAngularLock) but starts with NO
-  // towing vehicle at all - standalone, exactly like any float hull nobody is towing.
+  // towing1 and towed's connection is ORDINARY (mounted=false) - SAFE regardless of both sides
+  // being buoyant (unsafeBuoyantAngularLock only fires for mounted/restricted), matching
+  // BuoyantHitchProbe's own proven-safe ATTACH pattern - so towed gets a REAL, live joint here.
+  var towing1Definition = buildHullDefinition("alreadyactivefallback-towing1", true, false, false);
   var towedDefinition = buildHullDefinition("alreadyactivefallback-towed", false, true, false);
-  towed = spawnHull(world, towedDefinition, blockX + 0.5, surfaceY + 0.5, blockZ - 3.5, 0);
+  towing1 = spawnHull(world, towing1Definition, blockX + 0.5, surfaceY + 0.5, blockZ + 0.5, 0);
+  towed = spawnHull(world, towedDefinition, blockX + 0.5, surfaceY + 0.5, blockZ - 3.5, 180);
+  var connection = new TowingConnection(towing1, 0, 0, towed, 0, 0);
+  towing1.connectTrailer(connection, false);
   spawnX = blockX + 0.5; spawnZ = blockZ + 0.5; spawnSurfaceY = surfaceY;
-  phase = Phase.CONFIRM_ALREADY_ACTIVE; ticksInPhase = 0;
-  LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] spawned standalone towed(buoyant)=" + towed.position
-    + " - no towing vehicle yet - beginning CONFIRM_ALREADY_ACTIVE phase");
+  phase = Phase.CONFIRM_PREEXISTING_JOINT; ticksInPhase = 0;
+  LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] spawned towing1(buoyant,ordinary)=" + towing1.position + " towed(buoyant)=" + towed.position
+    + " connected via an ORDINARY (safe) connection from spawn - beginning CONFIRM_PREEXISTING_JOINT phase");
  }
 
- private static void confirmAlreadyActive() {
+ private static void confirmPreexistingJoint() {
   ticksInPhase++;
-  if (!boundedOrFail("confirmAlreadyActive/towed", towed)) return;
+  if (!boundedOrFail("confirmPreexistingJoint/towing1", towing1) || !boundedOrFail("confirmPreexistingJoint/towed", towed)) return;
   if (ticksInPhase < SETTLE_TICKS) return;
   var linear = PhysicsBridge.debugReadLinearVelocity(towed);
-  if (linear == null) {
-   LOGGER.error("[DIV alreadyActiveUnsafeFallbackProbe] FAILED - standalone towed never got an active Sable body (debugReadLinearVelocity returned null) - fixture problem, not the fallback question this probe exists to test");
+  boolean jointed = PhysicsBridge.debugIsJointed(towed);
+  capturedTowedBody = PhysicsBridge.debugCaptureBody(towed);
+  Boolean boxActive = PhysicsBridge.debugCapturedBoxIsActive(capturedTowedBody);
+  if (linear == null || !jointed || capturedTowedBody == null || !Boolean.TRUE.equals(boxActive)) {
+   LOGGER.error("[DIV alreadyActiveUnsafeFallbackProbe] FAILED - towed did not settle into a real, already-active, ALREADY-JOINTED Sable body"
+     + " (linearVelocity=" + linear + " debugIsJointed=" + jointed + " capturedBody=" + capturedTowedBody + " boxActive=" + boxActive
+     + ") - fixture problem, not the fallback question this probe exists to test");
    phase = Phase.FAILED;
    return;
   }
-  LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] CONFIRM_ALREADY_ACTIVE PASS - standalone towed has a real, active Sable body (linearVelocity=" + linear
-    + ") after " + SETTLE_TICKS + " ticks with no hitch at all - connecting a fresh buoyant towing2 on a mounted connection for CONNECT_UNSAFE_MOUNTED_TOW");
-  phase = Phase.CONNECT_UNSAFE_MOUNTED_TOW; ticksInPhase = 0;
+  LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] CONFIRM_PREEXISTING_JOINT PASS - towed has a real, active Sable body (linearVelocity=" + linear
+    + "), a REAL preexisting joint (debugIsJointed=true), and its captured native box reads active=true, after " + SETTLE_TICKS
+    + " ticks safely towed by an ordinary connection - despawning towing1 and reconnecting to a fresh MOUNTED buoyant towing2 for REPLACE_WITH_MOUNTED_BUOYANT_TOWING");
+  phase = Phase.REPLACE_WITH_MOUNTED_BUOYANT_TOWING; ticksInPhase = 0;
  }
 
- private static void connectUnsafeMountedTow(ServerLevel level) {
+ private static void replaceWithMountedBuoyantTowing(ServerLevel level) {
   ticksInPhase++;
   if (ticksInPhase == 1) {
+   towing1.remove();
    AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
    var towing2Definition = buildHullDefinition("alreadyactivefallback-towing2", true, false, true);
    towing2 = spawnHull(world, towing2Definition, spawnX, spawnSurfaceY + 0.5, spawnZ + 1.0, 180);
    var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
    towing2.connectTrailer(connection, false);
-   LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] CONNECT_UNSAFE_MOUNTED_TOW connected ALREADY-ACTIVE towed to fresh BUOYANT towing2="
-     + towing2.position + " on a MOUNTED connection, for the FIRST time this trailer has ever had a towedByConnection -"
-     + " unsafeLock should now fire while alreadyActive is true");
+   LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] REPLACE_WITH_MOUNTED_BUOYANT_TOWING reconnected ALREADY-ACTIVE, ALREADY-JOINTED towed to fresh"
+     + " BUOYANT towing2=" + towing2.position + " on a MOUNTED connection - unsafeLock should now fire while a REAL preexisting joint exists");
   }
-  if (!boundedOrFail("connectUnsafeMountedTow/towed", towed)) return;
+  if (!boundedOrFail("replaceWithMountedBuoyantTowing/towed", towed)) return;
   phase = Phase.VERIFY_FALLBACK; ticksInPhase = 0;
  }
 
@@ -191,22 +212,31 @@ public final class AlreadyActiveUnsafeFallbackProbe {
   }
   var linear = PhysicsBridge.debugReadLinearVelocity(towed);
   var angular = PhysicsBridge.debugReadAngularVelocity(towed);
-  if (ticksInPhase <= 10 || ticksInPhase % 10 == 0 || ticksInPhase == FALLBACK_VERIFY_TICKS) {
+  boolean stillJointed = PhysicsBridge.debugIsJointed(towed);
+  Boolean capturedBoxActive = PhysicsBridge.debugCapturedBoxIsActive(capturedTowedBody);
+  boolean towedByConnectionPersists = towed.towedByConnection != null;
+  if (ticksInPhase <= 10 || ticksInPhase % 10 == 0 || ticksInPhase == SUSTAINED_VERIFY_TICKS) {
    LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] VERIFY_FALLBACK tick=" + ticksInPhase + " towed.linearVelocity=" + linear
-     + " towed.angularVelocity=" + angular + " towed.position=" + towed.position + " towed.towedByConnection=" + (towed.towedByConnection != null));
+     + " towed.angularVelocity=" + angular + " debugIsJointed=" + stillJointed + " capturedBoxActive=" + capturedBoxActive
+     + " towed.position=" + towed.position + " towed.towedByConnection!=null=" + towedByConnectionPersists);
   }
-  if (linear == null && angular == null) {
-   LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] VERIFY_FALLBACK PASS at tick=" + ticksInPhase
-     + " - towed's real native Sable body is ACTUALLY REMOVED (debugReadLinearVelocity/debugReadAngularVelocity both null), not merely unjointed."
-     + " towed.isValid=" + towed.isValid + " towed.position=" + towed.position + " - end-to-end existing-body lifecycle confirmed live, per 54259.");
-   phase = Phase.DONE;
+  // Every tick of the sustained window, not just once: registry absence, joint release, AND
+  // native-object destruction must ALL hold simultaneously, and the vehicle must remain finite/
+  // valid with its IV-level connection persisting (sustained native towing) throughout.
+  boolean fallbackHoldsThisTick = linear == null && angular == null && !stillJointed && Boolean.FALSE.equals(capturedBoxActive) && towedByConnectionPersists;
+  if (!fallbackHoldsThisTick) {
+   LOGGER.error("[DIV alreadyActiveUnsafeFallbackProbe] FAILED at tick=" + ticksInPhase + " - fallback did not hold: linearVelocity=" + linear
+     + " angularVelocity=" + angular + " debugIsJointed=" + stillJointed + " capturedBoxActive=" + capturedBoxActive
+     + " towed.towedByConnection!=null=" + towedByConnectionPersists + " (expected null/null/false/false/true)");
+   phase = Phase.FAILED;
    return;
   }
-  if (ticksInPhase >= FALLBACK_VERIFY_TICKS) {
-   LOGGER.error("[DIV alreadyActiveUnsafeFallbackProbe] FAILED - towed STILL has an active Sable body (linearVelocity=" + linear
-     + ", angularVelocity=" + angular + ") after " + FALLBACK_VERIFY_TICKS
-     + " ticks post-connect - the already-active unsafe-fallback fix does NOT reach actual native-body removal live.");
-   phase = Phase.FAILED;
+  if (ticksInPhase >= SUSTAINED_VERIFY_TICKS) {
+   LOGGER.info("[DIV alreadyActiveUnsafeFallbackProbe] VERIFY_FALLBACK PASS - sustained for " + SUSTAINED_VERIFY_TICKS + " ticks: towed's real native Sable"
+     + " body is ACTUALLY REMOVED (not merely unjointed), its PREEXISTING joint is ACTUALLY RELEASED (debugIsJointed=false), its CAPTURED native box"
+     + " OBJECT transitioned active->inactive (not inferred from source), and towed.towedByConnection persists (sustained native IV authority) the"
+     + " entire window, with towed remaining finite/valid throughout. End-to-end existing-body lifecycle confirmed live, per 54259/54262.");
+   phase = Phase.DONE;
   }
  }
 

@@ -1089,6 +1089,40 @@ public final class PhysicsBridge {
   return null;
  }
  /**
+  * Diagnostic/test-only (MINECRAFT-545/547, John's comment 54262: "this does not establish
+  * release of a preexisting joint" - {@code debugReadLinearVelocity} returning {@code null} only
+  * proves DIV's OWN registry no longer holds a body for {@code trailer}; it says nothing about
+  * whether {@code hitches} itself ever held - and then actually released - a real joint entry).
+  * Direct, live OBSERVATION of {@link HitchRegistry#isJointed}, not an inference from source
+  * reading. Never called from any production code path.
+  */
+ public static boolean debugIsJointed(EntityVehicleF_Physics trailer) {
+  return hitches.isJointed(trailer);
+ }
+ /**
+  * Diagnostic/test-only (MINECRAFT-545/547, John's comment 54262: "native-object destruction" -
+  * {@code debugReadLinearVelocity} returning {@code null} only proves DIV's own Java-side
+  * registry entry is gone, not that the underlying native Sable {@code BoxPhysicsObject}/handle
+  * was actually destroyed). Captures the CURRENT active body for {@code v}, as an opaque
+  * reference a caller can hold across the exact tick a fallback is expected to remove it, then
+  * pass to {@link #debugCapturedBoxIsActive} afterward - a live OBSERVATION of the SAME native
+  * object's own {@code BoxPhysicsObject.isActive()} transitioning false, not an inference from
+  * {@code deactivate}/{@code remove}'s own source. Returns {@code null} if there is no active
+  * body right now. Never called from any production code path.
+  */
+ public static Object debugCaptureBody(EntityVehicleF_Physics v) {
+  return registry.get(v);
+ }
+ /** Diagnostic/test-only companion to {@link #debugCaptureBody} - reads the captured body's OWN
+  * native {@code BoxPhysicsObject.isActive()} directly, live, regardless of whether THIS vehicle
+  * is still the registry's current entry for anything. {@code null} input (no body was captured)
+  * returns {@code null}. Never called from any production code path. */
+ public static Boolean debugCapturedBoxIsActive(Object capturedBody) {
+  if (capturedBody instanceof Body b) return b.box.isActive();
+  if (capturedBody instanceof BuoyantBody bb) return bb.box().isActive();
+  return null;
+ }
+ /**
   * Diagnostic/test-only snapshot (MINECRAFT-526 review 53897/53905/53907) bundling everything a
   * test needs to assert real dispatch/retention without re-deriving any of it: {@code
   * bodyIdentity} is the active {@code Body} instance itself as a plain reference-equality-
