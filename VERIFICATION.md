@@ -3599,3 +3599,67 @@ whether forced-chunk flags or fixture entities were actually written
 back out by an autosave before the process was killed, or remain in
 `run/world` on disk. Not remediated here per instruction ("do not
 perform destructive cleanup") - reported factually for the record.
+
+**Ordinary-reconnect diagnosis, continued directly (John's comment 54262:
+"there is no verified currently active specialist dependency... continue
+already-authorized bounded ordinary-reconnect diagnosis... if the next
+step requires expertise beyond scope, report the precise missing
+expertise and code seam").** Traced the full call chain from DIV's own
+`PhysicsBridge.createHitch` through Sable's Java wrapper down to the
+actual native boundary, to locate exactly where the fresh-vs-already-
+active asymmetry would have to live if it is a native solver effect:
+
+- `createHitch` builds a `GenericConstraintConfiguration` (body-local
+  `pos1`/`pos2`, identity `orientation1`/`orientation2` for this
+  fixture's ordinary connections - already traced and cleared, comment
+  54254) and calls `physicsSystem().getPipeline().addConstraint(...)`.
+- That resolves to
+  `RapierGenericConstraintHandle.create(serverLevel, bodyA, bodyB,
+  config)` (Sable's own source, read directly at
+  `sable_rapier/.../constraint/generic/RapierGenericConstraintHandle.java`
+  in the local Sable checkout) - a thin wrapper that packs the same
+  config fields into a single native call,
+  `Rapier3D.addGenericConstraint(sceneHandle, idA, idB, pos1..., pos2...,
+  lockedAxesMask)` - no body-state/wake/island logic of its own; it is a
+  pure marshalling call across the JNI boundary.
+- `Rapier3D.addGenericConstraint` is a native method - its actual
+  implementation is the `rapier3d` Rust crate, pulled as an EXTERNAL git
+  dependency (`rapier3d = { git = "https://github.com/ryanhcode/rapier",
+  rev = "38e92f117590862481a53df6fc69a5d893e29186" }`, confirmed by
+  reading `sable_rapier/.../Cargo.toml` directly) - NOT vendored
+  anywhere in this workspace. Confirmed no local or cached copy of that
+  crate's own source exists on this machine at all (`find` for
+  `rapier*`/`~/.cargo` turned up nothing outside Sable's own thin
+  wrapper).
+
+**This is the actual, concrete boundary.** DIV's own Java-side candidates
+are now exhausted and cleared by direct evidence: (a) sleep/wake state -
+ruled out live (the earlier `box.wakeUp()` A/B test showed bit-identical
+trajectories with/without, confirmed inert); (b) DIV's own anchor-offset/
+local-frame computation - traced and provably inert for this fixture's
+ordinary connections (comment 54254); (c) a double-constraint/stale-
+construction-pose lifecycle bug - ruled out by `HitchRegistry.reconcile`'s
+own structural release-before-create guarantee (comment 54254 again).
+What remains - whether an already-stepped body's own island/warm-start/
+contact state inside Rapier's own solver behaves differently when a NEW
+joint is added to it than for a freshly-inserted body - is genuinely
+INSIDE the external `rapier3d` crate's own native solver, not inside
+DIV's or Sable's own Java source at all. Per instruction, this is NOT
+being claimed as a confirmed cause, only as the one remaining candidate
+location, now narrowed as far as this codebase's own source permits.
+
+**Precise missing expertise and code seam, for anyone with the
+capability to continue past this point:** Rust/Rapier physics-engine
+internals - specifically `rapier3d` (`github.com/ryanhcode/rapier`,
+pinned rev `38e92f117590862481a53df6fc69a5d893e29186`), its
+`ImpulseJointSet`/island-merging code path for adding a joint between a
+freshly-inserted `RigidBody` and a long-resident, previously-stepped one,
+and whether contact/warm-start state carried by the resident body
+interacts with that joint's own first solver iteration. This requires
+either network access to fetch and read that external repository at the
+pinned revision, or direct Rapier/Rust physics-engine expertise applied
+to it - a different skillset than this ticket's own Minecraft-mod Java
+codebase, and genuinely beyond what this agent's own sandboxed
+environment and scope provide. No further live experiment is attempted
+here on this specific question, consistent with the standing instruction
+against blind experimentation once a seam this precise has been located.
