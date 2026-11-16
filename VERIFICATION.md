@@ -3253,3 +3253,23 @@ ticket's own brief scopes broad/hardware playtesting to the user, and no
 ticket's bounded scope; the command's own entity-resolution and rendering
 logic is otherwise covered by `TuningProvenanceTest` and a successful
 compile against the real NeoForge/MTS command and entity APIs.
+
+**Post-merge-of-main reconciliation (2026-11-15).** Merged `origin/main`
+(`95b798e`, MINECRAFT-539's axle-specific spring/damping tuning, already
+landed via PR #37) into this branch; the only conflict was this file's own
+append point (two tickets appending at the same prior section), resolved
+by keeping both sections in full, in landing order. `Overrides.java`/
+`PhysicsBridge.java` merged cleanly with no conflict - M539's new
+`suspensionSpringMultiplierFront`/`Rear` and
+`suspensionDampingRatioFront`/`Rear` fields need no change on this
+ticket's side at all: `TuningProvenance` enumerates `Overrides.Tuning`'s
+public fields via reflection rather than a hand-maintained list, so the
+new fields are explained automatically. Re-ran the full suite at the
+merged head under the same slot-lock: `/tmp/gradle-8.14/bin/gradle
+--offline --no-daemon clean test build --console=plain` -
+`BUILD SUCCESSFUL`. The real JUnit XML reports total **819 tests**, 0
+skipped, 0 failures, 0 errors (M539's 810 plus this ticket's own 9,
+confirmed present and passing together).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `288d140a025f1fb01608a6ca330afb1f8db32f75661ce721b119c0b065ebbab3`)
+was produced.
