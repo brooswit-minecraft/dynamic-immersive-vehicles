@@ -44,6 +44,12 @@
       "driveForce": 9000.0,
       "axleDriveForceSharing": true
     },
+    "examplepack:axle_tuned_suspension_car": {
+      "suspensionSpringMultiplierFront": 1.3,
+      "suspensionDampingRatioFront": 0.9,
+      "suspensionSpringMultiplierRear": 0.9,
+      "suspensionDampingRatioRear": 0.75
+    },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
       "hullFillFactor": 0.5,

@@ -3058,6 +3058,131 @@ either direction.
 (sha256 `65dd7fb988eaa35a954e739d6b2722a026b4b53b5aa5fcd02220b6e25d80da03`)
 was produced.
 
+## Axle-specific spring and damping tuning (MINECRAFT-539, added 2026-11-15)
+
+Schema-coordinator slice for this sprint. Inspected the named seams first:
+`PhysicsBridge.stepGround`'s per-wheel loop already computes `loadShareZ`
+(each wheel's own longitudinal anchor relative to `center`, the exact
+geometry `BrakeBiasDistribution`/`DriveBiasDistribution`/`AxleToeDistribution`
+already use for their own front/rear axle split) before building
+`wheelSpring`/`wheelDamper` at the documented `suspensionSpringForShare`/
+`suspensionDamperForShare` call sites (`~2120`) - no new per-wheel geometry
+needed, only a new per-wheel resolved multiplier/ratio fed into those
+existing (already share/ratio-parameterized) formulas.
+
+Implementation mirrors MINECRAFT-533's own `AxleToeDistribution` shape (same
+geometric front/rear axle grouping off each wheel's own `z`, same max-z-
+within-`AXLE_EPSILON` classification, same ambiguous/multi-axle-lumped-rear
+fallback), but differs in exactly one deliberate way the ticket itself
+requires: an unconfigured axle does not fall back to a flat zero/FALLBACK
+constant, it INHERITS the vehicle's own already-resolved
+`suspensionSpringMultiplier`/`suspensionDampingRatio` - new
+`AxleSuspensionDistribution` class (`springMultipliers(z[], base, front,
+rear)`/`dampingRatios(z[], base, front, rear)`), new
+`Overrides.Tuning#suspensionSpringMultiplierFront`/`#Rear` and
+`#suspensionDampingRatioFront`/`#Rear` (same `(0.5,4.0]`/`(0,2.0]` bounds as
+the base fields, no FALLBACK entry - null means that axle's override is
+unconfigured, rejected on `parts` entries since a part has no own axle
+position, live-hot-reloaded via `applyLiveSafeFields` the same as
+`toeFrontDegrees`/`toeRearDegrees`). The combined travel-aware stability
+check (`Overrides.Tuning#validate`, shared by `suspensionSpringMultiplier`/
+`suspensionDampingRatio` since MINECRAFT-528) is generalized to also check
+EACH axle's own effective (override-or-base) pair independently - an axle
+override that alone destabilizes the unconfigured default on that axle is
+rejected even when the vehicle-wide base pair and the other axle are both
+safe, per the ticket's own "combined stability validation uses effective
+resolved values" acceptance line.
+
+`PhysicsBridge.stepGround` now resolves `axleSpringMultipliers[]`/
+`axleDampingRatios[]` once per tick (alongside `loadShares`/`brakeShares`/
+`toeRadians`) and feeds each wheel's own resolved value into
+`suspensionSpringForShare`/`suspensionDamperForShare` instead of the flat
+`tuning.suspensionSpringMultiplier`/`suspensionDampingRatio` - both the
+opt-in experimental `effectiveMassDamper` candidate (still sharing whichever
+ratio the non-experimental path uses, per MINECRAFT-523's own "no second
+hardcoded ratio" requirement, now per-axle-aware too) and the anti-roll
+pass's own `rateA`/`rateB` spring-rate lookup (previously the flat
+vehicle-wide multiplier for both paired wheels) were updated to use this
+same per-wheel resolved multiplier/ratio, so an axle-specific override is
+honored everywhere the base fields already were, not merely in the primary
+spring/damper formula.
+
+Evidence named by the ticket: `AxleSuspensionDistributionTest` covers the
+pure-math core - base-value inheritance when both axle fields are unset,
+one-axle-configured-leaves-the-other-inheriting-base, both axles configured
+independently, axle classification reused verbatim from
+`BrakeBiasDistribution`/`AxleToeDistribution` (including a reversed-z and a
+lumped-multi-axle layout), the ambiguous single-axle/lone-wheel fallback to
+the base value (never an axle-specific one), and a 500-trial random-layout
+finiteness sweep. `PhysicsBridgeAxleSuspensionTuningTest` is the production-
+formula-level integration: missing axle settings reproduce the exact
+baseline spring/damper on every wheel; both axles configured together each
+settle at their OWN independent equilibrium (the ticket's own "both axles"
+case); an asymmetric load (unequal `loadShare`) and an axle override compose
+independently - every wheel on a configured axle settles at that axle's
+equilibrium regardless of its own individual load share (the ticket's own
+"asymmetric loads" case); and "common heave" (both wheels of one axle) is
+shown to resolve and settle through byte-identical traces. `OverridesTest`
+gained the standard per-field cluster (out-of-range rejection, no-FALLBACK/
+stays-null-when-unconfigured, full precedence-chain participation including
+pack-metadata, part-override rejection, template-`extends` inheritance,
+invalid-reload-retains-prior-good-value plus a legitimate-removal-still-
+succeeds case) plus the two cross-field generalization cases the ticket's
+own acceptance line calls for: an axle override alone destabilizing the
+UNCONFIGURED default on that axle, and an invalid per-axle pair rejected
+even when the other axle and the vehicle-wide base pair are both safe (the
+ticket's own "invalid pairs" case). `PhysicsBridgeLiveOverrideApplicationTest`
+gained all four fields in the combined live-mutation case plus a dedicated
+revert-to-null-on-removal case mirroring its existing `toeFrontDegrees`/
+`toeRearDegrees` coverage (the ticket's own "live reload/removal" case).
+
+Field names/semantics published on the ticket (comment, 2026-11-15) ahead
+of implementation per this sprint's schema-coordinator convention; no
+collision with the other seven peers' own proposed fields (M541's
+`aileron`/`elevator`/`rudderAuthorityScale`, M543's
+`rotorAirDragCoefficient`) - all vehicle-level `Tuning` fields, none
+overlapping this ticket's `suspension*Front`/`*Rear` names or scope.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline test`, Gradle 8.14 / JDK
+21 (Temurin), against this branch
+(`minecraft-539/axle-specific-spring-damping-tuning`) at head (based on the
+accepted baseline `4ee035a`) - `BUILD SUCCESSFUL`. The real JUnit XML
+reports total **810 tests**, 0 skipped, 0 failures, 0 errors across the
+whole suite (12 from the new `AxleSuspensionDistributionTest`, 4 from the
+new `PhysicsBridgeAxleSuspensionTuningTest`, 8 new `OverridesTest` methods,
+1 new `PhysicsBridgeLiveOverrideApplicationTest` method, plus every
+pre-existing test - including every other axle-override ticket's own suite
+- run unchanged alongside them, confirming this change introduces no
+regression anywhere else in the suite).
+
+Not yet performed: in-game acceptance (real vehicle spawn with configured
+axle-specific spring/damping settings, observed ride-height/settling
+difference between axles) - this ticket's own brief says focused
+engineering tests are in scope, not John's broad/hardware playtesting,
+which is explicitly out of scope here.
+
+**Post-merge (2026-11-15).** Wroosbit approved exact head
+`c186906977ad7078e2e61cd87b7eab3e22fca7d2` (review comment Jira 54152);
+merged PR #37 into `main` at merge commit
+`5b1cc57d7f9cb1de9cb756f28fe41b1a1a9745b0` (clean fast-forward, no
+conflicts). Post-merge hosted CI (run 43778708686, triggered by the merge
+push) failed with all 5 jobs executing zero steps - the same pre-existing,
+already-disclosed hosted-CI billing/spending-limit blockage every recent
+DIV ticket on this repo has hit (most recently MINECRAFT-535's own merge,
+run 43766508214). No `release.yml` or tag-based release workflow exists in
+this repo beyond that billing-blocked CI, and this change (an additive
+Overrides/PhysicsBridge schema change, no version bump) does not warrant
+inventing one. Retained exact-head local evidence stands in its place: a
+fresh `gradle --no-daemon --offline clean test build` at the merged head
+(flock-protected on `/tmp/div-gradle-slot.lock`) reproduced **810 tests**,
+0 skipped, 0 failures, 0 errors, and produced
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
+checksum
+`62e0ba336172f536c0f770996368cf14092d639a64b35b685efb68014c877b34`.
+
 # MINECRAFT-543: optional rotorcraft translational air drag, 2026-11-15
 
 Added `RotorForces.translationalDragForce` (bounded, dissipative quadratic
@@ -3074,9 +3199,40 @@ threaded through validate/copy/template-merge/part-override-rejection/
 MINECRAFT-539 (schema coordinator) before editing shared Overrides/
 PhysicsBridge code; no objection received.
 
+**Review correction (Wroosbit, PR #40, 2026-11-15).** The first submission
+collapsed the force into an arbitrary `rotorAirDragCoefficient` scalar with
+no density/area/Cd decomposition and no native geometry - the ticket's own
+"explicit documented air-density/area model or existing applicable native
+geometry" acceptance line was not satisfied. Corrected
+`RotorForces.translationalDragForce` to reuse the SAME pieces
+`PhysicsBridge.stepFlight`'s own parasitic drag already consumes rather
+than inventing a parallel model: `PhysicsBridge.Body.AIR_DENSITY` (the
+existing sea-level-ISA constant) through `FlightForces.dynamicPressure`;
+IV's own `motorized.dragCoefficient`, floored via
+`FlightForces.dragCoefficient`'s existing no-wing (`aspectRatio<=0`)
+branch - the exact same floor a blimp's own parasitic drag already gets;
+and IV's own native reference area
+(`motorized.wingArea>0?wingArea:crossSectionalArea`, the SAME fallback
+`stepFlight` already uses for a no-wing vehicle), combined via
+`FlightForces.aeroForce` into the standard `0.5*rho*Cd*A*v^2` magnitude.
+`rotorAirDragCoefficient` is now a bounded `[0,5]` MULTIPLIER on that
+native-geometry-derived force (the same role `parasiticDragMultiplier`
+plays for fixed-wing drag), not a raw drag-strength scalar - `0.0`
+(FALLBACK, unchanged) is still a true no-op, so an unconfigured
+rotorcraft's force stays byte-identical to the accepted baseline. Added
+`dragScalesLinearlyWithTheNativeReferenceArea_provesNativeGeometryIsConsumed`,
+`dragScalesWithTheFlooredNativeDragCoefficient_provesNativeGeometryIsConsumed`,
+and `nativeDragCoefficientBelowTheFloorStillProducesDragViaTheSharedFloor`
+as the direct evidence the review asked for that the selected native
+geometry/model factors are actually consumed, not ignored. Also widened
+`/tmp/div-gradle-slot.lock` to mode `0666` so the reviewer's own
+independent `flock`/`gradle` invocation - blocked by "Permission denied"
+against the prior `0664` mode in the first review - can run without
+needing to route through the implementation owner's account.
+
 Covers the ticket's acceptance criteria: production force opposes
 velocity (`forceOpposesVelocityDirectionExactly`), zero-velocity/off parity
-(`zeroCoefficientProducesExactlyZeroForceVector_zeroOffParity`/
+(`zeroMultiplierProducesExactlyZeroForceVector_zeroOffParity`/
 `zeroVelocityProducesExactlyZeroForceVector_zeroVelocityParity`), rotated
 body/frame cases (`forceIsOrientationIndependentGivenTheSameWorldVelocity`
 - this force takes no body-local axes at all, so it is orientation-
@@ -3084,10 +3240,11 @@ independent by construction, unlike cyclic/yaw torque), finite high-
 speed/dt behavior with no momentum reversal
 (`extremeSpeedAndDtStayBoundedAndNeverReverseMomentum`), and a bounded
 real-Sable-representative response (`monotonicKineticEnergyReductionOverRepeatedTicksNeverOvershootsPastRest`,
-a ~2200kg helicopter at cruise speed, confirming strictly non-increasing
-kinetic energy and substantial decay without overshoot - quadratic drag
-decays hyperbolically, not exponentially, so this asserts measurable decay
-rather than an unphysical "reaches rest" claim). `OverridesTest` and
+a ~2200kg helicopter at cruise speed with a plausible fuselage Cd/frontal
+area, confirming strictly non-increasing kinetic energy and substantial
+decay without overshoot - quadratic drag decays hyperbolically, not
+exponentially, so this asserts measurable decay rather than an unphysical
+"reaches rest" claim). `OverridesTest` and
 `PhysicsBridgeLiveOverrideApplicationTest` cover the field's full
 precedence chain, template inheritance, part-override rejection,
 reload-validation (good-then-bad-retains-prior-good), and live hot-reload
@@ -3096,20 +3253,32 @@ existing coverage. Collective/cyclic/yaw authority and angular damping are
 untouched (no shared code path edited); float/water forces are untouched
 (`BuoyantForces` is a separate class, never called from `stepRotor`).
 
+**Integrated accepted main (2026-11-15).** Merged `origin/main` (advanced
+to `95b798e` via MINECRAFT-539's own merged PR #37) into this branch per
+John's follow-up coordination comment. The only conflicts were the
+expected adjacent-append-point collisions (`VERIFICATION.md`'s own append
+point, and the `applyLiveSafeFields` combined-fields `Set.of(...)` literal
+in `PhysicsBridgeLiveOverrideApplicationTest`) - resolved by keeping both
+tickets' own field names/evidence, dropping neither. `PhysicsBridge.
+stepRotor`/`Overrides.Tuning`'s own M543 edits merged cleanly with no
+conflict against M539's axle-suspension fields (two genuinely distinct
+regions: `stepRotor` vs. `stepGround`'s per-wheel spring/damper loop).
+
 Local slot-lock coordination (shared cooperative `flock` on
-`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
-concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/div-gradle-slot.lock`, widened to mode `0666` as noted above, held
+for the whole Gradle lifetime, no concurrent Java/Gradle process of
+another owner observed at claim time).
 `/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` against
-this branch (`minecraft-543/rotor-translational-air-drag`) at the accepted
-baseline `4ee035a16fffe416d5543343df11f3d793a16dd6` (origin/main, verified
-current at pickup) - `BUILD SUCCESSFUL`. The real JUnit XML reports total
-**799 tests**, 0 skipped, 0 failures, 0 errors across the whole suite (14
-new: 8 in `RotorForcesTest`, 5 in `OverridesTest`, 1 in
-`PhysicsBridgeLiveOverrideApplicationTest`, plus every pre-existing test
-run unchanged alongside them - confirming no regression anywhere else in
-the suite, ground/boat/fixed-wing/existing-rotor paths included).
+this branch (`minecraft-543/rotor-translational-air-drag`) merged with
+`origin/main` @ `95b798e` - `BUILD SUCCESSFUL`. The real JUnit XML reports
+total **827 tests**, 0 skipped, 0 failures, 0 errors across
+the whole suite - M539's own `AxleSuspensionDistributionTest`/
+`PhysicsBridgeAxleSuspensionTuningTest` additions and M543's own
+`RotorForcesTest`/`OverridesTest`/`PhysicsBridgeLiveOverrideApplicationTest`
+additions both present and passing together, confirming no regression in
+either direction.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
-(sha256 `80d93cd8f6b392f635b24e23e345ecf00305ddaab1a90b8c39152eea747f3c65`)
+(sha256 `b5e63c44bfdc3b42d5c70499899593939419f7b55d983ddc167a6eb19cbff0c0`)
 was produced.
 
 Not yet performed: in-game acceptance (real rotorcraft spawn with

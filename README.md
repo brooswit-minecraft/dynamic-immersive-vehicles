@@ -626,6 +626,27 @@ See [Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528)
 below for the full math, the ride-height consequence, and the combined
 stability guard it shares with `suspensionDampingRatio`.
 
+`suspensionSpringMultiplierFront`/`suspensionSpringMultiplierRear` and
+`suspensionDampingRatioFront`/`suspensionDampingRatioRear` (optional, same
+bounds as `suspensionSpringMultiplier`/`suspensionDampingRatio` above) let
+the spring multiplier and damping ratio be set independently per geometric
+front/rear axle group - same axle grouping as `brakeBiasFront`/
+`driveBiasFront`/`toeFrontDegrees`/`toeRearDegrees`. Leaving an axle field
+unset makes that axle INHERIT the vehicle-wide `suspensionSpringMultiplier`/
+`suspensionDampingRatio` value above - not a second independent default -
+so a vehicle that only sets the vehicle-wide fields (or neither) behaves
+exactly as before this option existed on every wheel. An ambiguous layout
+(no distinguishable rear axle - a single-axle or side-by-side-only vehicle)
+falls back to the vehicle-wide value on every wheel too, same as the
+ambiguous-layout fallback `toeFrontDegrees`/`toeRearDegrees` already
+documents. The combined travel-aware stability guard (see
+[Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528))
+is checked per axle too - an axle-specific override that alone would
+destabilize the unconfigured default on that axle is rejected even if the
+vehicle-wide pair and the other axle are both safe. See
+[`AxleSuspensionDistribution`](src/main/java/io/github/brooswitminecraft/div/AxleSuspensionDistribution.java)
+for the implementation.
+
 `toeFrontDegrees`/`toeRearDegrees` (optional, degrees, `-20` to `20`) set a
 static toe alignment angle for the geometric front/rear axle group
 respectively - same axle grouping as `brakeBiasFront`/`driveBiasFront`
@@ -705,25 +726,31 @@ at all). See
 for the full model.
 
 `rotorAirDragCoefficient` (MINECRAFT-543, rotorcraft only, finite,
-`[0, 1000]`, default `0.0` - off) is a separate, optional, bounded
-quadratic drag force ADDED to (never replacing) the thrust force above. It
-opposes this body's own current linear (translational) velocity - never
-the pilot's throttle/cyclic/yaw input, so it is deliberately not reduced
-thrust and cannot substitute for the pilot's own control authority. No
-native per-vehicle frontal-area/drag-coefficient field exists for a
-rotorcraft fuselage the way it does for a fixed wing, so this is one
-explicit documented scalar (the same simplified single-scalar shape
-`waterDrag` already uses for an analogous quadratic drag budget), not a
-literal density/area/Cd decomposition. Per-tick, it is clamped so it can
-slow this body's velocity to exactly zero but never reverse its direction
-("no-reversal") - the exact translational counterpart of
-`rotorAngularDampingCoefficient`'s own no-reversal clamp above - so it
-stays stable at any `dt` and any coefficient up to the documented cap.
-Orientation-independent by construction: it opposes the actual world-frame
-velocity regardless of the body's attitude, so a tumbled/rotated
-rotorcraft gets the identical force for the identical velocity. `0.0`
-reproduces the model's exact prior behavior (no translational drag term at
-all). See
+`[0, 5]`, default `0.0` - off) is a bounded MULTIPLIER on a quadratic
+aerodynamic drag force ADDED to (never replacing) the thrust force above -
+the same "multiplier against an existing calibrated/native number" shape
+`parasiticDragMultiplier` already establishes for fixed-wing drag, not a
+raw drag-strength scalar. The underlying force is the standard explicit
+`0.5*airDensity*Cd*A*|v|*v` formulation, built from the SAME native pieces
+`stepFlight`'s own parasitic drag already uses rather than a separate
+model: the existing sea-level-ISA `AIR_DENSITY` constant; IV's own
+`motorized.dragCoefficient`, floored exactly the way a no-wing (blimp)
+vehicle's own parasitic drag already is; and IV's own native reference
+area (`motorized.wingArea>0?wingArea:crossSectionalArea`, the same
+fallback a no-wing vehicle's parasitic drag already uses). It opposes this
+body's own current linear (translational) velocity - never the pilot's
+throttle/cyclic/yaw input, so it is deliberately not reduced thrust and
+cannot substitute for the pilot's own control authority. Per-tick, it is
+clamped so it can slow this body's velocity to exactly zero but never
+reverse its direction ("no-reversal") - the exact translational
+counterpart of `rotorAngularDampingCoefficient`'s own no-reversal clamp
+above - so it stays stable at any `dt` and any multiplier up to the
+documented cap. Orientation-independent by construction: it opposes the
+actual world-frame velocity regardless of the body's attitude, so a
+tumbled/rotated rotorcraft gets the identical force for the identical
+velocity. `0.0` reproduces the model's exact prior behavior (no
+translational drag term at all); a rotorcraft whose native geometry claims
+zero frontal area gets zero drag regardless of the multiplier. See
 [`RotorForces#translationalDragForce`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
 for the full model.
 
@@ -809,7 +836,9 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `yawAuthorityScale`, `rotorAngularDampingCoefficient`, `rotorAirDragCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
 `suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
 `verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `toeFrontDegrees`,
-`toeRearDegrees`, `axleDriveForceSharing`. Fields baked in at vehicle construction - `massKg`,
+`toeRearDegrees`, `axleDriveForceSharing`, `suspensionSpringMultiplierFront`,
+`suspensionSpringMultiplierRear`, `suspensionDampingRatioFront`, `suspensionDampingRatioRear`.
+Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
