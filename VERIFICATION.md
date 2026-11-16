@@ -3582,3 +3582,37 @@ not a JUnit test), 0 skipped, 0 failures, 0 errors.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `939e7190385adf2547d64b723911914f5b753f778b03db9b07d5858229c0d10b`)
 was produced.
+
+**Probe reliability + honest cleanup evidence fix (2026-11-16, John's
+independent-verification comment 54238).** John independently reproduced
+the live `PASSED` run above (clean head, 837 tests, log hashes recorded)
+and raised one legitimate finding: the probe's cleanup restored the
+original config and logged that the write/reload calls didn't throw, but
+never actually verified the restored file reads back byte-identical to
+the original - "please retain honest cleanup evidence rather than
+overclaiming." Fixed: the `finally` block now reads the restored file
+back and compares it to the captured original content (or confirms
+deletion, for the no-prior-file case), logging an explicit CONFIRMED/
+MISMATCH line rather than only "the write call didn't throw."
+
+A second, unrelated re-run also surfaced genuine PROBE-ONLY flakiness
+(not a production defect): the fixed `SETTLE_TICKS=5` constant used to
+decide "wait this many ticks after spawning before the vehicle is
+selectable" was itself a guessed constant, and one re-run's vehicle was
+still not visible via `ServerLevel.getAllEntities()` after 5 ticks when
+the server's own first ticks ran unusually fast right after startup.
+Fixed the same way chunk-readiness already was: poll `getAllEntities()`
+for actual non-empty visibility (bounded, same 100-tick ceiling as the
+chunk-readiness wait) instead of a fixed guessed tick count.
+
+Re-ran the live probe at this fix's head: identical `PASSED` outcome
+(`vehicle.uniqueUUID` != wrapping entity's own UUID confirmed again,
+dispatcher `result=1`, 46 captured lines) PLUS the new line - `config
+restoration CONFIRMED byte-identical to the pre-probe original
+(restored)`. Re-ran the full suite afterward: `/tmp/gradle-8.14/bin/gradle
+--no-daemon clean test build --console=plain` - `BUILD SUCCESSFUL`. The
+real JUnit XML reports total **837 tests** (unchanged - the probe is
+live-server-only), 0 skipped, 0 failures, 0 errors.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `975cb8394e7093d964671c621f6fd2ae7f6de34abd17539328c9eb6211115bf7`)
+was produced.

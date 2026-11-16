@@ -52,8 +52,12 @@ public final class TuningCommandProbe {
  // count is the actual fix.
  private static final int MAX_AWAIT_CHUNK_TICKS = 100;
  // Settle after spawnEntity before selecting the vehicle by selector/UUID - live-run finding:
- // executing on the SAME tick as spawnEntity failed with "No entity was found".
- private static final int SETTLE_TICKS = 5;
+ // a FIXED tick count here is itself flaky (observed live: occasionally still empty after 5
+ // ticks depending on real-time server tick pacing right after startup) - polling
+ // level.getAllEntities() for actual non-empty visibility, the same "poll the real readiness
+ // signal, not a guessed tick count" fix already applied to chunk loading above, is the real
+ // fix. Bounded the same way.
+ private static final int MAX_SETTLE_TICKS = 100;
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED || phase == Phase.DONE) return;
@@ -61,12 +65,20 @@ public final class TuningCommandProbe {
    switch (phase) {
     case AWAIT_CHUNK -> awaitChunk(level);
     case SPAWN -> { spawn(level); phase = Phase.SETTLE; ticksInPhase = 0; }
-    case SETTLE -> { if (++ticksInPhase >= SETTLE_TICKS) phase = Phase.EXECUTE; }
+    case SETTLE -> awaitVehicleVisible(level);
     case EXECUTE -> { execute(level); phase = Phase.DONE; }
     case DONE -> {}
    }
   } catch (RuntimeException ex) {
    LOGGER.error("[DIV tuningCommandProbe] COMPLETE - FAILED: unexpected exception", ex);
+   phase = Phase.DONE;
+  }
+ }
+
+ private static void awaitVehicleVisible(ServerLevel level) {
+  if (level.getAllEntities().iterator().hasNext()) { phase = Phase.EXECUTE; ticksInPhase = 0; return; }
+  if (++ticksInPhase >= MAX_SETTLE_TICKS) {
+   LOGGER.error("[DIV tuningCommandProbe] COMPLETE - FAILED: the just-spawned vehicle never became visible via ServerLevel.getAllEntities() within "+MAX_SETTLE_TICKS+" ticks");
    phase = Phase.DONE;
   }
  }
@@ -155,10 +167,21 @@ public final class TuningCommandProbe {
   } catch (IOException ex) {
    LOGGER.error("[DIV tuningCommandProbe] COMPLETE - FAILED: could not read/write the operator config file", ex);
   } finally {
+   // Review finding (John, comment 54238): restoring the original config and logging that the
+   // write/reload calls themselves didn't throw is not the same claim as "the file is actually
+   // back to byte-identical" - read it back and compare explicitly, logging CONFIRMED/MISMATCH
+   // rather than silently assuming the restoration succeeded.
    try {
     if (existed) Files.writeString(configPath, originalContent);
     else Files.deleteIfExists(configPath);
     Overrides.reload();
+    String restoredContent = existed ? Files.readString(configPath) : null;
+    boolean restoredCleanly = existed ? originalContent.equals(restoredContent) : !Files.exists(configPath);
+    if (restoredCleanly) {
+     LOGGER.info("[DIV tuningCommandProbe] config restoration CONFIRMED byte-identical to the pre-probe original ("+(existed?"restored":"deleted, as it did not exist before")+").");
+    } else {
+     LOGGER.error("[DIV tuningCommandProbe] config restoration MISMATCH - the file does not read back as byte-identical to the pre-probe original. Manual check needed: "+configPath);
+    }
    } catch (IOException ex) {
     LOGGER.error("[DIV tuningCommandProbe] failed to restore the original operator config file - manual check needed: "+configPath, ex);
    }
