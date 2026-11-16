@@ -3427,3 +3427,56 @@ regression anywhere else in the suite.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `401bd778991662045577fde4c97c604ac027110cf1d64e4fac388a7aabe38b9e`)
 was produced.
+
+**Fourth self-review kickback fix (2026-11-16, comments Jira 54209/54213/
+54221).** Finding: a real registration-tree/non-null-requirement check
+alone does not prove allowed/denied permission behavior, successful
+resolution, rendered output, or the non-vehicle failure path - John's own
+follow-up (comment 54221) additionally found the attempted live
+`gradle runServer` probe (an interim, since-abandoned approach) failed at
+its own fixture-setup stage (a freshly-spawned MTS vehicle's own
+`uniqueUUID` - confirmed via decompiled `WrapperWorld.
+spawnEntityInternal` bytecode to be an INDEPENDENTLY random-generated
+UUID, never copied onto the wrapping Minecraft entity by that spawn path -
+is not the UUID a Minecraft entity selector can ever find it by), and
+explicitly endorsed (comment 54209/54221) a bounded, production-used
+adapter seam with fake resolver/output collaborators over building a
+larger live harness to chase that fixture problem further.
+
+Fix: `TuningCommand` now exposes `VehicleLookup`/`LookupResult`/
+`ResolvedVehicle` - a seam separating "resolve a selected Minecraft
+entity to a DIV vehicle" (the genuinely live-world-dependent part,
+`productionLookup`, unchanged in real behavior) from "decide what to do
+with that resolution" (`respond` - the real DECISION logic, needing no
+`Entity`/live world at all). `run` is now pure glue: extract the selector
+argument and its display name, call the lookup, delegate to `respond`.
+Production wiring (`register`) is unchanged in actual behavior - still
+registers `TuningCommand::productionLookup` as the real resolver.
+
+New `TuningCommandAdapterTest` (6 tests, superseding the single
+registration-only test from the prior fix): a real `CommandDispatcher<
+CommandSourceStack>` and the real `TuningCommand.register` (tree shape,
+as before); the REAL permission requirement predicate evaluated against
+real, minimally-constructed `CommandSourceStack` instances - level 2 and
+4 allowed, level 1 and 0 denied (not merely checked non-null, closing
+that named gap); and three `TuningCommand.respond` cases - not-eligible,
+no-loaded-definition, and a fully resolved vehicle (including an
+installed part) - each invoking the REAL method with a FAKE
+`LookupResult` standing in for what a live `VehicleLookup` would have
+produced, through a real `CommandSourceStack` wrapping a capturing
+`CommandSource` so assertions are against the actual text the real
+`sendSuccess`/`sendFailure` send (confirmed via their own bytecode that
+neither dereferences a null level/server for this call shape), not a
+hand-rolled substitute. Still not achievable from any unit test, and not
+required per the above: `run`'s own `EntityArgument`/UUID-to-live-vehicle
+extraction, which needs a live, running `ServerLevel` with a real
+spawned vehicle - a few directly-inspectable lines of glue, with every
+decision it leads to now covered by `respond`'s own tests.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+at this fix's head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**835 tests**, 0 skipped, 0 failures, 0 errors.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `366a8a50bae316d3476426aea7ee9e7c297b04e0e371f129119572b25908b7b1`)
+was produced.
