@@ -80,7 +80,8 @@
       "elevatorAuthorityScale": 1.0,
       "rudderAuthorityScale": 0.8,
       "parasiticDragMultiplier": 1.0,
-      "oswaldEfficiency": 0.8
+      "oswaldEfficiency": 0.8,
+      "fixedWingAngularDampingCoefficient": 1.5
     },
     "examplepack:sporty_car": {
       "extends": "sporty-base",

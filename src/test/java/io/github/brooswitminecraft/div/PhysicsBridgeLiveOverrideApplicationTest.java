@@ -41,6 +41,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.parasiticDragMultiplier = 1.3; fresh.oswaldEfficiency = 0.65;
   // MINECRAFT-537: rotorAngularDampingCoefficient must go through this same live-mutation path too.
   fresh.rotorAngularDampingCoefficient = 3.5;
+  // MINECRAFT-542: fixedWingAngularDampingCoefficient must go through this same live-mutation
+  // path too - a wholly separate field from rotorAngularDampingCoefficient above.
+  fresh.fixedWingAngularDampingCoefficient = 2.5;
   // MINECRAFT-543: rotorAirDragCoefficient must go through this same live-mutation path too.
   fresh.rotorAirDragCoefficient = 0.9;
   // MINECRAFT-533: toeFrontDegrees/toeRearDegrees must go through this same live-mutation path.
@@ -70,6 +73,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.1, target.suspensionDampingRatio);
   assertEquals(1.3, target.parasiticDragMultiplier); assertEquals(0.65, target.oswaldEfficiency);
   assertEquals(3.5, target.rotorAngularDampingCoefficient);
+  assertEquals(2.5, target.fixedWingAngularDampingCoefficient);
   assertEquals(0.9, target.rotorAirDragCoefficient);
   assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
   assertEquals(true, target.axleDriveForceSharing);
@@ -77,7 +81,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.2, target.suspensionDampingRatioFront); assertEquals(0.9, target.suspensionDampingRatioRear);
   assertEquals(1.8, target.suspensionSpringMultiplierFront); assertEquals(0.75, target.suspensionSpringMultiplierRear);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","aileronAuthorityScale","elevatorAuthorityScale","rudderAuthorityScale","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","rotorAirDragCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing",
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","fixedWingAngularDampingCoefficient","rotorAirDragCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing",
       "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier",
       "suspensionDampingRatioFront","suspensionDampingRatioRear","suspensionSpringMultiplierFront","suspensionSpringMultiplierRear"),
     new TreeSet<>(applied));
@@ -159,6 +163,21 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.0, target.rotorAngularDampingCoefficient, "must revert to the documented off (0.0) default once the override is removed");
   assertTrue(applied.contains("rotorAngularDampingCoefficient"), "the revert-to-default must itself be reported as an applied live change");
+ }
+
+ @Test void removingAFixedWingAngularDampingCoefficientOverrideLiveAppliesBackDownToOffDefault() {
+  // MINECRAFT-542: same "revert to documented default on removal" requirement as
+  // rotorAngularDampingCoefficient (MINECRAFT-537) above, for the wholly separate fixed-wing
+  // field - an operator who previously configured this and then removes that config entry
+  // entirely must see the live vehicle actually fall back to the documented off default (0.0) on
+  // the next reload.
+  var target = Overrides.defaultTuning();
+  target.fixedWingAngularDampingCoefficient = 2.5;
+  var fresh = Overrides.defaultTuning(); // no override at all -> FALLBACK default (0.0)
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertEquals(0.0, target.fixedWingAngularDampingCoefficient, "must revert to the documented off (0.0) default once the override is removed");
+  assertTrue(applied.contains("fixedWingAngularDampingCoefficient"), "the revert-to-default must itself be reported as an applied live change");
  }
 
  @Test void removingARotorAirDragCoefficientOverrideLiveAppliesBackDownToOffDefault() {
