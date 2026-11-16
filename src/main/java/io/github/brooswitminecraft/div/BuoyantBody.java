@@ -97,6 +97,11 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
   Pose3d pose = new Pose3d(box.getPose());
   Quaterniond q = new Quaterniond(pose.orientation()), inverse = new Quaterniond(q).invert();
   Vector3d velocity = handle.getLinearVelocity(new Vector3d()), angular = handle.getAngularVelocity(new Vector3d());
+  // MINECRAFT-545/547 diagnostic (John's comment 54250) - log-only: this body's own step() entry
+  // velocity, every tick it actually runs, so the exact tick BuoyantBody.step reads an already-
+  // large angular velocity (vs. the tick it first appears) is visible directly, not inferred.
+  if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+    "[DIV lifecycleDiagnostic] BuoyantBody.step entry v=" + v.uniqueUUID + " linearVelocity=" + velocity + " angularVelocity=" + angular);
   boolean awake = BuoyantForces.apply(level, v, tuning, center, hullVolume, pose, q, inverse, velocity, angular, handle);
   if (awake) box.wakeUp();
   // Sable is authoritative. The pose here is the most recent completed simulation step.

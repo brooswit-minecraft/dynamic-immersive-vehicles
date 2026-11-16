@@ -652,6 +652,16 @@ public final class PhysicsBridge {
   boolean towingVehicleActive = towed && isHitchableBody(towedByConnection.towingVehicle)
     && !unsafeBuoyantAngularLock(registry.get(towedByConnection.towingVehicle) instanceof BuoyantBody, floating,
         towedByConnection.hitchConnection.mounted, towedByConnection.hitchConnection.restricted);
+  // MINECRAFT-545/547 diagnostic (John's comment 54250: trace actual tick-relative cleanup/
+  // remove/joint-release/step ordering, not just a before/after sample) - log-only, every tick a
+  // towed vehicle's own active() recomputes this decision, so the exact tick `isHitchableBody`
+  // starts/stops seeing a just-invalidated towing vehicle's still-registered body is visible
+  // directly, rather than inferred from cleanup()'s own registration order.
+  if (towed && GroundContactDiagnostics.ENABLED) {
+   com.mojang.logging.LogUtils.getLogger().info("[DIV lifecycleDiagnostic] v=" + v.uniqueUUID + " towingVehicle=" + towedByConnection.towingVehicle.uniqueUUID
+     + " towingValid=" + towedByConnection.towingVehicle.isValid + " isHitchableBody=" + isHitchableBody(towedByConnection.towingVehicle)
+     + " alreadyActive=" + alreadyActive + " towingVehicleActive=" + towingVehicleActive);
+  }
   var decision = decide(true, isClient, towed, alreadyActive, towingVehicleActive);
   GroundContactDiagnostics.logClassification(v.uniqueUUID, isClient, key, ground, floating, decision.toString());
   if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
@@ -1083,7 +1093,14 @@ public final class PhysicsBridge {
  public static void cleanup() {
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
-  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
+  registry.removeIf((v, b) -> !v.isValid, (v, b) -> {
+   // MINECRAFT-545/547 diagnostic (John's comment 54250) - log-only: the exact tick this sweep
+   // actually releases v's hitch joint and removes its native body, so that tick can be compared
+   // directly against the tick v.isValid first went false and the tick any still-jointed
+   // trailer's own active() last saw v as hitchable (see the active() log line above).
+   if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info("[DIV lifecycleDiagnostic] cleanup releasing/removing v=" + v.uniqueUUID);
+   hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v);
+  });
   // Review 53399: the registry.removeIf above only cleans pendingInheritedVelocity for a vehicle
   // STILL present in BodyRegistry - a vehicle already deactivated (e.g. a failed
   // chassisBoundsChanged reconstruction, which deactivates BEFORE attempting to rebuild) is

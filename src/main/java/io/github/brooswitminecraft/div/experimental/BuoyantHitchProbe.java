@@ -466,8 +466,23 @@ public final class BuoyantHitchProbe {
  private static void towingUnavailable() {
   ticksInPhase++;
   if (ticksInPhase == 1) {
+   // MINECRAFT-545/547 diagnostic (John's comment 54250: "record the immediately preceding
+   // native state too" - before AND after towing.remove() itself, in the same tick, not just
+   // the first later sample) - real native state on both sides right before the despawn call.
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE pre-remove() real native state"
+     + " towing.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towing)
+     + " towing.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towing)
+     + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
+     + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE despawning towing while towed remains jointed");
    towing.remove();
+   // Same-tick, same Java call, immediately AFTER remove() returns - whether remove() itself
+   // synchronously perturbs towed's own native state (as opposed to a later tick's physics
+   // step/cleanup() doing so) is directly visible by comparing this to the pre-remove() line.
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE post-remove() real native state"
+     + " towing.isValid=" + towing.isValid
+     + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
+     + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
   }
   if (!boundedOrFail("towingUnavailable/towed", towed)) return;
   // MINECRAFT-545/547 diagnostic (John's comment 54237/54247's "next bounded diagnostic" and
