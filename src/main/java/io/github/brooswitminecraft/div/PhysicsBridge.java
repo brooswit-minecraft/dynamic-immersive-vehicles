@@ -649,7 +649,9 @@ public final class PhysicsBridge {
   // `ground || floating` is always true here (the deactivate return above already excludes
   // neither), so `decide` alone (its own isClient/towed handling already matches the previous
   // per-branch ternary exactly) replaces it.
-  boolean towingVehicleActive = towed && isHitchableBody(towedByConnection.towingVehicle);
+  boolean towingVehicleActive = towed && isHitchableBody(towedByConnection.towingVehicle)
+    && !unsafeBuoyantAngularLock(registry.get(towedByConnection.towingVehicle) instanceof BuoyantBody, floating,
+        towedByConnection.hitchConnection.mounted, towedByConnection.hitchConnection.restricted);
   var decision = decide(true, isClient, towed, alreadyActive, towingVehicleActive);
   GroundContactDiagnostics.logClassification(v.uniqueUUID, isClient, key, ground, floating, decision.toString());
   if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
@@ -681,6 +683,29 @@ public final class PhysicsBridge {
   * than no body at all. */
  private static boolean isHitchableBody(EntityVehicleF_Physics towingVehicle) {
   return registry.get(towingVehicle) instanceof HitchAnchor;
+ }
+ /**
+  * MINECRAFT-545 safety gate: a {@code mounted} or {@code restricted} angular lock between TWO
+  * independently-buoyant hulls is a confirmed-live runaway instability, not a hypothesis -
+  * {@code BuoyantHitchProbe}'s own earlier live run settled cleanly to a sub-0.003-block anchor
+  * distance, then diverged to 35+ blocks within ~10 ticks and crashed {@code BuoyantBody.step}
+  * with a {@code NullPointerException} once the ejected body left Sable's own active region (see
+  * VERIFICATION.md's "Float-only hull hitch support" section and MINECRAFT-547).
+  * Each float's own independent righting torque fights a partial or full angular lock against
+  * the OTHER float's independent righting torque - a resonance a ground vehicle's own fixed-to-
+  * the-world suspension does not have, and that root cause is unrelated to which side is towing
+  * vs towed. Refusing this one combination - exactly the two conditions {@code lockedAxes} ever
+  * reads ({@code mounted}/{@code restricted}) AND both active bodies being {@code BuoyantBody} -
+  * falls back to IV's native hitch for that pair specifically, precisely the SAME behavior every
+  * towed float had before this ticket, rather than silently sending a known-unsafe configuration
+  * into production merely because the generalized {@code HitchAnchor} surface now compiles for
+  * it. An ordinary (unmounted, unrestricted) connection between two floats, or ANY connection
+  * where at least one side is not a {@code BuoyantBody} (ground/flight/rotor Body towing or
+  * being towed by a float), is unaffected - both are proven safe by this ticket's own live
+  * evidence.
+  */
+ static boolean unsafeBuoyantAngularLock(boolean towingIsBuoyant, boolean towedIsBuoyant, boolean mounted, boolean restricted) {
+  return towingIsBuoyant && towedIsBuoyant && (mounted || restricted);
  }
  /**
   * The exact reconcile-then-rollback composition {@code active()} performs once its body is
@@ -797,7 +822,10 @@ public final class PhysicsBridge {
   * every tick, unlike a chassis definition's fixed geometry.
   */
  private static boolean reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
-  EntityVehicleF_Physics desired = connection != null && isHitchableBody(connection.towingVehicle) ? connection.towingVehicle : null;
+  EntityVehicleF_Physics desired = connection != null && isHitchableBody(connection.towingVehicle)
+    && !unsafeBuoyantAngularLock(registry.get(connection.towingVehicle) instanceof BuoyantBody, registry.get(v) instanceof BuoyantBody,
+        connection.hitchConnection.mounted, connection.hitchConnection.restricted)
+    ? connection.towingVehicle : null;
   try {
    // MINECRAFT-545: either side can now be a ground/flight/rotor Body or a float-only
    // BuoyantBody - createHitch only needs each side's HitchAnchor surface.

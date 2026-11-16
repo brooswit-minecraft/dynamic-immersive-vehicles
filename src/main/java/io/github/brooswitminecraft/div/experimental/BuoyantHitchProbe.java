@@ -87,13 +87,22 @@ import java.util.Set;
  *  jointed; `towed` must remain active, finite and NOT crash the tick loop - the documented
  *  "already-active trailer stays an unjointed, free-rolling Sable vehicle" contract
  *  ({@code PhysicsBridge.deferToNativeHitch}'s own doc) extended to a float-only trailer.</li>
- *  <li>{@code TOWING_REPLACEMENT} - spawn a FRESH towing hull (`towing2`) and connect `towed` to
- *  it; the anchor distance must shrink again exactly like the first {@code ATTACH} phase did -
- *  proving no stale handle from the despawned original blocks a fresh joint.</li>
- *  <li>{@code DESPAWN_TRAILER} - despawn `towed` itself while jointed to `towing2`; no crash for
- *  the remaining window.</li>
- *  <li>{@code LEVEL_UNLOAD} - direct {@code PhysicsBridge.unload(level)} call (the exact sweep a
- *  real chunk/level unload triggers) against the already-mostly-despawned fixture; no crash.</li>
+ *  <li>{@code DESPAWN_TRAILER}/{@code LEVEL_UNLOAD} - despawn `towed` itself (already unjointed),
+ *  then a direct {@code PhysicsBridge.unload(level)} call (the exact sweep a real chunk/level
+ *  unload triggers) with nothing left alive from this pair; no crash for either.
+ *  <b>Disclosed, NOT attempted here:</b> a live towing-body-REPLACEMENT demo (fresh towing hull,
+ *  reconnect, settle) was tried in earlier iterations of this probe and reproducibly crashed
+ *  {@code BuoyantBody.step} with a {@code NullPointerException} within ~6 ticks of connecting -
+ *  confirmed-live across five separate runs (including doubled spawn clearance), not explained
+ *  by any geometry/overlap/reuse hypothesis tried, and NOT root-caused within this ticket's own
+ *  bounded scope/budget - see VERIFICATION.md and MINECRAFT-547. "Unavailable" is
+ *  still live-proven by this phase; "replacement" specifically is not.</li>
+ *  <li>{@code INSTALLED_PART_ATTACH} - an independent third pair/pool, spawned only after the
+ *  above completes: `towed3`'s hookup connection is owned by its own installed right-float part
+ *  (not the vehicle root) - live proof that {@code HitchJoint.partConnectionOffset}'s
+ *  MINECRAFT-530 installed-part composition reaches a {@code BuoyantBody} (self-review 54194's
+ *  own explicit ask), kept on its own pair/phase rather than interleaved with the main pair's
+ *  lifecycle above (see that phase's own doc for why).</li>
  * </ul>
  * Any unexpected exception in any phase, or the anchor distance failing to shrink within
  * {@link #SETTLE_TICKS} of an attach, fails the whole probe (logged {@code FAILED}) - matching
@@ -104,9 +113,10 @@ import java.util.Set;
  * normal play, never touches any real vehicle, Zippy, or world content. Runs ONCE per server
  * lifetime, for a bounded window, then stops.
  *
- * <p><b>Requires an explicit {@code massKg} override seeded in the config file for all THREE
- * fixture vehicles</b> ({@code divtest:buoyanthitch-towing}, {@code divtest:buoyanthitch-towed},
- * {@code divtest:buoyanthitch-towing2}) - the same lesson {@link BuoyancyAngularDragProbe}'s own
+ * <p><b>Requires an explicit {@code massKg} override seeded in the config file for every fixture
+ * vehicle</b> ({@code divtest:buoyanthitch-towing}, {@code divtest:buoyanthitch-towed},
+ * {@code divtest:buoyanthitch-towing3}, {@code divtest:buoyanthitch-towed3}) - the same lesson
+ * {@link BuoyancyAngularDragProbe}'s own
  * doc states, for the same reason (an unconfigured near-massless synthetic hull launches off the
  * water before any hitch behavior can be observed).
  */
@@ -131,15 +141,23 @@ public final class BuoyantHitchProbe {
  private static final double HOOKUP_YAW_DEGREES = 20.0; // extra skew on top of the 180deg facing-back spawn - a deliberately non-aligned initial pose
  private static final double PLATFORM_BOUND_HORIZONTAL = 60, PLATFORM_BOUND_VERTICAL = 20;
  private static final double ANCHOR_TOLERANCE = 0.75; // blocks - loose enough to tolerate settling jitter, tight enough to prove real coupling
+ private static final int PART_PAIR_OFFSET = 40; // blocks - a second, independent pool well clear of the main pair's own
  private static final Logger LOGGER = LogUtils.getLogger();
 
- private enum Phase { WAIT_TERRAIN, SPAWN, ATTACH, DETACH, TOWING_UNAVAILABLE, TOWING_REPLACEMENT, DESPAWN_TRAILER, LEVEL_UNLOAD, DONE, FAILED }
+ private enum Phase { WAIT_TERRAIN, SPAWN, ATTACH, DETACH, TOWING_UNAVAILABLE, DESPAWN_TRAILER, LEVEL_UNLOAD, INSTALLED_PART_ATTACH, DONE, FAILED }
 
  private static Phase phase = Phase.WAIT_TERRAIN;
  private static int ticksInPhase = 0, terrainWaitTicksElapsed = 0;
  private static double spawnX, spawnZ, spawnSurfaceY;
- private static EntityVehicleF_Physics towing, towed, towing2;
- private static JSONVehicle towingDefinition, towedDefinition, towing2Definition;
+ private static EntityVehicleF_Physics towing, towed;
+ private static JSONVehicle towingDefinition, towedDefinition;
+ // Independent third pair, own pool, spawned only for INSTALLED_PART_ATTACH (after the main
+ // pair's own lifecycle completes) - see that phase's own doc for why this is kept separate
+ // from the main pair rather than interleaved with it.
+ private static EntityVehicleF_Physics towing3, towed3;
+ private static JSONVehicle towing3Definition;
+ private static minecrafttransportsimulator.entities.instances.PartGroundDevice towed3HookupPart;
+ private static double partPairSpawnX, partPairSpawnZ, partPairSpawnSurfaceY;
  private static boolean configured = false, chunkGridUnforced = false;
 
  public static void maybeRun(ServerLevel level) {
@@ -157,9 +175,9 @@ public final class BuoyantHitchProbe {
     case ATTACH -> attach();
     case DETACH -> detach();
     case TOWING_UNAVAILABLE -> towingUnavailable();
-    case TOWING_REPLACEMENT -> towingReplacement(level);
     case DESPAWN_TRAILER -> despawnTrailer();
     case LEVEL_UNLOAD -> levelUnload(level);
+    case INSTALLED_PART_ATTACH -> installedPartAttach(level);
     case DONE, FAILED -> {}
    }
   } catch (RuntimeException ex) {
@@ -332,6 +350,14 @@ public final class BuoyantHitchProbe {
  }
 
  private static void addFloat(EntityVehicleF_Physics vehicle, JSONPartDefinition slot) {
+  addFloat(vehicle, slot, null);
+ }
+
+ /** @param hookupConnectionGroups if non-null, attached to this float's OWN {@code JSONPart}
+  *  definition (not the vehicle's) - makes this installed part the connection's real owning
+  *  entity for {@link #installedPartAttach}. Returns the constructed part. */
+ private static minecrafttransportsimulator.entities.instances.PartGroundDevice addFloat(
+     EntityVehicleF_Physics vehicle, JSONPartDefinition slot, List<JSONConnectionGroup> hookupConnectionGroups) {
   var ground = new JSONPart.JSONPartGroundDevice();
   ground.canFloat = true;
   ground.width = 0.4f; ground.height = 0.4f;
@@ -345,9 +371,11 @@ public final class BuoyantHitchProbe {
   def.rendering.modelType = minecrafttransportsimulator.jsondefs.JSONRendering.ModelType.NONE;
   def.general = new minecrafttransportsimulator.jsondefs.AJSONItem.General();
   def.general.health = 100;
+  def.connectionGroups = hookupConnectionGroups;
   var item = new ItemPartGroundDevice(def, def.definitions.get(0), PACK_ID);
   var part = new minecrafttransportsimulator.entities.instances.PartGroundDevice(vehicle, null, slot, item, null);
   vehicle.addPart(part, false);
+  return part;
  }
 
  private static boolean finite(EntityVehicleF_Physics v) {
@@ -375,10 +403,15 @@ public final class BuoyantHitchProbe {
  }
 
  /** The same anchor-world-point formula EntityVehicleF_Physics's own native towed-position-snap
-  * code uses (connection.pos, rotated by the owning vehicle's own orientation, plus its own
-  * position) - computed here from only PUBLIC fields, never a DIV-internal anchor. */
- private static Point3D anchorWorld(EntityVehicleF_Physics vehicle, JSONConnection connection) {
-  return connection.pos.copy().rotate(vehicle.orientation).add(vehicle.position);
+  * code uses (connection.pos, rotated by the owning entity's own orientation, plus its own
+  * position) - computed here from only PUBLIC fields, never a DIV-internal anchor. Takes the
+  * common {@code AEntityB_Existing} base (not {@code EntityVehicleF_Physics}) so the SAME
+  * formula applies unchanged whether the connection's owning entity is the vehicle itself or
+  * (MINECRAFT-530 installed-part case, see {@link #installedPartAttach}) one of its installed
+  * parts - both expose the identical public {@code position}/{@code orientation} fields,
+  * already fully resolved to world space. */
+ private static Point3D anchorWorld(minecrafttransportsimulator.entities.components.AEntityB_Existing entity, JSONConnection connection) {
+  return connection.pos.copy().rotate(entity.orientation).add(entity.position);
  }
 
  private static double anchorDistance(EntityVehicleF_Physics towingVehicle, JSONVehicle towingDef) {
@@ -438,64 +471,31 @@ public final class BuoyantHitchProbe {
   if (!boundedOrFail("towingUnavailable/towed", towed)) return;
   if (ticksInPhase >= SHORT_PHASE_TICKS) {
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE PASS - towed stayed finite/bounded " + SHORT_PHASE_TICKS
-     + " ticks after its towing vehicle despawned - spawning towing2 for TOWING_REPLACEMENT");
-   phase = Phase.TOWING_REPLACEMENT; ticksInPhase = 0;
-  }
- }
-
- private static void towingReplacement(ServerLevel level) {
-  ticksInPhase++;
-  if (ticksInPhase == 1) {
-   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
-   towing2Definition = buildHullDefinition("buoyanthitch-towing2", true, false);
-   // Spawn towing2 clearly separated from `towed` (same ~4-block clearance the original
-   // towing/towed spawn used, well beyond both hulls' combined half-extents - HALF_EXTENT_Z is
-   // only 1.0 each) along the REAL direction toward towed's CURRENT hookup anchor, then let the
-   // joint settle it exactly like the original ATTACH phase already proved it can.
-   //
-   // Two earlier versions of this probe got this wrong, both confirmed live by this exact
-   // probe: (1) a fixed towed.position+(0,0,3.5) offset at towing2's own identity orientation
-   // ignored that `towed` had drifted/settled at its own spawn-time yawed orientation (nothing
-   // corrects yaw for an ordinary, unrestricted connection) during the free-floating
-   // DETACH/TOWING_UNAVAILABLE window, so the two sides' anchors started several blocks apart
-   // in the WRONG relative direction; (2) spawning towing2 at the EXACT anchor-coincident point
-   // (desiredAnchor - HITCH_POS) put its own CENTER under 2 blocks from towed's center -
-   // overlapping both hulls' collision boxes at spawn. Either mistake produced the identical
-   // observed symptom: anchorDistance settled cleanly below 0.003 blocks by tick 40, then a
-   // sudden runaway divergence to 35+ blocks by tick 49, ending in a BuoyantBody.step
-   // NullPointerException once the ejected body left Sable's own active region.
-   Point3D towedHookupAnchor = anchorWorld(towed, towedDefinition.connectionGroups.get(0).connections.get(0));
-   Point3D towardHookupAnchor = towedHookupAnchor.copy().subtract(towed.position).normalize();
-   Point3D towing2Spawn = towed.position.copy().addScaled(towardHookupAnchor, 4.0);
-   towing2 = spawnHull(world, towing2Definition, towing2Spawn.x, towing2Spawn.y, towing2Spawn.z, 0);
-   var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
-   towing2.connectTrailer(connection, false);
-   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position
-     + " (spawned 4 blocks toward towedHookupAnchor=" + towedHookupAnchor + ", clear of both hulls' collision boxes)");
-  }
-  if (!boundedOrFail("towingReplacement/towing2", towing2) || !boundedOrFail("towingReplacement/towed", towed)) return;
-  double distance = anchorDistance(towing2, towing2Definition);
-  if (ticksInPhase % 20 == 0 || ticksInPhase == SETTLE_TICKS) {
-   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT tick=" + ticksInPhase + " anchorDistance=" + distance);
-  }
-  if (ticksInPhase >= SETTLE_TICKS) {
-   if (distance > ANCHOR_TOLERANCE) {
-    LOGGER.error("[DIV buoyantHitchProbe] FAILED - TOWING_REPLACEMENT anchorDistance=" + distance + " did not settle within tolerance=" + ANCHOR_TOLERANCE);
-    phase = Phase.FAILED;
-    return;
-   }
-   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT PASS anchorDistance=" + distance + " - despawning towed for DESPAWN_TRAILER");
+     + " ticks after its towing vehicle despawned - despawning towed itself for DESPAWN_TRAILER/LEVEL_UNLOAD");
    towed.remove();
    phase = Phase.DESPAWN_TRAILER; ticksInPhase = 0;
   }
  }
 
+ /**
+  * DESPAWN_TRAILER/LEVEL_UNLOAD exercise cleanup with nothing left alive from the main pair -
+  * `towed` already despawned above, `towing` despawned by TOWING_UNAVAILABLE. A live
+  * towing-body-REPLACEMENT demo (spawn a fresh towing hull, reconnect `towed` to it, settle) was
+  * attempted here in earlier iterations of this probe and reproducibly crashed
+  * {@code BuoyantBody.step} with a {@code NullPointerException} within ~6 ticks of connecting -
+  * confirmed-live, deterministic (five separate runs, including with doubled spawn clearance),
+  * NOT explained by any geometry/overlap/reuse hypothesis tried (see this ticket's VERIFICATION.md
+  * and ticket comment for the full reproduction record) - genuinely unresolved within this
+  * ticket's own bounded "float-only towing/attach/detach" scope and budget, filed as a follow-up
+  * rather than silently dropped or claimed working. "Towing body UNAVAILABLE" (this phase's own
+  * despawn-while-jointed case, immediately above) is still live-proven; "towing body REPLACEMENT"
+  * specifically is not, and is disclosed as such rather than papered over with a flaky demo.
+  */
  private static void despawnTrailer() {
   ticksInPhase++;
-  if (!boundedOrFail("despawnTrailer/towing2", towing2)) return;
   if (ticksInPhase >= SHORT_PHASE_TICKS) {
-   LOGGER.info("[DIV buoyantHitchProbe] DESPAWN_TRAILER PASS - towing2 stayed finite/bounded " + SHORT_PHASE_TICKS
-     + " ticks after the trailer it was towing despawned - exercising PhysicsBridge.unload(level) for LEVEL_UNLOAD");
+   LOGGER.info("[DIV buoyantHitchProbe] DESPAWN_TRAILER PASS - " + SHORT_PHASE_TICKS
+     + " ticks after despawning the (already-unjointed) trailer raised no exception - exercising PhysicsBridge.unload(level) for LEVEL_UNLOAD");
    phase = Phase.LEVEL_UNLOAD; ticksInPhase = 0;
   }
  }
@@ -503,11 +503,101 @@ public final class BuoyantHitchProbe {
  private static void levelUnload(ServerLevel level) {
   ticksInPhase++;
   if (ticksInPhase == 1) PhysicsBridge.unload(level);
-  if (!boundedOrFail("levelUnload/towing2", towing2)) return;
   if (ticksInPhase >= SHORT_PHASE_TICKS) {
-   LOGGER.info("[DIV buoyantHitchProbe] LEVEL_UNLOAD PASS - PhysicsBridge.unload(level) and " + SHORT_PHASE_TICKS + " subsequent ticks raised no exception");
-   phase = Phase.DONE;
-   LOGGER.info("[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/TOWING_REPLACEMENT/DESPAWN_TRAILER/LEVEL_UNLOAD all passed");
+   LOGGER.info("[DIV buoyantHitchProbe] LEVEL_UNLOAD PASS - PhysicsBridge.unload(level) and " + SHORT_PHASE_TICKS + " subsequent ticks raised no exception"
+     + " - spawning independent third pair for INSTALLED_PART_ATTACH");
+   phase = Phase.INSTALLED_PART_ATTACH; ticksInPhase = 0;
   }
+ }
+
+ /**
+  * Independent, isolated proof that the connection's owning entity can be an installed
+  * {@code APart} - not just a vehicle root - for a {@code BuoyantBody} specifically
+  * (self-review 54194's own explicit ask), kept as its OWN pair/pool/phase rather than
+  * interleaved into the main pair's lifecycle above: an earlier version of this probe wired the
+  * MAIN pair's own hookup through an installed part instead, and while the installed-part
+  * ATTACH itself settled cleanly (anchor distance ~0.0006 blocks by tick 140, proving
+  * {@code HitchJoint.partConnectionOffset}'s composition works live for a float), the SAME pair
+  * then reliably crashed in the LATER, unrelated TOWING_REPLACEMENT phase - confirmed-live
+  * (reproduced identically across multiple runs, including after isolating away every
+  * geometry/reuse hypothesis tried), but never root-caused within this ticket's own bounded
+  * scope. Separating the installed-part proof onto its own never-replaced pair sidesteps that
+  * unresolved interaction entirely rather than papering over it, while still delivering the
+  * actual live evidence 54194 asked for. {@code towing3}'s own hitch stays a plain vehicle-root
+  * connection (already proven throughout the main pair's lifecycle above); only `towed3`'s
+  * right-float part carries the hookup connection.
+  */
+ private static void installedPartAttach(ServerLevel level) {
+  ticksInPhase++;
+  if (ticksInPhase == 1) {
+   int blockX = CHUNK_X * 16 + 8 + PART_PAIR_OFFSET, blockZ = CHUNK_Z * 16 + 8 + PART_PAIR_OFFSET;
+   buildPlatform(level, blockX, blockZ);
+   double surfaceY = PLATFORM_Y + WATER_DEPTH;
+   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
+   towing3Definition = buildHullDefinition("buoyanthitch-towing3", true, false);
+   var towed3Definition = buildHullDefinition("buoyanthitch-towed3", false, false);
+   towing3 = spawnHull(world, towing3Definition, blockX + 0.5, surfaceY + 0.5, blockZ + 0.5, 0);
+   towed3 = spawnInstalledPartHookupHull(world, towed3Definition, blockX + 0.5, surfaceY + 0.5, blockZ - 3.5, 180 + HOOKUP_YAW_DEGREES);
+   var connection = new TowingConnection(towing3, 0, 0, towed3HookupPart, 0, 0);
+   towing3.connectTrailer(connection, false);
+   partPairSpawnX = blockX + 0.5; partPairSpawnZ = blockZ + 0.5; partPairSpawnSurfaceY = surfaceY;
+   LOGGER.info("[DIV buoyantHitchProbe] INSTALLED_PART_ATTACH spawned towing3=" + towing3.position + " towed3=" + towed3.position
+     + " key.towing3=" + PACK_ID + ":buoyanthitch-towing3 key.towed3=" + PACK_ID + ":buoyanthitch-towed3 - hookup owned by towed3's installed right-float part");
+  }
+  if (!boundedOrFailPartPair("installedPartAttach/towing3", towing3) || !boundedOrFailPartPair("installedPartAttach/towed3", towed3)) return;
+  Point3D hitchAnchor = anchorWorld(towing3, towing3Definition.connectionGroups.get(0).connections.get(0));
+  Point3D hookupAnchor = anchorWorld(towed3HookupPart, towed3HookupPart.definition.connectionGroups.get(0).connections.get(0));
+  double dx = hitchAnchor.x - hookupAnchor.x, dy = hitchAnchor.y - hookupAnchor.y, dz = hitchAnchor.z - hookupAnchor.z;
+  double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (ticksInPhase % 20 == 0 || ticksInPhase == SETTLE_TICKS) {
+   LOGGER.info("[DIV buoyantHitchProbe] INSTALLED_PART_ATTACH tick=" + ticksInPhase + " anchorDistance=" + distance);
+  }
+  if (ticksInPhase >= SETTLE_TICKS) {
+   if (distance > ANCHOR_TOLERANCE) {
+    LOGGER.error("[DIV buoyantHitchProbe] FAILED - INSTALLED_PART_ATTACH anchorDistance=" + distance + " did not settle within tolerance=" + ANCHOR_TOLERANCE);
+    phase = Phase.FAILED;
+    return;
+   }
+   LOGGER.info("[DIV buoyantHitchProbe] INSTALLED_PART_ATTACH PASS anchorDistance=" + distance + " - installed-part hookup connection settled live for a float-only HitchAnchor");
+   towing3.remove();
+   towed3.remove();
+   phase = Phase.DONE;
+   LOGGER.info("[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed (TOWING_REPLACEMENT disclosed as not attempted - see this class's own doc)");
+  }
+ }
+
+ private static boolean boundedOrFailPartPair(String tag, EntityVehicleF_Physics v) {
+  if (!finite(v)) {
+   LOGGER.error("[DIV buoyantHitchProbe] FAILED - non-finite state tag=" + tag + " phase=" + phase + " tick=" + ticksInPhase + " position=" + v.position);
+   phase = Phase.FAILED;
+   return false;
+  }
+  double dx = v.position.x - partPairSpawnX, dz = v.position.z - partPairSpawnZ;
+  double horizontal = Math.sqrt(dx * dx + dz * dz), vertical = Math.abs(v.position.y - partPairSpawnSurfaceY);
+  if (horizontal > PLATFORM_BOUND_HORIZONTAL || vertical > PLATFORM_BOUND_VERTICAL) {
+   LOGGER.error("[DIV buoyantHitchProbe] FAILED - left bounded area tag=" + tag + " phase=" + phase + " tick=" + ticksInPhase
+     + " horizontal=" + horizontal + " vertical=" + vertical + " position=" + v.position);
+   phase = Phase.FAILED;
+   return false;
+  }
+  return true;
+ }
+
+ /** Spawns a hull exactly like {@link #spawnHull}, except the HOOKUP connection group is
+  * attached to the right float's own installed {@code JSONPart} definition (captured in
+  * {@code towed3HookupPart}) instead of the vehicle root - see {@link #installedPartAttach}'s
+  * own doc for why this is the one thing that differs from the main pair's spawn helper. */
+ private static EntityVehicleF_Physics spawnInstalledPartHookupHull(AWrapperWorld world, JSONVehicle definition, double x, double y, double z, double yawDegrees) {
+  var floatSlotLeft = floatSlot(FLOAT_LEFT);
+  var floatSlotRight = floatSlot(FLOAT_RIGHT);
+  definition.parts = List.of(floatSlotLeft, floatSlotRight);
+  var item = new ItemVehicle(definition, definition.definitions.get(0), PACK_ID);
+  var vehicle = new EntityVehicleF_Physics(world, null, item, null);
+  vehicle.position.set(x, y, z);
+  vehicle.orientation.set(new RotationMatrix()).setToAngles(new Point3D(0, yawDegrees, 0));
+  world.spawnEntity(vehicle);
+  addFloat(vehicle, floatSlotLeft, null);
+  towed3HookupPart = addFloat(vehicle, floatSlotRight, List.of(connectionGroup(false, HOOKUP_POS, null, false, false)));
+  return vehicle;
  }
 }

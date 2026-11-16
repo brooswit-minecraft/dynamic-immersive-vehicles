@@ -139,6 +139,29 @@ class PhysicsBridgeClassificationTest {
   assertFalse(PhysicsBridge.deferToNativeHitch(false, true, true));
  }
 
+ @Test void mountedOrRestrictedAngularLockIsUnsafeOnlyBetweenTwoBuoyantBodies() {
+  // MINECRAFT-545 safety gate, added after BuoyantHitchProbe's own live run confirmed a
+  // mounted/restricted angular lock between two independently-buoyant hulls diverges into a
+  // runaway crash (see VERIFICATION.md). Only the exact combination lockedAxes would otherwise
+  // apply a mounted/restricted lock for, with BOTH active bodies BuoyantBody, is unsafe.
+  assertTrue(PhysicsBridge.unsafeBuoyantAngularLock(true, true, true, false));
+  assertTrue(PhysicsBridge.unsafeBuoyantAngularLock(true, true, false, true));
+ }
+
+ @Test void ordinaryConnectionsBetweenTwoBuoyantBodiesAreNotFlaggedUnsafe() {
+  assertFalse(PhysicsBridge.unsafeBuoyantAngularLock(true, true, false, false));
+ }
+
+ @Test void anyGroundFlightOrRotorBodyOnEitherSideIsNeverFlaggedUnsafe() {
+  // A ground/flight/rotor Body's own suspension/aerodynamics anchors the joint, unlike two
+  // free-floating hulls each applying independent righting torque - confirmed safe by this
+  // ticket's own established ground-hitch production path (MINECRAFT-525/530), unaffected by
+  // this new gate regardless of mounted/restricted.
+  assertFalse(PhysicsBridge.unsafeBuoyantAngularLock(false, true, true, false));
+  assertFalse(PhysicsBridge.unsafeBuoyantAngularLock(true, false, false, true));
+  assertFalse(PhysicsBridge.unsafeBuoyantAngularLock(false, false, true, true));
+ }
+
  @Test void keyAndBrokenKeyCanBeDifferentTypes() {
   // Mirrors PhysicsBridge's real usage: the active-bodies registry is keyed by the live entity,
   // but brokenDefinitions is keyed by the shared JSON definition object - a different key for
