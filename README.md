@@ -630,6 +630,27 @@ See [Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528)
 below for the full math, the ride-height consequence, and the combined
 stability guard it shares with `suspensionDampingRatio`.
 
+`suspensionSpringMultiplierFront`/`suspensionSpringMultiplierRear` and
+`suspensionDampingRatioFront`/`suspensionDampingRatioRear` (optional, same
+bounds as `suspensionSpringMultiplier`/`suspensionDampingRatio` above) let
+the spring multiplier and damping ratio be set independently per geometric
+front/rear axle group - same axle grouping as `brakeBiasFront`/
+`driveBiasFront`/`toeFrontDegrees`/`toeRearDegrees`. Leaving an axle field
+unset makes that axle INHERIT the vehicle-wide `suspensionSpringMultiplier`/
+`suspensionDampingRatio` value above - not a second independent default -
+so a vehicle that only sets the vehicle-wide fields (or neither) behaves
+exactly as before this option existed on every wheel. An ambiguous layout
+(no distinguishable rear axle - a single-axle or side-by-side-only vehicle)
+falls back to the vehicle-wide value on every wheel too, same as the
+ambiguous-layout fallback `toeFrontDegrees`/`toeRearDegrees` already
+documents. The combined travel-aware stability guard (see
+[Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528))
+is checked per axle too - an axle-specific override that alone would
+destabilize the unconfigured default on that axle is rejected even if the
+vehicle-wide pair and the other axle are both safe. See
+[`AxleSuspensionDistribution`](src/main/java/io/github/brooswitminecraft/div/AxleSuspensionDistribution.java)
+for the implementation.
+
 `toeFrontDegrees`/`toeRearDegrees` (optional, degrees, `-20` to `20`) set a
 static toe alignment angle for the geometric front/rear axle group
 respectively - same axle grouping as `brakeBiasFront`/`driveBiasFront`
@@ -808,7 +829,9 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `yawAuthorityScale`, `rotorAngularDampingCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
 `suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
 `verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `fixedWingAngularDampingCoefficient`, `toeFrontDegrees`,
-`toeRearDegrees`, `axleDriveForceSharing`. Fields baked in at vehicle construction - `massKg`,
+`toeRearDegrees`, `axleDriveForceSharing`, `suspensionSpringMultiplierFront`,
+`suspensionSpringMultiplierRear`, `suspensionDampingRatioFront`, `suspensionDampingRatioRear`.
+Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
