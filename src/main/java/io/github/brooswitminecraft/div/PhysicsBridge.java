@@ -957,6 +957,21 @@ public final class PhysicsBridge {
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  /**
+  * Ticket MINECRAFT-546 (tuning-provenance diagnostic): the live {@code Overrides.Tuning} the
+  * currently-active body for {@code v} was actually constructed with - see {@code
+  * VehicleBody.tuning()}'s own doc for exactly which fields a later hot reload can still mutate
+  * in place on this SAME object vs. which were only read once at construction. Returns {@code
+  * null} if {@code v} has no active body at all (never activated, opted out, or a broken
+  * definition) - the diagnostic's only way to tell "this vehicle is running tuning X right now"
+  * apart from "a fresh {@code Overrides.resolved} call against the current config would compute
+  * X" (the two can legitimately differ for a respawn-required field changed since this vehicle's
+  * body was built).
+  */
+ public static Overrides.Tuning activeTuning(EntityVehicleF_Physics v) {
+  VehicleBody body = registry.get(v);
+  return body != null ? body.tuning() : null;
+ }
+ /**
   * Diagnostic/test-only (ticket 53390's explicit "native angular before/after receipt on
   * rotating airborne rebuild remains necessary and cheap"): directly injects a KNOWN angular
   * velocity into this vehicle's currently-active Body, so a test can establish a real, nonzero,
