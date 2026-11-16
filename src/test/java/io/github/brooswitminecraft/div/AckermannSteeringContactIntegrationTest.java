@@ -21,7 +21,7 @@ class AckermannSteeringContactIntegrationTest {
   * {@code steer = (ackermannSteerRadians != null ? ackermann[i] : uniform) + toeRadians[i]}. */
  private static double[] composedSteer(double uniformDelta, Double toeFrontDegrees, Double toeRearDegrees, boolean ackermannEnabled, boolean skidSteer) {
   double[] toe = AxleToeDistribution.toeRadians(X, Z, toeFrontDegrees, toeRearDegrees);
-  double[] ackermann = ackermannEnabled ? AckermannSteeringDistribution.steerRadians(X, Z, FRONT_STEERS, skidSteer, uniformDelta) : null;
+  double[] ackermann = ackermannEnabled ? AckermannSteeringDistribution.steerRadians(X, Z, FRONT_STEERS, skidSteer, uniformDelta, Math.toRadians(60)) : null;
   double[] steer = new double[X.length];
   for (int i = 0; i < X.length; i++) {
    double base = FRONT_STEERS[i] ? (ackermann != null ? ackermann[i] : uniformDelta) : 0;

@@ -2141,7 +2141,7 @@ public final class PhysicsBridge {
    // turnsWithSteer wheel", the exact pre-ticket behavior). tuning.ackermannSteering unset/false
    // (the documented default) never even calls into the geometry - a byte-identical no-op.
    double[] ackermannSteerRadians=Boolean.TRUE.equals(tuning.ackermannSteering)
-     ? AckermannSteeringDistribution.steerRadians(loadShareX,loadShareZ,turnsWithSteerArr,skidSteer,uniformSteerRadians)
+     ? AckermannSteeringDistribution.steerRadians(loadShareX,loadShareZ,turnsWithSteerArr,skidSteer,uniformSteerRadians,Math.toRadians(tuning.maxSteerDegrees))
      : null;
    // MINECRAFT-539: each wheel's own EFFECTIVE spring multiplier/damping ratio - the vehicle-wide
    // tuning.suspensionSpringMultiplier/suspensionDampingRatio resolved above, overridden per
