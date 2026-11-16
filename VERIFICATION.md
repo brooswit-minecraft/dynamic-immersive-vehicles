@@ -3164,3 +3164,58 @@ Not yet performed: in-game/hardware acceptance (real aircraft spawn with
 configured `aileron/elevator/rudderAuthorityScale`, observed independent
 roll/pitch/yaw response) - out of scope per this repository's standing
 "user owns broad/hardware playtesting, not a completion gate" convention.
+
+**Review correction (Wroosbit, PR #36 comment 54143, CHANGES_REQUESTED at
+head `d62d927`): zero was not actually a valid authority-scale value.**
+The first revision bounded all three fields strictly positive `(0,5]`,
+copying `cyclicAuthorityScale`/`yawAuthorityScale`'s own shape verbatim -
+but unlike those rotor fields (which always have `cyclicLimitDegrees` or
+disabling the vehicle itself as a separate, already-existing way to turn
+off attitude authority entirely), there is no other per-axis knob here,
+and the ticket's own "test zero/unit/extreme valid values" acceptance line
+requires `0.0` to be an explicitly VALID way to zero out just ONE axis's
+authority (e.g. a glider with no rudder authority at all) while leaving
+the other two untouched. The review's own repro confirmed the submitted
+"zero" test coverage was zero DEFLECTION at a nonzero scale, never a zero
+SCALE itself - a materially different claim.
+
+Corrected: `aileron/elevator/rudderAuthorityScale`'s bound is now `[0,5]`
+(inclusive zero), not `(0,5]`. `OverridesTest.axisAuthorityScalesOutOfRangeFailValidation`
+now asserts `0.0` does NOT throw (alongside negative/above-cap still
+throwing); the invalid-reload-retention test's "invalid" fixture now uses
+genuinely out-of-range values (`-1.0`, not `0.0`) since `0.0` is valid.
+Added `FlightForcesTest.controlSurfaceForceIsZeroAtZeroAuthorityScaleEvenWithNonzeroDeflection`
+- the actual test the review asked for: a real, nonzero deflection at
+`authorityScale=0.0` must still produce exactly zero force. The existing
+unit-parity (`controlSurfaceForceWithUnitScaleMatchesTheUnscaledOverload`)
+and extreme-value (`controlSurfaceForceAuthorityScaleAtExtremeStaysFinite`)
+coverage already exercised the shared `FlightForces.controlSurfaceForce`
+overload every one of the three axes calls identically, so both already
+covered "for each independent axis" at the one place that distinction
+actually lives (the three separate `Overrides.Tuning` fields themselves,
+each independently bounds/precedence/live-reload tested in `OverridesTest`/
+`PhysicsBridgeLiveOverrideApplicationTest` already).
+
+Coordination: the review also flagged M539 comment 54134 (John) correcting
+the stale `agent:none` premise this ticket's schema proposal (comment
+54133) was posted under - M539's actual owner was already working (worktree
+`w265:p1`) at proposal time. That owner has since posted M539's own
+completion comment (54140), explicitly confirming "No collision with M541's
+aileron/elevator/rudderAuthorityScale ... - no action needed from me there,
+they're independent vehicle-level fields." No field-name or default change
+resulted from this reconciliation; recorded here and on the ticket per the
+review's request.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` against the
+corrected head (accepted baseline `4ee035a`, confirmed unmoved via `git
+fetch origin` immediately before this run) - `BUILD SUCCESSFUL`. The real
+JUnit XML reports total **796 tests**, 0 skipped, 0 failures, 0 errors
+across the whole suite (one net new test vs. the first revision's 795 -
+`controlSurfaceForceIsZeroAtZeroAuthorityScaleEvenWithNonzeroDeflection`
+added, no test removed, confirming no regression anywhere else).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `c42138c3952e7bce1a858de7b1ef80f72272967ba191ab7b4ba44d8168c6540e`)
+was produced.

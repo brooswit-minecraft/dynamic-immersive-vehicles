@@ -737,10 +737,12 @@ independently multiply the roll/pitch/yaw control torque `controlSurfaceSlope`
 already produces for that one axis, so changing one axis's authority never
 scales the others, the shared `controlSurfaceSlope` baseline, or either
 control surface's own native area/lever-arm geometry. All three are
-strictly positive, capped at `5` (same shape as `cyclicAuthorityScale`/
-`yawAuthorityScale` below), and default to `1.0` - a pure no-op reproducing
-the exact prior shared-`controlSurfaceSlope`-only torque for an unconfigured
-vehicle. `rudderAuthorityScale` scales the yaw torque AFTER the existing
+non-negative, capped at `5` (unlike `cyclicAuthorityScale`/
+`yawAuthorityScale` below, `0` is explicitly valid here too - there is no
+other per-axis knob to turn off just one axis's authority, e.g. a glider
+with no rudder authority at all), and default to `1.0` - a pure no-op
+reproducing the exact prior shared-`controlSurfaceSlope`-only torque for an
+unconfigured vehicle. `rudderAuthorityScale` scales the yaw torque AFTER the existing
 sideslip-restoring term (`rudderDeflection - sideslip`) is already folded
 in, so it changes that combined torque's magnitude only, never the
 sideslip-restoring term's own semantics.

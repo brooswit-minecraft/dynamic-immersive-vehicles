@@ -230,6 +230,16 @@ class FlightForcesTest {
   assertTrue(Double.isFinite(atCap) && atCap > 0);
  }
 
+ // Review correction (comment 54143): the ticket's own "test zero/unit/extreme valid values"
+ // acceptance means an authorityScale of exactly 0.0 itself, not merely zero deflection at a
+ // nonzero scale - 0.0 is explicitly valid (Overrides.validate's bound is now [0,5], not (0,5]),
+ // and must actually zero the resulting force even with a real, nonzero deflection.
+
+ @Test void controlSurfaceForceIsZeroAtZeroAuthorityScaleEvenWithNonzeroDeflection() {
+  assertEquals(0, FlightForces.controlSurfaceForce(0.2,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,0.0), 1e-9,
+    "an authorityScale of exactly 0.0 must zero out this axis's force even with a real deflection, the documented way to fully disable just one axis");
+ }
+
  @Test void controlSurfaceForceIsZeroAtZeroDeflectionRegardlessOfAuthorityScale() {
   assertEquals(0, FlightForces.controlSurfaceForce(0,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,3.0));
  }

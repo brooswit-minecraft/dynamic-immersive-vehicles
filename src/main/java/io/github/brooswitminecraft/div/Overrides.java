@@ -368,14 +368,17 @@ public final class Overrides {
    // never so large it produces an absurd lift/control force from a tiny angle/deflection.
    if (liftSlope != null && !(Double.isFinite(liftSlope) && liftSlope > 0 && liftSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (controlSurfaceSlope != null && !(Double.isFinite(controlSurfaceSlope) && controlSurfaceSlope > 0 && controlSurfaceSlope <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
-   // MINECRAFT-541: same strictly-positive, capped-at-5x shape as cyclicAuthorityScale/
-   // yawAuthorityScale above - a zero or negative scale would be a confusing way to disable one
-   // axis's authority entirely (controlSurfaceSlope/disabling the vehicle itself is for that),
-   // and this is a tuning multiplier against the existing controlSurfaceSlope-derived force, not
-   // a way to grant unbounded roll/pitch/yaw torque.
-   if (aileronAuthorityScale != null && !(Double.isFinite(aileronAuthorityScale) && aileronAuthorityScale > 0 && aileronAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
-   if (elevatorAuthorityScale != null && !(Double.isFinite(elevatorAuthorityScale) && elevatorAuthorityScale > 0 && elevatorAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
-   if (rudderAuthorityScale != null && !(Double.isFinite(rudderAuthorityScale) && rudderAuthorityScale > 0 && rudderAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-541 (review correction, comment 54143): capped-at-5x like cyclicAuthorityScale/
+   // yawAuthorityScale above, but INCLUSIVE of 0 rather than strictly positive - unlike the
+   // rotor fields (which always have cyclicLimitDegrees/disabling the vehicle itself as a
+   // separate way to turn off attitude authority entirely), there is no other per-axis knob
+   // here, and the ticket's own "test zero/unit/extreme valid values" acceptance requires 0.0 to
+   // be a legitimate, explicitly valid way to zero out just ONE axis's authority (e.g. a glider
+   // with no rudder authority at all) while leaving the other two, and the shared
+   // controlSurfaceSlope baseline, untouched.
+   if (aileronAuthorityScale != null && !(Double.isFinite(aileronAuthorityScale) && aileronAuthorityScale >= 0 && aileronAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (elevatorAuthorityScale != null && !(Double.isFinite(elevatorAuthorityScale) && elevatorAuthorityScale >= 0 && elevatorAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (rudderAuthorityScale != null && !(Double.isFinite(rudderAuthorityScale) && rudderAuthorityScale >= 0 && rudderAuthorityScale <= 5)) throw new IllegalArgumentException("invalid vehicle tuning");
    // MINECRAFT-536 review correction: a merely-strictly-positive lower bound (e.g. Double.
    // MIN_VALUE) is not enough - FlightForces.dragCoefficient multiplies the floored native value
    // by this field, and while multiplication alone cannot produce Infinity the way oswaldEfficiency's

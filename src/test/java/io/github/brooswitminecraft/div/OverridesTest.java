@@ -368,28 +368,35 @@ class OverridesTest {
  // above, consumed by PhysicsBridge.stepFlight.
 
  @Test void axisAuthorityScalesOutOfRangeFailValidation() {
-  var zeroAileron = new Overrides.Tuning(); zeroAileron.aileronAuthorityScale = 0.0;
-  assertThrows(IllegalArgumentException.class, zeroAileron::validate);
+  // Review correction (comment 54143): unlike cyclicAuthorityScale/yawAuthorityScale, 0.0 must
+  // be explicitly VALID here (the ticket's own "test zero/unit/extreme valid values"
+  // acceptance) - there is no other per-axis knob to zero out just one axis's authority.
   var negativeAileron = new Overrides.Tuning(); negativeAileron.aileronAuthorityScale = -1.0;
   assertThrows(IllegalArgumentException.class, negativeAileron::validate);
   var tooLargeAileron = new Overrides.Tuning(); tooLargeAileron.aileronAuthorityScale = 5.01;
   assertThrows(IllegalArgumentException.class, tooLargeAileron::validate);
+  var zeroAileron = new Overrides.Tuning(); zeroAileron.aileronAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroAileron::validate, "0.0 (fully disabling just this one axis's authority) must be explicitly valid");
   var atCapAileron = new Overrides.Tuning(); atCapAileron.aileronAuthorityScale = 5.0;
   assertDoesNotThrow(atCapAileron::validate);
   var inRangeAileron = new Overrides.Tuning(); inRangeAileron.aileronAuthorityScale = 1.5;
   assertDoesNotThrow(inRangeAileron::validate);
 
-  var zeroElevator = new Overrides.Tuning(); zeroElevator.elevatorAuthorityScale = 0.0;
-  assertThrows(IllegalArgumentException.class, zeroElevator::validate);
+  var negativeElevator = new Overrides.Tuning(); negativeElevator.elevatorAuthorityScale = -0.01;
+  assertThrows(IllegalArgumentException.class, negativeElevator::validate);
   var tooLargeElevator = new Overrides.Tuning(); tooLargeElevator.elevatorAuthorityScale = 100.0;
   assertThrows(IllegalArgumentException.class, tooLargeElevator::validate);
+  var zeroElevator = new Overrides.Tuning(); zeroElevator.elevatorAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroElevator::validate, "0.0 must be explicitly valid");
   var inRangeElevator = new Overrides.Tuning(); inRangeElevator.elevatorAuthorityScale = 0.5;
   assertDoesNotThrow(inRangeElevator::validate);
 
-  var zeroRudder = new Overrides.Tuning(); zeroRudder.rudderAuthorityScale = 0.0;
-  assertThrows(IllegalArgumentException.class, zeroRudder::validate);
+  var negativeRudder = new Overrides.Tuning(); negativeRudder.rudderAuthorityScale = -1.0;
+  assertThrows(IllegalArgumentException.class, negativeRudder::validate);
   var tooLargeRudder = new Overrides.Tuning(); tooLargeRudder.rudderAuthorityScale = 5.001;
   assertThrows(IllegalArgumentException.class, tooLargeRudder::validate);
+  var zeroRudder = new Overrides.Tuning(); zeroRudder.rudderAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroRudder::validate, "0.0 must be explicitly valid");
   var inRangeRudder = new Overrides.Tuning(); inRangeRudder.rudderAuthorityScale = 2.0;
   assertDoesNotThrow(inRangeRudder::validate);
  }
@@ -1316,7 +1323,9 @@ class OverridesTest {
    assertEquals(1.1, Overrides.resolved("packid:glider4").rudderAuthorityScale, 1e-9);
 
    var invalid = new Overrides.Tuning();
-   invalid.aileronAuthorityScale = 0.0; invalid.elevatorAuthorityScale = 999.0; invalid.rudderAuthorityScale = -2.0;
+   // 0.0 is now explicitly VALID (review correction 54143), so use genuinely out-of-range
+   // values here instead - negative and above the 5.0 cap.
+   invalid.aileronAuthorityScale = -1.0; invalid.elevatorAuthorityScale = 999.0; invalid.rudderAuthorityScale = -2.0;
    var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider4", invalid), java.util.Map.of()));
    assertFalse(badResult.success(), "an out-of-range reload for these fields must be rejected, not silently applied");
 
