@@ -177,6 +177,15 @@ neoForge {
    if (System.getenv('DIV_INSTALLED_PART_HITCH_FRAME_PROBE') == 'true') {
     jvmArgument('-Ddiv.experimentalInstalledPartHitchFrameProbe=true')
    }
+   // MINECRAFT-545: opt-in float-only-hull hitch lifecycle probe (attach/anchor-alignment,
+   // rotated hookup connection, towing-unavailable/replacement, despawn/level-unload cleanup) -
+   // same gating pattern as every other probe above; OFF for every normal `gradle runServer`.
+   // See BuoyantHitchProbe's own doc for the config-file massKg entries this requires before
+   // running.
+   if (System.getenv('DIV_BUOYANT_HITCH_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalBuoyantHitch=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }

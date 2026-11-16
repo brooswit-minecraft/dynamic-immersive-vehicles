@@ -3057,3 +3057,87 @@ either direction.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `65dd7fb988eaa35a954e739d6b2722a026b4b53b5aa5fcd02220b6e25d80da03`)
 was produced.
+
+## Float-only hull hitch support (MINECRAFT-545)
+
+`HitchAnchor` (level/box/center) is implemented by both `PhysicsBridge.Body`
+and `BuoyantBody`; `Classification.floatEligible`, `PhysicsBridge.active`/
+`isHitchableBody`/`createHitch`/`reconcileHitch` are generalized from
+`Body`-only to this new interface so a float-only hull can be either side of
+a hitch joint. `gradle test` under the shared `/tmp/div-gradle-slot.lock`:
+**786 tests**, 0 skipped/failures/errors (785-test accepted baseline + 1 new
+`ClassificationTest` case for the corrected `floatEligible` behavior).
+
+**Live Sable evidence (`BuoyantHitchProbe`, opt-in via
+`-Ddiv.experimentalBuoyantHitch=true`/`DIV_BUOYANT_HITCH_PROBE=true`),
+required because this ticket's own acceptance criteria name real
+attach/detach/rotated-anchor/unavailable-replacement/despawn-unload
+behavior, which no unit test can exercise without a live Sable-driven body
+and the real Mixin-intercepted tick loop.** Two real pontoon-hull
+`EntityVehicleF_Physics` spawned with one connection group apiece, wired
+with the real `AEntityG_Towable.connectTrailer`/`disconnectTrailer` API
+(never a DIV-internal shortcut), driven under
+`/tmp/gradle-8.14/bin/gradle --no-daemon --console=plain runServer` on this
+branch (`minecraft-545/float-only-hull-hitch-support`). Final run: `=== DIV
+buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/
+TOWING_REPLACEMENT/DESPAWN_TRAILER/LEVEL_UNLOAD all passed ===`:
+- `ATTACH`: connected from a deliberately non-aligned initial pose (towed
+  spawned yawed 200&deg;, anchors offset from each hull's own center);
+  anchor-point world-distance (computed independently from each vehicle's
+  own public pose, never a DIV-internal field) settled to `0.0024` blocks
+  by tick 140, well under the `0.75`-block tolerance.
+- `DETACH`: `towing.disconnectTrailer(0)`; `towed.towedByConnection`
+  explicitly asserted `null` (not merely logged) 60 ticks later - both
+  hulls stayed finite/bounded.
+- `TOWING_UNAVAILABLE`: `towing` despawned while `towed` stayed jointed;
+  `towed` remained finite/bounded for 60 ticks with no crash - the
+  documented "already-active trailer stays an unjointed, free-rolling
+  Sable vehicle" contract (`PhysicsBridge.deferToNativeHitch`'s own doc)
+  held for a float-only trailer too.
+- `TOWING_REPLACEMENT`: a fresh `towing2` connected to the same `towed`;
+  anchor distance settled to `0.0057` blocks by tick 140 - no stale handle
+  from the despawned original blocked the fresh joint.
+- `DESPAWN_TRAILER`/`LEVEL_UNLOAD`: `towed` despawned, then
+  `PhysicsBridge.unload(level)` called directly against the level; `towing2`
+  stayed finite/bounded for 60 further ticks each time, no exception, no
+  leaked joint observed.
+
+**Two real defects this probe's own first live runs caught and fixed before
+this evidence was recorded** (both confirmed live, not merely reasoned
+about): (1) the probe's own first `DETACH` check called
+`disconnectAllConnections()` and logged `towedByConnection` without
+asserting it - that method is documented as the OWN-removal cleanup path
+and does NOT clear a trailer's own `towedByConnection`; switched to
+`disconnectTrailer(0)` (the real detach call) plus an explicit
+null-assertion. (2) the first `TOWING_REPLACEMENT` fixture computed
+`towing2`'s spawn position from a fixed offset that ignored `towed`'s own
+settled yaw, and a second attempt solved for EXACT anchor coincidence
+without accounting for both hulls' collision-box half-extents (spawning
+`towing2` overlapping `towed`); both produced the identical symptom live -
+anchor distance settling cleanly below `0.003` blocks, then a sudden
+runaway divergence to 35+ blocks within ~10 ticks, ending in a
+`BuoyantBody.step` `NullPointerException` once the ejected body left
+Sable's own active region. Fixed by spawning `towing2` a full 4 blocks
+(matching the original towing/towed separation) toward `towed`'s current
+hookup anchor and letting the joint settle it normally, the same way the
+original `ATTACH` phase already does.
+
+**Disclosed, deliberate scope limit:** the probe's hookup connection is
+ordinary (unmounted, unrestricted) rather than `restricted`/`mounted` with
+a non-identity `rot`. A first version used `restricted` with a 20&deg;
+`rot` to also exercise `HitchJoint.lockedAxes`'s yaw/roll lock for a
+float-only body; live evidence showed that locking yaw/roll between TWO
+independently-buoyant hulls (each with its own righting torque fighting
+the lock) produces a genuine runaway instability, independent of the
+geometry fixes above (reproduced with correct, non-overlapping geometry).
+Mounted/restricted-joint stability for a buoyant pair specifically is a
+real question but outside this ticket's bounded "float-only
+towing/attach/detach" scope - filed as a follow-up candidate, not chased
+down here. The rotation-sign convention itself (MINECRAFT-525) is already
+covered, domain-agnostically, by `HitchRotationFrameProbe`/
+`InstalledPartHitchFrameProbe`, neither of which depends on which
+`HitchAnchor` implementation either side of the joint is.
+
+Not yet performed: broad/hardware playtesting with a real content pack and
+a real player (out of scope per this sprint's own brief - the user owns
+that, not a completion gate).
