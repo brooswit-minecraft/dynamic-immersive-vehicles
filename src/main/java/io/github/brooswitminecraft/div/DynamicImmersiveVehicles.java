@@ -7,6 +7,7 @@ import net.neoforged.fml.config.ModConfig;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 @Mod("dynamicimmersivevehicles")
 public final class DynamicImmersiveVehicles {
@@ -35,6 +36,9 @@ public final class DynamicImmersiveVehicles {
   var overridesHotReload = new OverridesHotReload();
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> overridesHotReload.maybeReload());
   NeoForge.EVENT_BUS.addListener((LevelEvent.Unload event) -> PhysicsBridge.unload(event.getLevel()));
+  // Ticket MINECRAFT-546: /div tuning <target> - the read-only, permission-checked tuning-
+  // provenance diagnostic. See TuningCommand's own doc.
+  NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) -> TuningCommand.register(event.getDispatcher()));
   // Opt-in, CI/isolated-host-only anchor-frame probe (ticket comment 53243/53244) - OFF by
   // default (Boolean.getBoolean read once inside the probe itself), a strict no-op otherwise.
   // Never touches any real vehicle or world content - see AnchorFrameProbe's own doc.

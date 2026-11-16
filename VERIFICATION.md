@@ -3057,3 +3057,74 @@ either direction.
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `65dd7fb988eaa35a954e739d6b2722a026b4b53b5aa5fcd02220b6e25d80da03`)
 was produced.
+
+# MINECRAFT-546: explain effective tuning values and provenance, 2026-11-15
+
+Adds `TuningProvenance` (pure, server-independent explanation logic) and
+`TuningCommand` (`/div tuning <target>`, permission level 2) - a read-only
+operator diagnostic printing a targeted vehicle's (and its installed
+parts') effective resolved `Overrides.Tuning`, with each field's winning
+precedence level. Deliberately reuses the actual shared resolver rather
+than a duplicate precedence implementation: `Overrides.effective`/
+`effectivePartOverride` for the real `extends`-chain merge, `Overrides.
+defaultTuning` for the real documented fallback, and `PhysicsBridge.
+applyLiveSafeFields`/`reportFieldsNeedingRespawn` for the real live-
+reload-vs-respawn-required field classification (derived by actually
+calling those two methods against sentinel `Tuning` pairs, never a second
+hand-maintained field list). Two small additive public accessors were
+added to support this: `Overrides.getTemplate(String)` (mirrors `get`/
+`getPart` for the third `templates` namespace) and `PhysicsBridge.
+activeTuning(EntityVehicleF_Physics)` (the live `Tuning` an already-active
+body was constructed with) - neither changes any existing method's
+behavior or signature.
+
+Per this ticket's explicit "report pack/native/derived layers as unwired
+unless actual code proves otherwise": every production call site in this
+codebase (`PhysicsBridge.tuning`, every `experimental.*Probe`) passes
+`null` for `packMetadata`/`ivAdapted`/`physicallyDerived` to `Overrides.
+resolved`/`resolvedPart` today, so `TuningProvenance` can only ever report
+`OPERATOR_OVERRIDE`, `FALLBACK`, or `UNSET` (no flat fallback defined) in
+practice - the command's output leads with an explicit notice naming all
+three unwired layers rather than ever fabricating one. Part-level
+explanations are filtered to only the fields with an actual part-level
+consumer (derived from `Tuning#validateSupportedForPart` itself, not a
+second hand-maintained list), per the ticket's "no unrelated config
+contents" requirement.
+
+`TuningProvenanceTest` (9 tests, no live FML config directory or Gson
+needed, same `Overrides.setForTest`/`apply` seams `OverridesTest` already
+uses) covers: an unconfigured key resolving every field from fallback/
+unset; a direct operator override with no template attribution; a field
+inherited through a two-level `extends` chain correctly attributed to the
+nearest ancestor that actually set it (not merely the immediate parent);
+part explanations excluding every field with no part-level consumer;
+live-safe/respawn-required classification matching `PhysicsBridge`'s own
+real methods and being mutually disjoint; a rejected (out-of-range)
+reload leaving a previously-resolved explanation byte-identical to its
+last-known-good value (the ticket's "rejected-edit behavior" requirement);
+and the rendered text output.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --offline --no-daemon build --console=plain`,
+Gradle 8.14 / JDK 21 (Temurin), against this branch
+(`minecraft-546/explain-effective-tuning-provenance`) at the accepted
+baseline head `4ee035a16fffe416d5543343df11f3d793a16dd6` (origin/main,
+unchanged - no sibling sprint ticket had merged yet at pickup time) -
+`BUILD SUCCESSFUL`. The real JUnit XML reports total **794 tests**, 0
+skipped, 0 failures, 0 errors across the whole suite (785 baseline + 9
+new `TuningProvenanceTest` cases, every pre-existing test run unchanged
+alongside them).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `127ba2721825dff20ed64c219db0ffe6e9ff589d9a01a96b8a8d0e624c90cac7`)
+was produced.
+
+Not yet performed: in-game/live-server acceptance of the actual `/div
+tuning` command path (real vehicle spawn, real selector resolution through
+`mcinterface1211.WrapperWorld.getEntity`, real chat output) - this
+ticket's own brief scopes broad/hardware playtesting to the user, and no
+`gradle runServer` probe for this specific command was added given this
+ticket's bounded scope; the command's own entity-resolution and rendering
+logic is otherwise covered by `TuningProvenanceTest` and a successful
+compile against the real NeoForge/MTS command and entity APIs.
