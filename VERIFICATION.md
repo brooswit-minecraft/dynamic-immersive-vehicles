@@ -3958,3 +3958,142 @@ residual remains on one or more axes - supporting an actual
 solver-internal anomaly, justifying the earlier-flagged
 `island_solver.rs`/`parallel_island_solver.rs` read. Not run here,
 pending direction.
+
+**Finished bounded diagnostic plan, John's comment 54290 - read-only;
+no run/edit/build performed in producing this plan itself.** Target
+event unchanged: the SAME `TOWING_UNAVAILABLE` reconnect spike, via the
+existing, unmodified `BuoyantHitchProbe`.
+
+**New provenance/ordering facts established this pass (read-only,
+directly resolve several previously-open items):**
+- The ACTUAL native binary this worktree runs is present unpacked at
+  `run/.sable/natives/sable_rapier_x86_64_linux.so` (SHA-256
+  `442c1ffb2f13250caab0e9e26d8e0aa507bad7d401474a723670f8f76b26832f`).
+  Its own embedded debug-symbol paths read directly via `strings`
+  include `.../cargo/git/checkouts/rapier-b7330b82f1d0b14c/38e92f1/
+  crates/rapier3d/.../dynamics/solver/joint_constraint/
+  generic_joint_constraint.rs` - the short hash `38e92f1` matches the
+  FULL pinned revision (`38e92f117590862481a53df6fc69a5d893e29186`)
+  exactly. **This is a direct, artifact-level confirmation that the
+  Rapier source read in the previous two entries (fetched via `gh api`
+  at that same revision) is genuinely what this build compiled against**
+  - stronger than the earlier same-version-number correspondence, though
+  still not independent of the local Sable checkout's own Cargo.toml
+  pin (which declares the identical revision) being accurate. Sable's
+  OWN `joints.rs` appears in the binary's strings only as the relative
+  path `rapier/src/joints.rs` (a path/local crate, not a hashed git
+  checkout) - no commit hash recoverable for Sable's own wrapper
+  specifically; that correspondence remains at the same-declared-version
+  level, as already stated.
+- `run/config/sable-server.toml` (this worktree's own live config)
+  reads `sub_level_substeps_per_tick = 2` - confirms, rather than
+  assumes, the previously-missing substep count.
+- Traced WHERE Sable's own physics step is invoked relative to MTS/DIV's
+  own vehicle entity tick (the previously-unestablished ordering this
+  comment specifically asked for): `ServerLevelMixin` (Sable's own
+  source) injects `SubLevelPhysicsSystem`'s own tick at the `HEAD` of
+  `ServerLevel.tick(BooleanSupplier)` - i.e. BEFORE entity ticking (where
+  `VehicleMovementMixin.div$move` → `PhysicsBridge.active` →
+  `createHitch` runs) in the SAME Minecraft tick. **Consequence: a joint
+  created during a vehicle's own entity tick is never solved during that
+  same Minecraft tick - Sable's physics step for that tick already ran,
+  at `HEAD`, before entity ticking began. It is first solved at the
+  NEXT tick's `HEAD`-injected step**, which runs `substepsPerTick` (= 2,
+  confirmed above) native substeps, each one immediately preceded by
+  `joints::tick()`'s anchor installation (confirmed in the prior entry).
+  So "one probe tick later" (the existing `pre-remove()` sample) is
+  confirmed, by this ordering, to be AFTER exactly one Minecraft tick's
+  worth of Sable physics (2 substeps), not an unverified assumption -
+  this closes the "log adjacency alone does not establish no
+  intervening steps" gap for THIS specific pair of samples.
+- An EXISTING, currently-unused extension seam for finer bracketing:
+  `SablePrePhysicsTickEvent`/`SablePostPhysicsTickEvent` fire once PER
+  SUBSTEP from inside `SubLevelPhysicsSystem.tickPipelinePhysics`'s own
+  loop. DIV does not currently subscribe to either (confirmed by grep -
+  no match in this codebase). Subscribing here is the smallest addition
+  that would bracket EACH of the 2 substeps individually, rather than
+  only the full Minecraft tick - see the plan below.
+
+**Per-quantity: existing seam, or explicit blocker/bound (not
+measurement substituted as truth):**
+- Linear/angular velocity, both bodies, both existing sample points:
+  EXISTING (`debugReadLinearVelocity`/`debugReadAngularVelocity`,
+  already in use for this exact event).
+- Pose/orientation, both bodies, both sample points: MISSING but an
+  EXISTING internal value to expose - `BoxPhysicsObject.getPose()` (the
+  same cached pose `BuoyantBody.step()` already reads every tick via
+  `box.updatePose()`). A new debug accessor mirroring the existing
+  `debugCaptureBody` pattern, returning `box().getPose()` directly,
+  would close this - a small, read-only addition, NOT made in this plan
+  itself.
+- World-space mass/inertia as Rapier internally represents it: BLOCKED.
+  Confirmed by reading the binary's own exported JNI symbols directly
+  (`strings`, filtered for `Mass`/`Inertia`): only `setMassProperties`/
+  `setCenterOfMass` exist (write-only, used at box construction) -
+  no `get` counterpart. The Java-side `BoxMassData` formula
+  (`diag(m/6,m/6,m/6)`, `COM=ZERO`) is defensible as WHAT WAS SENT to
+  Rapier at construction (confirmed by reading `BoxPhysicsObject`'s own
+  `MassData` interface and its caller), not as independently confirmed
+  of what Rapier internally still holds/uses after its own processing -
+  marked as a bound, not a measurement, exactly as instructed.
+- Joint frame/error/relative anchor velocity (the constraint's own
+  computed error term each solve): BLOCKED - no existing Java-callable
+  accessor exposes it. The exact solver files are now precisely located
+  in the running binary's own embedded paths -
+  `dynamics/solver/joint_constraint/generic_joint_constraint.rs` and
+  `dynamics/solver/joint_constraint/joint_velocity_constraint.rs` - but
+  not read in this pass. Reading them (read-only, no run) is the single
+  most direct way to resolve this without a new live measurement at all.
+- Integration timestep/substeps: CONFIRMED - `DT`=0.05s per Minecraft
+  tick, `substepsPerTick`=2 (confirmed above), so substep `dt`=0.025s.
+  Within-substep solver ITERATION count (Rapier's own
+  `IntegrationParameters::num_solver_iterations` or equivalent) is still
+  unconfirmed - a quick, bounded, read-only follow-up, not done here.
+- Bias/softness: CONFIRMED - `JOINT_SPRING_FREQUENCY`=550.0,
+  `JOINT_SPRING_DAMPING_RATIO`=4.0 (`rapier/src/config.rs`), now
+  cross-confirmed via the embedded-path check above to be the actual
+  running build's own constants, not merely the local checkout's.
+- Force/torque contribution over the interval (gravity/buoyancy/drag,
+  separate from the joint's own impulse): BLOCKED as a direct
+  measurement (not separately logged anywhere) but COMPUTABLE as a
+  bound from `BuoyantForces.apply`'s own known Java formula, evaluated
+  substep-by-substep against the known pre-interval pose/velocity
+  (forces are applied once per substep via `applyQueuedForces`, inside
+  the same loop identified above) - a hand/script calculation, not a
+  single clean number, and not performed in this pass.
+- **Angular-constraint torque - correctly flagged as unresolved, not
+  assumed.** Whether Rapier's `GenericJoint` solver decomposes
+  linear/angular DOF independently when only `LINEAR_X/Y/Z` are locked
+  (matching this ticket's own simple lever-arm model) or solves them in
+  a coupled block that could introduce torque beyond simple `r×J`
+  transfer is exactly the open question `generic_joint_constraint.rs`
+  (now precisely located, not yet read) would resolve. Not assumed
+  either way in this plan.
+
+**What the complete measurement could actually distinguish, and its
+remaining ambiguity, stated plainly:** even fully executed (orientation
+logging added, recomputed with correctly-rotated lever arms), a
+remaining residual on any axis would NOT by itself distinguish between
+(a) a genuine solver-internal coupling in `generic_joint_constraint.rs`,
+(b) the mass/inertia bound being wrong (blocked, not measured), (c) an
+unaccounted substep-by-substep force contribution (a bound, not
+measured), or (d) compounding effects of the softness/bias parameters
+over 2 substeps that the simple single-impulse model does not capture
+at all. Conversely, a clean match would only remove the single
+currently-available piece of suggestive evidence - it would not prove a
+defect absent, exactly as instructed.
+
+**Concrete next decision proposed:** given that genuine ambiguity
+persists even after full execution of the live-measurement half of this
+plan, and that the actual solver files are now precisely located in the
+confirmed-matching running binary, the recommended single next step is
+a READ-ONLY read of `generic_joint_constraint.rs` (and, if needed,
+`joint_velocity_constraint.rs`) to resolve the angular-coupling question
+directly from source - BEFORE adding any new logging or running
+anything live. If that read confirms a decoupled (lever-arm-only)
+treatment matching this ticket's own model, the live-measurement half of
+this plan (orientation logging) becomes the right next step to isolate
+the remaining bounds. If it instead finds a coupled treatment, that
+would directly explain the Z-axis residual from source alone, without
+any new live run. Not performed in this pass - reported as the proposed
+next decision, not executed.
