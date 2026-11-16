@@ -3231,6 +3231,34 @@ confirming no regression in either direction.
 (sha256 `c65c00ad60dc5d71bef53ea8f0f0063443b76368cf44e51ed7be29f220f9f2e1`)
 was produced.
 
+**Reconciliation onto M543/M546 (added 2026-11-16).** Main advanced
+further, from `5b1cc57` to `eff1e15`, via MINECRAFT-543 (rotorcraft
+translational air drag) and MINECRAFT-546 (effective-tuning provenance
+diagnostic). Merged `origin/main` into this branch; the only conflict was
+again `PhysicsBridgeLiveOverrideApplicationTest`'s combined-fields
+assertion `Set` (M543's `rotorAirDragCoefficient` and this ticket's
+`marineSteerDegrees` added on adjacent lines) - resolved by keeping both
+field names in the merged `Set`. `Overrides.java`/`PhysicsBridge.java`
+again merged with no conflict at all. `gh pr view`'s own `mergeable` had
+gone `CONFLICTING` at this new main; a `git merge-tree` dry run of the
+same two refs reported zero conflicts (a known limitation of that
+command relative to an actual three-way checkout-and-merge, confirmed
+here by then performing the real merge in this same worktree and getting
+a real, single conflict) - the real merge, not the dry run, is what this
+reconciliation is based on.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline build` against the
+reconciled head (`minecraft-544/marine-propeller-steering-limit` merged
+with `origin/main` @ `eff1e15`) - `BUILD SUCCESSFUL`. The real JUnit XML
+reports total **862 tests**, 0 skipped, 0 failures, 0 errors across the
+whole suite - M543's and M546's own new test classes and this ticket's
+`marineSteerDegrees` coverage all present and passing together.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `3f55fe4274737cf78e6d67fb8f9871e899801e8fc15834075b73634959b97300`)
+was produced.
+
 ## Axle-specific spring and damping tuning (MINECRAFT-539, added 2026-11-15)
 
 Schema-coordinator slice for this sprint. Inspected the named seams first:
