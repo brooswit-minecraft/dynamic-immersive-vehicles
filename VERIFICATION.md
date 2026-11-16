@@ -4320,7 +4320,13 @@ dimensions are saved" / `BUILD SUCCESSFUL` in the log, then released the
 lock (confirmed free via `flock -n`). No leftover `java`/`gradle`
 processes; no `server.log`/`server.stdin` left in the worktree. Full
 evidence retained at
-`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-authrun-probe2-20261116T140742Z/`
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-authrun-probe2-20261116T220757Z/`
+(corrected directory name - a real transcription error, confirmed by John's
+comment 54350: the previous entry and comments cited a nonexistent
+`...T140742Z` directory, apparently copying the LOCAL server-log timestamp
+format (`14:07:42`) instead of the actual UTC directory name. `server.log`
+SHA-256 `bb1857d536192d1a0e3e1cd6f18e7775bfcee750be5caec8643cbabfe710fdfc`,
+independently confirmed by John against his own computation - matches.)
 (server.log, pre-launch HEAD/diff/config/artifact-checksum snapshot,
 post-run checksums).
 
@@ -4353,43 +4359,129 @@ not re-run to patch these, reported honestly instead):**
   object at that call site. A real, specific limitation, not fixed in
   this run.
 
-**Measured result, using the RECONNECT-bracket data only (where both
-bodies' real orientation IS captured) - redone with the ACTUAL measured
-quaternions this time, not the identity-orientation shortcut:**
-`towing` orientation `(-0.563,-0.142,0.807,-0.11)`, `trailer` orientation
-`(0.148,0.11,-0.982,0.036)` (both far from identity - confirming the
-earlier flagged assumption was indeed wrong for both bodies, not just
-`towed`). Rotating each body's own lever arm by its REAL measured
-orientation and recomputing the same `Δv=J/m`, `Δω=I⁻¹(r×J)` check:
-linear momentum balance tightens (X/Z now match closely; Y's ~7.6%
-residual is unchanged, consistent with it coming from independent per-
-tick forces, not orientation). **Angular: the residual PERSISTS
-substantially on both bodies even with the real, correctly-rotated
-lever arm** - `towed`'s predicted `Δω≈(-49.5,-18.0,-14.5)` vs actual
-`(-73.1,-13.9,+88.0)` (one axis wrong-signed and ~6x too large);
-`towing`'s predicted `≈(-12.6,-7.4,-49.4)` vs actual
-`(-41.4,-12.5,-3.3)` (one axis right-signed but ~15x too small).
+**Exact cited operands, John's comment 54350 ("cite these exact
+operands and show subtraction") - server.log line numbers from the
+corrected directory above, values transcribed verbatim, not rounded
+until the final subtraction step:**
+
+- Line 930 (`towing`, `gameTime=9703`): orientation
+  `(-0.563,-0.142,0.807,-0.11)` [x,y,z,w] - labeled `cachedPose
+  (ONE_TICK_STALE)`, i.e. the box's own cached pose, last refreshed by
+  `towing`'s own PRIOR `step()` call, not independently re-verified as
+  exactly one tick old at this call site (per 54344/54346, already
+  flagged). `linearVelocity=(0.04051,-0.06650,0.02474)`,
+  `angularVelocity=(-0.002943,0.02401,-0.09756)`.
+- Line 931 (`trailer`/`towed`, `gameTime=9703`): orientation
+  `(0.148,0.11,-0.982,0.036)` - same `ONE_TICK_STALE` label/caveat.
+  `linearVelocity=(-0.004217,-0.3266,-0.04360)`,
+  `angularVelocity=(0.1194,0.06279,-0.03232)`.
+- Line 935 (`towed`, `gameTime=9704` - one Minecraft tick later,
+  confirmed by the numeric `gameTime` difference `9704-9703=1`, not by
+  log-line adjacency): `towing.linearVelocity=(2.890,-8.962,0.5378)`,
+  `towing.angularVelocity=(-41.40,-12.50,-3.443)`,
+  `towed.linearVelocity=(-2.854,7.943,-0.5569)`,
+  `towed.angularVelocity=(-73.00,-13.84,88.00)`. `towed.pose` is labeled
+  `CURRENT_THIS_TICK` (this body's own `step()` already ran this tick
+  before this sample, per the mixin ordering already cited) -
+  `towing`'s own pose at THIS second point was not captured at all (the
+  honest gap already reported).
+
+**Subtraction, shown explicitly (not just final numbers):**
+`Δv_towed = towed.linearVelocity@9704 - towed.linearVelocity@9703
+ = (-2.854,7.943,-0.5569) - (-0.004217,-0.3266,-0.04360)
+ = (-2.8498,8.2696,-0.5133)`.
+`Δv_towing = (2.890,-8.962,0.5378) - (0.04051,-0.06650,0.02474)
+ = (2.8495,-8.8955,0.5131)`.
+`Δω_towed = (-73.00,-13.84,88.00) - (0.1194,0.06279,-0.03232)
+ = (-73.12,-13.90,88.03)`.
+`Δω_towing = (-41.40,-12.50,-3.443) - (-0.002943,0.02401,-0.09756)
+ = (-41.40,-12.52,-3.345)`.
+
+**Native inertia labeled explicitly as UNMEASURED, not a bound**:
+`I = diag(m/6,m/6,m/6) = diag(66.67,66.67,66.67)` kg·m² is the Java-side
+`BoxMassData` fallback formula alone - what DIV/Sable's own Java sends
+to the native layer, not confirmed as what Rapier internally still
+holds or uses (no read-back accessor exists, as already stated). Each
+substep's own `BuoyantForces`-applied external force/torque over this
+exact interval is likewise UNMEASURED - not isolated or bounded here
+(see "ONE next decision" below for why no numerical bound is claimed).
+
+**Retraction, John's comment 54350: "linear momentum does not tighten
+merely by rotating lever arms."** Correct, and the prior entry's claim
+that it did was wrong - rotating the lever arm `r` only enters the
+ANGULAR prediction (`Δω=I⁻¹(r×J)`); the LINEAR check
+(`J=Δv_towed·m`, predicted `Δv_towing=-J/m`) never used `r` at all, so
+nothing about its own inputs changed between the identity-orientation
+version and this one. Recomputing explicitly:
+`J = Δv_towed · m = (-2.8498,8.2696,-0.5133) × 400 = (-1139.9,3307.8,-205.3)`
+N·s (unchanged from the prior entry's own value, since `Δv_towed` and
+`m` are unchanged). Predicted `Δv_towing = -J/m = (2.8498,-8.2696,0.5133)`
+vs actual `(2.8495,-8.8955,0.5131)` - X/Z match closely (as they already
+did before); Y's residual (`-8.2696` predicted vs `-8.8955` actual, ~7.6%)
+is IDENTICAL to the prior entry's own number, for the identical reason
+(independent per-tick forces, not isolated) - NOT an improvement
+produced by this run's own new orientation data, as the prior wording
+wrongly implied.
+
+**Angular, with the lever arm now correctly rotated by the REAL measured
+orientation (this part IS affected by orientation, unlike the linear
+check above):** `Δω_towed` predicted `≈(-49.5,-18.0,-14.5)` vs actual
+`(-73.12,-13.90,88.03)` (shown above) - one axis wrong-signed and ~6x too
+large. `Δω_towing` predicted `≈(-12.6,-7.4,-49.4)` vs actual
+`(-41.40,-12.52,-3.345)` - one axis right-signed but ~15x too small. The
+residual PERSISTS substantially on both bodies even with the real,
+correctly-rotated lever arm.
 
 **Per John's explicit interpretation guidance, stated as given, not
 reinterpreted:** orientation capture eliminates a major unknown but is
 NOT itself a solver-defect discriminator; native inertia and unmeasured
-force contributions remain unknown; convergence is not inferred from
-iteration count; this residual is NOT called a solver anomaly; aggregate
-impulse accounting remains valid under fixed Jacobians regardless of
-scalar solve ordering - the persisting residual is consistent with
+force contributions remain unknown (labeled as such above, not
+substituted); convergence is not inferred from iteration count;
+sequential scalar solving alone is NOT a missing aggregate-impulse term
+- this residual is NOT called a solver anomaly, and aggregate impulse
+accounting remains valid under fixed Jacobians regardless of scalar
+solve ordering. The persisting angular residual is consistent with
 EITHER a genuine Sable/Rapier-side effect OR this simple model's own
-remaining gaps (still-unconfirmed native inertia, un-isolated per-
-substep external force/torque contributions from `BuoyantForces` acting
-independently of the joint, and the true sequential multi-axis solve
-structure - not a single combined impulse - found in the prior entry).
+remaining gaps (unmeasured native inertia, un-isolated per-substep
+external force/torque contributions, and the true sequential multi-axis
+solve structure found in an earlier entry) - not concluded as either.
 Reproduction/non-reproduction: reproduced, exactly as every prior run.
 
-**ONE next decision:** the smallest remaining unaccounted variable that
-is tractable without a new live run is isolating `BuoyantForces.apply`'s
-own per-substep force/torque contribution (a bound computable from its
-already-known Java formula against the measured pre-interval
-pose/velocity, as scoped in the prior entry) - not yet done. Confirming
-or ruling out native inertia and the true per-axis sequential solve's
-own aggregate effect both remain blocked/require further source reading
-respectively, not a new run. No further live measurement proposed or
-executed beyond the one authorized here.
+**Cleanup/fixture disposition, corrected to precise claims, John's
+comment 54350 ("correct 'no stray files/full cleanup' to precise gaps
+unless receipts support it"):**
+- Config identity: `run/config/sable-server.toml` and
+  `dynamic-immersive-vehicles.json` both match their retained pre-launch
+  snapshots byte-for-byte (confirmed independently by John too) - this
+  specific claim IS supported by a receipt.
+- World: this run REUSED the existing shared `run/world` directory, like
+  every prior run in this ticket - NOT an isolated/disposable one
+  (stated plainly, not left ambiguous).
+- Chunk force: `BuoyantHitchProbe`'s own terminal-phase
+  `unforceChunkGrid` call is confirmed in the log ("released terrain
+  chunk grid") and the server then saved/stopped cleanly - this proves
+  an orderly SHUTDOWN, not full fixture restoration.
+- Fixture entities: `towing`/`towed`/`towing2` (the vehicles this run's
+  probe spawned) were NOT explicitly removed by the probe at any point -
+  it has no such cleanup path on `FAILED`, only the chunk-force
+  unforce. Whatever final state they were in at the moment of the clean
+  world save is what persists in `run/world` going forward - an actual,
+  unremediated gap, not covered by "chunk-release/save."
+- Other in-memory state (`ConfigSystem`'s own maps, etc.): resets
+  naturally on process exit (a new JVM), as already noted in an earlier
+  entry - not itself a persistent-world concern.
+- The first, stuck FIFO attempt: `ps` confirmed, at the time it was
+  killed, no `java` process existed anywhere in that process's own
+  lineage (only the shell wrapper itself, blocked on the FIFO's own
+  open() call) - `gradle`/the JVM never launched, so killing it affected
+  only that wrapper shell, nothing resembling a running server or world.
+
+**No further runtime/build/probe performed or proposed - this comment's
+own "one-run grant is now consumed; NO further runtime/build/probe
+authorized" is honored as stated.** The previously-proposed
+`BuoyantForces` force/torque bound is NOT attempted: the actual inputs
+it would need (submerged fraction/water-surface height at this exact
+tick - not logged anywhere; confirmed per-float tuning constants for
+this fixture - not independently re-verified in this pass) are not
+available from retained data, so per instruction this is listed as a
+missing-input blocker, not a speculative numerical claim.
