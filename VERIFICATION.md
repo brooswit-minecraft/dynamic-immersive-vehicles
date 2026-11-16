@@ -3850,3 +3850,111 @@ edit performed in response to this comment - exactly as instructed).**
    has some of the needed numbers) but a clean one-tick-before/one-tick-
    after capture of BOTH anchor-gap and velocity for the SAME event would
    make it rigorous - not run here, awaiting direction per instruction.
+
+**Corrected calculation, John's comment 54278 - read-only, from retained
+logs and identified source constants only; no new live run, build, or
+edit.** The prior proposal's units were wrong (effective-mass × gap / DT
+is an impulse, not a velocity) - corrected here via the actual
+impulse-to-velocity/angular-velocity relations
+(`Δv = J/m`, `Δω = I⁻¹(r×J)`), using ONLY the SAME pre/post-solve event
+(the `TOWING_UNAVAILABLE` reconnect spike, `diag5run`'s own
+`createHitchDiagnostic` lines 924/925 → `pre-remove()` line 929 - NOT
+substituting `TOWING_REPLACEMENT`'s later ~1.995 gap, as flagged).
+
+Identified source constants (read directly, not assumed): `m` = 400 kg
+both sides (`run/config` `massKg`); local inertia, from
+`BoxPhysicsObject.BoxMassData` (used whenever `massProperties == null`,
+which is always true for a `BuoyantBody` constructed via the
+scalar-mass constructor) = `diag(m/6, m/6, m/6)` = `diag(66.67, 66.67,
+66.67)` kg·m² - **this is Sable's own FALLBACK formula, not a true box
+inertia tensor from the half-extents; flagged as an assumption that
+Rapier does not further recompute or override it internally, not
+independently confirmed**; `r` (anchor lever arm from each body's own
+origin/COM, since COM is `ZERO` under this same fallback) = the logged
+`hitchLocalOffset=(0,-0.3,-1.0)` (towing) / `hookupLocalOffset=
+(0,-0.3,1.0)` (towed), in each body's OWN LOCAL frame; `PhysicsBridge.DT`
+= 0.05s (one call per Minecraft tick); the joint's own compliance,
+`GenericJointBuilder::softness(JOINT_SPRING_FREQUENCY=550.0,
+JOINT_SPRING_DAMPING_RATIO=4.0)` (read from `rapier/src/config.rs`) -
+**this is a SOFT/spring constraint, not a perfectly rigid one; its
+exact discretized response at `DT=0.05s` depends on solver internals
+not derived here, only noted - 550 Hz is far above the ~20 Hz tick
+rate, so a near-rigid response is plausible but not derived
+rigorously.**
+
+Measured, from retained logs: `Δv_towed = (-2.850, 8.270, -0.513)`,
+`Δω_towed = (-73.1, -13.9, 88.0)` rad/s; `Δv_towing = (2.850, -8.896,
+0.513)`, `Δω_towing = (-41.4, -12.5, -3.34)` rad/s (both over the SAME
+single tick, confirmed by log line adjacency - 924/925 immediately
+precede 929 with no other `createHitchDiagnostic`/step line for either
+body in between).
+
+**Bounded check performed, explicitly NOT assuming world ≈ local
+orientation (flagged below as the single largest source of error in
+this check) - this is a first-order consistency check, not a
+rigorous derivation:**
+
+1. Linear momentum: solving `J = Δv_towed × m` gives `J ≈ (-1140, 3308,
+   -205) N·s`. Predicting `Δv_towing = -J/m = (2.85, -8.27, 0.513)`
+   against the ACTUAL `(2.85, -8.896, 0.513)`: X and Z match closely;
+   Y differs by ~7.6% - within the range independent per-tick forces
+   (gravity, buoyancy, drag - NOT part of the joint impulse at all)
+   acting on both bodies independently each tick would plausibly
+   account for, not a large unexplained residual.
+2. Angular: predicting `Δω_towed = I⁻¹(r_towed × J)` (using `r_towed` in
+   its OWN local frame, i.e. ASSUMING near-identity orientation - the
+   flagged assumption) gives `(-48.7, -17.1, -5.13)` against the ACTUAL
+   `(-73.1, -13.9, 88.0)`: X and Y are the same order of magnitude and
+   sign (ratio ~1.5x and ~0.8x); **Z is wildly different - wrong sign
+   and ~17x too large.**
+
+**This Z discrepancy is NOT reported as evidence of a solver defect.**
+The single largest unaccounted variable in this check is each body's
+ACTUAL orientation at the event - `towed` was spawned at a 180+20°
+yaw and this check applied `r` UNROTATED (identity-orientation
+shortcut), which is almost certainly wrong by the time of this event;
+yaw rotation specifically mixes a lever arm's own X/Z components, the
+exact axes where the discrepancy appears and is worst. A wrong-sign,
+over-an-order-of-magnitude miss on exactly the axes a missing yaw
+rotation would scramble is NOT distinguishable, from this data alone,
+from a genuine solver anomaly - per instruction, comparable order of
+magnitude on X/Y cannot prove absence of a defect, and the Z excess
+alone cannot isolate a solver-internal cause, especially with this
+specific, identified, unaddressed confound.
+
+**Minimal missing measurements, listed rather than guessed:**
+- Each body's actual orientation (quaternion) at the exact pre-solve
+  tick of this same event - not currently logged anywhere, needed to
+  rotate `r` into world frame correctly before repeating this check.
+- Confirmation (not assumption) that Rapier's own internal mass/inertia
+  representation for this body matches the `diag(m/6,m/6,m/6)` fallback
+  derived from `BoxMassData`'s Java source, with no further native-side
+  recomputation.
+- The actual number of solver iterations/substeps `IntegrationParameters`
+  applies within one `PhysicsBridge.DT`-sized `pipeline.step()` call -
+  not retrieved.
+- Each body's own external-force contribution (gravity, buoyancy,
+  directional drag - computed independently by `BuoyantForces.apply`,
+  separate from the joint impulse) over the SAME tick, to subtract from
+  the measured `Δv`/`Δω` before attributing the remainder to the joint
+  alone - not isolated here; the current check conflates all of it.
+
+**ONE bounded discriminating test PLAN (not executed - a plan, not an
+execution request):** for the SAME `TOWING_UNAVAILABLE` reconnect event
+(preserving the original reproducer unchanged), add log-only
+instrumentation reading each body's orientation quaternion alongside
+the already-logged linear/angular velocity, at the same two points
+(inside `createHitch`, and one tick later) - then redo this exact
+calculation with `r` correctly rotated into world frame by each body's
+own measured orientation. **Expected alternatives:** (a) with correct
+orientation, X/Y/Z all become consistent (same order of magnitude and
+sign as the single-impulse prediction) - supporting "this is the
+ordinary, momentum-conserving consequence of a stiff joint correcting a
+real error, confounded earlier only by the missing-orientation
+shortcut," pointing any further fix toward DIV's own joint
+configuration (softness/staging), not Sable/Rapier; (b) even with
+correct orientation, a large, sign-flipped or order-of-magnitude
+residual remains on one or more axes - supporting an actual
+solver-internal anomaly, justifying the earlier-flagged
+`island_solver.rs`/`parallel_island_solver.rs` read. Not run here,
+pending direction.
