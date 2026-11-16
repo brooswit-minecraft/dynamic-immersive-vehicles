@@ -3263,38 +3263,51 @@ Live `BuoyantHitchProbe` run, `createHitchDiagnostic` log lines in order:
 | `TOWING_UNAVAILABLE` reconnect (same towing, same towed, after 140-tick settle) | (0.041,-0.067,0.025) | (-0.003,0.024,-0.098) | (-0.004,-0.327,-0.044) | (0.119,0.063,-0.032) |
 | `TOWING_REPLACEMENT` (fresh towing2, same towed, 60 ticks after towing1 despawned) | (0, 0.883, 0) | (0,0,0) | (0.075,**-5.589**,-2.021) | (**-6.341**,-0.030,-0.117) |
 
-The finding: `towed`'s real angular velocity grows from ~0.12 rad/s (normal
-post-settle residue, row 2) to **-6.34 rad/s** by the time the replacement
-joint is created (row 3) - a ~50x jump that happens DURING the 60-tick
-unjointed free-float window, BEFORE `TOWING_REPLACEMENT`'s `connectTrailer`
-is ever called. `towing2` itself is calm (identical to `ATTACH`'s fresh-spawn
-state) - the instability belongs entirely to `towed`, acquired while alone.
-MTS's own `.motion` field, read by the probe's own `TOWING_UNAVAILABLE`
-bound check at the same moment, reported `towed.motion.y=-0.047` - calm,
-and with no angular component at all - a >100x discrepancy from the real
-native state. The probe's own position-only bound check during
-`TOWING_UNAVAILABLE` cannot see this: `towed` never left the probe's
-position bounds, so `TOWING_UNAVAILABLE PASS` is truthful but blind to the
-rotational runaway building underneath it.
+The finding: `towed`'s real angular velocity reads ~0.12 rad/s (normal
+post-settle residue, row 2) vs. **-6.34 rad/s** at the row-3 sample. **Timing
+correction (independent specialist review, MINECRAFT-547 comment 54237):**
+the row-3 value is sampled INSIDE `createHitch`, which runs AFTER
+`connectTrailer` has already been called - it is a single point-in-time
+sample, not a continuous trace of the preceding 60-tick free-float window.
+It does NOT by itself prove when the spin began, and does NOT rule out the
+hitch/joint lifecycle as a contributor - retracting the stronger claim this
+subsection originally made. `towing2` itself is calm (identical to `ATTACH`'s
+fresh-spawn state). MTS's own `.motion` field, read by the probe's own
+`TOWING_UNAVAILABLE` bound check, reported `towed.motion.y=-0.047` - calm,
+and with no angular component at all, at a point the probe treats as
+"settled". The probe's own position-only bound check during
+`TOWING_UNAVAILABLE` cannot see rotation at all: `towed` never left the
+probe's position bounds, so `TOWING_UNAVAILABLE PASS` is truthful but blind
+to whatever rotational state is building underneath it.
 
-This rules out the joint itself as the root cause: `HitchRegistry.release`
-(called the tick `towing1.isValid` goes false, via each body registry's own
-`removeIf`) correctly releases the trailer's joint through the
-towing-vehicle branch of its `partners` sweep, and does so BEFORE the native
-body is removed - the same ordering `GroundHitchReplacementProbe` exercises
-without incident. The divergence is therefore not in hitch bookkeeping but
-in `BuoyantForces.apply`'s own torque computation for a hull with nothing
-constraining it - no joint, no engine - over an extended window: `towed`
-destabilizes on its own, alone, well before any new joint touches it. This
-is the same code (`BuoyantForces`) already implicated in the retained
-`unsafeBuoyantAngularLock` fix (MINECRAFT-547) for the JOINTED
-mounted/restricted case; this diagnostic suggests a shared root mechanism
-in `BuoyantForces`'s torque/angular handling, now also observed UNJOINTED.
+**Do not read the previous version of this section as having ruled out the
+joint/hitch lifecycle** - that claim exceeded the evidence this single
+pre/post-connectTrailer comparison actually supports; independent specialist
+review (547 comment 54237) found neither prior lifecycle causes nor fixture
+effects have been excluded. Two concrete, unresolved specialist findings as
+of this writing: (a) the probe fixture's own float placement
+(`(+/-0.5,-0.2,0)`, COM `(0,0.3,0)`, no fore/aft spacing, both force arms
+below COM) is a plausible source of fixture-specific pitch instability under
+small perturbations - kept as-is (not silently substituted) so the failure
+stays reproducible; (b) point quadratic drag impulses lacking
+effective-mass/inertia timestep bounds is a flagged numerical vulnerability,
+not an established cause here. `BuoyantForces.apply`'s torque/angular
+computation remains a plausible contributor (same code already implicated
+in the retained `unsafeBuoyantAngularLock` fix, MINECRAFT-547, for the
+JOINTED mounted/restricted case) but is a hypothesis, not a demonstrated
+root cause.
 
-Per comment 54230, no further fix is attempted here. Precise code seam for
-specialist review: `BuoyantForces.apply` (the torque/angular-velocity
-computation, not the hitch or joint-creation code), reproduced via
-`BuoyantHitchProbe`'s `TOWING_UNAVAILABLE` phase alone (despawn the towing
+Per comment 54230/54237, no further fix is attempted here. Next bounded
+diagnostic requested by specialist review: trace body/joint IDs and
+validity, actual pose/velocity BEFORE `connectTrailer` is called (not just
+inside `createHitch`), before/after force impulses and physics step,
+resolved mass/inertia/drag fractions - separating buoyancy and drag
+impulses - and compare against MTS's own motion field only with units/
+timing properly converted. Not yet run this cycle. A lower-cost
+corroborating check worth running first: `BuoyantHitchProbe`'s
+`TOWING_UNAVAILABLE` phase alone (despawn the towing
 side, let `towed` free-float ~60 ticks with `-Ddiv.debugGroundContact=true`,
-and log `handle.getAngularVelocity()` every tick - no replacement join
-needed to see the growth). Reported to MINECRAFT-547 and MINECRAFT-545.
+logging `handle.getAngularVelocity()` every tick) - this would show whether
+any growth happens with no replacement join or second vehicle in the loop
+at all, but has not been run; whether it shows growth is still open.
+Reported to MINECRAFT-547 and MINECRAFT-545, with this retraction.
