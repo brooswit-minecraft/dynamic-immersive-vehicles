@@ -3273,3 +3273,61 @@ confirmed present and passing together).
 `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
 (sha256 `288d140a025f1fb01608a6ca330afb1f8db32f75661ce721b119c0b065ebbab3`)
 was produced.
+
+**Self-review kickback fix (2026-11-16, comment Jira 54183).** Finding:
+`TuningProvenanceTest` covered only the pure provenance/precedence logic,
+not the actual command/adapter path the ticket explicitly requires
+(registration/execution, UUID-based entity resolution, rendered output).
+Investigated adding a real `CommandDispatcher<CommandSourceStack>`
+registration-shape test directly against `TuningCommand` - this FAILED TO
+COMPILE (`package com.mojang.brigadier does not exist`): this project's
+test source set has no Minecraft/NeoForge/Brigadier/MTS classes on its
+classpath at all (only `main` does, via the neoForge moddev plugin).
+Moving the test to only reference `TuningCommand`'s own already-pure
+`explainResponse`/message-builder methods still failed, this time at
+RUNTIME (`NoClassDefFoundError` on class load, before any assertion ran) -
+merely loading a class that imports `net.minecraft.*`/MTS types is not
+possible from this test source set, not just calling into Minecraft APIs
+directly. This is the same pre-existing constraint `PhysicsBridgeStepperTest`'s
+own doc already states for a live `EntityVehicleF_Physics`/Sable body,
+just discovered to apply one level earlier (the whole class, not only the
+live-entity-dependent methods on it) than that precedent's own wording
+suggested.
+
+Fix: moved every actual DECISION `TuningCommand` makes - the vehicle-not-
+found/no-definition failure messages, and the full response-assembly
+logic (`explainResponse`: per-field rendering, part-key dedup, skipping
+parts with no override entry) - into `TuningProvenance`, which has no
+Minecraft/NeoForge/MTS import at all and was already unit-testable.
+`TuningCommand` itself is now pure thin glue: resolve the selector target
+to a live vehicle via the UUID bridge, read its plain fields, delegate to
+`TuningProvenance`, send the result - documented as not unit-testable for
+the reason above, with the actual decision logic it used to contain now
+covered instead. New `TuningCommandTest` (6 tests, exercising
+`TuningProvenance`'s moved methods, never `TuningCommand` itself): the
+not-eligible and no-definition messages; response assembly leads with the
+unwired-layers notice and the correct active/inactive status line; an
+installed part with no override entry at all is skipped entirely; and
+four installed instances of the same part definition (e.g. four identical
+wheels) are explained exactly once, not four times, with the real
+resolved value present.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --offline --no-daemon clean test build
+--console=plain` at this fix's head - `BUILD SUCCESSFUL`. The real JUnit
+XML reports total **825 tests**, 0 skipped, 0 failures, 0 errors (819
+from the prior merged-with-main head plus these 6 new `TuningCommandTest`
+cases).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `cd54ddeb50664aadb852cae76a542391acfb2bfb6b4f3d32377e3ea1bc56ec34`)
+was produced.
+
+Still not performed, for the reason stated above (no live Minecraft/MTS
+runtime reachable from this test source set, not merely this ticket's own
+scope choice as previously stated): true end-to-end execution of
+`TuningCommand.register`/`run` against a live server. The command/adapter
+path's actual decision logic is covered via `TuningProvenance` as
+described; the remaining uncovered surface is thin, directly-inspectable
+glue (selector resolution, field reads, `CommandSourceStack` sends) - the
+same category of gap every other live-`EntityVehicleF_Physics`-dependent
+path in this codebase already carries and documents rather than closes.

@@ -2,6 +2,7 @@ package io.github.brooswitminecraft.div;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
@@ -224,6 +225,43 @@ final class TuningProvenance {
    if (fo.liveSafe()) line.append(" (live-reloadable)");
    else if (fo.respawnRequired()) line.append(" (respawn required to apply a change)");
    lines.add(line.toString());
+  }
+  return lines;
+ }
+ /**
+  * {@code TuningCommand}'s own vehicle-not-found failure message - kept here (not in {@code
+  * TuningCommand}) purely so it stays unit-testable: this project's test source set has no
+  * Minecraft/NeoForge/MTS classes on its classpath at all, and merely referencing {@code
+  * TuningCommand} from a test fails to even load the class (confirmed: {@code
+  * NoClassDefFoundError}) - see {@code TuningCommand}'s own doc.
+  */
+ static String notEligibleMessage(String targetDisplayName) {
+  return "[DIV] "+targetDisplayName+" is not a DIV-eligible vehicle entity.";
+ }
+ /** {@code TuningCommand}'s own no-loaded-definition failure message - see {@link
+  * #notEligibleMessage} for why this lives here instead. */
+ static final String NO_DEFINITION_MESSAGE = "[DIV] that vehicle has no loaded definition.";
+ /**
+  * The full command-response assembly {@code TuningCommand.run} delegates to, extracted as a
+  * pure function of plain data (never an {@code EntityVehicleF_Physics}/{@code APart}/{@code
+  * CommandSourceStack}, none of which this project's test source set can even load - see {@code
+  * TuningCommand}'s own doc) so it is directly unit-testable: every line this method needs is
+  * read out of the live vehicle by {@code TuningCommand.run} first and passed in as plain data.
+  * Dedupes {@code installedPartKeysInEncounterOrder} by part key (packID:systemName) - several
+  * installed parts (e.g. four identical wheels) commonly share one definition/override entry, so
+  * explaining the same key repeatedly would be noise, not new information - and skips any part
+  * with no override entry at all (nothing to explain for it).
+  */
+ static List<String> explainResponse(String vehicleKey, boolean active, List<String> installedPartKeysInEncounterOrder) {
+  List<String> lines = new ArrayList<>();
+  lines.add(UNWIRED_LAYERS_NOTICE);
+  lines.add("[DIV] vehicle "+vehicleKey+" - "+(active ? "active (spawned/physics-engaged)" : "not currently active"));
+  lines.addAll(render("vehicle "+vehicleKey, explainVehicle(vehicleKey)));
+  var explainedPartKeys = new LinkedHashSet<String>();
+  for (String partKey : installedPartKeysInEncounterOrder) {
+   if (!explainedPartKeys.add(partKey)) continue;
+   if (Overrides.getPart(partKey) == null) continue;
+   lines.addAll(render("part "+partKey, explainPart(partKey)));
   }
   return lines;
  }
