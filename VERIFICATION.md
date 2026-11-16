@@ -4195,3 +4195,99 @@ logging orientation alongside the existing velocity capture for a NEW
 occurrence of the SAME reconnect event - now with the correct
 sequential-per-axis model in hand rather than the oversimplified
 single-impulse one, but still not run in this pass.
+
+**One further bounded read-only check (John's comment 54332: "sequential
+scalar solves alone neither violate aggregate impulse accounting nor
+explain the observed residual; distinguish net impulses/torques and
+unknown state") - still no run/edit/build.** Checked whether Sable
+overrides Rapier's own default iteration counts (previously flagged
+unconfirmed): `PhysicsConfigData` (Sable's own Java config, read
+directly) sets `solverIterations = 18` (Rapier's own upstream default
+is 4), `pgsIterations = 2` (upstream default 1),
+`stabilizationIterations = 2` (upstream default 1). This worktree's own
+`run/config/sable-server.toml`/`sable-common.toml` do not override any
+of these - same "current config, not a historical receipt for a past
+run" caveat already stated for `substepsPerTick`.
+
+**This matters for exactly the distinction John drew.** 18 outer
+Gauss-Seidel iterations (plus 2 inner PGS passes each) is a heavily-
+iterated solve; a well-posed linear system solved this many times by
+Gauss-Seidel should converge close to the SAME aggregate result a
+single simultaneous block solve would reach - the sequential,
+per-axis mechanism found in the previous entry changes HOW the impulse
+is computed en route, not, on its own, the converged END result enough
+to explain a residual this large. **This narrows (does not eliminate)
+the earlier structural finding as the likely explanation, and shifts
+weight back toward the "unknown state" bucket** (real orientation,
+real native inertia, real substep-by-substep force contributions) -
+consistent with, and now better-supported than, John's own correction.
+
+**Concrete bounded instrumented-run PROPOSAL (NOT authorized to execute
+by this comment - prepared only, per explicit instruction).** This
+specifies the smallest live measurement that would close the "unknown
+state" gap for ONE occurrence of the SAME, unmodified
+`BuoyantHitchProbe` reconnect event, and the complete restoration
+procedure a run of it would need (addressing the per-run cleanup gap
+directly, not just flagging it again):
+
+*Measured quantities (new):* each body's own orientation quaternion
+(via a new, read-only `PhysicsBridge.debugReadOrientation(v)` returning
+`registry.get(v)`'s `box().getPose().orientation()` - mirrors the
+existing `debugCaptureBody`/`debugReadLinearVelocity` pattern exactly,
+same risk profile). Captured at the SAME two existing bracket points
+already used for velocity (inside `createHitch`, and the probe's own
+`pre-remove()` sample one Minecraft tick later) - no new bracket points
+needed; the existing ones are already confirmed, this pass and the
+prior one, to correctly bracket exactly one Minecraft tick of physics
+(2 substeps, 18 iterations each).
+
+*What remains missing/bounded even after this measurement, stated
+up front:* world-space mass/inertia as Rapier internally holds it
+(still blocked - no read-back accessor exists; the Java `BoxMassData`
+formula stays an assumption/input, not upgraded by this run); each
+substep's own external-force (gravity/buoyancy/drag) contribution
+(still not isolated - would require a SEPARATE instrumentation pass
+inside `BuoyantForces.apply` itself, deliberately NOT included here to
+keep this one proposal minimal/single-purpose); the exact relative
+anchor velocity/error terms Rapier's own solver computes internally
+(still blocked - no accessor; resolvable only by further source
+reading, not a live run).
+
+*Expected alternatives, stated before any execution:* (a) recomputing
+`Δω` with `r` correctly rotated by the MEASURED orientation (replacing
+the identity-orientation shortcut) brings the prediction within the
+same rough order of magnitude John's own "comparable order of
+magnitude cannot prove absence of a defect" caveat already bounds -
+narrowing the residual without eliminating remaining uncertainty from
+the still-blocked mass/inertia and force-contribution items; (b) a
+large, still-unexplained residual remains even with correct
+orientation - strengthens (does not prove, absent the still-blocked
+items) the case for a genuine solver- or Sable-side anomaly, and would
+make isolating the force-contribution and native-inertia blockers the
+next proposal, not a conclusion drawn from this run alone.
+
+*Evidence preservation:* identical to every prior retained run in this
+ticket - full raw `server.log`, `HEAD.txt`, `config.json`, and
+`SHA256SUMS`, written to a new, separate
+`/home/booswrit/div-evidence/MINECRAFT-545-547/<run-id>-<timestamp>/`
+directory; no existing evidence directory touched or deleted.
+
+*Complete owned-fixture/config/chunk restoration and orderly shutdown,
+specified so it is no longer a gap in THIS run specifically* (the
+concrete fix for the cleanup gap already identified against
+`AlreadyActiveUnsafeFallbackProbe`, generalized here rather than
+silently repeated): run via `BuoyantHitchProbe` ONLY (the one probe in
+this ticket already confirmed, by direct source read, to call its own
+`unforceChunkGrid(level)` unconditionally on `DONE`/`FAILED`) - not the
+newer, non-cleaning probes. After the probe reaches a terminal phase and
+its own chunk-release log line is confirmed in the live output, send an
+explicit `stop` to the server's own stdin (the same mechanism, now
+intentionally applied rather than relied on implicitly) rather than
+letting a bounded `timeout` kill the process - producing the same
+"Stopping server"/"All dimensions are saved" receipt `diag3`/`diag5`
+happened to have, for every future run, not just those two. Lock
+claim/release logged to `/tmp/div-gradle-slot.owner` exactly as every
+prior run in this ticket. Only after a clean stop and lock release:
+copy the run's complete log into the new evidence directory as above.
+
+Not executed. Awaiting explicit authorization to run, per instruction.
