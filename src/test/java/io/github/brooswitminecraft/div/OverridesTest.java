@@ -1690,4 +1690,143 @@ class OverridesTest {
    default -> throw new IllegalArgumentException(field);
   }
  }
+
+ // MINECRAFT-539: suspensionSpringMultiplierFront/Rear, suspensionDampingRatioFront/Rear -
+ // per-geometric-axle overrides of suspensionSpringMultiplier/suspensionDampingRatio, same bounds
+ // as those base fields, no FALLBACK entry (unset axle field inherits the vehicle's own already-
+ // resolved base value - see AxleSuspensionDistribution's own doc), participating in the SAME
+ // combined travel-aware stability check as the base fields, generalized per axle.
+
+ @Test void axleSpringAndDampingFieldsOutOfRangeFailValidation() {
+  var zeroRatioFront = new Overrides.Tuning(); zeroRatioFront.suspensionDampingRatioFront = 0.0;
+  assertThrows(IllegalArgumentException.class, zeroRatioFront::validate);
+  var tooLargeRatioRear = new Overrides.Tuning(); tooLargeRatioRear.suspensionDampingRatioRear = 2.01;
+  assertThrows(IllegalArgumentException.class, tooLargeRatioRear::validate);
+  var nanRatioFront = new Overrides.Tuning(); nanRatioFront.suspensionDampingRatioFront = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nanRatioFront::validate);
+  var atBoundMultiplierFront = new Overrides.Tuning(); atBoundMultiplierFront.suspensionSpringMultiplierFront = 0.5; // fully bottomed out, same reasoning as the base field
+  assertThrows(IllegalArgumentException.class, atBoundMultiplierFront::validate);
+  var tooLargeMultiplierRear = new Overrides.Tuning(); tooLargeMultiplierRear.suspensionSpringMultiplierRear = 4.01;
+  assertThrows(IllegalArgumentException.class, tooLargeMultiplierRear::validate);
+  var validRatioFront = new Overrides.Tuning(); validRatioFront.suspensionDampingRatioFront = 1.0;
+  assertDoesNotThrow(validRatioFront::validate);
+  var validMultiplierRear = new Overrides.Tuning(); validMultiplierRear.suspensionSpringMultiplierRear = 1.0;
+  assertDoesNotThrow(validMultiplierRear::validate);
+ }
+
+ @Test void unsetAxleFieldsHaveNoFallbackAndStayNullWhenNeverConfigured() {
+  // No FALLBACK entry for any of the four fields (mirrors brakeBiasFront/toeFrontDegrees above)
+  // - a vehicle that never sets any of them must stay null through resolution
+  // (AxleSuspensionDistribution's own inheritance, not a second independently-resolved default,
+  // is what substitutes the base value at runtime).
+  assertNull(Overrides.resolved("packid:not_configured").suspensionDampingRatioFront);
+  assertNull(Overrides.resolved("packid:not_configured").suspensionDampingRatioRear);
+  assertNull(Overrides.resolved("packid:not_configured").suspensionSpringMultiplierFront);
+  assertNull(Overrides.resolved("packid:not_configured").suspensionSpringMultiplierRear);
+  assertNull(Overrides.defaultTuning().suspensionDampingRatioFront);
+ }
+
+ @Test void axleSpringAndDampingFieldsParticipateInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.suspensionDampingRatioFront = 1.4; override.suspensionSpringMultiplierRear = 0.7;
+   Overrides.setForTest(java.util.Map.of("packid:axle_tuned_vehicle", override));
+   var resolved = Overrides.resolved("packid:axle_tuned_vehicle");
+   assertEquals(1.4, resolved.suspensionDampingRatioFront,
+     "an explicit operator override must take precedence and stay non-null, unlike the no-FALLBACK base resolution");
+   assertEquals(0.7, resolved.suspensionSpringMultiplierRear);
+   assertNull(resolved.suspensionDampingRatioRear, "the unconfigured axle field must stay null, not fall back to any flat constant");
+
+   var packMetadata = new Overrides.Tuning(); packMetadata.suspensionSpringMultiplierFront = 1.6;
+   assertEquals(1.6, Overrides.resolved("packid:not_configured", packMetadata, null, null).suspensionSpringMultiplierFront,
+     "pack metadata must win over the (nonexistent) fallback when no operator override exists");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void axleSpringAndDampingFieldsAreRejectedOnAPartOverride() {
+  var dampingFront = new Overrides.Tuning(); dampingFront.suspensionDampingRatioFront = 1.0;
+  assertThrows(IllegalArgumentException.class, dampingFront::validateSupportedForPart);
+  var dampingRear = new Overrides.Tuning(); dampingRear.suspensionDampingRatioRear = 1.0;
+  assertThrows(IllegalArgumentException.class, dampingRear::validateSupportedForPart);
+  var springFront = new Overrides.Tuning(); springFront.suspensionSpringMultiplierFront = 1.2;
+  assertThrows(IllegalArgumentException.class, springFront::validateSupportedForPart);
+  var springRear = new Overrides.Tuning(); springRear.suspensionSpringMultiplierRear = 1.2;
+  assertThrows(IllegalArgumentException.class, springRear::validateSupportedForPart);
+ }
+
+ @Test void axleSpringAndDampingFieldsAreInheritedThroughExtends() {
+  try {
+   var template = new Overrides.Tuning();
+   template.suspensionDampingRatioFront = 1.1; template.suspensionSpringMultiplierRear = 0.8;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "axle-tuned-template";
+   Overrides.setForTest(java.util.Map.of("axle-tuned-template", template), java.util.Map.of("packid:inherits_axle_tuning", child), java.util.Map.of());
+   var resolved = Overrides.resolved("packid:inherits_axle_tuning");
+   assertEquals(1.1, resolved.suspensionDampingRatioFront,
+     "a child entry leaving suspensionDampingRatioFront unset must inherit its template's own value");
+   assertEquals(0.8, resolved.suspensionSpringMultiplierRear);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void invalidReloadRetainsThePriorGoodAxleSuspensionFields() {
+  try {
+   var good = new Overrides.Tuning(); good.suspensionDampingRatioFront = 1.2;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:axle_reload", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(1.2, Overrides.resolved("packid:axle_reload").suspensionDampingRatioFront);
+
+   var invalid = new Overrides.Tuning(); invalid.suspensionDampingRatioFront = -3.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:axle_reload", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload must be rejected, not silently applied");
+
+   assertEquals(1.2, Overrides.resolved("packid:axle_reload").suspensionDampingRatioFront,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or null");
+
+   // Removal (a reload that omits the field entirely) must successfully fall back to null
+   // (inherit the base value) - the live-reload-retention above must not make a legitimate
+   // removal impossible.
+   var removed = new Overrides.Tuning();
+   var removedResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:axle_reload", removed), java.util.Map.of()));
+   assertTrue(removedResult.success(), "removing the field entirely must itself be a valid reload");
+   assertNull(Overrides.resolved("packid:axle_reload").suspensionDampingRatioFront,
+     "a reload that no longer sets the field must resolve back to null (inherit base), not retain the old value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void axleOverrideAloneCanBeRejectedForDestabilizingTheUnconfiguredDefaultOnThatAxle() {
+  // Same shape as suspensionSpringMultiplierAloneCanBeRejectedForDestabilizingTheUnconfiguredDefaultRatio
+  // above, generalized per-axle: a front-only multiplier override must be checked against the
+  // UNCONFIGURED default 0.7 ratio for the front axle specifically, even with no vehicle-wide or
+  // rear-axle field touched at all.
+  var destabilizingFront = new Overrides.Tuning();
+  destabilizingFront.suspensionTravel = 0.2; destabilizingFront.suspensionSpringMultiplierFront = 4.0;
+  assertThrows(IllegalArgumentException.class, destabilizingFront::validate,
+    "a front-axle-only spring multiplier must be rejected when it destabilizes the unconfigured default ratio on that axle");
+  var destabilizingRearRatio = new Overrides.Tuning();
+  destabilizingRearRatio.suspensionTravel = 0.2; destabilizingRearRatio.suspensionDampingRatioRear = 1.77;
+  assertThrows(IllegalArgumentException.class, destabilizingRearRatio::validate,
+    "a rear-axle-only damping ratio must be rejected when it is unstable against the unconfigured default multiplier on that axle");
+  // A safe axle-specific pair must remain accepted.
+  var safeFront = new Overrides.Tuning();
+  safeFront.suspensionTravel = 0.2; safeFront.suspensionSpringMultiplierFront = 1.0; safeFront.suspensionDampingRatioFront = 0.9;
+  assertDoesNotThrow(safeFront::validate);
+ }
+
+ @Test void invalidAxlePairsAreRejectedEvenWhenTheOtherAxleAndTheVehicleWideFieldsAreSafe() {
+  // The vehicle-wide pair (0.7/1.0 defaults) and the REAR axle are both safe here - only the
+  // FRONT axle's own (multiplier, ratio) pair is destabilizing - the per-axle generalization must
+  // still catch it rather than only checking the vehicle-wide base pair.
+  var frontOnlyUnstablePair = new Overrides.Tuning();
+  frontOnlyUnstablePair.suspensionTravel = 0.2;
+  frontOnlyUnstablePair.suspensionSpringMultiplierFront = 2.5;
+  frontOnlyUnstablePair.suspensionDampingRatioFront = 1.8;
+  frontOnlyUnstablePair.suspensionDampingRatioRear = 0.5; // safe on its own
+  assertThrows(IllegalArgumentException.class, frontOnlyUnstablePair::validate,
+    "an unstable front-axle (multiplier,ratio) pair must be rejected even though the rear axle and the vehicle-wide base pair are both safe");
+ }
 }
