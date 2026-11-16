@@ -4139,3 +4139,23 @@ was produced. No merge of PR42 itself was performed or authorized by this
 pass - only the branch-level reconciliation requested; PR42's own merge
 remains gated on independent exact-head review and the existing hosted-CI
 billing disclosure.
+
+**Post-merge (2026-11-16).** Independent review 5928613803 approved exact
+head `68b471da53924d4f66b5566b8a0206ffa3c95ec0`; the coordinator, with
+John's specific authorization for this head despite the disclosed hosted-
+CI billing failure, merged PR #42 into `main` at merge commit
+`b5b690bf2ebf477f0d93665db60c6f79705531e3` (no branch-protection bypass or
+settings change - this repo has no required status checks). Post-merge
+hosted CI on that merge commit (run triggered by the push) failed all 5
+jobs (`build`, `anchor-frame-probe`, `two-body-impulse-probe`,
+`runtime-smoke`, `ground-support-fixture`) - the same pre-existing,
+already-disclosed zero-runner-inventory billing blockage every recent DIV
+ticket on this repo has hit (most recently MINECRAFT-539's own merge, and
+confirmed identically on this exact code pre-merge). No `release.yml` or
+tag-based release workflow exists in this repo beyond that billing-
+blocked CI, and this change (an additive `Overrides`/`PhysicsBridge`
+schema change, no version bump) does not warrant inventing one. Retained
+exact-head local evidence stands in its place: the 868-test, 0-failure
+JUnit XML and `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `99583001aeb1cf6068cc9ceeff2742fc4ba8842099cb5f42dfff1320619f268e`)
+recorded above, at the exact approved/merged head.
