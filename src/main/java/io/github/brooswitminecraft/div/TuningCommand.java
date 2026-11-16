@@ -74,13 +74,13 @@ final class TuningCommand {
    return 0;
   }
   String key = definition.packID+":"+definition.systemName;
-  boolean active = PhysicsBridge.activeTuning(vehicle) != null;
+  Overrides.Tuning liveTuning = PhysicsBridge.activeTuning(vehicle);
   List<String> installedPartKeys = new ArrayList<>();
   for (APart part : vehicle.allParts) {
    if (part.definition == null) continue;
    installedPartKeys.add(part.definition.packID+":"+part.definition.systemName);
   }
-  for (String line : TuningProvenance.explainResponse(key, active, installedPartKeys)) send(source, line);
+  for (String line : TuningProvenance.explainResponse(key, liveTuning, installedPartKeys)) send(source, line);
   return 1;
  }
  private static void send(CommandSourceStack source, String line) {

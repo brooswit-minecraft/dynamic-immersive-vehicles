@@ -3331,3 +3331,46 @@ described; the remaining uncovered surface is thin, directly-inspectable
 glue (selector resolution, field reads, `CommandSourceStack` sends) - the
 same category of gap every other live-`EntityVehicleF_Physics`-dependent
 path in this codebase already carries and documents rather than closes.
+
+**Second self-review kickback fix (2026-11-16, comment Jira 54192).**
+Finding: for a respawn-required field on an already-ACTIVE vehicle, the
+diagnostic rendered only the freshly resolved CONFIG value under a
+generic "active" label - `TuningCommand.run` computed `PhysicsBridge.
+activeTuning(vehicle)` only to collapse it into a boolean, then discarded
+the actual live `Tuning` object entirely. After a valid reload changes
+e.g. `massKg`, an already-active body keeps its OLD mass (that field is
+only ever read once, at construction - see `PhysicsBridge.
+reportFieldsNeedingRespawn`'s own doc) while the diagnostic would have
+shown the NEW value with nothing marking the two as different.
+
+Fix: `TuningProvenance.explainResponse`/`render` now take the vehicle's
+own live `Tuning` (or `null` if it has no active body) instead of a bare
+boolean. For every field classified `respawnRequired`, if the live
+value differs from the freshly resolved config value, the rendered line
+now explicitly names BOTH - the resolved config value as the headline
+(unchanged position/format) plus `LIVE (currently applied to this
+vehicle): <value>` - and notes a respawn is needed to pick up the new
+one. A `liveSafe` field is NEVER compared this way at all (hot reload
+already keeps the live object's own field in sync by mutating it in
+place, so comparing would be pointless and could only ever show a false
+divergence from a latent bug, not a real one). `TuningCommand.run` now
+passes the real `PhysicsBridge.activeTuning(vehicle)` return value
+straight through instead of discarding it for a boolean.
+
+Four new `TuningCommandTest` cases: a stale respawn-required field (live
+300.0 vs. resolved-config 500.0) is flagged with both values named; a
+respawn-required field already matching the live body shows no
+divergence note; a live-safe field is never compared against `liveTuning`
+even when deliberately set to a different value (proving the "never
+compared" claim, not just that it happens not to differ in other tests);
+and an inactive vehicle (`liveTuning == null`) shows no divergence note
+at all, since there is nothing live to compare against.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --offline --no-daemon clean test build
+--console=plain` at this fix's head - `BUILD SUCCESSFUL`. The real JUnit
+XML reports total **829 tests**, 0 skipped, 0 failures, 0 errors (825
+from the prior head plus these 4 new cases).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `e33a538c447e9d1a04d82caec5f0c4076c57929c4efeae98ddfa460b84658de7`)
+was produced.

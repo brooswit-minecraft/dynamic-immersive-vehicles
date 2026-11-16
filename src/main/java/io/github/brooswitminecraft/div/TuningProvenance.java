@@ -211,6 +211,23 @@ final class TuningProvenance {
  static final String UNWIRED_LAYERS_NOTICE =
    "[DIV] pack DIV metadata, IV-adapted native values, and physically-derived values are not wired to any source in this build - only an explicit operator override or the documented fallback can ever win below.";
  static List<String> render(String label, Explanation explanation) {
+  return render(label, explanation, null);
+ }
+ /**
+  * Ticket MINECRAFT-546 review (comment 54192): a freshly {@code resolve}d value for a respawn-
+  * required field is NOT what an already-active vehicle is actually running - that field was
+  * only ever read once, at this body's own construction, and a later config change cannot reach
+  * it without a respawn (see {@link PhysicsBridge#applyLiveSafeFields}/{@link
+  * PhysicsBridge#reportFieldsNeedingRespawn}'s own doc). {@code liveTuning} is this vehicle's
+  * ACTUAL currently-active {@code Overrides.Tuning} ({@link PhysicsBridge#activeTuning}'s own
+  * return value), or {@code null} if this vehicle has no active body at all (nothing to compare
+  * against - every field is reported purely as resolved-from-config, same as the no-{@code
+  * liveTuning} overload). For a {@code liveSafe} field this comparison is pointless - hot reload
+  * already keeps the live object's own field in sync with current config by mutating it in
+  * place, so the two can never legitimately differ - so only {@code respawnRequired} fields are
+  * ever compared; never fabricates a divergence note from a field this class cannot see.
+  */
+ static List<String> render(String label, Explanation explanation, Overrides.Tuning liveTuning) {
   List<String> lines = new ArrayList<>();
   if (!explanation.found()) {
    lines.add("[DIV] "+label+": no operator-override entry - every field below is pack/native/derived-unwired fallback or unset.");
@@ -223,7 +240,16 @@ final class TuningProvenance {
    StringBuilder line = new StringBuilder("  ").append(fo.field()).append("=").append(fo.value());
    line.append(" [").append(describeSource(fo)).append("]");
    if (fo.liveSafe()) line.append(" (live-reloadable)");
-   else if (fo.respawnRequired()) line.append(" (respawn required to apply a change)");
+   else if (fo.respawnRequired()) {
+    line.append(" (respawn required to apply a change)");
+    if (liveTuning != null) {
+     Object liveValue = readField(fieldByName(fo.field()), liveTuning);
+     if (!java.util.Objects.equals(liveValue, fo.value())) {
+      line.append(" - LIVE (currently applied to this vehicle): ").append(liveValue)
+        .append("; shown value above is the current RESOLVED CONFIG, not yet applied - respawn this vehicle to pick it up");
+     }
+    }
+   }
    lines.add(line.toString());
   }
   return lines;
@@ -251,12 +277,23 @@ final class TuningProvenance {
   * installed parts (e.g. four identical wheels) commonly share one definition/override entry, so
   * explaining the same key repeatedly would be noise, not new information - and skips any part
   * with no override entry at all (nothing to explain for it).
+  *
+  * <p>{@code liveVehicleTuning} is {@code PhysicsBridge.activeTuning(vehicle)}'s own return
+  * value - this vehicle's ACTUAL currently-applied {@code Tuning}, or {@code null} if it has no
+  * active body (review fix, comment 54192: an earlier version only passed a boolean "active"
+  * flag here and discarded the live {@code Tuning} object entirely, so a respawn-required field
+  * changed by a reload since this vehicle last activated rendered only the freshly-resolved
+  * CONFIG value with a generic "active" label - never showing what the running body is actually
+  * using, or that the two have diverged). Passed through to {@link #render(String,Explanation,
+  * Overrides.Tuning)} for the vehicle-level explanation only - {@code PhysicsBridge.activeTuning}
+  * has no part-level counterpart, so part explanations always use the plain, no-live-comparison
+  * {@link #render(String,Explanation)} overload.
   */
- static List<String> explainResponse(String vehicleKey, boolean active, List<String> installedPartKeysInEncounterOrder) {
+ static List<String> explainResponse(String vehicleKey, Overrides.Tuning liveVehicleTuning, List<String> installedPartKeysInEncounterOrder) {
   List<String> lines = new ArrayList<>();
   lines.add(UNWIRED_LAYERS_NOTICE);
-  lines.add("[DIV] vehicle "+vehicleKey+" - "+(active ? "active (spawned/physics-engaged)" : "not currently active"));
-  lines.addAll(render("vehicle "+vehicleKey, explainVehicle(vehicleKey)));
+  lines.add("[DIV] vehicle "+vehicleKey+" - "+(liveVehicleTuning != null ? "active (spawned/physics-engaged)" : "not currently active"));
+  lines.addAll(render("vehicle "+vehicleKey, explainVehicle(vehicleKey), liveVehicleTuning));
   var explainedPartKeys = new LinkedHashSet<String>();
   for (String partKey : installedPartKeysInEncounterOrder) {
    if (!explainedPartKeys.add(partKey)) continue;
