@@ -3058,6 +3058,189 @@ either direction.
 (sha256 `65dd7fb988eaa35a954e739d6b2722a026b4b53b5aa5fcd02220b6e25d80da03`)
 was produced.
 
+## Optional fixed-wing angular-rate damping (MINECRAFT-542, added 2026-11-15)
+
+Bounded M537 reuse, fixed-wing scope only. Inspected the named seams first:
+`PhysicsBridge.Body.stepFlight` already assembles its own aileron/elevator/
+rudder control torque into a single `Vector3d torque` right before the
+shared `handle.applyTorqueImpulse(torque.mul(DT))` call - the exact same
+shape `stepRotor` already had before MINECRAFT-537 added its own
+angular-rate damping torque there. `PhysicsBridge.rotorAngularDampingTorque`
+(the per-axis-to-world-vector assembler `stepRotor` already uses) and
+`RotorForces.angularDampingTorque` (the actual dissipative-drag/no-reversal
+formula) are both generic - nothing inside either is actually rotor-specific,
+they only combine a per-axis coefficient with a body's own axes/inertia/
+angular velocity - so this ticket reuses BOTH verbatim (zero duplicated
+logic, zero modification to either), per its own "reuse sound inertia-aware
+no-reversal principles from M537" instruction.
+
+New, wholly separate `Overrides.Tuning#fixedWingAngularDampingCoefficient`
+(finite, `[0, 1000]` via new `FlightForces#MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT`
+- a separate constant from `RotorForces#MAX_ANGULAR_DAMPING_COEFFICIENT`,
+default `0.0` - off) - never shared or aliased with
+`rotorAngularDampingCoefficient`, satisfying the ticket's own "without
+silently sharing rotor settings" instruction; goes through the full
+declaration/validate/part-rejection/FALLBACK/copy/mergeOntoParent/resolved
+precedence chain the same way every other tuning field does, and through
+`PhysicsBridge.applyLiveSafeFields` for the same live hot-reload/removal
+behavior `rotorAngularDampingCoefficient` already has. New
+`FlightForces#gatedFixedWingAngularDampingCoefficient(aspectRatio,
+fixedWingAngularDampingCoefficient)` - a small, pure, unit-testable function
+(the same "move the gating into FlightForces for testability" shape
+`dragCoefficient`'s own `parasiticDragMultiplier`/`oswaldEfficiency` gating
+was moved there for, MINECRAFT-536 review) - returns exactly `0.0` whenever
+`aspectRatio<=0` (no wing, e.g. a blimp hull) regardless of the configured
+coefficient, so a blimp's angular motion stays completely unaffected by
+this field no matter how it is set; only a positive-aspect-ratio fixed wing
+gets its configured coefficient passed through unchanged. `stepFlight` calls
+this gate, then calls `rotorAngularDampingTorque` with the gated result and
+`handle.getAngularVelocity`, then `torque.add(...)`s the result onto the
+existing control-torque vector before the single shared
+`applyTorqueImpulse` call - ADDED to, never substituting for, the pilot's
+own aileron/elevator/rudder authority, satisfying "control torque remains
+independent" and "fixed-wing only, preserve blimps/rotors/ground" together.
+`0.0` (the FALLBACK) and the blimp gate both collapse to the exact same
+"zero torque added" result `RotorForces.angularDampingTorque` already
+guarantees for a non-positive coefficient, so an unconfigured fixed-wing
+vehicle's and every blimp's torque - and therefore
+`handle.applyTorqueImpulse` - stay byte-identical to before this ticket
+("off/unset is exact baseline"). Unreachable for a rotorcraft (`stepRotor`
+never reads this field) or a ground/boat vehicle (`stepGround` never reads
+it either).
+
+Evidence named by the ticket: the generic per-axis/rotated-body/extreme-dt
+vector-assembly properties (zero/off parity, each axis independently, a
+rotated body, extreme dt/coefficient stability, and a bounded real-rotor
+probe with monotonic energy decrease and no-reversal) are already covered
+exhaustively by the pre-existing, unmodified `PhysicsBridgeRotorAngularDampingTest`
+against the identical helper this ticket reuses verbatim, so they are not
+re-duplicated here. New `FlightForcesTest` cases cover
+`gatedFixedWingAngularDampingCoefficient` in isolation (zero for a
+zero/negative aspect ratio at any coefficient including the maximum, exact
+pass-through on an actual wing). New `PhysicsBridgeFixedWingAngularDampingTest`
+covers what is actually new to this ticket at the assembly level: the
+off/unconfigured case leaves an existing nonzero control torque completely
+unchanged (exact baseline); a blimp aspect ratio gates the damping to
+exactly zero regardless of the configured coefficient (including the
+maximum), leaving its control torque unaffected; a nonzero coefficient on
+an actual wing is pure superposition onto the existing control torque
+(control torque remains independent); and a bounded, pure-numeric
+representative-inertia probe (a plain-number simulation against this
+ticket's own formulas, NOT an actual native Sable engine run - no live
+entity, world, or Sable runtime is constructed anywhere in this suite,
+same as every other test in this file; representative ~1,400 kg
+light-aircraft box inertia, all three axes spun up at once by a believable
+post-gust rate, damped at a moderate coefficient on an actual wing) decays
+strictly monotonically in combined rotational energy with no per-axis
+overshoot past zero, settling close to rest within 2,000 ticks - "energy
+cannot increase" and "frame rotation and dt bounds are correct" exercised
+the same evidentiary shape, and at the same level of evidence (a numeric
+model probe, not a Sable boot/response test), M537's own equivalent
+rotorcraft probe used.
+`OverridesTest` and `PhysicsBridgeLiveOverrideApplicationTest` gained
+`fixedWingAngularDampingCoefficient` coverage mirroring every existing
+`rotorAngularDampingCoefficient` case (out-of-range validation at both
+ends including the new separate cap, the full override/pack-metadata/IV-
+adapted/physically-derived/fallback precedence chain, `extends`-template
+inheritance, part-override rejection, a real `Overrides.apply` reload
+cycle that applies a valid value then rejects an invalid one while
+retaining the prior good value, and live hot-mutation/revert-to-off-default
+on removal).
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --offline compileJava` - `BUILD SUCCESSFUL`;
+`/tmp/gradle-8.14/bin/gradle --offline test --rerun-tasks` - `BUILD
+SUCCESSFUL`; `/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain`
+- `BUILD SUCCESSFUL` - against this branch
+(`minecraft-542/fixed-wing-angular-rate-damping`) at the accepted M535
+baseline (`origin/main` @ `4ee035a`, 785 tests). The real JUnit XML reports
+total **797 tests**, 0 skipped, 0 failures, 0 errors across the whole
+suite (5 from new `OverridesTest` cases, 2 from new `FlightForcesTest`
+cases, 4 from the new `PhysicsBridgeFixedWingAngularDampingTest`, 1 from a
+new `PhysicsBridgeLiveOverrideApplicationTest` case, plus every
+pre-existing test - including every rotor/ground/boat/blimp test - run
+unchanged and passing alongside them, confirming this change introduces no
+regression anywhere else in the suite).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `6a8e547a4bf819db95b319744eb8af77b36dbb17135c3ead08b94e7ceea177fd`)
+was produced.
+
+Not yet performed: in-game acceptance (real fixed-wing aircraft spawn with
+a configured `fixedWingAngularDampingCoefficient`, observed in-flight
+damping effect, and confirmation a blimp with the same field configured
+shows no effect at all) - this ticket's own brief says focused engineering
+tests are in scope, not John's broad/hardware playtesting, which is
+explicitly out of scope here.
+
+**Self-review correction (PR #42 review, added 2026-11-15).** The
+original `FlightForces.gatedFixedWingAngularDampingCoefficient` gated
+solely on `aspectRatio>0`, missing that `stepFlight` already has the
+authoritative `motorized.isBlimp` classification available and that a
+blimp definition can itself carry a positive `wingArea`/`wingSpan` (e.g.
+stabilizer fins, or a copied/mistaken config) - giving a positive aspect
+ratio despite the vehicle being a blimp, and therefore incorrectly
+receiving the new damping torque, violating the ticket's "fixed-wing
+only, preserve blimps" requirement regardless of configuration. Fixed by
+adding a second, required `boolean isBlimp` parameter to the gate
+(`(aspectRatio>0 && !isBlimp) ? coefficient : 0.0`); `PhysicsBridge.
+stepFlight` now passes `motorized.isBlimp` alongside the existing
+`aspectRatio`. New regression coverage: `FlightForcesTest.
+gatedFixedWingAngularDampingCoefficientIsZeroForABlimpEvenWithPositiveWingGeometry`
+exercises the gate in isolation at `isBlimp=true` with a positive aspect
+ratio (including at the maximum configured coefficient), and
+`PhysicsBridgeFixedWingAngularDampingTest.
+aBlimpWithPositiveWingGeometryStillGatesTheDampingToZero` exercises the
+same scenario at the full torque-assembly level the reviewer asked for -
+both would have failed against the pre-fix single-condition gate.
+Re-verified at the corrected head: local slot-lock coordination (shared
+cooperative `flock` on `/tmp/div-gradle-slot.lock` held for the whole
+Gradle lifetime). `/tmp/gradle-8.14/bin/gradle --offline compileJava` -
+`BUILD SUCCESSFUL`; `/tmp/gradle-8.14/bin/gradle --no-daemon build
+--console=plain` - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**799 tests**, 0 skipped, 0 failures, 0 errors across the whole suite (the
+2 new regression tests above, plus every test from the original pass
+still present and passing).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `2e37a9b1a1ff23090636f3378d229d93a85c093ba6fdc697e1b773cd35e76c9a`)
+was produced.
+
+**Integration onto current main; M541 coordination (review follow-up,
+added 2026-11-15).** Main advanced from this ticket's `4ee035a` baseline
+to `95b798e` via MINECRAFT-539 (axle-specific spring/damping tuning,
+schema coordinator). Merged `origin/main` into this branch; conflicts were
+confined to the explicitly-coordinated shared schema/live-reload seam
+(`Overrides.Tuning#fixedWingAngularDampingCoefficient` alongside M539's
+own four new axle fields in `applyLiveSafeFields`'s combined test case)
+plus doc append points (README.md, VERIFICATION.md) - every conflict was
+two independent field additions sitting on adjacent/duplicated lines,
+resolved by keeping both sides, dropping neither feature. `PhysicsBridge.
+stepFlight`/`stepGround` themselves merged with no conflict at all - M539
+touches only `stepGround`'s per-wheel spring/damper resolution, a
+genuinely distinct region from this ticket's `stepFlight` torque
+assembly. MINECRAFT-541 (per-axis fixed-wing aileron/elevator/rudder
+authority scales, PR #36) remains its own OPEN, unmerged PR as of this
+pass - not yet in `main` - so there is nothing to merge against it yet;
+inspecting its diff confirms it touches only the `rollTorque`/
+`pitchTorque`/`yawTorque` computation lines ABOVE this ticket's own
+insertion point (between the existing `Vector3d torque=...` assembly and
+`handle.applyTorqueImpulse`), so this ticket's damping term - added
+strictly AFTER that assembly regardless of how its three components were
+computed - composes cleanly with M541's eventual change with no code
+change required here; a normal merge will be needed once M541 actually
+lands, same as any other sibling ticket. Re-verified at the merged head:
+local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` - `BUILD
+SUCCESSFUL`. The real JUnit XML reports total **824 tests**, 0 skipped, 0
+failures, 0 errors across the whole suite (M539's own 810 plus this
+ticket's 14, all present and passing together, confirming no regression
+in either direction).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `a780c1412b65a51f66a34d47a663c7ab72ab4749b14fa4b5fbaae6382c78fe7a`)
+was produced.
+
 ## Axle-specific spring and damping tuning (MINECRAFT-539, added 2026-11-15)
 
 Schema-coordinator slice for this sprint. Inspected the named seams first:
@@ -3379,6 +3562,7 @@ match this exact head - the prior description still named the obsolete
 `[0,1000]` coefficient bound, 799/14-test totals, and omitted the
 real-Sable runtime probe entirely.
 
+
 # MINECRAFT-546: explain effective tuning values and provenance, 2026-11-15
 
 Adds `TuningProvenance` (pure, server-independent explanation logic) and
@@ -3424,6 +3608,7 @@ real methods and being mutually disjoint; a rejected (out-of-range)
 reload leaving a previously-resolved explanation byte-identical to its
 last-known-good value (the ticket's "rejected-edit behavior" requirement);
 and the rendered text output.
+
 
 Local slot-lock coordination (shared cooperative `flock` on
 `/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
@@ -3837,6 +4022,294 @@ failures, 0 errors, and produced
 checksum
 `da536806f7b4f38fe8cc54c0a156e1cad2900b1d2eca4b10976f53b3022ba5c5`.
 
+## Independent fixed-wing pitch/roll/yaw control authority (MINECRAFT-541, added 2026-11-15)
+
+Eight-item sprint coordination (MINECRAFT-539 schema/540/541/542/543/544/
+545/546, dispatched 2026-11-15, John: "sounds good! go!"); accepted baseline
+`4ee035a` (785 tests). Schema coordinator M539 was unstaffed (`agent:none`)
+with no field-name agreement published yet, so the proposed field names/
+bounds/semantics were posted on M539 itself before any shared-schema edit,
+for visibility/objection, rather than blocking indefinitely on an unstaffed
+coordinator - see that ticket's comment.
+
+`PhysicsBridge.stepFlight` previously shared one `tuning.controlSurfaceSlope`
+across aileron (roll), elevator (pitch), and rudder (yaw) control-surface
+torque, via `FlightForces.controlSurfaceForce`. Added three independent,
+bounded `Overrides.Tuning` fields - `aileronAuthorityScale`,
+`elevatorAuthorityScale`, `rudderAuthorityScale` (each strictly positive,
+capped at `5`, default `1.0` - the same bound/default shape MINECRAFT-522's
+`cyclicAuthorityScale`/`yawAuthorityScale` already established for the rotor
+analogue). Named after the existing `motorized.aileronArea`/`elevatorArea`/
+`rudderArea` fields, not `roll/pitch/yawAuthorityScale`, to stay unambiguous
+against M522's own rotor-only `yawAuthorityScale` field already on `Tuning` -
+a distinct field, never a rename or a shared one.
+
+Rather than multiplying the three already-computed torques at the
+`PhysicsBridge.stepFlight` call site (which would have left the new scale
+untestable except through a private method), `FlightForces.controlSurfaceForce`
+gained a 5-arg overload taking an explicit `authorityScale` parameter - the
+same "explicit authority-multiplier overload" shape `RotorForces.
+cyclicTorque`/`yawTorque` already established for MINECRAFT-522's rotor
+fields (a 1.0-default public overload delegating to the new one). `stepFlight`
+now passes `tuning.aileron/elevator/rudderAuthorityScale` to the matching
+call for `rollTorque`/`pitchTorque`/`yawTorque`, each still externally
+multiplied by its own unchanged `wingArm`/`tailArm` lever arm exactly as
+before. Because the scale is folded in before the lever arm, and
+`rudderDeflection - sideslip` is still computed first and passed in as that
+call's own deflection argument unchanged, the existing sideslip-restoring
+term's semantics are entirely unaffected - only each axis' resulting torque
+magnitude changes, and changing one axis's scale cannot affect another axis,
+the shared `controlSurfaceSlope` baseline, or either control surface's own
+native area/lever-arm geometry (none of that is duplicated anywhere).
+
+All three fields are validated (same strictly-positive/capped-at-5 bound as
+`cyclicAuthorityScale`/`yawAuthorityScale`), rejected on a `parts` override
+(no part-level consumer, same as `controlSurfaceSlope`), wired through the
+same precedence chain (`resolved`/`merge`/`copy`) and `extends`-template
+inheritance every other vehicle-level field already uses, and added to
+`PhysicsBridge.applyLiveSafeFields`'s live-safe set (`stepFlight` reads all
+three fresh from the live `tuning` object every tick, same as
+`controlSurfaceSlope` itself) rather than `reportFieldsNeedingRespawn`'s
+construction-cached one - a live on-disk edit or removal takes effect on an
+already-active flight body's very next tick, no respawn needed.
+
+`FlightForcesTest` covers the new overload directly: zero deflection is
+still zero force regardless of scale; the unit-scale overload matches the
+unscaled 4-arg one exactly; the scale and `controlSurfaceSlope` compose
+multiplicatively and independently (doubling either alone doubles the
+result, doubling both quadruples it, neither canceling or overriding the
+other - the ticket's own "changing one axis does not scale the others"
+acceptance, confirmed at the pure-function level the three axes share); and
+the validated extreme (scale `5.0`) stays finite. `OverridesTest` covers
+out-of-range rejection at both bounds for all three fields, that an
+override to ONE axis (e.g. `aileronAuthorityScale`) leaves the other two
+resolving to their own independent `1.0` fallback rather than picking up
+the overridden axis' value, part-override rejection, and - mirroring the
+MINECRAFT-521/536 self-review regressions - an invalid reload retaining the
+prior good per-axis values (never the invalid one or the flat fallback) AND
+a full removal (omitting the vehicle's entry entirely, not merely setting
+an invalid value) correctly falling all the way back to the flat `1.0`
+default rather than getting stuck. `PhysicsBridgeLiveOverrideApplicationTest`
+covers all three being mutated live in place by `applyLiveSafeFields`
+(added to the existing combined-fields case) and reported in its
+applied-field set, plus a dedicated revert-to-`1.0`-on-removal case
+mirroring the existing rotor-field one.
+
+Same disclosed, long-standing limitation every prior flight ticket in this
+repository has stood on (MINECRAFT-521/536's own VERIFICATION.md entries):
+no dedicated fixed-wing runtime probe exists yet to drive a real spawned
+aircraft through `stepFlight` end-to-end (`GroundSupportFixtureProbe`/
+`BuoyancyAngularDragProbe` and others already prove the ground/float-only
+pattern is buildable; building the fixed-wing analogue was assessed, in the
+MINECRAFT-521 review, as a legitimate "if practical" enhancement rather
+than a per-ticket requirement). This ticket does not newly introduce that
+gap and does not attempt to close it - `stepFlight`'s actual force/torque
+application remains exercised only at the pure-function (`FlightForcesTest`)
+and wiring/live-reload (`OverridesTest`/`PhysicsBridgeLiveOverrideApplicationTest`)
+levels, disclosed plainly rather than concealed.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain`, Gradle
+8.14 / JDK 21 (Temurin), against this branch
+(`minecraft-541/per-axis-fixed-wing-authority`) at head (accepted baseline
+`4ee035a`, unmoved since this ticket's pickup - confirmed via `git fetch
+origin` immediately before this run) - `BUILD SUCCESSFUL`. The real JUnit
+XML reports total **795 tests**, 0 skipped, 0 failures, 0 errors across the
+whole suite (10 new: 5 in `FlightForcesTest`, 4 in `OverridesTest`, 1 in
+`PhysicsBridgeLiveOverrideApplicationTest` - 785+10=795, confirming no
+regression anywhere else in the suite).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `85d2b06ed0b1ff97aa426a2eb1c6b9826b36ff52eb6838ce9faae81e8d3ec485`)
+was produced.
+
+Not yet performed: in-game/hardware acceptance (real aircraft spawn with
+configured `aileron/elevator/rudderAuthorityScale`, observed independent
+roll/pitch/yaw response) - out of scope per this repository's standing
+"user owns broad/hardware playtesting, not a completion gate" convention.
+
+**Review correction (Wroosbit, PR #36 comment 54143, CHANGES_REQUESTED at
+head `d62d927`): zero was not actually a valid authority-scale value.**
+The first revision bounded all three fields strictly positive `(0,5]`,
+copying `cyclicAuthorityScale`/`yawAuthorityScale`'s own shape verbatim -
+but unlike those rotor fields (which always have `cyclicLimitDegrees` or
+disabling the vehicle itself as a separate, already-existing way to turn
+off attitude authority entirely), there is no other per-axis knob here,
+and the ticket's own "test zero/unit/extreme valid values" acceptance line
+requires `0.0` to be an explicitly VALID way to zero out just ONE axis's
+authority (e.g. a glider with no rudder authority at all) while leaving
+the other two untouched. The review's own repro confirmed the submitted
+"zero" test coverage was zero DEFLECTION at a nonzero scale, never a zero
+SCALE itself - a materially different claim.
+
+Corrected: `aileron/elevator/rudderAuthorityScale`'s bound is now `[0,5]`
+(inclusive zero), not `(0,5]`. `OverridesTest.axisAuthorityScalesOutOfRangeFailValidation`
+now asserts `0.0` does NOT throw (alongside negative/above-cap still
+throwing); the invalid-reload-retention test's "invalid" fixture now uses
+genuinely out-of-range values (`-1.0`, not `0.0`) since `0.0` is valid.
+Added `FlightForcesTest.controlSurfaceForceIsZeroAtZeroAuthorityScaleEvenWithNonzeroDeflection`
+- the actual test the review asked for: a real, nonzero deflection at
+`authorityScale=0.0` must still produce exactly zero force. The existing
+unit-parity (`controlSurfaceForceWithUnitScaleMatchesTheUnscaledOverload`)
+and extreme-value (`controlSurfaceForceAuthorityScaleAtExtremeStaysFinite`)
+coverage already exercised the shared `FlightForces.controlSurfaceForce`
+overload every one of the three axes calls identically, so both already
+covered "for each independent axis" at the one place that distinction
+actually lives (the three separate `Overrides.Tuning` fields themselves,
+each independently bounds/precedence/live-reload tested in `OverridesTest`/
+`PhysicsBridgeLiveOverrideApplicationTest` already).
+
+Coordination: the review also flagged M539 comment 54134 (John) correcting
+the stale `agent:none` premise this ticket's schema proposal (comment
+54133) was posted under - M539's actual owner was already working (worktree
+`w265:p1`) at proposal time. That owner has since posted M539's own
+completion comment (54140), explicitly confirming "No collision with M541's
+aileron/elevator/rudderAuthorityScale ... - no action needed from me there,
+they're independent vehicle-level fields." No field-name or default change
+resulted from this reconciliation; recorded here and on the ticket per the
+review's request.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` against the
+corrected head (accepted baseline `4ee035a`, confirmed unmoved via `git
+fetch origin` immediately before this run) - `BUILD SUCCESSFUL`. The real
+JUnit XML reports total **796 tests**, 0 skipped, 0 failures, 0 errors
+across the whole suite (one net new test vs. the first revision's 795 -
+`controlSurfaceForceIsZeroAtZeroAuthorityScaleEvenWithNonzeroDeflection`
+added, no test removed, confirming no regression anywhere else).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `c42138c3952e7bce1a858de7b1ef80f72272967ba191ab7b4ba44d8168c6540e`)
+was produced.
+
+**Reconciliation onto M539 (John, Jira comments 54167/54172, 2026-11-15).**
+While this agent was disconnected, MINECRAFT-539 (axle-specific spring and
+damping tuning, the schema coordinator - see that ticket's own
+VERIFICATION.md entry above) was reviewed, approved, and merged into `main`
+at `5b1cc57`, advancing main from this ticket's `4ee035a` baseline. This
+made PR #36 `mergeable=CONFLICTING`/`mergeStateStatus=DIRTY` - confirmed via
+`gh pr view 36 --json mergeable,mergeStateStatus`. John also flagged that an
+earlier Jira readback transiently showed To Do with the agent label absent
+(a self-reflector transition this ticket's own session did not request or
+witness) before being restored to In Progress for normal reconciliation;
+preserved all existing PR/branch/session history and did not create a
+duplicate implementation, per that comment's explicit instruction.
+
+Merged `origin/main` (`95b798e`, which itself merged M539's own PR #37 plus
+one M539 post-merge documentation commit) into this branch. Conflicts were
+confined to the explicitly-coordinated shared-doc/test append points -
+exactly the "two independent field additions sitting on adjacent lines"
+shape this sprint's own prior reconciliations (e.g. MINECRAFT-533 onto
+MINECRAFT-532) already established:
+- `PhysicsBridgeLiveOverrideApplicationTest`'s combined live-mutation case:
+  both tickets' own field assertions and `Set.of(...)` applied-field-name
+  entries kept side by side (M539's `suspensionDampingRatioFront/Rear`/
+  `suspensionSpringMultiplierFront/Rear` alongside M541's
+  `aileron/elevator/rudderAuthorityScale`).
+- `VERIFICATION.md`'s own two per-ticket sections and their trailing
+  build-evidence paragraphs: both kept in full (M539's section first, in
+  main's position; M541's section - including its own review-correction
+  addendum - second, unchanged in content).
+
+`Overrides.java`, `PhysicsBridge.java`, `OverridesTest.java`, `README.md`,
+and the example config merged with NO conflict at all - M539's
+`suspensionSpringMultiplierFront/Rear`/`suspensionDampingRatioFront/Rear`
+additions and M541's `aileron/elevator/rudderAuthorityScale` additions sit
+on genuinely separate lines throughout every one of those files (confirmed
+by `git diff` showing only clean three-way merges there), exactly the "no
+field-name or region overlap" both tickets' own schema-coordination
+comments (M539's 54140, M541's 54133/54150) already established. No logic
+from either ticket was dropped or altered during the merge.
+
+Corrected the PR #36 description per John's explicit instruction: it had
+gone stale in two ways - it still described the bound as strictly positive
+(predating the zero-value review correction above) and still described
+M539 as unstaffed (predating John's 54134 correction). Both are now
+accurate.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` against the
+reconciled head (this branch merged with `origin/main` @ `95b798e`) -
+`BUILD SUCCESSFUL`. The real JUnit XML reports total **821 tests**, 0
+skipped, 0 failures, 0 errors across the whole suite (810 from M539's own
+baseline on `main` + 11 from this ticket's own additions - 10 from the
+first revision plus the review-correction's 1 new test - confirming both
+tickets' full suites run together with no regression in either direction).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `3b5ab50c81039bd7a425ab40e56e0fe322d98bfb38afa6ea37cc68d5f6a61100`)
+was produced.
+
+**Second reconciliation onto M546 (2026-11-16).** While awaiting review,
+`main` advanced again past this ticket's merged-with-M539 head: MINECRAFT-
+546 (explain effective tuning values and provenance, see that section
+above) landed via PR #43 at merge commit `a3ed39e`. Merged `origin/main`
+(`eff1e15`) into this branch; the only conflict was again this file's own
+append point (two tickets' sections sitting at the same prior insertion
+point), resolved the same way as the M539 reconciliation above - both
+sections kept in full, M546's placed first (matching its position on
+`main`), this ticket's section second, unchanged in content.
+`Overrides.java`/`PhysicsBridge.java` merged with NO conflict - M546 added
+only new read-only accessors (`getTemplate`, `activeTuning`) and a new
+`TuningCommand`/`TuningProvenance`/probe/test files, none of which touch
+`aileron/elevator/rudderAuthorityScale` or any other field this ticket
+added. No logic from either ticket was dropped or altered.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock`; this run queued behind another task's own
+legitimate in-progress build holding the lock, waited for it rather than
+overlapping or killing it, then acquired it in turn).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+against the reconciled head (this branch merged with `origin/main` @
+`eff1e15`) - `BUILD SUCCESSFUL`. The real JUnit XML reports total **848
+tests**, 0 skipped, 0 failures, 0 errors (837 from M546's own baseline on
+`main` + 11 from this ticket's own additions, confirming both tickets'
+full suites run together with no regression in either direction).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `2531356e270e9775254af753fb323a16c9510873c9a5467342b40a5f5ea68093`)
+was produced.
+
+**M542's own reconciliation onto M546 (recorded on its own ticket, for
+context - MINECRAFT-542, 2026-11-16).**
+**Reconciliation onto M546 (PR42 flagged dirty/nonmergeable, 2026-11-16).**
+Main advanced from this ticket's prior integration point (M539 @
+`95b798e`) to `eff1e15` via MINECRAFT-546 (explain effective tuning
+provenance). Merged `origin/main` into this existing
+`minecraft-542/fixed-wing-angular-rate-damping` branch (same worktree,
+same implementation owner - no competing worker). Conflicts were confined
+entirely to VERIFICATION.md's own append point (this ticket's section
+ending immediately before M546's "# MINECRAFT-546" heading) - a pure
+two-sided append, resolved by keeping both sections with no content
+dropped from either side. `Overrides.java` and `PhysicsBridge.java` merged
+cleanly with NO conflict at all (`git merge` auto-merged both) - M546
+touches `TuningProvenance`/`TuningCommand` (a new, separate read-only
+diagnostic command path reading already-resolved `Tuning` values) and
+`DynamicImmersiveVehicles.java`/`build.gradle` (command registration,
+moddev unit-test support), none of which overlaps this ticket's
+`stepFlight`/`Overrides.Tuning#fixedWingAngularDampingCoefficient`
+plumbing; this ticket's own reviewed behavior (the `isBlimp`-corrected gate
+from the prior review pass) is therefore preserved byte-for-byte across
+the merge, confirmed by the full suite below re-passing unchanged.
+
+Validated under the EXISTING shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` (held for the whole Gradle lifetime; no
+unlink/replacement/chmod; no parallel heavy job observed at claim time):
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` - `BUILD
+SUCCESSFUL`. The real JUnit XML reports total **851 tests**, 0 skipped, 0
+failures, 0 errors across the whole suite (M546's own 837 plus this
+ticket's 14, all present and passing together, confirming no regression
+in either direction).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `f05d3d36fd355f73fc823f1566758ba662a84fbf62c4480bfacac4d54bb58745`)
+was produced. No merge of PR42 itself was performed or authorized by this
+pass - only the branch-level reconciliation requested; PR42's own merge
+remains gated on Wroosbit's/the reserved reviewer's exact-head approval
+and the existing hosted-CI billing disclosure, per the coordinator's
+explicit "no merge authorization inferred" instruction.
+
 # MINECRAFT-543: main-conflict reconciliation after PR #43 (M546) merge, 2026-11-16
 
 John (comment 54324/54325): PR #40's reviewed head `9ce4df4` became
@@ -3876,3 +4349,264 @@ Per John's explicit instruction (54324/54325): this changed head requires
 independent exact-head re-review and resolved authorization scope before
 any merge - the earlier approval (review 5927085182, head `9ce4df4`) does
 not carry over to this new head. No merge action taken.
+
+## Third reconciliation onto M543 (MINECRAFT-541, 2026-11-16)
+
+Same pattern as the M539/M546 reconciliations above, one step further:
+while this ticket's PR #36 was APPROVED (Codex review, GitHub PR review id
+`PRR_kwDOVnYGF88AAAABYVFw4w`) at exact head `d065b23`, `main` advanced
+again past that head via MINECRAFT-543's own PR #40 (rotor translational
+air drag, merge commit `17770a8`) - making PR #36 `mergeable=CONFLICTING`
+again. Per this repo's own documented merge-verification query and the
+`REFUSE: STALE` guidance it names, an approval does not survive a push
+past the approved sha even for a pure reconciliation merge - so this
+revision requires a fresh re-review at the new head, not an immediate
+merge, exactly the posture MINECRAFT-543's own reconciliation entry above
+already took after its approval was similarly outrun by MINECRAFT-546.
+
+Merged `origin/main` (`17770a8`) into this branch. Conflicts were confined
+to the same three expected append-points as the prior two reconciliations:
+`README.md`'s live-reload field list (both tickets' own new field names
+kept), `VERIFICATION.md`'s own section-append point (M543's full section,
+including its own M546-reconciliation addendum, kept ahead of this
+ticket's section - matching its position on `main` - this ticket's section
+kept unchanged after it), and `PhysicsBridgeLiveOverrideApplicationTest`'s
+combined live-mutation case (both tickets' own field assertions and
+`Set.of(...)` applied-field-name entries kept side by side -
+`rotorAirDragCoefficient` alongside `aileron/elevator/rudderAuthorityScale`).
+`Overrides.java`/`PhysicsBridge.java`/`OverridesTest.java` merged with NO
+conflict at all - M543's `rotorAirDragCoefficient` (rotorcraft-only,
+`stepRotor`) and this ticket's three fields (fixed-wing-only, `stepFlight`)
+sit on genuinely separate lines and touch genuinely separate methods
+throughout, confirming no field/region overlap. No logic from either
+ticket was dropped or altered.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+against the reconciled head (this branch merged with `origin/main` @
+`17770a8`) - `BUILD SUCCESSFUL`. The real JUnit XML reports total **865
+tests**, 0 skipped, 0 failures, 0 errors (854 from M543's own baseline on
+`main` + 11 from this ticket's own additions, confirming both tickets'
+full suites run together with no regression in either direction).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `3ad9188ec97e82639d78afc23ddd61c8914640a68c99c3d2f1dd3a2537a2ae13`)
+was produced.
+
+Per the same precedent MINECRAFT-543's own entry above establishes: this
+changed head requires a fresh independent exact-head re-review before any
+merge - the prior approval at `d065b23` does not carry over. No merge
+action taken by this entry; reported on the ticket for the next reviewer.
+
+**M542's own reconciliation onto this M543/M546 state (recorded on its own
+ticket, for context - MINECRAFT-542, 2026-11-16).**
+**M542 reconciliation onto this M543/M546 state (John comment 54331/54336, 2026-11-16).**
+PR42 was flagged dirty/nonmergeable. Merged current `origin/main` (now at
+`17770a8`, M543's own reconciled merge of M546) into this existing
+`minecraft-542/fixed-wing-angular-rate-damping` branch (same worktree,
+same implementation owner - no competing worker), in two steps as main
+advanced mid-pass (first to `eff1e15`/M546, then to `17770a8` once M543's
+own PR #40 merged). Conflicts were confined to:
+- `VERIFICATION.md`'s own append point (two separate occasions, both pure
+  two-sided appends resolved by keeping both sections in full, nothing
+  dropped).
+- `src/test/java/.../OverridesTest.java` and `PhysicsBridgeLiveOverride
+  ApplicationTest.java` - `fixedWingAngularDampingCoefficient` (this
+  ticket) and `rotorAirDragCoefficient` (M543) both add their own
+  per-field test cluster adjacent to `rotorAngularDampingCoefficient`'s
+  existing one; `git merge`'s textual 3-way merge interleaved the two
+  clusters incorrectly on the first pass (splicing one field's test body
+  into the other's), caught by inspection before building - re-resolved by
+  hand, extracting each side's own clean, contiguous insertion (verified
+  against the pre-merge `:1`/`:2`/`:3` git stages) and placing both intact,
+  back to back, never interleaved.
+`Overrides.java`/`PhysicsBridge.java` themselves merged with NO conflict
+at all - this ticket's `stepFlight`/`fixedWingAngularDampingCoefficient`
+plumbing and M543's `stepRotor`/`rotorAirDragCoefficient`/M546's
+`TuningProvenance`/`TuningCommand` additions are all distinct regions.
+This ticket's own reviewed behavior (the `isBlimp`-corrected gate) is
+preserved byte-for-byte across both merge steps.
+
+Validated under the EXISTING shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` (held for the whole Gradle lifetime; no
+unlink/replacement/chmod; no parallel heavy job observed at claim time):
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` - `BUILD
+SUCCESSFUL`. The real JUnit XML reports total **868 tests**, 0 skipped, 0
+failures, 0 errors across the whole suite (854 from the already-
+reconciled M543/M546 state plus this ticket's 14, all present and passing
+together, confirming no regression in either direction - including the
+hand-reconstructed test files, each individually re-verified to contain
+BOTH fields' complete, non-interleaved test clusters).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `99583001aeb1cf6068cc9ceeff2742fc4ba8842099cb5f42dfff1320619f268e`)
+was produced. No merge of PR42 itself was performed or authorized by this
+pass - only the branch-level reconciliation requested; PR42's own merge
+remains gated on independent exact-head review and the existing hosted-CI
+billing disclosure.
+
+**Post-merge (2026-11-16).** Independent review 5928613803 approved exact
+head `68b471da53924d4f66b5566b8a0206ffa3c95ec0`; the coordinator, with
+John's specific authorization for this head despite the disclosed hosted-
+CI billing failure, merged PR #42 into `main` at merge commit
+`b5b690bf2ebf477f0d93665db60c6f79705531e3` (no branch-protection bypass or
+settings change - this repo has no required status checks). Post-merge
+hosted CI on that merge commit (run triggered by the push) failed all 5
+jobs (`build`, `anchor-frame-probe`, `two-body-impulse-probe`,
+`runtime-smoke`, `ground-support-fixture`) - the same pre-existing,
+already-disclosed zero-runner-inventory billing blockage every recent DIV
+ticket on this repo has hit (most recently MINECRAFT-539's own merge, and
+confirmed identically on this exact code pre-merge). No `release.yml` or
+tag-based release workflow exists in this repo beyond that billing-
+blocked CI, and this change (an additive `Overrides`/`PhysicsBridge`
+schema change, no version bump) does not warrant inventing one. Retained
+exact-head local evidence stands in its place: the 868-test, 0-failure
+JUnit XML and `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `99583001aeb1cf6068cc9ceeff2742fc4ba8842099cb5f42dfff1320619f268e`)
+recorded above, at the exact approved/merged head.
+
+## Fourth reconciliation onto M542 (MINECRAFT-541, 2026-11-16)
+
+Same pattern as the three reconciliations above: while this ticket's
+exact head `03a9624` carried a second APPROVED Codex re-review (GitHub PR
+review id `PRR_kwDOVnYGF88AAAABYWOFxg`), `main` advanced yet again via
+MINECRAFT-542's own PR #42 (optional fixed-wing angular-rate damping,
+merge commit `b5b690b`) - John's own comment 54354 explicitly instructed
+reconciling this exact commit while preserving both this ticket's per-axis
+authority changes AND M542's angular-damping/rotor/diagnostic changes, and
+explicitly NOT to merge the changed head without renewed exact-head review.
+
+Merged `origin/main` (`87b8380`, M542's own merge plus its post-merge
+documentation commit) into this branch. Conflicts were confined to the
+same three expected append-points as every prior reconciliation:
+`PhysicsBridgeLiveOverrideApplicationTest`'s combined live-mutation case
+(all three tickets' field assertions/applied-set entries - M542's new
+`fixedWingAngularDampingCoefficient` alongside M543's
+`rotorAirDragCoefficient` and this ticket's own three fields - kept side
+by side, nothing dropped); `PhysicsBridge.java`'s `stepFlight` doc comment
+(a pure documentation conflict - this ticket's and M542's own doc
+paragraphs both describing different fields on the same method, kept back
+to back, no code conflict at all); and `VERIFICATION.md`'s own
+section-append points (M542's own two reconciliation notes, recorded
+verbatim for context, kept ahead of this ticket's own entries at each
+point, matching their position on `main`). `Overrides.java`/
+`FlightForces.java`/`OverridesTest.java`/`README.md`/the example config
+merged with NO conflict at all - M542's `fixedWingAngularDampingCoefficient`
+(fixed-wing-only, gated on `!motorized.isBlimp` - the same blimp-unit-gate
+correction that resolves PR #36's own nonblocking #44 finding for the
+angular-damping field, though NOT for this ticket's own authority-scale
+fields, which remain unconditional per #44's own tracked scope) and this
+ticket's `aileron/elevator/rudderAuthorityScale` sit on genuinely separate
+lines throughout, confirming no field/region overlap. No logic from any
+ticket was dropped or altered during the merge.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+against the reconciled head (this branch merged with `origin/main` @
+`87b8380`) - `BUILD SUCCESSFUL`. The real JUnit XML reports total **879
+tests**, 0 skipped, 0 failures, 0 errors (868 from M542's own baseline on
+`main` + 11 from this ticket's own additions, confirming all tickets'
+full suites run together with no regression in any direction).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `0f79d8acb3a9f1e052c16ed399c9daafe392275963465f2a046dbf6b9ecb25eb`)
+was produced.
+
+Per John's explicit instruction (54354): this changed head requires a
+fresh independent exact-head re-review and authorization before any merge
+- the prior approval at `03a9624` does not carry over. No merge action
+taken by this entry; reported on the ticket for the existing
+parent-arranged independent reviewer.
+
+## Review kickback correction: blimp unit-gate (MINECRAFT-541, 2026-11-16)
+
+**Required change (self-review kickback, comment 54361).** The item
+earlier recorded above as M542's reviewer's own "nonblocking" PR #44
+follow-up was escalated by this ticket's own reviewer to a REQUIRED
+correction at exact head `f69a643`: `PhysicsBridge.java` passed
+`aileron/elevator/rudderAuthorityScale` unconditionally in `stepFlight`,
+which serves both fixed-wing aircraft AND blimps - a blimp with nonzero
+control-surface geometry and a configured/inherited non-`1.0` scale
+therefore received changed torque, violating the ticket's own explicit
+"preserve non-fixed-wing/blimp behavior" requirement and the documented
+fixed-wing-only contract. The review named the exact fix shape: gate via
+the authoritative classification (mirroring MINECRAFT-542's own
+established pattern for exactly this class of bug) while preserving
+fixed-wing per-axis behavior and the `rudderDeflection - sideslip`
+ordering, plus a production-path regression for a blimp with positive
+geometry and a non-unit configured scale.
+
+Fix: new `FlightForces.gatedControlAuthorityScale(boolean isBlimp, double
+controlAuthorityScale)` - returns the documented `1.0` no-op for a blimp
+regardless of its configured/inherited scale or wing/control-surface
+geometry, the configured scale unchanged otherwise. Same shape as
+MINECRAFT-542's own `gatedFixedWingAngularDampingCoefficient` (gated on
+the authoritative `motorized.isBlimp`, not merely a geometry check, since
+a blimp can itself carry positive wing/control-surface geometry).
+`PhysicsBridge.stepFlight` now computes `effectiveAileron/Elevator/
+RudderAuthorityScale` through this gate before each axis's existing
+`FlightForces.controlSurfaceForce` call - the shared `controlSurfaceSlope`,
+native areas, externally-applied `wingArm`/`tailArm` lever arms, and the
+`rudderDeflection - sideslip` ordering (still computed and passed in
+exactly as before, unchanged) are all untouched; only which authority
+scale reaches the existing call site changed.
+
+`FlightForcesTest` covers the gate in isolation
+(`gatedControlAuthorityScaleIsOneForABlimpRegardlessOfTheConfiguredScale`/
+`gatedControlAuthorityScalePassesThroughUnchangedForAnActualNonBlimpWing`,
+mirroring `gatedFixedWingAngularDampingCoefficient`'s own two tests
+exactly) plus the actual production-path regression the review required
+(`productionPathRegressionBlimpWithPositiveControlSurfaceGeometryAndNonUnitScaleSeesUnchangedTorque`):
+a blimp with a POSITIVE `area` (representing real control-surface
+geometry, e.g. stabilizer fins) and a non-unit configured scale (`2.5`)
+run through the real `FlightForces.controlSurfaceForce` production call
+produces EXACTLY the same force as the unscaled (`1.0`) baseline would -
+proving the gate reaches the actual production formula, not merely that
+the gate function itself returns the right value in isolation - with an
+explicit non-vacuousness check that the configured scale actually would
+have differed if left unguarded.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+at this fix's head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**882 tests**, 0 skipped, 0 failures, 0 errors (879 from the prior head
+plus these 3 new tests, confirming no regression anywhere else in the
+suite).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `d395ff539c62981b337a25428612e49008373f9e0f1d44a07f6fa06e393d85dc`)
+was produced.
+
+No code, tests, or merge action was taken by the reviewer per their own
+disclosure; this fix and its evidence are produced solely by the
+implementation owner, as required. GitHub #44 (M542's reviewer's own
+nonblocking follow-up) can now be closed/updated to reflect that this
+ticket's own fields are fixed, independent of whatever scope #44 still
+tracks for other fields, if any remain.
+
+## Post-merge (2026-11-16)
+
+Independent review (`5929277383`) approved exact head `ba0093a`; the
+coordinator, with John's explicit latest-head authorization under the
+disclosed hosted-CI billing limitation (comment 54376), merged PR #36
+into `main` at merge commit `81db9d1b0e9e5e764a3d266c3890335cbba6b0d6` - a
+clean merge (`git diff --stat ba0093a 81db9d1` is empty: the merged tree
+is byte-identical to the reviewed/approved head). No branch-protection
+bypass or settings change; this repo has no required status checks.
+
+Post-merge hosted CI on this merge commit (run `43980628420`, triggered by
+the push) failed in 3 seconds - the same pre-existing, already-disclosed
+zero-runner-inventory billing blockage every recent DIV ticket on this
+repo has hit (most recently MINECRAFT-542's own merge). `.github/
+workflows/` contains only `ci.yml` (triggered on `pull_request`/
+`push: [main]`, no tag/`workflow_dispatch` trigger) - no `release.yml` or
+tag-based release workflow exists in this repo beyond that billing-
+blocked CI, and this change (an additive `Overrides`/`FlightForces`/
+`PhysicsBridge` schema change, no version bump) does not warrant inventing
+one. Retained exact-head local evidence stands in its place: the
+**882-test, 0-failure/error/skip** JUnit XML and `build/libs/dynamic-
+immersive-vehicles-0.1.0-SNAPSHOT.jar` (sha256 `d395ff539c62981b337a254
+28612e49008373f9e0f1d44a07f6fa06e393d85dc`) recorded above, at the exact
+approved/merged head (confirmed identical by the empty `git diff --stat`).

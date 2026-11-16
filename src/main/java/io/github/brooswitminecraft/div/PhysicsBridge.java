@@ -360,6 +360,8 @@ public final class PhysicsBridge {
   * waterDrag/propellerForce/angularWaterDrag/antiRollStiffness (MINECRAFT-519 - stepGround reads
   * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
   * stallAngleDegrees/liftSlope/controlSurfaceSlope (MINECRAFT-521, stepFlight only)/
+  * aileronAuthorityScale/elevatorAuthorityScale/rudderAuthorityScale (MINECRAFT-541, stepFlight
+  * only, same reasoning as stallAngleDegrees/liftSlope/controlSurfaceSlope immediately above)/
   * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
   * rotorAngularDampingCoefficient (MINECRAFT-537, stepRotor only - read fresh every tick via
   * rotorAngularDampingTorque, same as the MINECRAFT-522 fields immediately above)/
@@ -376,7 +378,10 @@ public final class PhysicsBridge {
   * Multiplier/lateralWaterDragMultiplier/verticalWaterDragMultiplier (MINECRAFT-535,
   * BuoyantForces.apply reads all three fresh every tick alongside waterDrag itself)/
   * parasiticDragMultiplier/oswaldEfficiency (MINECRAFT-536, stepFlight only, same reasoning as
-  * stallAngleDegrees/liftSlope/controlSurfaceSlope above)/axleDriveForceSharing (MINECRAFT-532,
+  * stallAngleDegrees/liftSlope/controlSurfaceSlope above)/fixedWingAngularDampingCoefficient
+  * (MINECRAFT-542, stepFlight only - read fresh every tick via rotorAngularDampingTorque, same
+  * reasoning as rotorAngularDampingCoefficient above, a wholly separate field)/
+  * axleDriveForceSharing (MINECRAFT-532,
   * stepGround reads tuning.axleDriveForceSharing fresh every tick via
   * AxleDriveForceSharing#shareRatios, same as every other field in this list)/ackermannSteering
   * (MINECRAFT-540, stepGround reads tuning.ackermannSteering fresh every tick via
@@ -417,6 +422,12 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.stallAngleDegrees, fresh.stallAngleDegrees)) { target.stallAngleDegrees = fresh.stallAngleDegrees; appliedOut.add("stallAngleDegrees"); }
   if (!java.util.Objects.equals(target.liftSlope, fresh.liftSlope)) { target.liftSlope = fresh.liftSlope; appliedOut.add("liftSlope"); }
   if (!java.util.Objects.equals(target.controlSurfaceSlope, fresh.controlSurfaceSlope)) { target.controlSurfaceSlope = fresh.controlSurfaceSlope; appliedOut.add("controlSurfaceSlope"); }
+  // MINECRAFT-541: stepFlight reads tuning.aileron/elevator/rudderAuthorityScale fresh every
+  // tick, same "no separate cached field" shape as stallAngleDegrees/liftSlope/
+  // controlSurfaceSlope immediately above.
+  if (!java.util.Objects.equals(target.aileronAuthorityScale, fresh.aileronAuthorityScale)) { target.aileronAuthorityScale = fresh.aileronAuthorityScale; appliedOut.add("aileronAuthorityScale"); }
+  if (!java.util.Objects.equals(target.elevatorAuthorityScale, fresh.elevatorAuthorityScale)) { target.elevatorAuthorityScale = fresh.elevatorAuthorityScale; appliedOut.add("elevatorAuthorityScale"); }
+  if (!java.util.Objects.equals(target.rudderAuthorityScale, fresh.rudderAuthorityScale)) { target.rudderAuthorityScale = fresh.rudderAuthorityScale; appliedOut.add("rudderAuthorityScale"); }
   if (!java.util.Objects.equals(target.cyclicLimitDegrees, fresh.cyclicLimitDegrees)) { target.cyclicLimitDegrees = fresh.cyclicLimitDegrees; appliedOut.add("cyclicLimitDegrees"); }
   if (!java.util.Objects.equals(target.cyclicAuthorityScale, fresh.cyclicAuthorityScale)) { target.cyclicAuthorityScale = fresh.cyclicAuthorityScale; appliedOut.add("cyclicAuthorityScale"); }
   if (!java.util.Objects.equals(target.yawAuthorityScale, fresh.yawAuthorityScale)) { target.yawAuthorityScale = fresh.yawAuthorityScale; appliedOut.add("yawAuthorityScale"); }
@@ -452,6 +463,10 @@ public final class PhysicsBridge {
   // controlSurfaceSlope immediately above - both are safe to hot-mutate in place.
   if (!java.util.Objects.equals(target.parasiticDragMultiplier, fresh.parasiticDragMultiplier)) { target.parasiticDragMultiplier = fresh.parasiticDragMultiplier; appliedOut.add("parasiticDragMultiplier"); }
   if (!java.util.Objects.equals(target.oswaldEfficiency, fresh.oswaldEfficiency)) { target.oswaldEfficiency = fresh.oswaldEfficiency; appliedOut.add("oswaldEfficiency"); }
+  // MINECRAFT-542: stepFlight reads tuning.fixedWingAngularDampingCoefficient fresh every tick
+  // via rotorAngularDampingTorque, same "no separate cached field" shape as
+  // rotorAngularDampingCoefficient (MINECRAFT-537, stepRotor only) immediately above.
+  if (!java.util.Objects.equals(target.fixedWingAngularDampingCoefficient, fresh.fixedWingAngularDampingCoefficient)) { target.fixedWingAngularDampingCoefficient = fresh.fixedWingAngularDampingCoefficient; appliedOut.add("fixedWingAngularDampingCoefficient"); }
   // MINECRAFT-533: stepGround reads tuning.toeFrontDegrees/toeRearDegrees fresh every tick via
   // AxleToeDistribution.toeRadians, same "no separate cached field" shape as maxSteerDegrees/
   // brakeBiasFront/driveBiasFront above - no respawn needed for either field.
@@ -1434,6 +1449,12 @@ public final class PhysicsBridge {
   * its other torque/impulse application today (see its own class doc), so this follows that same
   * established single-handle pattern rather than introducing two-body awareness nothing else in
   * this method has yet.
+  *
+  * <p>MINECRAFT-542: reused verbatim (same method, unmodified) by {@code Body.stepFlight} for
+  * fixed-wing angular-rate damping - nothing about the assembly above is actually rotor-specific
+  * (it only combines a per-axis dissipative torque with this body's own axes/inertia), so the
+  * fixed-wing caller passes its own, wholly separate {@code tuning.fixedWingAngularDampingCoefficient}
+  * rather than sharing {@code tuning.rotorAngularDampingCoefficient} - see that field's own doc.
   */
  static Vector3d rotorAngularDampingTorque(Vector3d angularVelocity, Vector3d forward, Vector3d right, Vector3d up,
      Vector3d inertiaBody, double dampingCoefficient, double dt) {
@@ -2877,6 +2898,54 @@ public final class PhysicsBridge {
    * the live {@code tuning} object every tick, same as every other live-safe field below - an
    * unconfigured vehicle gets exactly {@link FlightForces}'s own previous hardcoded constants via
    * {@link Overrides}'s FALLBACK.
+   * MINECRAFT-541: {@code tuning.aileron/elevator/rudderAuthorityScale} are each passed to their
+   * own {@link FlightForces#controlSurfaceForce(double, double, double, double, double)} call
+   * below (the same "explicit authority-multiplier overload" shape {@link
+   * RotorForces#cyclicTorque(double, double, double, double)}/{@link
+   * RotorForces#yawTorque(double, double, double, double)} already established for the rotor
+   * fields above) - independently multiplying that one axis's force, never the shared {@code
+   * controlSurfaceSlope}, the native area, or the externally-applied {@code wingArm}/{@code
+   * tailArm} lever arm (all still read/applied exactly as before, unduplicated). Since the scale
+   * is folded in BEFORE the lever arm, not after, and {@code rudderDeflection-sideslip} is still
+   * computed first and passed in as this call's own deflection argument, the existing
+   * sideslip-restoring term's semantics are entirely unchanged - only the resulting yaw torque's
+   * magnitude is scaled. All three are read fresh from the live {@code tuning} object every
+   * tick, same as every other live-safe field below; FALLBACK 1.0 reproduces the exact prior
+   * controlSurfaceSlope-only torque for an unconfigured vehicle.
+   *
+   * <p>MINECRAFT-541 (review kickback correction, comment 54361): each axis's scale is passed
+   * through {@link FlightForces#gatedControlAuthorityScale} first - gated on {@code
+   * motorized.isBlimp} (the authoritative classification, same reasoning MINECRAFT-542's own
+   * {@code gatedFixedWingAngularDampingCoefficient} gate below already uses for a blimp that can
+   * itself carry positive wing/control-surface geometry) - so a blimp always gets the documented
+   * {@code 1.0} no-op regardless of its configured/inherited scale, preserving this ticket's own
+   * "preserve non-fixed-wing/blimp behavior" requirement exactly. Only a non-blimp fixed wing
+   * gets its configured scale passed through unchanged.
+   *
+   * <p>MINECRAFT-542: {@code tuning.fixedWingAngularDampingCoefficient} additionally ADDS (never
+   * replaces) a bounded, dissipative angular-rate damping torque on top of the aileron/elevator/
+   * rudder control torque above, via {@link #rotorAngularDampingTorque} / {@link
+   * RotorForces#angularDampingTorque} - the exact same inertia-aware, no-reversal formula
+   * MINECRAFT-537 established for {@link #stepRotor}, reused here verbatim (never duplicated) but
+   * driven by its own wholly separate {@code tuning.fixedWingAngularDampingCoefficient}, never
+   * {@code tuning.rotorAngularDampingCoefficient} - the two fields are deliberately never shared
+   * or aliased. It opposes only this body's OWN current angular velocity (read fresh from {@code
+   * handle.getAngularVelocity} every tick, never the pilot's aileron/elevator/rudder input), so it
+   * is deliberately NOT autopilot, NOT a target-attitude/auto-level system, and NOT a sideslip
+   * redesign - it cannot substitute for the pilot's own control authority, and leaves the existing
+   * aileron/elevator/rudder torque above completely independent. 0.0 (the FALLBACK) is a true
+   * no-op, so an unconfigured fixed-wing vehicle's torque - and the resulting {@code
+   * handle.applyTorqueImpulse} below - is byte-identical to before this ticket. Gated on {@code
+   * aspectRatio>0} (a real wing present, the same gate {@link FlightForces#dragCoefficient}'s own
+   * {@code parasiticDragMultiplier}/{@code oswaldEfficiency} already use, MINECRAFT-536) AND on
+   * {@code !motorized.isBlimp} - the authoritative classification, needed IN ADDITION to the
+   * aspect-ratio check because a blimp definition can itself carry a positive {@code wingArea}/
+   * {@code wingSpan} (e.g. stabilizer fins, or a copied/mistaken config), which would otherwise
+   * still give a positive aspect ratio despite the vehicle being a blimp. A blimp's angular motion
+   * therefore stays completely unaffected by this field regardless of how it OR its wing geometry
+   * are configured, matching this ticket's "fixed-wing only, preserve blimps" scope exactly.
+   * Never reaches a rotorcraft ({@link #stepRotor} never reads this field) or a ground/boat
+   * vehicle either.
    */
   private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
    var motorized = v.definition.motorized;
@@ -2916,10 +2985,39 @@ public final class PhysicsBridge {
    double aileronDeflection=Math.toRadians(v.aileronInputVar.currentValue);
    double elevatorDeflection=Math.toRadians(v.elevatorInputVar.currentValue);
    double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
-   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope)*wingArm;
-   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope)*tailArm;
-   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope)*tailArm;
+   // MINECRAFT-541 (review kickback correction, comment 54361): gate each axis's authority
+   // scale on the authoritative motorized.isBlimp classification via
+   // FlightForces.gatedControlAuthorityScale (same shape as MINECRAFT-542's own
+   // gatedFixedWingAngularDampingCoefficient immediately below) - a blimp always gets the
+   // documented 1.0 no-op regardless of configured scale or wing/control-surface geometry.
+   double effectiveAileronAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.aileronAuthorityScale);
+   double effectiveElevatorAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.elevatorAuthorityScale);
+   double effectiveRudderAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.rudderAuthorityScale);
+   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveAileronAuthorityScale)*wingArm;
+   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveElevatorAuthorityScale)*tailArm;
+   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveRudderAuthorityScale)*tailArm;
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
+   // MINECRAFT-542: tuning.fixedWingAngularDampingCoefficient is read live off this tick's tuning
+   // object, same as stallAngleDegrees/liftSlope/controlSurfaceSlope/parasiticDragMultiplier/
+   // oswaldEfficiency above - see applyLiveSafeFields. ADDED to (never substituted for) the
+   // pilot's own aileron/elevator/rudder control torque just assembled above - it only ever
+   // opposes this body's OWN current angular velocity (read fresh here, not cached), so it cannot
+   // be mistaken for autopilot/auto-level/sideslip redesign. Overrides.resolved always fills this
+   // from FALLBACK (0.0) when unconfigured, and RotorForces.angularDampingTorque returns exactly 0
+   // for a non-positive coefficient, so an unconfigured fixed-wing vehicle's torque - and
+   // therefore handle.applyTorqueImpulse below - is byte-identical to before this ticket.
+   // Gated on aspectRatio>0 AND !motorized.isBlimp via
+   // FlightForces.gatedFixedWingAngularDampingCoefficient - the no-wing half mirrors
+   // dragCoefficient's own parasiticDragMultiplier/oswaldEfficiency gate just above
+   // (MINECRAFT-536); the explicit isBlimp half is required in addition (review correction) since
+   // a blimp definition can itself carry a positive wingArea/wingSpan (e.g. stabilizer fins, or a
+   // copied/mistaken config), which would otherwise give a positive aspectRatio despite the
+   // vehicle being a blimp. A blimp's angular motion must stay completely unaffected by this
+   // field regardless of how it or its wing geometry are configured, not merely
+   // still-damped-by-something.
+   double effectiveFixedWingAngularDampingCoefficient = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, motorized.isBlimp, tuning.fixedWingAngularDampingCoefficient);
+   Vector3d angularVelocity=handle.getAngularVelocity(new Vector3d());
+   torque.add(rotorAngularDampingTorque(angularVelocity,forward,right,up,inertiaBody,effectiveFixedWingAngularDampingCoefficient,DT));
    handle.applyTorqueImpulse(torque.mul(DT));
    applyTowingCompensation(v);
    return true;

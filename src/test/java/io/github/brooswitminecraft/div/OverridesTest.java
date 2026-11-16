@@ -73,10 +73,14 @@ class OverridesTest {
   assertEquals(FlightForces.DEFAULT_STALL_ANGLE_DEGREES, r.stallAngleDegrees, "stallAngleDegrees falls back to FlightForces's own previously-hardcoded 15deg");
   assertEquals(FlightForces.DEFAULT_LIFT_SLOPE, r.liftSlope, 1e-9, "liftSlope falls back to FlightForces's own previously-hardcoded 2*pi");
   assertEquals(FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE, r.controlSurfaceSlope, 1e-9, "controlSurfaceSlope falls back to the same previously-hardcoded 2*pi");
+  assertEquals(1.0, r.aileronAuthorityScale, "aileronAuthorityScale's fallback is unit scaling - no change from prior behavior");
+  assertEquals(1.0, r.elevatorAuthorityScale, "elevatorAuthorityScale's fallback is unit scaling - no change from prior behavior");
+  assertEquals(1.0, r.rudderAuthorityScale, "rudderAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(20.0, r.cyclicLimitDegrees, "cyclicLimitDegrees' fallback matches RotorForces' own prior hardcoded 20-degree clamp");
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(0.0, r.rotorAngularDampingCoefficient, "rotorAngularDampingCoefficient's fallback is 0 - no angular-rate damping term at all unless configured (MINECRAFT-537 zero/off parity)");
+  assertEquals(0.0, r.fixedWingAngularDampingCoefficient, "fixedWingAngularDampingCoefficient's fallback is 0 - no angular-rate damping term at all unless configured (MINECRAFT-542 zero/off parity), a wholly separate field from rotorAngularDampingCoefficient");
   assertEquals(0.0, r.rotorAirDragCoefficient, "rotorAirDragCoefficient's fallback is 0 - no translational drag term at all unless configured (MINECRAFT-543 zero/off parity)");
   assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertEquals(1.0, r.suspensionSpringMultiplier, "suspensionSpringMultiplier's fallback is a pure no-op - an unconfigured vehicle's calibrated spring rate is unchanged");
@@ -98,8 +102,10 @@ class OverridesTest {
   assertNotNull(r.angularWaterDrag);
   assertNotNull(r.antiRollStiffness);
   assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
+  assertNotNull(r.aileronAuthorityScale); assertNotNull(r.elevatorAuthorityScale); assertNotNull(r.rudderAuthorityScale);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
   assertNotNull(r.rotorAngularDampingCoefficient);
+  assertNotNull(r.fixedWingAngularDampingCoefficient);
   assertNotNull(r.rotorAirDragCoefficient);
   assertNotNull(r.suspensionDampingRatio);
   assertNotNull(r.suspensionSpringMultiplier);
@@ -261,6 +267,77 @@ class OverridesTest {
    assertFalse(badResult.success(), "a negative rotorAngularDampingCoefficient reload must be rejected, not silently applied");
    assertEquals(3.0, Overrides.resolved("examplepack:reloadable_helicopter").rotorAngularDampingCoefficient,
      "a rejected reload must retain the PRIOR GOOD rotorAngularDampingCoefficient, not the invalid value or the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-542: fixedWingAngularDampingCoefficient - bounded, optional, fixed-wing-only
+ // angular-rate damping torque, reusing M537's dissipative-drag formula/no-reversal clamp but a
+ // wholly separate field from rotorAngularDampingCoefficient above (deliberately never shared).
+
+ @Test void fixedWingAngularDampingCoefficientOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.fixedWingAngularDampingCoefficient = -0.1;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.fixedWingAngularDampingCoefficient = FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT + 0.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nonFinite = new Overrides.Tuning(); nonFinite.fixedWingAngularDampingCoefficient = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nonFinite::validate);
+  var zero = new Overrides.Tuning(); zero.fixedWingAngularDampingCoefficient = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zero::validate);
+  var atCap = new Overrides.Tuning(); atCap.fixedWingAngularDampingCoefficient = FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT; // the cap itself is allowed
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.fixedWingAngularDampingCoefficient = 5.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void fixedWingAngularDampingCoefficientParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.fixedWingAngularDampingCoefficient = 4.5;
+   Overrides.setForTest(java.util.Map.of("packid:damped_fixed_wing_vehicle", override));
+   assertEquals(4.5, Overrides.resolved("packid:damped_fixed_wing_vehicle").fixedWingAngularDampingCoefficient,
+     "an explicit operator override must take precedence over the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void fixedWingAngularDampingCoefficientInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.fixedWingAngularDampingCoefficient = 2.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "fixed-wing-damping-base"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("fixed-wing-damping-base", template), java.util.Map.of("packid:inherited_fixed_wing_damping", child), java.util.Map.of());
+   assertEquals(2.0, Overrides.resolved("packid:inherited_fixed_wing_damping").fixedWingAngularDampingCoefficient,
+     "a field the child never set must inherit the template's value, same as every other tuning field");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void fixedWingAngularDampingCoefficientIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.fixedWingAngularDampingCoefficient = 1.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart,
+    "this is a vehicle-only concept - a fixed-wing part has no own angular-damping consumer");
+ }
+
+ @Test void validThenInvalidFixedWingAngularDampingReloadAppliesThenRetainsThePriorGoodOverride() {
+  // Same "invalid reload retains last-known-good" structure as rotorAngularDampingCoefficient
+  // above - exercises the REAL Overrides.apply(Supplier<Config>) seam, not merely setForTest, so
+  // a bad edit mid-session cannot silently corrupt an already-good fixed-wing damping
+  // configuration.
+  try {
+   var goodAirplane = new Overrides.Tuning(); goodAirplane.fixedWingAngularDampingCoefficient = 3.0;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_airplane", goodAirplane), java.util.Map.of()));
+   assertTrue(goodResult.success(), "a valid fixedWingAngularDampingCoefficient reload must apply cleanly");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_airplane").fixedWingAngularDampingCoefficient);
+
+   var invalidAirplane = new Overrides.Tuning(); invalidAirplane.fixedWingAngularDampingCoefficient = -1.0; // out of range
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_airplane", invalidAirplane), java.util.Map.of()));
+   assertFalse(badResult.success(), "a negative fixedWingAngularDampingCoefficient reload must be rejected, not silently applied");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_airplane").fixedWingAngularDampingCoefficient,
+     "a rejected reload must retain the PRIOR GOOD fixedWingAngularDampingCoefficient, not the invalid value or the 0.0 fallback");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }
@@ -429,6 +506,70 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, lift::validateSupportedForPart);
   var control = new Overrides.Tuning(); control.controlSurfaceSlope = 4.0;
   assertThrows(IllegalArgumentException.class, control::validateSupportedForPart);
+ }
+
+ // MINECRAFT-541: aileron/elevator/rudderAuthorityScale - bounded, independent per-axis
+ // fixed-wing control authority, each a multiplier on top of the shared controlSurfaceSlope
+ // above, consumed by PhysicsBridge.stepFlight.
+
+ @Test void axisAuthorityScalesOutOfRangeFailValidation() {
+  // Review correction (comment 54143): unlike cyclicAuthorityScale/yawAuthorityScale, 0.0 must
+  // be explicitly VALID here (the ticket's own "test zero/unit/extreme valid values"
+  // acceptance) - there is no other per-axis knob to zero out just one axis's authority.
+  var negativeAileron = new Overrides.Tuning(); negativeAileron.aileronAuthorityScale = -1.0;
+  assertThrows(IllegalArgumentException.class, negativeAileron::validate);
+  var tooLargeAileron = new Overrides.Tuning(); tooLargeAileron.aileronAuthorityScale = 5.01;
+  assertThrows(IllegalArgumentException.class, tooLargeAileron::validate);
+  var zeroAileron = new Overrides.Tuning(); zeroAileron.aileronAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroAileron::validate, "0.0 (fully disabling just this one axis's authority) must be explicitly valid");
+  var atCapAileron = new Overrides.Tuning(); atCapAileron.aileronAuthorityScale = 5.0;
+  assertDoesNotThrow(atCapAileron::validate);
+  var inRangeAileron = new Overrides.Tuning(); inRangeAileron.aileronAuthorityScale = 1.5;
+  assertDoesNotThrow(inRangeAileron::validate);
+
+  var negativeElevator = new Overrides.Tuning(); negativeElevator.elevatorAuthorityScale = -0.01;
+  assertThrows(IllegalArgumentException.class, negativeElevator::validate);
+  var tooLargeElevator = new Overrides.Tuning(); tooLargeElevator.elevatorAuthorityScale = 100.0;
+  assertThrows(IllegalArgumentException.class, tooLargeElevator::validate);
+  var zeroElevator = new Overrides.Tuning(); zeroElevator.elevatorAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroElevator::validate, "0.0 must be explicitly valid");
+  var inRangeElevator = new Overrides.Tuning(); inRangeElevator.elevatorAuthorityScale = 0.5;
+  assertDoesNotThrow(inRangeElevator::validate);
+
+  var negativeRudder = new Overrides.Tuning(); negativeRudder.rudderAuthorityScale = -1.0;
+  assertThrows(IllegalArgumentException.class, negativeRudder::validate);
+  var tooLargeRudder = new Overrides.Tuning(); tooLargeRudder.rudderAuthorityScale = 5.001;
+  assertThrows(IllegalArgumentException.class, tooLargeRudder::validate);
+  var zeroRudder = new Overrides.Tuning(); zeroRudder.rudderAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroRudder::validate, "0.0 must be explicitly valid");
+  var inRangeRudder = new Overrides.Tuning(); inRangeRudder.rudderAuthorityScale = 2.0;
+  assertDoesNotThrow(inRangeRudder::validate);
+ }
+
+ @Test void axisAuthorityScalesParticipateInTheFullPrecedenceChainIndependently() {
+  try {
+   var override = new Overrides.Tuning();
+   // Only aileronAuthorityScale is overridden - the others must still resolve to their own
+   // 1.0 fallback, not pick up this value or any other axis' override (ticket acceptance:
+   // "changing one axis does not scale the others").
+   override.aileronAuthorityScale = 2.0;
+   Overrides.setForTest(java.util.Map.of("packid:glider", override));
+   var r = Overrides.resolved("packid:glider");
+   assertEquals(2.0, r.aileronAuthorityScale, "an explicit operator override must take precedence over the 1.0 fallback");
+   assertEquals(1.0, r.elevatorAuthorityScale, "an unrelated axis override must not change elevatorAuthorityScale's own fallback");
+   assertEquals(1.0, r.rudderAuthorityScale, "an unrelated axis override must not change rudderAuthorityScale's own fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void axisAuthorityScalesAreRejectedOnAPartOverride() {
+  var aileron = new Overrides.Tuning(); aileron.aileronAuthorityScale = 1.5;
+  assertThrows(IllegalArgumentException.class, aileron::validateSupportedForPart);
+  var elevator = new Overrides.Tuning(); elevator.elevatorAuthorityScale = 1.5;
+  assertThrows(IllegalArgumentException.class, elevator::validateSupportedForPart);
+  var rudder = new Overrides.Tuning(); rudder.rudderAuthorityScale = 1.5;
+  assertThrows(IllegalArgumentException.class, rudder::validateSupportedForPart);
  }
 
  // MINECRAFT-536: parasiticDragMultiplier/oswaldEfficiency - bounded fixed-wing parasitic/
@@ -1331,6 +1472,49 @@ class OverridesTest {
      "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
    assertEquals(0.7, Overrides.resolved("packid:glider3").oswaldEfficiency, 1e-9,
      "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-541 self-review: same "invalid reload retaining last-good values" regression
+ // already covered for stallAngleDegrees/liftSlope/controlSurfaceSlope above, for the new
+ // aileron/elevator/rudderAuthorityScale fields. Also covers live removal: the second reload
+ // below OMITS the vehicle entirely (not merely setting an invalid value), confirming it falls
+ // all the way back to the flat 1.0 FALLBACK rather than retaining the first reload's values.
+
+ @Test void invalidReloadRetainsThePriorGoodAxisAuthorityScalesAndRemovalFallsBackToDefault() {
+  try {
+   var good = new Overrides.Tuning();
+   good.aileronAuthorityScale = 1.3; good.elevatorAuthorityScale = 0.9; good.rudderAuthorityScale = 1.1;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider4", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(1.3, Overrides.resolved("packid:glider4").aileronAuthorityScale, 1e-9);
+   assertEquals(0.9, Overrides.resolved("packid:glider4").elevatorAuthorityScale, 1e-9);
+   assertEquals(1.1, Overrides.resolved("packid:glider4").rudderAuthorityScale, 1e-9);
+
+   var invalid = new Overrides.Tuning();
+   // 0.0 is now explicitly VALID (review correction 54143), so use genuinely out-of-range
+   // values here instead - negative and above the 5.0 cap.
+   invalid.aileronAuthorityScale = -1.0; invalid.elevatorAuthorityScale = 999.0; invalid.rudderAuthorityScale = -2.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider4", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload for these fields must be rejected, not silently applied");
+
+   assertEquals(1.3, Overrides.resolved("packid:glider4").aileronAuthorityScale, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(0.9, Overrides.resolved("packid:glider4").elevatorAuthorityScale, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(1.1, Overrides.resolved("packid:glider4").rudderAuthorityScale, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+
+   var removalResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(), java.util.Map.of()));
+   assertTrue(removalResult.success(), "a reload that simply omits the vehicle entirely must itself apply cleanly");
+   assertEquals(1.0, Overrides.resolved("packid:glider4").aileronAuthorityScale, 1e-9,
+     "removing the vehicle's entry entirely must fall back to the flat 1.0 default, not retain the prior good override");
+   assertEquals(1.0, Overrides.resolved("packid:glider4").elevatorAuthorityScale, 1e-9,
+     "removing the vehicle's entry entirely must fall back to the flat 1.0 default, not retain the prior good override");
+   assertEquals(1.0, Overrides.resolved("packid:glider4").rudderAuthorityScale, 1e-9,
+     "removing the vehicle's entry entirely must fall back to the flat 1.0 default, not retain the prior good override");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }

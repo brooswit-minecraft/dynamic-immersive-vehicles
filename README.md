@@ -36,7 +36,15 @@ each vehicle from IV's own definition at the moment it is needed:
   volume sized to displace the vehicle's mass) and not tied to
   `gravityFactor`, whose own IV runtime default actually resolves to full
   gravity when a pack leaves it unset. A blimp with no configured
-  `ballastVolume` gets ordinary gravity, matching IV. See
+  `ballastVolume` gets ordinary gravity, matching IV. An optional, independent,
+  bounded angular-rate damping torque (`fixedWingAngularDampingCoefficient` -
+  MINECRAFT-542) can additionally be configured on top of the control torques
+  above - a dissipative drag opposing the body's own existing roll/pitch/yaw
+  rate (never the pilot's aileron/elevator/rudder input), off by default,
+  reusing the same inertia-aware, no-reversal model `rotorAngularDampingCoefficient`
+  (MINECRAFT-537) uses but as a wholly separate, never-shared field. Fixed-wing
+  only - a blimp (no wing) is completely unaffected by this field regardless of
+  how it is configured. See
   [`FlightForces`](src/main/java/io/github/brooswitminecraft/div/FlightForces.java)
   for the exact model and its stated simplifications (no post-stall/spin
   behavior, no advance-ratio propeller falloff, no altitude/weather air
@@ -543,7 +551,10 @@ after changes.
       "driveForce": 9000.0,
       "stallAngleDegrees": 15.0,
       "liftSlope": 6.283185307179586,
-      "controlSurfaceSlope": 6.283185307179586
+      "controlSurfaceSlope": 6.283185307179586,
+      "aileronAuthorityScale": 1.2,
+      "elevatorAuthorityScale": 1.0,
+      "rudderAuthorityScale": 0.8
     }
   }
 }
@@ -725,6 +736,23 @@ at all). See
 [`RotorForces#angularDampingTorque`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
 for the full model.
 
+`fixedWingAngularDampingCoefficient` (MINECRAFT-542, fixed-wing aircraft
+only - never a blimp, rotorcraft, or ground vehicle - finite, `[0, 1000]`,
+default `0.0` - off) is the same optional, bounded angular-rate damping
+torque as `rotorAngularDampingCoefficient` above, ADDED to (never
+replacing) the aileron/elevator/rudder control torque, reusing that exact
+dissipative viscous-drag, inertia-aware, no-reversal model
+(`RotorForces#angularDampingTorque`) - but as a wholly separate,
+never-shared field, so configuring one vehicle category's damping can
+never silently affect the other's. It is gated on the vehicle actually
+having a wing (`aspectRatio>0`, the same gate `parasiticDragMultiplier`/
+`oswaldEfficiency` below already use) AND on the vehicle not being a
+blimp (the authoritative classification, checked in addition since a
+blimp definition can itself carry a positive `wingArea`/`wingSpan`): a
+blimp's angular motion stays completely unaffected by this field
+regardless of how it OR its wing geometry are configured. `0.0`
+reproduces the model's exact prior behavior (no angular-rate damping term
+at all).
 `rotorAirDragCoefficient` (MINECRAFT-543, rotorcraft only, finite,
 `[0, 5]`, default `0.0` - off) is a bounded MULTIPLIER on a quadratic
 aerodynamic drag force ADDED to (never replacing) the thrust force above -
@@ -781,6 +809,23 @@ cyclic/yaw authority - only on a fixed-wing vehicle's own wing lift and
 control-surface torque. Every field above the documented default (the exact
 prior hardcoded behavior) is omittable independently of the other two.
 
+`aileronAuthorityScale`, `elevatorAuthorityScale`, and
+`rudderAuthorityScale` (MINECRAFT-541, fixed-wing only - same "ignored by a
+ground, blimp, or rotorcraft vehicle" scope as the three fields above) each
+independently multiply the roll/pitch/yaw control torque `controlSurfaceSlope`
+already produces for that one axis, so changing one axis's authority never
+scales the others, the shared `controlSurfaceSlope` baseline, or either
+control surface's own native area/lever-arm geometry. All three are
+non-negative, capped at `5` (unlike `cyclicAuthorityScale`/
+`yawAuthorityScale` below, `0` is explicitly valid here too - there is no
+other per-axis knob to turn off just one axis's authority, e.g. a glider
+with no rudder authority at all), and default to `1.0` - a pure no-op
+reproducing the exact prior shared-`controlSurfaceSlope`-only torque for an
+unconfigured vehicle. `rudderAuthorityScale` scales the yaw torque AFTER the existing
+sideslip-restoring term (`rudderDeflection - sideslip`) is already folded
+in, so it changes that combined torque's magnitude only, never the
+sideslip-restoring term's own semantics.
+
 ### Part overrides, templates, and `extends`
 
 Alongside `vehicles`, the config accepts two more top-level maps:
@@ -832,10 +877,11 @@ A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
-`controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
+`controlSurfaceSlope`, `aileronAuthorityScale`, `elevatorAuthorityScale`, `rudderAuthorityScale`,
+`cyclicLimitDegrees`, `cyclicAuthorityScale`,
 `yawAuthorityScale`, `rotorAngularDampingCoefficient`, `rotorAirDragCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
 `suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
-`verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `toeFrontDegrees`,
+`verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `fixedWingAngularDampingCoefficient`, `toeFrontDegrees`,
 `toeRearDegrees`, `axleDriveForceSharing`, `suspensionSpringMultiplierFront`,
 `suspensionSpringMultiplierRear`, `suspensionDampingRatioFront`, `suspensionDampingRatioRear`.
 Fields baked in at vehicle construction - `massKg`,
