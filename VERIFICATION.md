@@ -3418,3 +3418,56 @@ damping, per standing instruction.
 
 Reported to MINECRAFT-547 and MINECRAFT-545, retracting the
 despawn-lifecycle framing from the immediately preceding subsection.
+
+**Code-level review (John's comment 54253's four specific checks) - no
+live run needed, pure source analysis against the DIV and Sable API
+source.** Clears DIV's own code of all four named concerns rather than
+speculating further:
+
+1. *Anchor offsets (`pos1`/`pos2`)*: `HitchJoint.anchorLocalOffset` is
+   purely body-local (`localOffset - bodyCenter`, confirmed by its own doc
+   comment and MINECRAFT-525's empirical anchor-frame probe) - `bodyCenter`
+   is `BuoyantBody.center`, a `final` field set ONCE in the constructor
+   from the chassis geometry, never updated. Identical computation
+   regardless of how long the body has been active - no staleness
+   possible here by construction.
+2. *Local-frame rotations (`local_frame1`/`local_frame2`)*: for this
+   probe's ORDINARY (unmounted, unrestricted) connections,
+   `JSONConnection.rot` is documented as having "no effect on other
+   connections" (`HitchJoint.localJointFrame`'s own doc, review 53817) -
+   `connectionRotationVehicleLocal` returns `HitchJoint.localJointFrame
+   (connectionRot)` directly for a root-level connection (this fixture's
+   case, `owner` is the vehicle itself, not an `APart`), which is identity
+   whenever `rot` is null/unset. No live-orientation dependency at all for
+   this fixture - "current vs. stale" does not apply to an always-identity
+   value.
+3. *Removed constraints actually absent*: `HitchRegistry.reconcile` always
+   calls `release(trailer)` - which synchronously removes the OLD
+   `PhysicsConstraintHandle` via `own.remove()` - BEFORE calling `create.
+   get()` to build any new one, in the same method call, same tick, no
+   gap. Structurally guaranteed by this code's own control flow; the old
+   and new constraint can never coexist.
+4. *Current body-local transforms vs. stale construction pose*: traced
+   `connectionOffsetVehicleLocal`/`connectionRotationVehicleLocal`'s own
+   source - for a ROOT-level connection (`owner instanceof APart` is
+   false, exactly this fixture's case), `vehicleOrientation` is NOT EVEN
+   READ; the method returns `connectionPos`/`localJointFrame(connectionRot)`
+   directly, with no transform by live or cached orientation at all. Also
+   confirmed `VehicleMovementMixin.div$move` calls `PhysicsBridge.active`
+   (which triggers `createHitch`) BEFORE `PhysicsBridge.step` (which
+   refreshes `v.orientation` from the box's native pose) in the same
+   tick - so `v.orientation` IS technically "last tick's" value at
+   `createHitch` time for an already-active body - but since this fixture's
+   effective code path never reads `vehicleOrientation` at all, that
+   staleness is provably inert here regardless.
+
+**None of DIV's own anchor/frame/lifecycle code shows a staleness or
+double-constraint defect for this fixture.** This does not, by itself,
+establish a native Sable/Rapier solver defect (not inferring that merely
+from the fresh-vs-stepped correlation, per instruction) - it narrows where
+one would have to live if it exists: inside Sable's own native
+joint-creation/first-solve handling of an already-active vs. freshly-
+constructed `RigidBodyHandle`, which is outside this codebase and is what
+the assigned read-only specialist is positioned to inspect. The
+already-active unsafe-fallback correction (54237) remains open and in
+scope, not dropped, not addressed in this update.
