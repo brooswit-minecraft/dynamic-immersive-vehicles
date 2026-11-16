@@ -3366,3 +3366,497 @@ fresh `gradle --no-daemon --offline clean test build` at the merged head
 checksum
 `62e0ba336172f536c0f770996368cf14092d639a64b35b685efb68014c877b34`.
 
+# MINECRAFT-546: explain effective tuning values and provenance, 2026-11-15
+
+Adds `TuningProvenance` (pure, server-independent explanation logic) and
+`TuningCommand` (`/div tuning <target>`, permission level 2) - a read-only
+operator diagnostic printing a targeted vehicle's (and its installed
+parts') effective resolved `Overrides.Tuning`, with each field's winning
+precedence level. Deliberately reuses the actual shared resolver rather
+than a duplicate precedence implementation: `Overrides.effective`/
+`effectivePartOverride` for the real `extends`-chain merge, `Overrides.
+defaultTuning` for the real documented fallback, and `PhysicsBridge.
+applyLiveSafeFields`/`reportFieldsNeedingRespawn` for the real live-
+reload-vs-respawn-required field classification (derived by actually
+calling those two methods against sentinel `Tuning` pairs, never a second
+hand-maintained field list). Two small additive public accessors were
+added to support this: `Overrides.getTemplate(String)` (mirrors `get`/
+`getPart` for the third `templates` namespace) and `PhysicsBridge.
+activeTuning(EntityVehicleF_Physics)` (the live `Tuning` an already-active
+body was constructed with) - neither changes any existing method's
+behavior or signature.
+
+Per this ticket's explicit "report pack/native/derived layers as unwired
+unless actual code proves otherwise": every production call site in this
+codebase (`PhysicsBridge.tuning`, every `experimental.*Probe`) passes
+`null` for `packMetadata`/`ivAdapted`/`physicallyDerived` to `Overrides.
+resolved`/`resolvedPart` today, so `TuningProvenance` can only ever report
+`OPERATOR_OVERRIDE`, `FALLBACK`, or `UNSET` (no flat fallback defined) in
+practice - the command's output leads with an explicit notice naming all
+three unwired layers rather than ever fabricating one. Part-level
+explanations are filtered to only the fields with an actual part-level
+consumer (derived from `Tuning#validateSupportedForPart` itself, not a
+second hand-maintained list), per the ticket's "no unrelated config
+contents" requirement.
+
+`TuningProvenanceTest` (9 tests, no live FML config directory or Gson
+needed, same `Overrides.setForTest`/`apply` seams `OverridesTest` already
+uses) covers: an unconfigured key resolving every field from fallback/
+unset; a direct operator override with no template attribution; a field
+inherited through a two-level `extends` chain correctly attributed to the
+nearest ancestor that actually set it (not merely the immediate parent);
+part explanations excluding every field with no part-level consumer;
+live-safe/respawn-required classification matching `PhysicsBridge`'s own
+real methods and being mutually disjoint; a rejected (out-of-range)
+reload leaving a previously-resolved explanation byte-identical to its
+last-known-good value (the ticket's "rejected-edit behavior" requirement);
+and the rendered text output.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --offline --no-daemon build --console=plain`,
+Gradle 8.14 / JDK 21 (Temurin), against this branch
+(`minecraft-546/explain-effective-tuning-provenance`) at the accepted
+baseline head `4ee035a16fffe416d5543343df11f3d793a16dd6` (origin/main,
+unchanged - no sibling sprint ticket had merged yet at pickup time) -
+`BUILD SUCCESSFUL`. The real JUnit XML reports total **794 tests**, 0
+skipped, 0 failures, 0 errors across the whole suite (785 baseline + 9
+new `TuningProvenanceTest` cases, every pre-existing test run unchanged
+alongside them).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `127ba2721825dff20ed64c219db0ffe6e9ff589d9a01a96b8a8d0e624c90cac7`)
+was produced.
+
+Not yet performed: in-game/live-server acceptance of the actual `/div
+tuning` command path (real vehicle spawn, real selector resolution through
+`mcinterface1211.WrapperWorld.getEntity`, real chat output) - this
+ticket's own brief scopes broad/hardware playtesting to the user, and no
+`gradle runServer` probe for this specific command was added given this
+ticket's bounded scope; the command's own entity-resolution and rendering
+logic is otherwise covered by `TuningProvenanceTest` and a successful
+compile against the real NeoForge/MTS command and entity APIs.
+
+**Post-merge-of-main reconciliation (2026-11-15).** Merged `origin/main`
+(`95b798e`, MINECRAFT-539's axle-specific spring/damping tuning, already
+landed via PR #37) into this branch; the only conflict was this file's own
+append point (two tickets appending at the same prior section), resolved
+by keeping both sections in full, in landing order. `Overrides.java`/
+`PhysicsBridge.java` merged cleanly with no conflict - M539's new
+`suspensionSpringMultiplierFront`/`Rear` and
+`suspensionDampingRatioFront`/`Rear` fields need no change on this
+ticket's side at all: `TuningProvenance` enumerates `Overrides.Tuning`'s
+public fields via reflection rather than a hand-maintained list, so the
+new fields are explained automatically. Re-ran the full suite at the
+merged head under the same slot-lock: `/tmp/gradle-8.14/bin/gradle
+--offline --no-daemon clean test build --console=plain` -
+`BUILD SUCCESSFUL`. The real JUnit XML reports total **819 tests**, 0
+skipped, 0 failures, 0 errors (M539's 810 plus this ticket's own 9,
+confirmed present and passing together).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `288d140a025f1fb01608a6ca330afb1f8db32f75661ce721b119c0b065ebbab3`)
+was produced.
+
+**Self-review kickback fix (2026-11-16, comment Jira 54183).** Finding:
+`TuningProvenanceTest` covered only the pure provenance/precedence logic,
+not the actual command/adapter path the ticket explicitly requires
+(registration/execution, UUID-based entity resolution, rendered output).
+Investigated adding a real `CommandDispatcher<CommandSourceStack>`
+registration-shape test directly against `TuningCommand` - this FAILED TO
+COMPILE (`package com.mojang.brigadier does not exist`): this project's
+test source set has no Minecraft/NeoForge/Brigadier/MTS classes on its
+classpath at all (only `main` does, via the neoForge moddev plugin).
+Moving the test to only reference `TuningCommand`'s own already-pure
+`explainResponse`/message-builder methods still failed, this time at
+RUNTIME (`NoClassDefFoundError` on class load, before any assertion ran) -
+merely loading a class that imports `net.minecraft.*`/MTS types is not
+possible from this test source set, not just calling into Minecraft APIs
+directly. This is the same pre-existing constraint `PhysicsBridgeStepperTest`'s
+own doc already states for a live `EntityVehicleF_Physics`/Sable body,
+just discovered to apply one level earlier (the whole class, not only the
+live-entity-dependent methods on it) than that precedent's own wording
+suggested.
+
+Fix: moved every actual DECISION `TuningCommand` makes - the vehicle-not-
+found/no-definition failure messages, and the full response-assembly
+logic (`explainResponse`: per-field rendering, part-key dedup, skipping
+parts with no override entry) - into `TuningProvenance`, which has no
+Minecraft/NeoForge/MTS import at all and was already unit-testable.
+`TuningCommand` itself is now pure thin glue: resolve the selector target
+to a live vehicle via the UUID bridge, read its plain fields, delegate to
+`TuningProvenance`, send the result - documented as not unit-testable for
+the reason above, with the actual decision logic it used to contain now
+covered instead. New `TuningCommandTest` (6 tests, exercising
+`TuningProvenance`'s moved methods, never `TuningCommand` itself): the
+not-eligible and no-definition messages; response assembly leads with the
+unwired-layers notice and the correct active/inactive status line; an
+installed part with no override entry at all is skipped entirely; and
+four installed instances of the same part definition (e.g. four identical
+wheels) are explained exactly once, not four times, with the real
+resolved value present.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --offline --no-daemon clean test build
+--console=plain` at this fix's head - `BUILD SUCCESSFUL`. The real JUnit
+XML reports total **825 tests**, 0 skipped, 0 failures, 0 errors (819
+from the prior merged-with-main head plus these 6 new `TuningCommandTest`
+cases).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `cd54ddeb50664aadb852cae76a542391acfb2bfb6b4f3d32377e3ea1bc56ec34`)
+was produced.
+
+Still not performed, for the reason stated above (no live Minecraft/MTS
+runtime reachable from this test source set, not merely this ticket's own
+scope choice as previously stated): true end-to-end execution of
+`TuningCommand.register`/`run` against a live server. The command/adapter
+path's actual decision logic is covered via `TuningProvenance` as
+described; the remaining uncovered surface is thin, directly-inspectable
+glue (selector resolution, field reads, `CommandSourceStack` sends) - the
+same category of gap every other live-`EntityVehicleF_Physics`-dependent
+path in this codebase already carries and documents rather than closes.
+
+**Second self-review kickback fix (2026-11-16, comment Jira 54192).**
+Finding: for a respawn-required field on an already-ACTIVE vehicle, the
+diagnostic rendered only the freshly resolved CONFIG value under a
+generic "active" label - `TuningCommand.run` computed `PhysicsBridge.
+activeTuning(vehicle)` only to collapse it into a boolean, then discarded
+the actual live `Tuning` object entirely. After a valid reload changes
+e.g. `massKg`, an already-active body keeps its OLD mass (that field is
+only ever read once, at construction - see `PhysicsBridge.
+reportFieldsNeedingRespawn`'s own doc) while the diagnostic would have
+shown the NEW value with nothing marking the two as different.
+
+Fix: `TuningProvenance.explainResponse`/`render` now take the vehicle's
+own live `Tuning` (or `null` if it has no active body) instead of a bare
+boolean. For every field classified `respawnRequired`, if the live
+value differs from the freshly resolved config value, the rendered line
+now explicitly names BOTH - the resolved config value as the headline
+(unchanged position/format) plus `LIVE (currently applied to this
+vehicle): <value>` - and notes a respawn is needed to pick up the new
+one. A `liveSafe` field is NEVER compared this way at all (hot reload
+already keeps the live object's own field in sync by mutating it in
+place, so comparing would be pointless and could only ever show a false
+divergence from a latent bug, not a real one). `TuningCommand.run` now
+passes the real `PhysicsBridge.activeTuning(vehicle)` return value
+straight through instead of discarding it for a boolean.
+
+Four new `TuningCommandTest` cases: a stale respawn-required field (live
+300.0 vs. resolved-config 500.0) is flagged with both values named; a
+respawn-required field already matching the live body shows no
+divergence note; a live-safe field is never compared against `liveTuning`
+even when deliberately set to a different value (proving the "never
+compared" claim, not just that it happens not to differ in other tests);
+and an inactive vehicle (`liveTuning == null`) shows no divergence note
+at all, since there is nothing live to compare against.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --offline --no-daemon clean test build
+--console=plain` at this fix's head - `BUILD SUCCESSFUL`. The real JUnit
+XML reports total **829 tests**, 0 skipped, 0 failures, 0 errors (825
+from the prior head plus these 4 new cases).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `e33a538c447e9d1a04d82caec5f0c4076c57929c4efeae98ddfa460b84658de7`)
+was produced.
+
+**Third self-review kickback fix (2026-11-16, comment Jira 54202).**
+Finding: the explicit acceptance requirement to test the actual command/
+adapter path was still unmet - `TuningCommandTest` exercised only
+`TuningProvenance`, never registering/executing `TuningCommand` itself.
+Investigated the neoForge moddev plugin's own `net.neoforged.moddevgradle.
+dsl.UnitTest` class (confirmed present via `javap` against the cached
+plugin jar) - an OFFICIAL, documented mechanism for exactly this gap
+(wiring the real Minecraft/NeoForge/registered-mod runtime onto the
+`test` source set), not a custom classpath hack. This is the same
+pattern this very `build.gradle` already used for a narrower case
+(`testImplementation 'org.joml:joml:1.10.5'`, added specifically because
+a main class importing JOML could not otherwise be loaded from a test).
+
+Enabled it: `neoForge { unitTest { enable(); testedMod = mods.
+dynamicimmersivevehicles } }` (pure addition to the existing `neoForge{}`
+block). First attempt under `--offline` failed - `net.neoforged.
+fancymodloader:junit-fml:4.0.45` was not yet cached; a plain (non-offline)
+`gradle test` fetched it successfully (one-time, this machine's Gradle
+cache now has it for every future `--offline` run, including CI's own
+`gradle clean build` once network is available there again - currently
+blocked by the same disclosed hosted-CI billing/spending-limit issue
+every recent DIV ticket has hit, independent of this change).
+
+New `TuningCommandRegistrationTest`: a REAL `CommandDispatcher<
+CommandSourceStack>`, the REAL `TuningCommand.register`, asserting the
+resulting Brigadier tree has the right shape - `div` -> `tuning` ->
+an argument node named `target`, with a non-null permission requirement
+on `div`. This is the actual command/adapter path the ticket's
+acceptance requires for registration/permission-gate coverage, closing
+the gap comment 54202 named. Full command EXECUTION against a real
+spawned `EntityVehicleF_Physics`/Sable body, or a real `CommandSourceStack`
+instance, remains infeasible in ANY unit test context regardless of this
+change - that needs a live, running dedicated server/world (the same
+pre-existing constraint `PhysicsBridgeStepperTest`'s own doc already
+states) - `CommandDispatcher.register` itself never executes anything,
+so no such instance was ever needed for THIS test; the response-assembly
+DECISION logic a real execution would exercise is already covered via
+`TuningProvenance`/`TuningCommandTest`, as documented in the prior fix.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+(the FIRST non-`--offline` run needed only to fetch `junit-fml` once, as
+above; every run since, including the final one below, used the now-
+populated local cache) at this fix's head - `BUILD SUCCESSFUL`. The real
+JUnit XML reports total **830 tests**, 0 skipped, 0 failures, 0 errors
+(829 from the prior head plus this one new registration test) - every
+pre-existing test (including the 829 that ran before `unitTest` was
+enabled) still passes unchanged, confirming enabling it introduced no
+regression anywhere else in the suite.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `401bd778991662045577fde4c97c604ac027110cf1d64e4fac388a7aabe38b9e`)
+was produced.
+
+**Fourth self-review kickback fix (2026-11-16, comments Jira 54209/54213/
+54221).** Finding: a real registration-tree/non-null-requirement check
+alone does not prove allowed/denied permission behavior, successful
+resolution, rendered output, or the non-vehicle failure path - John's own
+follow-up (comment 54221) additionally found the attempted live
+`gradle runServer` probe (an interim, since-abandoned approach) failed at
+its own fixture-setup stage (a freshly-spawned MTS vehicle's own
+`uniqueUUID` - confirmed via decompiled `WrapperWorld.
+spawnEntityInternal` bytecode to be an INDEPENDENTLY random-generated
+UUID, never copied onto the wrapping Minecraft entity by that spawn path -
+is not the UUID a Minecraft entity selector can ever find it by), and
+explicitly endorsed (comment 54209/54221) a bounded, production-used
+adapter seam with fake resolver/output collaborators over building a
+larger live harness to chase that fixture problem further.
+
+Fix: `TuningCommand` now exposes `VehicleLookup`/`LookupResult`/
+`ResolvedVehicle` - a seam separating "resolve a selected Minecraft
+entity to a DIV vehicle" (the genuinely live-world-dependent part,
+`productionLookup`, unchanged in real behavior) from "decide what to do
+with that resolution" (`respond` - the real DECISION logic, needing no
+`Entity`/live world at all). `run` is now pure glue: extract the selector
+argument and its display name, call the lookup, delegate to `respond`.
+Production wiring (`register`) is unchanged in actual behavior - still
+registers `TuningCommand::productionLookup` as the real resolver.
+
+New `TuningCommandAdapterTest` (6 tests, superseding the single
+registration-only test from the prior fix): a real `CommandDispatcher<
+CommandSourceStack>` and the real `TuningCommand.register` (tree shape,
+as before); the REAL permission requirement predicate evaluated against
+real, minimally-constructed `CommandSourceStack` instances - level 2 and
+4 allowed, level 1 and 0 denied (not merely checked non-null, closing
+that named gap); and three `TuningCommand.respond` cases - not-eligible,
+no-loaded-definition, and a fully resolved vehicle (including an
+installed part) - each invoking the REAL method with a FAKE
+`LookupResult` standing in for what a live `VehicleLookup` would have
+produced, through a real `CommandSourceStack` wrapping a capturing
+`CommandSource` so assertions are against the actual text the real
+`sendSuccess`/`sendFailure` send (confirmed via their own bytecode that
+neither dereferences a null level/server for this call shape), not a
+hand-rolled substitute. Still not achievable from any unit test, and not
+required per the above: `run`'s own `EntityArgument`/UUID-to-live-vehicle
+extraction, which needs a live, running `ServerLevel` with a real
+spawned vehicle - a few directly-inspectable lines of glue, with every
+decision it leads to now covered by `respond`'s own tests.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+at this fix's head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**835 tests**, 0 skipped, 0 failures, 0 errors.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `366a8a50bae316d3476426aea7ee9e7c297b04e0e371f129119572b25908b7b1`)
+was produced.
+
+**Fifth self-review kickback fix (2026-11-16, comment Jira 54227) - a real
+production bug, not only a test-coverage gap.** Finding: `TuningCommand.
+productionLookup` resolved the selected Minecraft entity to its MTS
+vehicle by UUID equality (`AWrapperWorld.getEntity(target.getUUID())`).
+Per the prior fix's own finding (comment 54221/this file's own fourth
+entry above), a freshly-spawned MTS vehicle's own `uniqueUUID` and the
+wrapping Minecraft entity's own UUID are independently random-generated
+and never synchronized by the spawn path - so that lookup returned
+`NOT_FOUND` (the "not a DIV-eligible vehicle" message) for every selected
+vehicle that had not yet round-tripped through at least one real NBT
+save/load, which in practice is most vehicles an operator would actually
+want to diagnose. This was a correctly-identified production defect in
+the command itself, not merely a missing test.
+
+Fix: resolve through the ACTUAL wrapper/entity relationship instead of
+UUID equality - `mcinterface1211.BuilderEntityExisting` (confirmed, via
+the same decompiled `spawnEntityInternal` bytecode the prior finding
+already cited) unconditionally holds the live wrapped `AEntityB_Existing`
+in its own `entity` field the MOMENT it is constructed, independent of
+any UUID relationship and well before any save/load. That field is
+`protected` with no public accessor anywhere in MTS's own API, so
+`TuningCommand.wrappedMtsEntity` is a new, bounded reflective accessor
+reading it by name - exactly the "bounded production accessor" the
+review itself suggested. Never throws: an entity that is not actually a
+`BuilderEntityExisting`, or a future MTS version renaming/removing the
+field, degrades to the same `NOT_FOUND` an actually-ineligible entity
+already gets, never a crash. `productionLookup` no longer touches
+`AWrapperWorld`/UUID at all.
+
+Two new `TuningCommandAdapterTest` cases: `wrappedMtsEntity(null)`
+returns `null` without throwing (the real "not actually a
+`BuilderEntityExisting`" branch, exercised with zero `Entity`/`Level`
+construction needed, since `instanceof` on `null` is always `false` in
+Java); and a reflective existence/type check confirming
+`BuilderEntityExisting` still declares its own `entity` field as
+`AEntityB_Existing` under the current MTS jar - so a future MTS update
+that renames/retypes/removes it fails this test loudly, rather than only
+ever being discovered live in-game. `wrappedMtsEntity`'s own happy path
+(an actual `BuilderEntityExisting` wrapping a real
+`EntityVehicleF_Physics`) remains infeasible in any unit test, the same
+pre-existing constraint named throughout this ticket's own history.
+
+Local slot-lock coordination (same `/tmp/div-gradle-slot.lock` flock).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean test build --console=plain`
+at this fix's head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**837 tests**, 0 skipped, 0 failures, 0 errors (835 prior plus these 2
+new cases).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `0fd62848020956792499d965cf6839c67848ec7c9981b82eb4cc88fbc170acaa`)
+was produced.
+
+**Live probe proof of the fixed wrapper/entity lookup (2026-11-16, John's
+comment 54231/review 54232).** John asked that the bounded live probe
+(abandoned earlier in this ticket's history once the seam-based approach
+looked sufficient) be revived specifically to demonstrate the fresh-
+wrapper lookup and actual command output at this fix's exact head, since
+`TuningCommandAdapterTest`'s null-safety/field-existence cases alone do
+not exercise a real `BuilderEntityExisting` holding a freshly spawned
+`EntityVehicleF_Physics`. Restored `TuningCommandProbe` (opt-in via
+`-Ddiv.experimentalTuningCommandProbe=true`, same convention as every
+other probe in this package): spawns one minimal real vehicle, selects
+it via the REAL wrapping Minecraft entity's own UUID (never `vehicle.
+uniqueUUID` - the exact mismatch comment 54227's fix addressed), and
+dispatches `div tuning <uuid>` through the REAL registered dispatcher
+with a real `CommandSourceStack` wrapping a capturing `CommandSource`.
+
+Two real fixture problems were found and fixed along the way, both in
+the PROBE itself, not production code: (1) `level.getEntities(Entity,
+AABB,Predicate)` returned empty even over an astronomically large AABB
+and after confirming chunk-readiness via `getChunkNow` - replaced with
+`ServerLevel.getAllEntities()` (a direct iterable over every tracked
+entity, no AABB/section lookup involved), which found it immediately;
+(2) force-loading a chunk is not synchronously complete - polling
+`getChunkNow` (the same real readiness check `FlightRotorRuntimeFixtureProbe`'s
+own spawn-gating already uses) instead of a fixed tick count was the
+actual fix for an earlier "No entity was found" failure.
+
+Live run result: `vehicle.uniqueUUID` and the wrapping Minecraft entity's
+own `getUUID()` were CONFIRMED DIFFERENT (`sameUUID=false`) - direct live
+confirmation of comment 54227's own finding, now observed on an actual
+running server, not only from decompiled bytecode. Dispatching `div
+tuning <the real Minecraft-side UUID>` through the real dispatcher
+returned `result=1` (success) and captured 46 real rendered response
+lines through the real `sendSuccess` path, including the seeded operator
+override (`driveForce=4321.0`, tagged `operator override`) and the
+vehicle's own key - `[DIV tuningCommandProbe] COMPLETE - PASSED`. This is
+live, real proof that `TuningCommand.wrappedMtsEntity`'s reflective
+accessor correctly resolves a freshly-spawned (never saved/loaded)
+vehicle end-to-end through the real command, closing exactly the gap the
+review named.
+
+Local slot-lock coordination (`/tmp/div-gradle-slot.lock` flock held for
+the probe's own full `gradle runServer` lifetime, including bounded
+server cleanup via `stop`). Re-ran the full suite afterward at the same
+head: `/tmp/gradle-8.14/bin/gradle --no-daemon clean test build
+--console=plain` - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**837 tests** (unchanged - the probe is a live-server-only opt-in path,
+not a JUnit test), 0 skipped, 0 failures, 0 errors.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `939e7190385adf2547d64b723911914f5b753f778b03db9b07d5858229c0d10b`)
+was produced.
+
+**Probe reliability + honest cleanup evidence fix (2026-11-16, John's
+independent-verification comment 54238).** John independently reproduced
+the live `PASSED` run above (clean head, 837 tests, log hashes recorded)
+and raised one legitimate finding: the probe's cleanup restored the
+original config and logged that the write/reload calls didn't throw, but
+never actually verified the restored file reads back byte-identical to
+the original - "please retain honest cleanup evidence rather than
+overclaiming." Fixed: the `finally` block now reads the restored file
+back and compares it to the captured original content (or confirms
+deletion, for the no-prior-file case), logging an explicit CONFIRMED/
+MISMATCH line rather than only "the write call didn't throw."
+
+A second, unrelated re-run also surfaced genuine PROBE-ONLY flakiness
+(not a production defect): the fixed `SETTLE_TICKS=5` constant used to
+decide "wait this many ticks after spawning before the vehicle is
+selectable" was itself a guessed constant, and one re-run's vehicle was
+still not visible via `ServerLevel.getAllEntities()` after 5 ticks when
+the server's own first ticks ran unusually fast right after startup.
+Fixed the same way chunk-readiness already was: poll `getAllEntities()`
+for actual non-empty visibility (bounded, same 100-tick ceiling as the
+chunk-readiness wait) instead of a fixed guessed tick count.
+
+Re-ran the live probe at this fix's head: identical `PASSED` outcome
+(`vehicle.uniqueUUID` != wrapping entity's own UUID confirmed again,
+dispatcher `result=1`, 46 captured lines) PLUS the new line - `config
+restoration CONFIRMED byte-identical to the pre-probe original
+(restored)`. Re-ran the full suite afterward: `/tmp/gradle-8.14/bin/gradle
+--no-daemon clean test build --console=plain` - `BUILD SUCCESSFUL`. The
+real JUnit XML reports total **837 tests** (unchanged - the probe is
+live-server-only), 0 skipped, 0 failures, 0 errors.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `975cb8394e7093d964671c621f6fd2ae7f6de34abd17539328c9eb6211115bf7`)
+was produced.
+
+**Post-merge (2026-11-16).** Independent reviewer `brooswit` approved
+exact head `1544a0b46a23d85ddd4d63136ece978f498ccc0a` (GitHub PR review
+5927086140, verified via `gh pr view 43 --json headRefOid,reviews` -
+`MERGE OK: approved @ 1544a0b4 == head`, per this repo's own documented
+pre-merge verification query); merged PR #43 into `main` at merge commit
+`a3ed39e78bd677d52e89bb5f803d13e913b06a03` (clean merge, no conflicts).
+Post-merge hosted CI (run 43951376282, triggered by the merge push)
+failed with all 5 jobs executing zero steps each - the same pre-
+existing, already-disclosed hosted-CI billing/spending-limit blockage
+every recent DIV ticket on this repo has hit (most recently
+MINECRAFT-539's own merge, run 43779308182). No `release.yml` or tag-
+based release workflow exists in this repo beyond that billing-blocked
+CI (confirmed: `.github/workflows/` contains only `ci.yml`, triggered on
+`pull_request`/`push: [main]`, no tag/`workflow_dispatch` trigger), and
+this change (a new read-only diagnostic command plus two small additive
+accessors, no version bump) does not warrant inventing one. Retained
+exact-head local evidence stands in its place: a fresh `gradle --no-
+daemon clean test build` at the merged head (flock-protected on
+`/tmp/div-gradle-slot.lock`) reproduced **837 tests**, 0 skipped, 0
+failures, 0 errors, and produced
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` with SHA-256
+checksum
+`da536806f7b4f38fe8cc54c0a156e1cad2900b1d2eca4b10976f53b3022ba5c5`.
+
+**Reconciliation onto M546 (PR42 flagged dirty/nonmergeable, 2026-11-16).**
+Main advanced from this ticket's prior integration point (M539 @
+`95b798e`) to `eff1e15` via MINECRAFT-546 (explain effective tuning
+provenance). Merged `origin/main` into this existing
+`minecraft-542/fixed-wing-angular-rate-damping` branch (same worktree,
+same implementation owner - no competing worker). Conflicts were confined
+entirely to VERIFICATION.md's own append point (this ticket's section
+ending immediately before M546's "# MINECRAFT-546" heading) - a pure
+two-sided append, resolved by keeping both sections with no content
+dropped from either side. `Overrides.java` and `PhysicsBridge.java` merged
+cleanly with NO conflict at all (`git merge` auto-merged both) - M546
+touches `TuningProvenance`/`TuningCommand` (a new, separate read-only
+diagnostic command path reading already-resolved `Tuning` values) and
+`DynamicImmersiveVehicles.java`/`build.gradle` (command registration,
+moddev unit-test support), none of which overlaps this ticket's
+`stepFlight`/`Overrides.Tuning#fixedWingAngularDampingCoefficient`
+plumbing; this ticket's own reviewed behavior (the `isBlimp`-corrected gate
+from the prior review pass) is therefore preserved byte-for-byte across
+the merge, confirmed by the full suite below re-passing unchanged.
+
+New exact head: `cfcc87d7d7b1053e6c1e0eac23d4a9c5a28e2b5e8` <!-- placeholder, replaced after commit -->.
+Validated under the EXISTING shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` (held for the whole Gradle lifetime; no
+unlink/replacement/chmod; no parallel heavy job observed at claim time):
+`/tmp/gradle-8.14/bin/gradle --no-daemon build --console=plain` - `BUILD
+SUCCESSFUL`. The real JUnit XML reports total **851 tests**, 0 skipped, 0
+failures, 0 errors across the whole suite (M546's own 837 plus this
+ticket's 14, all present and passing together, confirming no regression
+in either direction).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `f05d3d36fd355f73fc823f1566758ba662a84fbf62c4480bfacac4d54bb58745`)
+was produced. No merge of PR42 itself was performed or authorized by this
+pass - only the branch-level reconciliation requested; PR42's own merge
+remains gated on Wroosbit's/the reserved reviewer's exact-head approval
+and the existing hosted-CI billing disclosure, per the coordinator's
+explicit "no merge authorization inferred" instruction.
