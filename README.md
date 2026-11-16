@@ -63,7 +63,10 @@ each vehicle from IV's own definition at the moment it is needed:
   angular-rate damping torque (`rotorAngularDampingCoefficient` -
   MINECRAFT-537) can additionally be configured on top of this - a
   dissipative drag opposing the body's own existing roll/pitch/yaw rate
-  (never the pilot's cyclic/yaw input), off by default. See
+  (never the pilot's cyclic/yaw input), off by default. A separate
+  optional, bounded translational (linear) air drag force
+  (`rotorAirDragCoefficient` - MINECRAFT-543) opposes the body's own
+  existing linear velocity instead, also off by default. See
   [`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
   for the exact model and its stated simplifications (no translational-lift
   efficiency gain in forward flight, no retreating-blade stall, no
@@ -525,7 +528,8 @@ after changes.
       "cyclicLimitDegrees": 15.0,
       "cyclicAuthorityScale": 1.3,
       "yawAuthorityScale": 0.8,
-      "rotorAngularDampingCoefficient": 2.5
+      "rotorAngularDampingCoefficient": 2.5,
+      "rotorAirDragCoefficient": 0.6
     },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
@@ -733,6 +737,35 @@ at all). See
 [`RotorForces#angularDampingTorque`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
 for the full model.
 
+`rotorAirDragCoefficient` (MINECRAFT-543, rotorcraft only, finite,
+`[0, 5]`, default `0.0` - off) is a bounded MULTIPLIER on a quadratic
+aerodynamic drag force ADDED to (never replacing) the thrust force above -
+the same "multiplier against an existing calibrated/native number" shape
+`parasiticDragMultiplier` already establishes for fixed-wing drag, not a
+raw drag-strength scalar. The underlying force is the standard explicit
+`0.5*airDensity*Cd*A*|v|*v` formulation, built from the SAME native pieces
+`stepFlight`'s own parasitic drag already uses rather than a separate
+model: the existing sea-level-ISA `AIR_DENSITY` constant; IV's own
+`motorized.dragCoefficient`, floored exactly the way a no-wing (blimp)
+vehicle's own parasitic drag already is; and IV's own native reference
+area (`motorized.wingArea>0?wingArea:crossSectionalArea`, the same
+fallback a no-wing vehicle's parasitic drag already uses). It opposes this
+body's own current linear (translational) velocity - never the pilot's
+throttle/cyclic/yaw input, so it is deliberately not reduced thrust and
+cannot substitute for the pilot's own control authority. Per-tick, it is
+clamped so it can slow this body's velocity to exactly zero but never
+reverse its direction ("no-reversal") - the exact translational
+counterpart of `rotorAngularDampingCoefficient`'s own no-reversal clamp
+above - so it stays stable at any `dt` and any multiplier up to the
+documented cap. Orientation-independent by construction: it opposes the
+actual world-frame velocity regardless of the body's attitude, so a
+tumbled/rotated rotorcraft gets the identical force for the identical
+velocity. `0.0` reproduces the model's exact prior behavior (no
+translational drag term at all); a rotorcraft whose native geometry claims
+zero frontal area gets zero drag regardless of the multiplier. See
+[`RotorForces#translationalDragForce`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
+for the full model.
+
 A copyable example is also
 available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
@@ -812,7 +845,7 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `brakeForce`, `maxSteerDegrees`, `marineSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
-`yawAuthorityScale`, `rotorAngularDampingCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
+`yawAuthorityScale`, `rotorAngularDampingCoefficient`, `rotorAirDragCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
 `suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
 `verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `toeFrontDegrees`,
 `toeRearDegrees`, `axleDriveForceSharing`, `suspensionSpringMultiplierFront`,

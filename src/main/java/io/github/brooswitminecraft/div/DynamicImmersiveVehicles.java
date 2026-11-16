@@ -7,6 +7,7 @@ import net.neoforged.fml.config.ModConfig;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 @Mod("dynamicimmersivevehicles")
 public final class DynamicImmersiveVehicles {
@@ -35,6 +36,9 @@ public final class DynamicImmersiveVehicles {
   var overridesHotReload = new OverridesHotReload();
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> overridesHotReload.maybeReload());
   NeoForge.EVENT_BUS.addListener((LevelEvent.Unload event) -> PhysicsBridge.unload(event.getLevel()));
+  // Ticket MINECRAFT-546: /div tuning <target> - the read-only, permission-checked tuning-
+  // provenance diagnostic. See TuningCommand's own doc.
+  NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) -> TuningCommand.register(event.getDispatcher()));
   // Opt-in, CI/isolated-host-only anchor-frame probe (ticket comment 53243/53244) - OFF by
   // default (Boolean.getBoolean read once inside the probe itself), a strict no-op otherwise.
   // Never touches any real vehicle or world content - see AnchorFrameProbe's own doc.
@@ -136,6 +140,24 @@ public final class DynamicImmersiveVehicles {
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSurfaceHotReloadProbe.maybeRun(overworld);
+  });
+  // Opt-in, dev/isolated-host-only real-Sable-handle rotor translational air drag probe
+  // (MINECRAFT-543 review, comments 54188/54189) - OFF by default, a strict no-op otherwise.
+  // Closes the disclosed gap that RotorForcesTest's own bounded-response coverage manually
+  // integrates a Vector3d rather than exercising the real PhysicsBridge.stepRotor dispatch on a
+  // live Sable handle. Never touches any real vehicle or world content - see
+  // RotorAirDragRuntimeProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.RotorAirDragRuntimeProbe.maybeRun(overworld);
+  });
+  // Ticket MINECRAFT-546 review (comment 54231/54232): opt-in, CI/isolated-host-only real
+  // end-to-end /div tuning command/adapter probe, proving the fixed wrapper/entity lookup
+  // against a real spawned vehicle - OFF by default, a strict no-op otherwise. Spawns and
+  // removes its own bounded test vehicle only - see TuningCommandProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.TuningCommandProbe.maybeRun(overworld);
   });
  }
 }
