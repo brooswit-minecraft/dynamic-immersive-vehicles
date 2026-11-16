@@ -1034,7 +1034,22 @@ public final class PhysicsBridge {
   * inferring preservation from a yaw-rate proxy. Returns null if there is no active Body.
   */
  public static Vector3d debugReadAngularVelocity(EntityVehicleF_Physics v) {
-  return registry.get(v) instanceof Body body ? body.handle.getAngularVelocity(new Vector3d()) : null;
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.handle.getAngularVelocity(new Vector3d());
+  // MINECRAFT-545/547 diagnostic (John's comment 54237: trace actual pose/velocity BEFORE
+  // connectTrailer is called, not just inside createHitch): extends this existing debug-only
+  // reader to BuoyantBody too, so a probe can read the SAME real native state right before
+  // calling connectTrailer that createHitch's own log line reads moments later, inside it.
+  if (body instanceof BuoyantBody bb) return bb.handle().getAngularVelocity(new Vector3d());
+  return null;
+ }
+ /** Diagnostic/test-only companion to {@link #debugReadAngularVelocity} - the same real native
+  * state, linear component. See that method's own doc. */
+ public static Vector3d debugReadLinearVelocity(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.handle.getLinearVelocity(new Vector3d());
+  if (body instanceof BuoyantBody bb) return bb.handle().getLinearVelocity(new Vector3d());
+  return null;
  }
  /**
   * Diagnostic/test-only snapshot (MINECRAFT-526 review 53897/53905/53907) bundling everything a

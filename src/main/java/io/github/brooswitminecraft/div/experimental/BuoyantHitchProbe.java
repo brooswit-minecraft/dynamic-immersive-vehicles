@@ -470,6 +470,14 @@ public final class BuoyantHitchProbe {
    towing.remove();
   }
   if (!boundedOrFail("towingUnavailable/towed", towed)) return;
+  // MINECRAFT-545/547 diagnostic (John's comment 54237/54247's "next bounded diagnostic" and
+  // VERIFICATION.md's own lower-cost corroborating check): real native angular/linear velocity
+  // of `towed`, every tick of this unjointed free-float window, to see directly whether any
+  // growth happens here at all - rather than inferring it from a single sample taken later,
+  // inside createHitch. Still open whether this shows growth; this is the first run to check.
+  LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE tick=" + ticksInPhase
+    + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
+    + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
   if (ticksInPhase >= SHORT_PHASE_TICKS) {
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE PASS - towed stayed finite/bounded " + SHORT_PHASE_TICKS
      + " ticks after its towing vehicle despawned - spawning towing2 for TOWING_REPLACEMENT");
@@ -503,6 +511,15 @@ public final class BuoyantHitchProbe {
    towing2 = spawnHull(world, towing2Definition, towing2Spawn.x, towing2Spawn.y, towing2Spawn.z, 0);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT pre-connect towing2=" + towing2.position + " towing2.motion=" + towing2.motion
      + " towed=" + towed.position + " towed.motion=" + towed.motion + " towedHookupAnchor=" + towedHookupAnchor);
+   // MINECRAFT-545/547 diagnostic (John's comment 54237: trace actual pose/velocity BEFORE
+   // connectTrailer is called, not just inside createHitch's own log line, which runs AFTER).
+   // Real native state, same handle BuoyantBody.step reads every tick - not v.motion (linear-
+   // only, and already logged immediately above for comparison).
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT pre-connectTrailer real native state"
+     + " towing2.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towing2)
+     + " towing2.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towing2)
+     + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
+     + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
    var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
    towing2.connectTrailer(connection, false);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position);
