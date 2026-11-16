@@ -3844,7 +3844,6 @@ plumbing; this ticket's own reviewed behavior (the `isBlimp`-corrected gate
 from the prior review pass) is therefore preserved byte-for-byte across
 the merge, confirmed by the full suite below re-passing unchanged.
 
-New exact head: `cfcc87d7d7b1053e6c1e0eac23d4a9c5a28e2b5e8` <!-- placeholder, replaced after commit -->.
 Validated under the EXISTING shared cooperative `flock` on
 `/tmp/div-gradle-slot.lock` (held for the whole Gradle lifetime; no
 unlink/replacement/chmod; no parallel heavy job observed at claim time):
