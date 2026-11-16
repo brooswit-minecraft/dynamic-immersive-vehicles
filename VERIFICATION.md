@@ -3315,7 +3315,7 @@ gravity (which only ever acts vertically) is this ticket's own drag term
 
 **Actual probe run results** (`DIV_ROTOR_AIR_DRAG_RUNTIME_PROBE=true
 /tmp/gradle-8.14/bin/gradle --no-daemon runServer --console=plain`,
-flock-protected on `/tmp/div-gradle-slot.lock`, at head `b63bd6f` - this
+flock-protected on `/tmp/div-gradle-slot.lock`, at head `d6cbe55` - this
 branch with the probe/seam addition on top of the previously-merged
 `e624ea2`): both scenarios reached `PASSED` with zero `FAILED` lines -
 `ALL SCENARIOS FINISHED - 2/2 PASSED`. Scenario `on`: injected native
