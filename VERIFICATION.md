@@ -4745,3 +4745,162 @@ verified there.
 
 **No Minecraft launch was performed.** Still gated on independent packet
 review, per "No run until independent packet review releases it."
+
+## The one authorized isolated diagnostic run (54371/54372/54373) - executed, non-reproduction
+
+John's comment 54371 accepted the gate-review packet and authorized EXACTLY
+ONE isolated original-reproducer run via the prepared `launch-wrapper.sh`.
+This run was executed at `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-rundir-20261116T224049Z`. This
+section reports it per 54371/54373's own instructions: same-event
+accounting with phase/refresh-aware operands and native unknowns,
+reproduction/non-reproduction WITHOUT a solver-cause claim, the stale
+terminal-wording reconciliation 54373 asked for, and the omitted-phase
+limitation. **This consumes the one-run grant - no retry or additional run
+without new direction.**
+
+### Execution
+
+Launched `launch-wrapper.sh` directly (no redundant outer `flock`, per
+54371 - the wrapper owns its own lock). Lock claimed by `M545-isolated-run1`
+at 2026-11-16T23:18:07Z, released at 2026-11-16T23:19:47Z, both logged in
+`/tmp/div-gradle-slot.owner`. Wrapper's own terminal-pattern match:
+`[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/
+DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed
+(TOWING_REPLACEMENT disclosed as not attempted...)` (log line 6141). Java
+exited with code 0; `Stopping server` (line 6205) and `All dimensions are
+saved` (line 6217) both confirmed present. Isolated world retained
+UNCONDITIONALLY at `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-rundir-20261116T224049Z/rundir/world`
+(9.3M). Post-run re-verification: the original (shared) `run/config`'s 8
+files and `run/world/level.dat`/`level.dat_old` both STILL match their
+pre-run baseline hashes exactly - the isolated run touched nothing shared.
+
+### Reconciling the stale terminal wording (54373)
+
+The COMPLETE line's `(TOWING_REPLACEMENT disclosed as not attempted...)`
+is a FIXED string, always printed verbatim at that point in
+`BuoyantHitchProbe.java` (line 677) regardless of what actually happened -
+it is NOT a report on this run specifically. Checking the actual log: there
+are 32 `TOWING_REPLACEMENT`-tagged lines in this run (log lines
+2125-3683) - the phase genuinely started (2125), the fresh `towing2` was
+genuinely connected to `towed` (2126-2128), anchor distance was tracked
+tick-by-tick (2129 through 3682, reaching tick=140 with
+`anchorDistance=0.04569687473078841`), and it ended with an explicit
+`TOWING_REPLACEMENT PASS` (line 3683) - NOT a crash. So
+TOWING_REPLACEMENT genuinely ran for the MAIN pair and genuinely settled.
+The fixed string's actual referent (confirmed via the class's own doc
+comment, lines 625-641) is the SEPARATE `installedPartAttach` pair
+(`towing3`/`towed3`) - by design, that pair's own hitch is never put
+through a replacement cycle at all, sidestepping the still-unresolved
+TOWING_REPLACEMENT interaction entirely for that specific proof. The fixed
+string is honestly confusing out of context (it reads as if
+TOWING_REPLACEMENT itself was skipped for everything) and is flagged here
+as a real, PRE-EXISTING clarity gap in the probe's own log text - not
+something newly introduced by this round's edits, and not altered by this
+report.
+
+### Non-reproduction (not a fix claim)
+
+This run's TOWING_REPLACEMENT phase did NOT reproduce the known runaway/
+out-of-bounds crash (the `FAILED - left bounded area ... phase=
+TOWING_REPLACEMENT` outcome seen in every previously retained crash, e.g.
+`M545-authrun-probe2`). anchorDistance settled to 0.0457 blocks by
+tick=140 (well under `ANCHOR_TOLERANCE`) instead of diverging.
+
+**Source/compiled code is confirmed unchanged for the exercised phase**:
+`git diff 077d6a6..75af6b4` (077d6a6 is the commit `M545-authrun-probe2`
+ran, the last confirmed crash) touching `BuoyantHitchProbe.java`,
+`PhysicsBridge.java`, `BuoyantForces.java`, `BuoyantBody.java` shows
+ONLY: new log fields/relabeled comments, one plain diagnostic-bookkeeping
+field write (`debugLastPoseUpdateGameTime`), and new debug-only static
+accessors never called from production code - confirmed by direct
+inspection of every hunk, not merely by description. The
+`towingReplacement()` method itself (and `createHitch`'s actual
+connection-forming logic) has ZERO lines changed in that diff. So this is
+NOT explained by any code change between the last crash and this run.
+
+**Environment/retained-state is genuinely different, uncertainty stated
+explicitly, no causal claim (per 54373's direction):** this run used a
+FRESHLY GENERATED isolated world (`level-seed=` is empty in
+`server.properties`, so a brand-new world gets a random seed; this
+isolated `rundir` had no `world/` before this run) - unlike every prior
+crash-reproducing run, which used the SAME long-reused, already-populated
+`run/world`. Checked whether this plausibly matters: `BuoyantHitchProbe`
+builds its OWN deterministic pool/platform (`buildPlatform`, fixed
+absolute `PLATFORM_Y`, explicit stone/water/air block placement) rather
+than relying on natural terrain, so the water geometry itself should NOT
+differ by seed - checked via source, not assumed. What is NOT checked or
+ruled out: whether a brand-new world's first-time chunk generation at
+those coordinates introduces timing differences, whether the shared
+world's many prior sessions left ANY accumulated state (chunk/entity/
+region data) that could matter, or whether the native solver/Rapier has
+any run-to-run nondeterminism independent of world identity at all. None
+of these is claimed as the cause - they are named as open, unverified
+candidates, exactly as uncertain as they were before this run, and
+explicitly NOT "physics fixed."
+
+### Same-event accounting, phase/refresh-aware (TOWING_UNAVAILABLE
+reconnect-adjacent bracket - NOT the TOWING_REPLACEMENT phase itself,
+which has no comparable reconnect-adjacent bracket logged)
+
+At the TOWING_UNAVAILABLE pre-remove() bracket (log line ~2061,
+`sampleGameTime=204`, `knownEventPhase=ServerTickEvent.Post(after-entity-
+ticking)`, `substepIndex=UNAVAILABLE`):
+- `towing` (99d17011): `linearVelocity=(2.890, -8.962, 0.538)`,
+  `angularVelocity=(-41.40, -12.50, -3.443)` rad/s,
+  `lastPoseUpdateGameTime=203` (ONE tick behind this tick's own
+  `sampleGameTime=204` - towing's own `step()` had NOT yet refreshed its
+  cached pose by this read, an observed fact, not explained here).
+- `towed` (05fddcea): `linearVelocity=(-2.854, 7.943, -0.557)`,
+  `angularVelocity=(-73.00, -13.84, 87.99)` rad/s,
+  `lastPoseUpdateGameTime=203` (same one-tick lag).
+- Both bodies' `lastPoseUpdateGameTime` match each other at 203, but
+  BOTH lag this read's own `sampleGameTime=204` by one tick - a real,
+  measured asymmetry/staleness, logged via the new freshness markers (not
+  inferred from call-ordering), and NOT explained here (native cause
+  unknown).
+- Immediately prior (createHitch's own log, `sampleGameTime=203`):
+  `towing.lastPoseUpdateGameTime=203` (matches its own sample tick -
+  fresh), `trailer(towed).lastPoseUpdateGameTime=202` (one tick behind
+  ITS sample tick) - confirming the two bodies' own refresh timing is not
+  simply "always in lockstep," independent of the later observation above.
+- Large angular-velocity spikes on BOTH bodies are present at this
+  bracket in THIS run - the SAME kind of spike magnitude historically
+  associated with the eventual TOWING_REPLACEMENT divergence in other
+  runs - but this run's TOWING_REPLACEMENT nonetheless settled rather than
+  diverging. This means the TOWING_UNAVAILABLE-adjacent angular spike
+  ALONE is not sufficient to predict a later TOWING_REPLACEMENT failure -
+  an observation, not a mechanism.
+
+Per-float impulse accounting immediately before this bracket (gameTime=
+202/203, both bodies, log lines ~2040-2060): buoyancy-only and drag-only
+forces and the resulting applied impulse are fully itemized per float
+(e.g. towing's float at `floatLocalOffset=(0.5,-0.2,0.0)`, gameTime=203:
+`submergedFraction=0.504`, `buoyancyOnlyForce=(0,1778,0)`,
+`dragOnlyForce=(2.61,61.99,-2.66)`, `appliedImpulse=(0.131,92.02,-0.133)`
+- full per-float lines for both bodies at both ticks are in the retained
+log, not reproduced in full here). Rotational water drag confirmed
+INACTIVE for both bodies at both ticks (`angularWaterDrag=0.0`), matching
+this fixture's own design (no override sets it above the 0 default).
+
+**Native unknowns, stated not silently omitted:** Rapier's own internal
+per-substep applied impulse/constraint force, and its internal
+mass/inertia representation, remain UNREAD at this bracket (no accessor
+exists) - only the Java-side computed/applied impulses above are
+available. `substepIndex` stays explicitly `UNAVAILABLE` throughout, as
+already established.
+
+### Omitted-phase limitation (pre-existing design fact, not new)
+
+`INSTALLED_PART_ATTACH`'s own separate `towing3`/`towed3` pair NEVER
+exercises TOWING_REPLACEMENT by design (confirmed via the class's own doc
+comment) - its PASS in this run is evidence about the installed-part
+hookup-connection composition only, and says nothing about the main
+pair's TOWING_REPLACEMENT behavior either way.
+
+### Disposition
+
+One-run grant is now CONSUMED. No retry or additional run is performed or
+proposed without new direction, per 54371/54373. No instrumentation,
+physics, or fixture changes were made as part of this run or this report.
+All evidence (isolated world, server.log, wrapper stdout) is retained
+UNCONDITIONALLY at the path above.
