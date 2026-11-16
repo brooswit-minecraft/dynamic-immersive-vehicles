@@ -4701,3 +4701,47 @@ to the isolated directory). Lock claims/releases logged in
 
 **Not yet done:** the isolated diagnostic run itself - still gated on
 independent review of this packet.
+
+## 54368 follow-up: self-contained lock ownership in the wrapper, real classpath-byte hashes
+
+John's comment 54368: pose-refresh marker and event-phase separation from
+the prior round accepted as progress, no broad new requirements. Two
+narrow remaining checks, both in the isolated-run packet at
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-rundir-20261116T224049Z`, no source-code changes this round (git
+status is clean on the worktree):
+
+**(1) Lock ownership/child-result correction.** The prior `launch-wrapper.sh`
+left lock ownership to an external caller and `exit 3`ed after an
+orderly-stop timeout while merely asserting the slot "stays held" - an
+unenforced claim. Rewrote the wrapper to claim/release
+`/tmp/div-gradle-slot.lock` ITSELF (own `flock`,
+`CLAIMED`/`RELEASED` lines in `/tmp/div-gradle-slot.owner`) and removed
+the `exit 3` path entirely: if an orderly stop doesn't finish within its
+120s wait, the script does not exit - it keeps the lock held and keeps
+polling `kill -0 $JAVA_PID`, logging `STILL_WAITING_FOR_JAVA_EXIT` every
+30s, until the one java process it launched is actually gone, for EVERY
+terminal reason (clean marker, startup failure, no-progress timeout, or a
+stuck orderly stop) - never a different process, never a signal ("no peer
+signals/lock changes"). The script's own final exit code is now the real
+`wait "$JAVA_PID"` exit code ("preserve actual child result"), not an
+internal wrapper status.
+
+**(2) Real classpath-byte hashes, not just a path list.** The prior
+`effective-classpath-entries.txt` listed paths only. Also found and fixed
+an extraction bug while redoing this: the prior 101-entry count included
+the literal `-classpath` flag token itself as a bogus "entry" (an
+artifact of naively splitting the whole @-args file on `:`, rather than
+just its actual path line) - corrected to the real 99 entries. Added
+`effective-classpath-hashes.sha256`: SHA-256 of every jar file directly,
+and of every file found inside the 2 directory entries
+(`build/classes/java/main`, `build/resources/main` - confirmed these are
+the SAME 2 directories `-Dfml.modFolders` points at, so this already
+covers "relevant resource directories/mod inputs" without a separate
+list) - 244 hashed lines total. Cross-checked live: this worktree's own
+instrumented `PhysicsBridge.class`/`BuoyantForces.class` hashes here are
+IDENTICAL to the ones already recorded in `compiled-instrumentation.sha256`
+- confirming the effective classpath will load the exact bytecode already
+verified there.
+
+**No Minecraft launch was performed.** Still gated on independent packet
+review, per "No run until independent packet review releases it."
