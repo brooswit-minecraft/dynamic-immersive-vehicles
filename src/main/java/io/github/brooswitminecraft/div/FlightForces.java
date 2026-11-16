@@ -98,21 +98,25 @@ public final class FlightForces {
  }
 
  /**
-  * MINECRAFT-542: gates {@code Overrides.Tuning#fixedWingAngularDampingCoefficient} the exact
-  * same "fixed-wing only, never a blimp/no-wing vehicle" way {@link #dragCoefficient}'s own
-  * {@code parasiticDragMultiplier}/{@code oswaldEfficiency} are already gated (MINECRAFT-536,
-  * review correction) - {@code aspectRatio<=0} (no wing, e.g. a blimp hull) returns exactly 0
-  * regardless of the configured coefficient, so {@code PhysicsBridge.stepFlight}'s resulting
-  * {@link PhysicsBridge#rotorAngularDampingTorque} call (and therefore the blimp's angular
-  * motion) stays completely unaffected by this field, matching the ticket's "fixed-wing only,
-  * preserve blimps" scope exactly rather than merely still-damped-by-something. Only a
+  * MINECRAFT-542: gates {@code Overrides.Tuning#fixedWingAngularDampingCoefficient} the "fixed-
+  * wing only, never a blimp/no-wing vehicle" way {@link #dragCoefficient}'s own {@code
+  * parasiticDragMultiplier}/{@code oswaldEfficiency} are already gated (MINECRAFT-536, review
+  * correction) - but on BOTH the no-wing case ({@code aspectRatio<=0}) AND the authoritative
+  * {@code motorized.isBlimp} classification (review correction: a blimp definition can itself
+  * carry a positive {@code wingArea}/{@code wingSpan} - e.g. stabilizer fins, or simply a copied/
+  * mistaken config - which would otherwise give a positive aspect ratio despite the vehicle being
+  * a blimp), returning exactly 0 regardless of the configured coefficient in either case, so
+  * {@code PhysicsBridge.stepFlight}'s resulting {@link PhysicsBridge#rotorAngularDampingTorque}
+  * call (and therefore the blimp's angular motion) stays completely unaffected by this field no
+  * matter how it or its wing geometry are configured, matching the ticket's "fixed-wing only,
+  * preserve blimps" scope exactly rather than merely still-damped-by-something. Only a non-blimp,
   * positive-aspect-ratio fixed wing gets the configured coefficient passed through unchanged.
   * Extracted as its own pure, unit-testable function (same reasoning {@code dragCoefficient}'s
   * own gating was moved here for, MINECRAFT-536 review) rather than an inline ternary at
   * {@code stepFlight}'s own untestable live call site.
   */
- public static double gatedFixedWingAngularDampingCoefficient(double aspectRatio, double fixedWingAngularDampingCoefficient) {
-  return aspectRatio > 0 ? fixedWingAngularDampingCoefficient : 0.0;
+ public static double gatedFixedWingAngularDampingCoefficient(double aspectRatio, boolean isBlimp, double fixedWingAngularDampingCoefficient) {
+  return (aspectRatio > 0 && !isBlimp) ? fixedWingAngularDampingCoefficient : 0.0;
  }
 
  /** Aerodynamic force magnitude for one coefficient/area pair at this dynamic pressure. */

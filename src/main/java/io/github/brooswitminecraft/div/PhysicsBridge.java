@@ -2804,12 +2804,16 @@ public final class PhysicsBridge {
    * aileron/elevator/rudder torque above completely independent. 0.0 (the FALLBACK) is a true
    * no-op, so an unconfigured fixed-wing vehicle's torque - and the resulting {@code
    * handle.applyTorqueImpulse} below - is byte-identical to before this ticket. Gated on {@code
-   * aspectRatio>0} (a real wing present), the same "fixed-wing-only, never a blimp/no-wing
-   * vehicle" gate {@link FlightForces#dragCoefficient}'s own {@code parasiticDragMultiplier}/
-   * {@code oswaldEfficiency} already use (MINECRAFT-536) - a blimp's angular motion stays
-   * completely unaffected by this field regardless of how it is configured, matching this
-   * ticket's "fixed-wing only, preserve blimps" scope exactly. Never reaches a rotorcraft ({@link
-   * #stepRotor} never reads this field) or a ground/boat vehicle either.
+   * aspectRatio>0} (a real wing present, the same gate {@link FlightForces#dragCoefficient}'s own
+   * {@code parasiticDragMultiplier}/{@code oswaldEfficiency} already use, MINECRAFT-536) AND on
+   * {@code !motorized.isBlimp} - the authoritative classification, needed IN ADDITION to the
+   * aspect-ratio check because a blimp definition can itself carry a positive {@code wingArea}/
+   * {@code wingSpan} (e.g. stabilizer fins, or a copied/mistaken config), which would otherwise
+   * still give a positive aspect ratio despite the vehicle being a blimp. A blimp's angular motion
+   * therefore stays completely unaffected by this field regardless of how it OR its wing geometry
+   * are configured, matching this ticket's "fixed-wing only, preserve blimps" scope exactly.
+   * Never reaches a rotorcraft ({@link #stepRotor} never reads this field) or a ground/boat
+   * vehicle either.
    */
   private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
    var motorized = v.definition.motorized;
@@ -2862,12 +2866,16 @@ public final class PhysicsBridge {
    // from FALLBACK (0.0) when unconfigured, and RotorForces.angularDampingTorque returns exactly 0
    // for a non-positive coefficient, so an unconfigured fixed-wing vehicle's torque - and
    // therefore handle.applyTorqueImpulse below - is byte-identical to before this ticket.
-   // Gated on aspectRatio>0 via FlightForces.gatedFixedWingAngularDampingCoefficient, same
-   // "fixed-wing-only, never a blimp/no-wing vehicle" gate dragCoefficient's own
-   // parasiticDragMultiplier/oswaldEfficiency already use just above (MINECRAFT-536) - a blimp's
-   // angular motion must stay completely unaffected by this field regardless of how it is
-   // configured, not merely still-damped-by-something.
-   double effectiveFixedWingAngularDampingCoefficient = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, tuning.fixedWingAngularDampingCoefficient);
+   // Gated on aspectRatio>0 AND !motorized.isBlimp via
+   // FlightForces.gatedFixedWingAngularDampingCoefficient - the no-wing half mirrors
+   // dragCoefficient's own parasiticDragMultiplier/oswaldEfficiency gate just above
+   // (MINECRAFT-536); the explicit isBlimp half is required in addition (review correction) since
+   // a blimp definition can itself carry a positive wingArea/wingSpan (e.g. stabilizer fins, or a
+   // copied/mistaken config), which would otherwise give a positive aspectRatio despite the
+   // vehicle being a blimp. A blimp's angular motion must stay completely unaffected by this
+   // field regardless of how it or its wing geometry are configured, not merely
+   // still-damped-by-something.
+   double effectiveFixedWingAngularDampingCoefficient = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, motorized.isBlimp, tuning.fixedWingAngularDampingCoefficient);
    Vector3d angularVelocity=handle.getAngularVelocity(new Vector3d());
    torque.add(rotorAngularDampingTorque(angularVelocity,forward,right,up,inertiaBody,effectiveFixedWingAngularDampingCoefficient,DT));
    handle.applyTorqueImpulse(torque.mul(DT));

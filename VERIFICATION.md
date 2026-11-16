@@ -3168,3 +3168,35 @@ damping effect, and confirmation a blimp with the same field configured
 shows no effect at all) - this ticket's own brief says focused engineering
 tests are in scope, not John's broad/hardware playtesting, which is
 explicitly out of scope here.
+
+**Self-review correction (PR #42 review, added 2026-11-15).** The
+original `FlightForces.gatedFixedWingAngularDampingCoefficient` gated
+solely on `aspectRatio>0`, missing that `stepFlight` already has the
+authoritative `motorized.isBlimp` classification available and that a
+blimp definition can itself carry a positive `wingArea`/`wingSpan` (e.g.
+stabilizer fins, or a copied/mistaken config) - giving a positive aspect
+ratio despite the vehicle being a blimp, and therefore incorrectly
+receiving the new damping torque, violating the ticket's "fixed-wing
+only, preserve blimps" requirement regardless of configuration. Fixed by
+adding a second, required `boolean isBlimp` parameter to the gate
+(`(aspectRatio>0 && !isBlimp) ? coefficient : 0.0`); `PhysicsBridge.
+stepFlight` now passes `motorized.isBlimp` alongside the existing
+`aspectRatio`. New regression coverage: `FlightForcesTest.
+gatedFixedWingAngularDampingCoefficientIsZeroForABlimpEvenWithPositiveWingGeometry`
+exercises the gate in isolation at `isBlimp=true` with a positive aspect
+ratio (including at the maximum configured coefficient), and
+`PhysicsBridgeFixedWingAngularDampingTest.
+aBlimpWithPositiveWingGeometryStillGatesTheDampingToZero` exercises the
+same scenario at the full torque-assembly level the reviewer asked for -
+both would have failed against the pre-fix single-condition gate.
+Re-verified at the corrected head: local slot-lock coordination (shared
+cooperative `flock` on `/tmp/div-gradle-slot.lock` held for the whole
+Gradle lifetime). `/tmp/gradle-8.14/bin/gradle --offline compileJava` -
+`BUILD SUCCESSFUL`; `/tmp/gradle-8.14/bin/gradle --no-daemon build
+--console=plain` - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**799 tests**, 0 skipped, 0 failures, 0 errors across the whole suite (the
+2 new regression tests above, plus every test from the original pass
+still present and passing).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `2e37a9b1a1ff23090636f3378d229d93a85c093ba6fdc697e1b773cd35e76c9a`)
+was produced.

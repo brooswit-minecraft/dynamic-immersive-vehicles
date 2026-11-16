@@ -41,7 +41,7 @@ class PhysicsBridgeFixedWingAngularDampingTest {
   Vector3d beforeAdd = new Vector3d(controlTorque);
 
   double aspectRatio = 6.5; // an actual wing
-  double gated = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, 0.0);
+  double gated = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, false, 0.0);
   Vector3d damping = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, axes[0], axes[1], axes[2], inertiaBody, gated, PhysicsBridge.DT);
   Vector3d assembled = new Vector3d(controlTorque).add(damping);
 
@@ -49,10 +49,11 @@ class PhysicsBridgeFixedWingAngularDampingTest {
   assertEquals(beforeAdd, assembled, "adding zero damping must leave the control torque completely unchanged (exact baseline)");
  }
 
- @Test void aBlimpAspectRatioGatesTheDampingToZeroRegardlessOfTheConfiguredCoefficient() {
-  // "Fixed-wing only, preserve blimps" (ticket acceptance): a blimp (aspectRatio<=0) with an
-  // operator-configured coefficient must still see exactly zero damping torque added, so its
-  // existing control-torque-only behavior (and buoyant/ballast flight model) stays byte-identical.
+ @Test void aNoWingBlimpGatesTheDampingToZeroRegardlessOfTheConfiguredCoefficient() {
+  // "Fixed-wing only, preserve blimps" (ticket acceptance): a blimp with no wing geometry at all
+  // (aspectRatio<=0) with an operator-configured coefficient must still see exactly zero damping
+  // torque added, so its existing control-torque-only behavior (and buoyant/ballast flight
+  // model) stays byte-identical.
   var axes = identityAxes();
   Vector3d inertiaBody = new Vector3d(3000.0, 9000.0, 9000.0); // representative blimp hull inertia
   Vector3d angularVelocity = new Vector3d(1.5, 0.9, -1.1);
@@ -60,12 +61,35 @@ class PhysicsBridgeFixedWingAngularDampingTest {
   Vector3d beforeAdd = new Vector3d(controlTorque);
 
   for (double aspectRatio : new double[]{0, -3.0}) {
-   double gated = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT);
+   double gated = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, true, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT);
    Vector3d damping = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, axes[0], axes[1], axes[2], inertiaBody, gated, PhysicsBridge.DT);
    Vector3d assembled = new Vector3d(controlTorque).add(damping);
    assertEquals(0, damping.length(), 1e-12, "aspectRatio=" + aspectRatio + ": a blimp must see exactly zero damping even at the maximum configured coefficient");
    assertEquals(beforeAdd, assembled, "aspectRatio=" + aspectRatio + ": the blimp's control torque must stay completely unaffected");
   }
+ }
+
+ @Test void aBlimpWithPositiveWingGeometryStillGatesTheDampingToZero() {
+  // Review correction / required regression (PR #42 review comment): a blimp definition can
+  // itself carry a positive wingArea/wingSpan (e.g. stabilizer fins, or a copied/mistaken
+  // config), which gives a positive aspectRatio despite the vehicle being a blimp. The
+  // authoritative isBlimp classification must still fully gate the damping to zero in that case -
+  // the aspect-ratio check alone is NOT sufficient, which is exactly the bug this regression
+  // guards against (an earlier revision gated on aspectRatio>0 only, so this exact scenario would
+  // have incorrectly damped a blimp).
+  var axes = identityAxes();
+  Vector3d inertiaBody = new Vector3d(3000.0, 9000.0, 9000.0); // representative blimp hull inertia
+  Vector3d angularVelocity = new Vector3d(1.5, 0.9, -1.1);
+  Vector3d controlTorque = new Vector3d(axes[0]).mul(40.0).fma(15.0, axes[1]).fma(10.0, axes[2]);
+  Vector3d beforeAdd = new Vector3d(controlTorque);
+
+  double aspectRatioFromMisconfiguredWingGeometry = 6.0; // isBlimp=true but wingArea/wingSpan set
+  double gated = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatioFromMisconfiguredWingGeometry, true, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT);
+  Vector3d damping = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, axes[0], axes[1], axes[2], inertiaBody, gated, PhysicsBridge.DT);
+  Vector3d assembled = new Vector3d(controlTorque).add(damping);
+
+  assertEquals(0, damping.length(), 1e-12, "a blimp with positive wing geometry must still see exactly zero damping - isBlimp must win over a merely-positive aspect ratio");
+  assertEquals(beforeAdd, assembled, "the blimp's control torque must stay completely unaffected even with misconfigured wing geometry");
  }
 
  @Test void nonzeroCoefficientOnAnActualWingIsAddedToNeverSubstitutesForTheExistingControlTorque() {
@@ -78,7 +102,7 @@ class PhysicsBridgeFixedWingAngularDampingTest {
   Vector3d controlTorque = new Vector3d(axes[0]).mul(50.0).fma(30.0, axes[1]).fma(-20.0, axes[2]);
 
   double aspectRatio = 6.5;
-  double gated = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, 4.0);
+  double gated = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, false, 4.0);
   Vector3d damping = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, axes[0], axes[1], axes[2], inertiaBody, gated, PhysicsBridge.DT);
   assertTrue(damping.length() > 1e-9, "a positive coefficient with nonzero angular velocity must produce a nonzero damping torque to actually exercise independence");
 
@@ -107,7 +131,7 @@ class PhysicsBridgeFixedWingAngularDampingTest {
     mass/3*(halfX*halfX+halfY*halfY));
   var axes = identityAxes(); // forward, right, up
   double aspectRatio = 7.0; // an actual wing
-  double coefficient = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, 3.0);
+  double coefficient = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, false, 3.0);
   double dt = PhysicsBridge.DT;
   Vector3d angularVelocity = new Vector3d(1.0, -0.6, 0.4); // roll, pitch, yaw rad/s
 

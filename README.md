@@ -718,10 +718,13 @@ dissipative viscous-drag, inertia-aware, no-reversal model
 never-shared field, so configuring one vehicle category's damping can
 never silently affect the other's. It is gated on the vehicle actually
 having a wing (`aspectRatio>0`, the same gate `parasiticDragMultiplier`/
-`oswaldEfficiency` below already use): a blimp's angular motion stays
-completely unaffected by this field regardless of how it is configured.
-`0.0` reproduces the model's exact prior behavior (no angular-rate damping
-term at all).
+`oswaldEfficiency` below already use) AND on the vehicle not being a
+blimp (the authoritative classification, checked in addition since a
+blimp definition can itself carry a positive `wingArea`/`wingSpan`): a
+blimp's angular motion stays completely unaffected by this field
+regardless of how it OR its wing geometry are configured. `0.0`
+reproduces the model's exact prior behavior (no angular-rate damping term
+at all).
 
 A copyable example is also
 available at

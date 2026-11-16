@@ -144,20 +144,32 @@ class FlightForcesTest {
  }
 
  // MINECRAFT-542: fixedWingAngularDampingCoefficient is gated the same "fixed-wing only, never a
- // blimp/no-wing vehicle" way parasiticDragMultiplier/oswaldEfficiency are above (MINECRAFT-536).
+ // blimp/no-wing vehicle" way parasiticDragMultiplier/oswaldEfficiency are above (MINECRAFT-536) -
+ // on BOTH aspectRatio<=0 AND the authoritative isBlimp classification (review correction: a
+ // blimp definition can itself carry a positive wingArea/wingSpan, which would otherwise give a
+ // positive aspect ratio despite the vehicle being a blimp).
 
  @Test void gatedFixedWingAngularDampingCoefficientIsZeroForANoWingVehicle() {
-  // A blimp (aspectRatio<=0) must see exactly 0 regardless of the configured coefficient - its
-  // angular motion stays completely unaffected by this field, matching the ticket's "fixed-wing
-  // only, preserve blimps" scope.
-  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, 4.0));
-  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(-5, 4.0), "a negative aspectRatio must also gate off, not pass the coefficient through");
-  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT), "even the maximum configured coefficient must be fully gated off for a no-wing vehicle");
+  // A no-wing, non-blimp vehicle (aspectRatio<=0) must see exactly 0 regardless of the
+  // configured coefficient.
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, false, 4.0));
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(-5, false, 4.0), "a negative aspectRatio must also gate off, not pass the coefficient through");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, false, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT), "even the maximum configured coefficient must be fully gated off for a no-wing vehicle");
  }
 
- @Test void gatedFixedWingAngularDampingCoefficientPassesThroughUnchangedForAnActualWing() {
-  assertEquals(4.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, 4.0), "a positive aspectRatio (a real wing) must pass the configured coefficient through unchanged");
-  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, 0.0), "the off/unconfigured 0.0 value must also pass through unchanged on an actual wing");
+ @Test void gatedFixedWingAngularDampingCoefficientIsZeroForABlimpEvenWithPositiveWingGeometry() {
+  // Review correction: a blimp (isBlimp=true) must see exactly 0 regardless of the configured
+  // coefficient EVEN WHEN it carries a positive wingArea/wingSpan (e.g. stabilizer fins, or a
+  // copied/mistaken config) that would otherwise give a positive aspect ratio - the authoritative
+  // isBlimp classification must win, not merely the aspect-ratio check alone.
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, true, 4.0), "a blimp with a positive aspect ratio must still be fully gated off");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, true, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT), "even the maximum configured coefficient must be fully gated off for a blimp with a positive aspect ratio");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, true, 4.0), "a blimp with no wing geometry at all must also be fully gated off (both conditions agree)");
+ }
+
+ @Test void gatedFixedWingAngularDampingCoefficientPassesThroughUnchangedForAnActualNonBlimpWing() {
+  assertEquals(4.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, false, 4.0), "a non-blimp positive aspectRatio (a real wing) must pass the configured coefficient through unchanged");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, false, 0.0), "the off/unconfigured 0.0 value must also pass through unchanged on an actual wing");
  }
 
  @Test void dragForceScalesQuadraticallyWithAirspeedAtAFixedCoefficient() {

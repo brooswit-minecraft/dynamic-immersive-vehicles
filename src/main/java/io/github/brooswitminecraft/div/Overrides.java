@@ -169,11 +169,13 @@ public final class Overrides {
   // above and the MINECRAFT-541 per-axis control-authority fields - this only ever opposes the
   // body's OWN existing angular velocity, never the pilot's control-surface input, so it cannot
   // be mistaken for (or substitute for) autopilot, target attitude, auto-level, or sideslip
-  // redesign. Gated in PhysicsBridge.stepFlight on aspectRatio>0 (a real wing present) - same
-  // "fixed-wing only" gate parasiticDragMultiplier/oswaldEfficiency above already use - so a
-  // blimp's angular motion stays completely unaffected regardless of how this is configured.
-  // Unreachable for a rotorcraft (stepRotor never reads this field) or a ground/boat vehicle
-  // (stepGround never reads it either).
+  // redesign. Gated in PhysicsBridge.stepFlight on aspectRatio>0 (a real wing present - same
+  // "fixed-wing only" gate parasiticDragMultiplier/oswaldEfficiency above already use) AND on
+  // !motorized.isBlimp (the authoritative classification, needed IN ADDITION since a blimp
+  // definition can itself carry a positive wingArea/wingSpan) - so a blimp's angular motion stays
+  // completely unaffected regardless of how it OR its wing geometry are configured. Unreachable
+  // for a rotorcraft (stepRotor never reads this field) or a ground/boat vehicle (stepGround
+  // never reads it either).
   public Double fixedWingAngularDampingCoefficient;
   // MINECRAFT-522: rotorcraft-only cyclic/yaw tuning, mirroring RotorForces.cyclicTilt's own
   // bounded-clamp contract and RotorForces.cyclicTorque/yawTorque's new authority-scale overloads
