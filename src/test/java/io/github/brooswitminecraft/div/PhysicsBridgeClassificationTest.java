@@ -162,6 +162,7 @@ class PhysicsBridgeClassificationTest {
   assertFalse(PhysicsBridge.unsafeBuoyantAngularLock(false, false, true, true));
  }
 
+
  @Test void keyAndBrokenKeyCanBeDifferentTypes() {
   // Mirrors PhysicsBridge's real usage: the active-bodies registry is keyed by the live entity,
   // but brokenDefinitions is keyed by the shared JSON definition object - a different key for

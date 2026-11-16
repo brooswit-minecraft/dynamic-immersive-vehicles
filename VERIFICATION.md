@@ -3174,13 +3174,59 @@ scope/budget - continued per John's own explicit direction not to waive
 this named requirement (ticket comment history), diagnosed from evidence
 rather than retried blindly or silently dropped.
 
-**Defensive production improvement (unrelated to resolving the crash
-above, but shipped anyway):** `PhysicsBridge.createHitch` now explicitly
-wakes both sides' Sable boxes immediately after `addConstraint`, so a
-newly-created joint can never leave either side asleep regardless of its
-prior sleep state. Confirmed by direct A/B test to have no effect on the
-replacement crash's own trajectory, but a reasonable defensive guarantee
-in its own right, independent of that unresolved question.
+**Per John's own directive (ticket comment 54217): a bounded minimal
+ground-vehicle reconnect comparison, using the identical lifecycle/anchor
+setup.** Added `GroundHitchReplacementProbe` - two simple 4-wheeled ground
+vehicles (no engine needed; `Classification.eligible` only requires a
+drivable ground device), same ATTACH/DETACH/TOWING_UNAVAILABLE/
+TOWING_REPLACEMENT shape as `BuoyantHitchProbe`'s main pair, same
+per-tick diagnostic logging. Result: **ground does NOT reproduce the
+crash.** The replacement reconnect (initial anchor gap ~2.5 blocks, a
+similar magnitude to the float case's ~2.0-2.1) produces a real but
+transient speed spike (peak ~17 blocks/s at ticks 3-10), which the ground
+vehicle's own wheel-suspension forces damp out cleanly - back under 1
+block/s by tick 80, fully settled (anchor distance ~0.21 blocks, within
+tolerance) by tick 140, `COMPLETE`. This is a DEFINITIVE finding: the
+crash is specific to a float-involved pair, not a pre-existing general
+DIV/Sable hitch-joint-creation gap - buoyancy alone does not damp a
+horizontal correction impulse of this scale fast enough, unlike a ground
+vehicle's active wheel-ground contact forces.
+
+**An attempted fix based on this finding was tried and explicitly
+reverted after it made things WORSE, confirmed live - reported here in
+full rather than silently dropped.** Hypothesizing that the raw initial
+anchor-gap SIZE was the deciding factor, added
+`PhysicsBridge.unsafeBuoyantInitialGap` - a gate refusing (throwing,
+caught by `reconcileHitch`'s own try/catch) any hitch-joint creation with
+a world-space anchor gap over a conservative 1.0-block threshold when
+either side is a `BuoyantBody`. Live result: this ALSO blocked the
+ORIGINAL, previously-safe `ATTACH` phase (its own initial gap is ~4
+blocks, well over the threshold, yet that configuration has settled
+cleanly across every prior run in this ticket) - every tick's own
+construct-then-immediately-roll-back cycle (the gate's exception causes
+`reconcileOrRollBack` to tear down the JUST-activated `BuoyantBody` every
+single tick, since a brand-new body is never "already coherently
+jointed") produced worse chaos than the crash it was meant to prevent:
+Sable itself logged "Aborting entity get for abnormally large AABB" and
+the hull's own position diverged to absurd magnitudes (tens of thousands
+of blocks) within 4 ticks. REVERTED in full (code and tests) once this
+was confirmed live - raw gap size is NOT, by itself, a safe discriminator
+between the working `ATTACH` case and the crashing `TOWING_REPLACEMENT`
+case; the real distinguishing factor remains unidentified (leading
+hypothesis unchanged: joining a FRESH body to an already-settled one,
+not gap size alone - both `ATTACH` sides are fresh, only
+`TOWING_REPLACEMENT`'s `towed` side is not). A speculative `box.wakeUp()`
+call on both sides at joint creation (tried in an earlier iteration) was
+also removed per John's own instruction not to retain a defensive change
+that doesn't address a demonstrated requirement - confirmed by direct A/B
+test to have no effect on the crash's own trajectory either.
+
+**Net result: no code fix for the replacement crash is included in this
+PR.** Two fix attempts were tried live and both failed to help (one
+inert, one actively harmful and reverted); the ground-vehicle comparison
+conclusively rules out "pre-existing, not float-specific" as a basis for
+treating this as out of scope. The crash remains fully disclosed,
+reproducible, and unresolved - recorded in detail on MINECRAFT-547.
 
 **Disclosed, deliberate scope limit:** the probe's connections are ordinary
 (unmounted, unrestricted) rather than `restricted`/`mounted` with a

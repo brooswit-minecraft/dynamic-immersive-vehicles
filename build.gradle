@@ -186,6 +186,13 @@ neoForge {
     jvmArgument('-Ddiv.experimentalBuoyantHitch=true')
     jvmArgument('-Ddiv.debugGroundContact=true')
    }
+   // MINECRAFT-545 (John's own directive, comment 54217): opt-in ground-vehicle hitch-
+   // replacement comparison probe - same gating pattern as every other probe above; OFF for
+   // every normal `gradle runServer`. See GroundHitchReplacementProbe's own doc.
+   if (System.getenv('DIV_GROUND_HITCH_REPLACEMENT_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalGroundHitchReplacement=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+   }
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
