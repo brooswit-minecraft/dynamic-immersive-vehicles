@@ -3200,6 +3200,37 @@ pre-existing test still passing unchanged).
 (sha256 `eb86f3129be0e9965d86426f9db43b15c360bff9ed148f2114fc32415f869a4f`)
 was produced.
 
+**Reconciliation onto M539 (added 2026-11-16).** Main advanced from this
+ticket's 4ee035a baseline to `5b1cc57` via MINECRAFT-539 (the sprint's own
+designated schema coordinator, axle-specific spring/damping tuning),
+making PR #38's GitHub head go `CONFLICTING`/draft. Merged `origin/main`
+into this branch; `Overrides.java`/`PhysicsBridge.java` merged cleanly
+(each ticket's field declarations/validation/copy/merge/resolve/
+applyLiveSafeFields sit on independent lines, same non-overlapping-seam
+shape the sprint's own M532/M533 reconciliation already established).
+Conflicts were confined to two places, both resolved by keeping both
+sides: `PhysicsBridgeLiveOverrideApplicationTest`'s combined-fields
+assertion (both tickets' field names merged into the same `Set`/fresh-
+tuning setup) and its "removing an override reverts" test method (two
+independent `@Test` methods, kept side by side); `VERIFICATION.md`'s own
+append point (both sections kept, in order). Un-drafted the PR
+(`gh pr ready`) once `mergeable` read back `MERGEABLE`.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline build` against the
+reconciled head (`minecraft-544/marine-propeller-steering-limit` merged
+with `origin/main` @ `5b1cc57`) - `BUILD SUCCESSFUL`. The real JUnit XML
+reports total **818 tests**, 0 skipped, 0 failures, 0 errors across the
+whole suite - M539's own `AxleSuspensionDistributionTest`/
+`PhysicsBridgeAxleSuspensionTuningTest` additions and this ticket's
+`marineSteerDegrees` coverage both present and passing together,
+confirming no regression in either direction.
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `c65c00ad60dc5d71bef53ea8f0f0063443b76368cf44e51ed7be29f220f9f2e1`)
+was produced.
+
 ## Axle-specific spring and damping tuning (MINECRAFT-539, added 2026-11-15)
 
 Schema-coordinator slice for this sprint. Inspected the named seams first:
