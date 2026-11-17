@@ -220,15 +220,18 @@ neoForge {
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
- // MINECRAFT-545/547 (John's comment 54411): the plain `test` source set has no Minecraft/
- // NeoForge classes on its classpath at all (confirmed: constructing Sable's own Pose3d throws
- // NoClassDefFoundError: net/minecraft/core/Position on class load). This is the moddev
- // plugin's own official, documented mechanism for exactly that gap - the same narrow pattern
- // this project's own history already used once for MINECRAFT-546's TuningCommandRegistrationTest
- // (commit 0ce3285, not currently on this branch) - not a custom classpath hack or a new
- // dependency. Enables constructing real Sable value objects (Pose3d, BoxPhysicsObject) in a
- // test; a live native physics pipeline/dedicated server remains infeasible in ANY unit test
- // regardless (unchanged from that same prior precedent's own documented limit).
+ // MINECRAFT-545/547 (John's comments 54411/54419): the plain `test` source set has no
+ // Minecraft/NeoForge classes on its classpath at all (confirmed: constructing Sable's own
+ // Pose3d throws NoClassDefFoundError: net/minecraft/core/Position on class load). This is the
+ // moddev plugin's own official, documented mechanism for exactly that gap - the same narrow
+ // pattern this project's own history already used once for MINECRAFT-546's
+ // TuningCommandRegistrationTest (commit 0ce3285, not currently on this branch) - not a custom
+ // classpath hack or a new dependency. What this actually enables, scoped to what has been
+ // tried: constructing real Sable value objects (Pose3d, BoxPhysicsObject) and reading their
+ // plain Java methods (e.g. getMassTracker()) in a test. It does NOT add a live native physics
+ // pipeline or dedicated server to the test runtime - no such attempt has been made under this
+ // setup, and whether one is possible at all is simply untested here, not established as
+ // impossible for every conceivable unit test.
  unitTest { enable(); testedMod = mods.dynamicimmersivevehicles }
 }
 

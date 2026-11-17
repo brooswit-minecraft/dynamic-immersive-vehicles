@@ -51,13 +51,18 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
   var r = v.orientation;
   Quaterniond q = new Quaterniond().setFromNormalized(new Matrix3d(r.m00, r.m10, r.m20, r.m01, r.m11, r.m21, r.m02, r.m12, r.m22));
   Vector3d position = q.transform(new Vector3d(center)).add(v.position.x, v.position.y, v.position.z);
-  // MINECRAFT-545/547 (John's comments 54403/54407): the plain BoxPhysicsObject legacy
-  // constructor reports mass/6 inertia on every axis regardless of this hull's actual shape
-  // (confirmed via javap on the pinned sable-neoforge-1.21.1-2.0.5.jar) - a quantified ~2-2.7x
-  // underestimate of pitch/yaw inertia for an elongated hull. ShapeAwareBoxPhysicsObject
-  // overrides getMassTracker() (public, non-final in the pinned jar) to report the real
-  // solid-box tensor instead - same collision geometry/pose/handle lifecycle, no native patch,
-  // no dependency change, no reflection.
+  // MINECRAFT-545/547 (John's comments 54403/54407/54413/54419): the plain BoxPhysicsObject
+  // legacy constructor reports mass/6 as its Java-side getMassTracker() inertia on every axis
+  // regardless of this hull's actual shape (confirmed via javap on the pinned
+  // sable-neoforge-1.21.1-2.0.5.jar) - a quantified ~2-2.7x difference from the solid-box
+  // formula's own pitch/yaw values for an elongated hull. ShapeAwareBoxPhysicsObject overrides
+  // getMassTracker() (public, non-final in the pinned jar) to report that solid-box tensor
+  // instead - same collision geometry/pose/handle lifecycle, no native patch, no dependency
+  // change, no reflection. CORRECTED (54413): reading the pinned native source directly showed
+  // getMassTracker() is never consulted by the actual native body-creation path (Rapier
+  // computes its own mass properties from the raw mass/half-extents createBox receives) - so
+  // this change is JAVA-SIDE METADATA ONLY, confirmed to have no effect on native simulation,
+  // not a demonstrated correction to the hitch-reconnect crash or anything else.
   box = new ShapeAwareBoxPhysicsObject(new Pose3d(position, q, new Vector3d(), new Vector3d(1)), half, mass);
   var physics = SubLevelContainer.getContainer(level).physicsSystem();
   physics.addObject(box);

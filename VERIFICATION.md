@@ -6054,3 +6054,33 @@ next concrete direction, not yet investigated to a conclusion.
 No production change proposed in this entry. Reporting the full trace
 back for direction, per 54418's own request to select and report one
 concrete, falsifiable discrepancy or the precise limit found.
+
+## Comment/doc corrections completing 54419; provenance caveat for 54413/54418 (54422)
+
+Completing 54419's specific request (previously only VERIFICATION.md was
+updated for the retraction; the live source/test comments still called
+the Java baseline "the actual inertia the native solver was being told
+to use," called the override "the fix," and implied the tests themselves
+demonstrated a failing-before/passing-after native correction). Corrected
+in `ShapeAwareBoxPhysicsObjectTest.java`, `ShapeAwareBoxPhysicsObject.java`,
+`BuoyantBody.java`, and `build.gradle`'s own `unitTest` comment (which
+claimed a live native pipeline/dedicated server is infeasible in ANY
+unit test - narrowed to describe only what this suite has actually
+tried, not a universal claim). No test rerun performed for these
+comment-only changes, per 54419's own instruction.
+
+Also corrects 54422's own caveat, applied retroactively to the native-
+source trace in the two immediately preceding entries (the retraction
+and the joint-source trace): fetching the GitHub TAG's own source
+(`mc1.21.1-2.0.5-neoforge`, commit `6966d292...`) is NOT independent
+proof that the ACTUAL `.so` binary this worktree runs
+(`run/.sable/natives/sable_rapier_x86_64_linux.so`) was compiled from
+that exact source - only that the tagged source MATCHES the pinned
+version string. An earlier entry in this investigation (the binary
+debug-symbol-strings check) already found this correspondence to be only
+PROVISIONAL for Sable's own wrapper code specifically (no commit hash
+recoverable from the binary for `joints.rs`/`boxes.rs`/`config.rs`,
+unlike the external Rapier crate's own short hash, which WAS recoverable
+and confirmed matching) - that same provisional status applies here too;
+no fresh binary-string check was performed for this round's specific
+files. Stated plainly rather than re-asserted as settled.
