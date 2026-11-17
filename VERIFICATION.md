@@ -9311,3 +9311,166 @@ explicit `LC_ALL=en_US.UTF-8` - still `PREFLIGHT_OK`, all 9 checks pass.
 Root cause resolved per 54654/54655's own account - not a file-drift
 bug, a locale-nondeterminism bug in my own hashing function, now fixed
 at the source rather than relying on launch-environment convention.
+
+## First real native measurement confirms the starvation mechanism; minimal DIV compatibility fix implemented per 54656
+
+### The authorized run (14ada9b/4b6190b packet, John's 54655 release)
+
+The coordinator's 54655 explicitly authorized exactly ONE native launch
+of `M545-packet-4b6190b/launch-wrapper.sh` with `LC_ALL=en_US.UTF-8`.
+Executed exactly once. Result:
+
+- All 9 preflight checks `PASS` inside the lock (receipt:
+  `receipts/launch-wrapper-run-20261117T160621Z.log`).
+- Java launched (pid 792478), ran cleanly.
+- Terminal: `[DIV buoyantHitchProbe] FAILED - lifecycleInvariantCheck
+  withinUnavailableOutcome=FAIL_STARVED_TICK` at `TOWING_REPLACEMENT`
+  tick=1 (the pre-connect snapshot, BEFORE `connectTrailer` runs) -
+  exactly the bounded scope stated in the prior entry: this stops
+  BEFORE the original tick=7/8 crash site, and is NOT a reproduction of
+  that crash or proof of any solver-level cause.
+- Orderly shutdown: "Stopping server", "All dimensions are saved", Java
+  exit code 0, wrapper exit code 0, lock released
+  (`RELEASED by M545-packet-4b6190b at 2026-11-17T16:07:40Z rc=0`).
+- Post-run originals check (receipt:
+  `receipts/post-run-originals-check-20261117T160800Z.txt`): the 8
+  shared `run/config/*.*` files and the shared `run/world/level.dat`/
+  `level.dat_old` are BYTE-IDENTICAL to the original baseline, confirmed
+  AFTER the run, not just before. The isolated copy's own
+  `server.properties` was rewritten by the server itself on startup
+  (ordinary Minecraft behavior, confirmed benign: `level-seed=545547`
+  and `level-name=world` both still correctly present) - not a
+  protected "original," and not unexpected.
+
+### The actual measured evidence (log lines 2005-2197, per John's own
+54656 line citation)
+
+`towed.stepInvocationCount` is logged as `201` on EVERY SINGLE tick of
+the 60-tick `TOWING_UNAVAILABLE` window (ticks 1 through 60) - the exact
+SAME value, never once advancing. The final `lifecycleInvariantCheck`
+line makes this precise:
+`firstSample=Sample[gameTime=204, stepInvocationCount=201, ...]`,
+`lastWithinUnavailableSample=Sample[gameTime=263, stepInvocationCount=201, ...]`,
+`postGapSample=Sample[gameTime=264, stepInvocationCount=201, ...]` - the
+step counter is frozen at 201 across a full 60-gameTime span AND into
+the first tick of the next phase. All three samples carry the IDENTICAL
+`registryBodyIdentity` (`BuoyantBody@1bbbeb1e`) - the SAME live body
+instance throughout, never swapped/removed/replaced (ruling out
+`BODY_IDENTITY_CHANGED`/`BODY_ABSENT` as the explanation - this is a
+confirmed, identity-verified `FAIL_STARVED_TICK` on a stable, still-
+registered body). Every tick also logs
+`towedConnection.towingVehicleIsRemovedTowing=true
+towing.towingConnectionsStillContainsIt=true` - the stale connection to
+the removed towing vehicle persists the entire window, and the removed
+towing vehicle's own (dead, unreferenced) `towingConnections` list still
+holds it. At `TOWING_REPLACEMENT`'s own reconnect, the post-connect
+check confirms the real rewiring succeeded in both directions
+(`towed.towedByConnectionIsNewConnection=true`,
+`towing2.towingConnectionsContainsIt=true`).
+
+**This is the first real, native, per-tick-granular measurement
+confirming the starvation mechanism this investigation's source-level
+reasoning predicted.** Prior entries called this "conditional, source-
+supported" - that qualifier is no longer needed for the starvation
+mechanism itself, which is now directly measured. It remains true, per
+54656's own instruction, that this is NOT proof of the tick=7/8 crash's
+own solver-level cause - that remains a separate, still-open question.
+
+### Minimal DIV compatibility fix (John's 54656: "identify minimal
+supported DIV compatibility seam... preserving native authority,
+ordinary detach/reconnect and already-active fallback")
+
+**Root mechanism**: `AEntityG_Towable.update()`'s own auto-disconnect
+check (`if (towedByConnection!=null && !towedByConnection.towingVehicle.isValid)
+disconnectTrailer(...)`) is the ONLY place MTS itself would ever clear a
+stale connection - but `blockMainUpdateCall()` (`return
+this.towedByConnection != null;`) prevents `update()` from EVER running
+again once `towedByConnection` is non-null and the towing vehicle is
+gone. This is circular: the one check that would fix the connection
+lives on the exact method the stale connection itself blocks. A towed
+vehicle can never break out of this on its own.
+
+**Fix**: `PhysicsBridge.cleanup()` already runs every tick via
+`NeoForge.EVENT_BUS... ServerTickEvent.Post` - independent of MTS's own
+per-vehicle `update()`/`moveVehicle()` dispatch (confirmed by the run
+itself: `registryBodyIdentity` stayed live and registered the entire
+time, proving DIV's OWN registry/tick hooks were never the problem,
+only MTS's dispatch reaching the entity). Added a new sweep at the start
+of `cleanup()`, over `registry.forEachActive`, which on now-passed
+`shouldReleaseOrphanedTowingConnection(towedByConnectionNonNull,
+towingVehicleIsValid)` (a new pure boolean seam, same style as the
+existing `deferToNativeHitch`/`unsafeBuoyantAngularLock`/
+`compensableConnection`) sets `v.towedByConnection = null` directly -
+the exact same single-field effect `disconnectTrailer` itself produces
+on the TOWED side (the only side that matters, since the towing vehicle
+is already invalid/removed and nothing ever reads its own dead
+`towingConnections` list again).
+
+The instant that field goes `null`, `blockMainUpdateCall()` returns
+`false` and MTS's OWN ordinary main-loop dispatch resumes ticking the
+vehicle normally on its very next tick - `VehicleMovementMixin.div$move`
+-> `PhysicsBridge.step()` then runs through the SAME native path every
+other vehicle uses, every tick, with NO new DIV-side physics-driving
+mechanism and no change to MTS's own normal per-vehicle update/
+moveVehicle flow for any vehicle whose towing relationship is intact.
+
+**Constraints preserved** (all per 54656's own explicit list):
+- *Native authority*: MTS's own `update()`/`moveVehicle()` dispatch is
+  unmodified and untouched; this only clears a field MTS's own code
+  would have cleared itself, from a call site MTS's own blocked dispatch
+  can never reach.
+- *Ordinary detach/reconnect*: untouched - the new check only fires when
+  `towingVehicle.isValid` is `false`; a live, still-towing vehicle's own
+  `isValid` stays `true`, so `shouldReleaseOrphanedTowingConnection`
+  returns `false` and nothing changes for the ordinary case.
+- *Already-active fallback*: untouched - `deferToNativeHitch`/
+  `unsafeBuoyantAngularLock` never read `towingVehicle.isValid` at all;
+  this new check is a completely independent condition.
+- *No arbitrary damping/physics masking*: this clears a stale reference,
+  it does not touch velocity/force/any physics quantity.
+
+**Removal-vs-tick-hook assessment** (54656's own "assess applicable
+removal vs tick hook and ordering/reentrancy"): considered adding a NEW
+mixin injecting into `AEntityA_Base.remove()` (or
+`EntityManager.removeEntity`) to proactively disconnect BEFORE removal
+completes. Rejected as a larger, riskier change: DIV has no existing
+removal-event hook anywhere today (confirmed via grep - DIV's own
+cleanup idiom is exclusively POLLING sweeps against `!v.isValid`, e.g.
+the existing `handbrakeMagnitude.keySet().removeIf(v -> !v.isValid)`
+lines already in `cleanup()`), so a removal-time mixin would be a NEW
+mechanism/pattern, not the smallest supported seam, and would need its
+own reentrancy analysis against MTS's own `remove()` internals (unknown,
+undecompiled risk). The tick-hook fix instead reuses an EXISTING,
+already-reliable, already-running sweep and matches DIV's own
+established idiom exactly - genuinely the smaller, lower-risk patch.
+Re-entrancy: `cleanup()`'s new sweep only ever WRITES
+`v.towedByConnection`, reads `v.towedByConnection.towingVehicle.isValid`
+(a plain boolean field read, no native call), and never touches Sable/
+native state - no reentrancy into `BuoyantBody.step()`/`BuoyantForces`/
+the hitch joint at all.
+
+### Verification performed (no additional native run)
+
+Compiled and ran the full test suite under the exclusive
+`/tmp/div-gradle-slot.lock`
+(`MINECRAFT-545-fix-orphan-connection-20261117T161331Z`,
+`RESULT=PASS`). Two new focused tests added to
+`PhysicsBridgeClassificationTest`:
+`releasesAnOrphanedConnectionOnlyWhenTowingVehicleIsInvalid` and
+`neverReleasesWhenThereIsNoConnectionAtAll`, following the exact style
+of the existing `deferToNativeHitch`/`unsafeBuoyantAngularLock` pure-
+boolean tests - no live MTS object construction needed.
+
+### Disposition
+
+Starvation mechanism now directly measured by a real native run, not
+merely source-level reasoned. Minimal DIV-side compatibility fix
+implemented, compiled, and pure-JUnit-tested per 54656's own explicit
+constraints (native authority, ordinary detach/reconnect, already-active
+fallback, no damping/masking). NOT yet validated against a real native
+run - the native grant from 54655/54656 is consumed and 54656 explicitly
+holds further native execution. Whether this fix actually resolves the
+starvation (and whether that, in turn, is sufficient to prevent the
+original tick=7/8 crash - still a separate, unconfirmed question) remain
+open until a future authorized run. "Erosion hold" referenced in 54655/
+54656 is unrelated to this ticket's own scope and is left untouched.

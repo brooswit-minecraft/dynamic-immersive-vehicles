@@ -193,4 +193,20 @@ class PhysicsBridgeClassificationTest {
   assertTrue(broken.contains(42));
   assertFalse(registry.isActive(entity));
  }
+
+ @Test void releasesAnOrphanedConnectionOnlyWhenTowingVehicleIsInvalid() {
+  // MINECRAFT-545/547 (John's comment 54656): the exact condition that must fire for
+  // cleanup()'s own orphan-release sweep to actually release a stale towedByConnection - a
+  // towing vehicle that is still valid (ordinary, still-towing case) must NEVER be released.
+  assertTrue(PhysicsBridge.shouldReleaseOrphanedTowingConnection(true, false));
+  assertFalse(PhysicsBridge.shouldReleaseOrphanedTowingConnection(true, true));
+ }
+
+ @Test void neverReleasesWhenThereIsNoConnectionAtAll() {
+  // An untowed vehicle (towedByConnection == null) has nothing to release regardless of the
+  // second flag's value - this must stay false, not merely "false because towingVehicleIsValid
+  // happened to be true."
+  assertFalse(PhysicsBridge.shouldReleaseOrphanedTowingConnection(false, false));
+  assertFalse(PhysicsBridge.shouldReleaseOrphanedTowingConnection(false, true));
+ }
 }
