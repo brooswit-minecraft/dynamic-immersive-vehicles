@@ -5629,3 +5629,114 @@ instruction already ruled out.
 mechanism evidence and this specific blocker for review, per 54403's own
 instruction to report "concrete mechanism/patch/regression or exact
 blocker."**
+
+## Fix implemented: shape-aware inertia, via public Sable API, no dependency change (54407)
+
+John's comment 54407 corrected 54405/06's overclaims and directed following
+the PUBLIC backing pipeline/mass APIs past `BoxPhysicsObject`'s own
+constructors before declaring "no DIV-side option." Doing exactly that
+found a real, viable, supported fix path.
+
+### Correction accepted
+
+54405/06 overstated two things: (1) the solid-box inertia formula is a
+CHOSEN shape/mass-distribution model (uniform density), not automatically
+proven to match the body's INTENDED effective mass properties - treated
+as a principled, standard, falsifiable candidate below, not an
+established fact. (2) "Ruled out" was too broad: the absence of a
+stiffness field in `GenericConstraintConfiguration` rules out only THAT
+specific public knob, and body-local anchor inputs rule out only the
+DIRECT stale-world-pose path - neither claim covers every possible
+lifecycle/timing defect. Both corrections are accepted; this entry does
+not repeat the overbroad framing.
+
+### Following the public API past the constructors (what 54407 asked for)
+
+Decompiled the full set of public backing interfaces/classes in the
+ACTUALLY PINNED `sable-neoforge-1.21.1-2.0.5.jar` (`javap`, exact
+signatures below) that `BoxPhysicsObject` implements or returns:
+
+- `PhysicsPipelineBody` (interface `BoxPhysicsObject` implements):
+  `getRuntimeId()`, `getMassTracker()` returning `MassData`, `isRemoved()`.
+- `MassData` (interface): `getMass()`, `getInverseMass()`,
+  `getInertiaTensor()` returning `Matrix3dc`, `getInverseInertiaTensor()`,
+  `getCenterOfMass()`, plus two `default` methods - ALL of its abstract
+  methods are `public`, nothing package-private or final-by-interface.
+- `BoxPhysicsObject.getMassTracker()` bytecode flags: `(0x0001) ACC_PUBLIC`
+  - NOT final. `BoxPhysicsObject`'s own class flags:
+  `(0x0021) ACC_PUBLIC, ACC_SUPER` - NOT final either.
+
+**This means `BoxPhysicsObject` is a normal, non-final public class with
+a normal, non-final public method returning a public interface type -
+fully overridable via ordinary Java subclassing, a completely supported
+operation requiring no reflection, no native patch, and no dependency
+version change.** `getHalfExtents()`/`getMass()`/`getPose()` are already
+public getters on the base class, giving a subclass everything it needs
+to compute a real inertia tensor itself.
+
+### The fix
+
+- `BoxInertia.java` (new, pure math, zero Sable/Minecraft dependency):
+  the standard solid-rectangular-box inertia tensor about its own center,
+  `I_xx=m/3*(hy²+hz²)` etc. - textbook rigid-body mechanics, the same
+  uniform-density assumption the flawed fallback already implicitly made,
+  just actually accounting for shape.
+- `ShapeAwareBoxPhysicsObject.java` (new): extends `BoxPhysicsObject`,
+  overrides `getMassTracker()` to return a `MassData` built from
+  `BoxInertia.solidBoxTensor(mass, halfExtents)` instead of the base
+  class's own `mass/6` fallback. Center of mass stays at the box's own
+  geometric center (matching the base class's own implicit assumption -
+  this changes how resistant to rotation the native solver is told the
+  body is, not where the body is). Everything else (collision geometry,
+  pose, handle lifecycle, actual native rigid-body creation/stepping) is
+  inherited UNCHANGED from `BoxPhysicsObject`.
+- `BuoyantBody.java` (changed): constructs `ShapeAwareBoxPhysicsObject`
+  instead of the plain `BoxPhysicsObject`, same arguments, same call
+  site - the smallest possible change, scoped to only the class this
+  ticket's own hull domain uses. `PhysicsBridge.Body` (ground/flight/
+  rotor) is NOT touched - it shares the same underlying characteristic
+  (noted in 54405/06) but changing its established, separately-tuned
+  behavior is explicitly out of this ticket's own scope.
+
+No arbitrary damping, reset, or gap delay; no acceptance weakening; no
+reflection; no native patch; no Sable dependency version change; no mass
+fudge (the new value is a real, different, principled physical quantity,
+derived from the body's own already-known shape, not an arbitrary
+multiplier).
+
+### Regression receipt
+
+`BoxInertiaTest.java` (new, 4 tests, pure math, no Sable/Minecraft
+runtime): verifies the cube-case formula independently, verifies
+off-diagonal terms are zero for an axis-aligned box, verifies the EXACT
+fixture-hull numbers already hand-computed in 54405
+(400kg/0.6/0.3/1.0 → 145.33/181.33/60.0 kg·m²), and verifies linear mass
+scaling. All 4 pass.
+
+**Confirmed classpath limitation (reported plainly, not hidden):** a
+second test file constructing `BoxPhysicsObject`/`ShapeAwareBoxPhysicsObject`
+directly (to show the live before/after contrast on the actual Sable
+class) was written and run, but failed with
+`NoClassDefFoundError: net/minecraft/core/Position` - `Pose3d`
+(required by `BoxPhysicsObject`'s own constructor) transitively needs a
+Minecraft class that is NOT present on this project's `test`
+sourceSet runtime classpath (confirmed: `createMinecraftArtifacts` feeds
+the MAIN sourceSet only; no existing test in this codebase constructs
+`Pose3d`/`BoxPhysicsObject` directly, for exactly this reason). That test
+was removed rather than left broken. The actually-running regression
+(`BoxInertiaTest`) instead locks in the pure-math formula the fix relies
+on; the characterization of Sable's OWN flawed baseline behavior
+(`mass/6`, confirmed via `javap` on the pinned jar's bytecode in 54405)
+stands as the "before" evidence, since it cannot be re-demonstrated live
+under plain `gradle test`.
+
+Full suite re-run forced (`--rerun-tasks test`, not relying on any cached
+UP-TO-DATE result): **795 tests, 0 failures, 0 errors** - no regression
+anywhere else in the codebase from this change.
+
+### Disposition
+
+Patch + regression ready for review. No native/Minecraft run has been
+performed for this fix - still gated on independent review of the actual
+mechanism/diff per 54407's own "native run remains gated on coordinator
+review." PR #39 stays draft/unmerged.

@@ -51,7 +51,14 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
   var r = v.orientation;
   Quaterniond q = new Quaterniond().setFromNormalized(new Matrix3d(r.m00, r.m10, r.m20, r.m01, r.m11, r.m21, r.m02, r.m12, r.m22));
   Vector3d position = q.transform(new Vector3d(center)).add(v.position.x, v.position.y, v.position.z);
-  box = new BoxPhysicsObject(new Pose3d(position, q, new Vector3d(), new Vector3d(1)), half, mass);
+  // MINECRAFT-545/547 (John's comments 54403/54407): the plain BoxPhysicsObject legacy
+  // constructor reports mass/6 inertia on every axis regardless of this hull's actual shape
+  // (confirmed via javap on the pinned sable-neoforge-1.21.1-2.0.5.jar) - a quantified ~2-2.7x
+  // underestimate of pitch/yaw inertia for an elongated hull. ShapeAwareBoxPhysicsObject
+  // overrides getMassTracker() (public, non-final in the pinned jar) to report the real
+  // solid-box tensor instead - same collision geometry/pose/handle lifecycle, no native patch,
+  // no dependency change, no reflection.
+  box = new ShapeAwareBoxPhysicsObject(new Pose3d(position, q, new Vector3d(), new Vector3d(1)), half, mass);
   var physics = SubLevelContainer.getContainer(level).physicsSystem();
   physics.addObject(box);
   var inherited = PhysicsBridge.pendingInheritedVelocity.get(v);
