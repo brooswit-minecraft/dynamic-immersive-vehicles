@@ -67,6 +67,7 @@ class OverridesTest {
   var r = Overrides.resolved("packid:not_configured");
   assertEquals(0.3, r.suspensionTravel); assertEquals(1.0, r.friction); assertEquals(8000.0, r.driveForce);
   assertEquals(12000.0, r.brakeForce); assertEquals(30.0, r.maxSteerDegrees);
+  assertEquals(30.0, r.marineSteerDegrees, "marineSteerDegrees has no flat fallback of its own - it inherits the resolved maxSteerDegrees (30deg here)");
   assertEquals(0.5, r.hullFillFactor); assertEquals(400.0, r.waterDrag); assertEquals(6000.0, r.propellerForce);
   assertEquals(0.0, r.angularWaterDrag, "angularWaterDrag's fallback is 0 - no rotational damping term unless configured");
   assertEquals(0.0, r.antiRollStiffness, "antiRollStiffness's fallback is 0 - no axle anti-roll coupling unless configured");
@@ -98,6 +99,7 @@ class OverridesTest {
   var r = Overrides.resolved("packid:not_configured", null, null, null);
   assertNotNull(r.suspensionTravel); assertNotNull(r.friction); assertNotNull(r.driveForce);
   assertNotNull(r.brakeForce); assertNotNull(r.maxSteerDegrees);
+  assertNotNull(r.marineSteerDegrees);
   assertNotNull(r.hullFillFactor); assertNotNull(r.waterDrag); assertNotNull(r.propellerForce);
   assertNotNull(r.angularWaterDrag);
   assertNotNull(r.antiRollStiffness);
@@ -731,6 +733,88 @@ class OverridesTest {
  @Test void driveBiasFrontIsRejectedOnAPartOverride() {
   var part = new Overrides.Tuning(); part.driveBiasFront = 0.5;
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ // MINECRAFT-544: marineSteerDegrees - an independent, bounded water-propeller steering limit
+ // from the ground maxSteerDegrees, see BuoyantForces.apply. Unlike brakeBiasFront/driveBiasFront
+ // (which stay null when unconfigured), marineSteerDegrees falls through to the SAME entry's own
+ // resolved maxSteerDegrees rather than staying null or using a second flat constant.
+
+ @Test void marineSteerDegreesOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.marineSteerDegrees = -0.01;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.marineSteerDegrees = 60.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var inRange = new Overrides.Tuning(); inRange.marineSteerDegrees = 45.0;
+  assertDoesNotThrow(inRange::validate);
+  var atCeiling = new Overrides.Tuning(); atCeiling.marineSteerDegrees = 60.0;
+  assertDoesNotThrow(atCeiling::validate);
+ }
+
+ @Test void marineSteerDegreesZeroIsAValidInclusiveExtremeUnlikeMaxSteerDegreesItself() {
+  // Review correction: UNLIKE maxSteerDegrees (strictly positive), 0.0 must be an ACCEPTED
+  // marineSteerDegrees value - a vehicle whose propellers physically cannot swivel at all
+  // (straight-only thrust) is a real, sensible configuration, not a degenerate one.
+  var zeroMarine = new Overrides.Tuning(); zeroMarine.marineSteerDegrees = 0.0;
+  assertDoesNotThrow(zeroMarine::validate);
+  // And it must stay genuinely independent: a zero marine limit must not force (or require)
+  // maxSteerDegrees to also be zero - wheel steering can stay fully nonzero at the same time.
+  try {
+   var override = new Overrides.Tuning(); override.maxSteerDegrees = 35.0; override.marineSteerDegrees = 0.0;
+   Overrides.setForTest(java.util.Map.of("packid:straight_thrust_steerable_wheels_vehicle", override));
+   var r = Overrides.resolved("packid:straight_thrust_steerable_wheels_vehicle");
+   assertEquals(35.0, r.maxSteerDegrees, "wheel steering must stay fully nonzero");
+   assertEquals(0.0, r.marineSteerDegrees, "the explicit zero marine limit must resolve exactly, not get coerced to something nonzero");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void marineSteerDegreesInheritsTheResolvedMaxSteerDegreesWhenUnconfigured() {
+  assertEquals(30.0, Overrides.resolved("packid:not_configured").marineSteerDegrees,
+    "unconfigured marineSteerDegrees must inherit the resolved (fallback) maxSteerDegrees, not a second hardcoded constant");
+  try {
+   var override = new Overrides.Tuning(); override.maxSteerDegrees = 42.0; // no marineSteerDegrees set
+   Overrides.setForTest(java.util.Map.of("packid:custom_steer_vehicle", override));
+   assertEquals(42.0, Overrides.resolved("packid:custom_steer_vehicle").marineSteerDegrees,
+     "with maxSteerDegrees itself overridden but marineSteerDegrees left unset, marineSteerDegrees must inherit that SAME resolved maxSteerDegrees, not the flat 30deg fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void marineSteerDegreesExplicitOverrideWinsOverTheInheritedMaxSteerDegrees() {
+  try {
+   var override = new Overrides.Tuning(); override.maxSteerDegrees = 42.0; override.marineSteerDegrees = 15.0;
+   Overrides.setForTest(java.util.Map.of("packid:independent_steer_vehicle", override));
+   var r = Overrides.resolved("packid:independent_steer_vehicle");
+   assertEquals(42.0, r.maxSteerDegrees, "maxSteerDegrees (ground) must stay exactly what was configured");
+   assertEquals(15.0, r.marineSteerDegrees, "an explicit marineSteerDegrees must win over inheriting maxSteerDegrees - the two limits are independent");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void marineSteerDegreesParticipatesInTheFullPrecedenceChain() {
+  var packMetadata = new Overrides.Tuning(); packMetadata.marineSteerDegrees = 25.0;
+  assertEquals(25.0, Overrides.resolved("packid:not_configured", packMetadata, null, null).marineSteerDegrees,
+    "with no operator override, pack DIV metadata must still be used over inheriting maxSteerDegrees");
+ }
+
+ @Test void marineSteerDegreesIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.marineSteerDegrees = 20.0;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ @Test void marineSteerDegreesIsInheritedThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.marineSteerDegrees = 18.0;
+   var entry = new Overrides.Tuning(); entry.extendsTemplate = "steer_template";
+   Overrides.setForTest(java.util.Map.of("steer_template", template), java.util.Map.of("packid:extends_steer_vehicle", entry), java.util.Map.of());
+   assertEquals(18.0, Overrides.resolved("packid:extends_steer_vehicle").marineSteerDegrees);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
  }
 
  @Test void axleDriveForceSharingHasNoFallbackAndStaysNullWhenNeverConfigured() {

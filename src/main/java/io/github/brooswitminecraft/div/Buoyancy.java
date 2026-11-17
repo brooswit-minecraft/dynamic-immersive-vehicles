@@ -134,4 +134,25 @@ public final class Buoyancy {
  public static double signedPropellerDrive(double desiredLinearVelocity, double throttle) {
   return Math.signum(desiredLinearVelocity) * throttle;
  }
+ /** MINECRAFT-544: body-local rudder-driven steer angle (radians) for water-propeller thrust
+  * direction - driven by the vehicle's OWN {@code marineSteerDegrees} limit, never the ground
+  * {@code maxSteerDegrees} wheel steering uses (a wholly separate parameter to this function;
+  * amphibious ground-vs-water separation is structural, not merely a different number plugged
+  * into the same formula - {@code PhysicsBridge.stepGround}'s own wheel-steer computation is a
+  * different method entirely that never calls this one). Same {@code -rudderInput/maxRudderAngle}
+  * ratio ground steering already uses, just against this independent limit; see
+  * {@code BuoyantForces.apply} for the one production call site. */
+ public static double propellerSteerAngleRadians(double rudderInput, double maxRudderAngle, double marineSteerDegrees) {
+  return (-rudderInput / maxRudderAngle) * Math.toRadians(marineSteerDegrees);
+ }
+ /** Body-local (x=lateral/port-starboard, y=up/heave, z=forward/bow-stern) unit thrust-direction
+  * vector for the given steer angle - the exact vector {@code BuoyantForces.apply} rotates into
+  * world frame (via the hull's own orientation quaternion) before scaling by each propeller's own
+  * signed thrust magnitude. A zero steer angle is always exactly (0,0,1) - straight-ahead/astern
+  * thrust, regardless of throttle sign: reversing a propeller's drive flips this vector's own
+  * scale (the thrust magnitude it is later multiplied by), never this direction itself - the
+  * configured steer angle governs where thrust points, forward or reverse alike. */
+ public static org.joml.Vector3d propellerThrustDirection(double steerAngleRadians) {
+  return new org.joml.Vector3d(Math.sin(steerAngleRadians), 0, Math.cos(steerAngleRadians));
+ }
 }
