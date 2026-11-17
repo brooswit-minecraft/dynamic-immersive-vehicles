@@ -7643,3 +7643,114 @@ explicit and separate from this run's own measured outcome - not
 conflated. Native gate: this one authorized run is now COMPLETE; no
 further native execution is authorized by this entry. No peer signals,
 permission, or dependency changes made. No deployment/Zippy action.
+
+## Read-only analysis of the authorized run per 54532; a real, earlier divergence point found
+
+Per 54532's independent raw verification (confirmed matching: wrapper
+claim/release times, Java pid, FAILED line, stop/dimensions-saved lines,
+original baseline). Grant CONSUMED - no further native run in this entry.
+
+### Honest correction: the check-to-launch gap was NOT continuous lock ownership
+
+54532 is right: the pre-launch revalidation's own lock was claimed and
+released at `08:42:42Z`; the wrapper's own lock acquisition happened at
+`08:42:55Z` - an actual 13-second window where NO process held the lock.
+The prior entry did not claim continuous ownership outright, but should
+have stated this gap explicitly rather than let "revalidate then launch"
+read as seamless. Stated plainly now: there is no proof any byte changed
+in that 13-second gap, and per 54532's own instruction, no rerun is made
+to try to close or "repair" this - the gap is preserved as a true
+limitation of this specific run's own provenance, not papered over.
+
+### Marker/row counts confirmed independently
+
+24 per-float query rows, 12 `applyInvoked=true` rows, 8 `expectedBodyThisTick`
+rows - matching 54532's own independent count exactly.
+
+### Root cause of the 258-263 gap: a genuine call-path absence, not a gating artifact
+
+Checked precisely: the `expectedBodyThisTick` markers correctly fired for
+all 6 intended ticks (`gameTime=258-263`, `TOWING_UNAVAILABLE` ticks 55-60)
+plus the `TOWING_REPLACEMENT` transition tick (`gameTime=264`, both
+bodies) - the window/body-restriction mechanism itself worked exactly as
+designed. But the `applyInvoked=true` invocation marker - which fires
+whenever `BuoyantForces.apply()` is actually called for `towed`, REGARDLESS
+of the per-float detail gating - ALSO only begins at `gameTime=264`, with
+NONE in `258-263`. This confirms `BuoyantForces.apply()` itself is simply
+never invoked for `towed` during that specific window in this run - not a
+diagnostics-disabled or context-mismatch artifact (both were independently
+confirmed armed and matching). Per 54532's own instruction: this does NOT
+mean "55-60 was captured" and does NOT support inferring water absence
+from it - it is a confirmed, different kind of gap (no call at all), stated
+as such, not reinterpreted as evidence of anything about water.
+
+### New finding: the earliest matched-hook divergence is NOT at tick ~53-60
+
+Per 54532's own flag - `towed`'s velocity at `TOWING_UNAVAILABLE` tick=60
+in THIS run is near-zero (`linearVelocity≈(-4.8E-4,-2.8E-4,3.1E-4)`),
+completely unlike Trial 1/2's own established "frozen, continuing free-
+fall" signature (`≈(0.075,-5.04,-2.02)`) at the identical tick. Read the
+full tick-by-tick sequence (already retained, no new run) to find exactly
+where this happens: ticks 1-36 show a normal, moderate, non-trivial
+velocity (broadly consistent in KIND with free motion, though not
+numerically identical to Trial 1/2's own values even this early - expected,
+given this run's own earlier DETACH/ATTACH-phase history necessarily
+differs somewhat given the source changes made since Trial 1/2). Between
+tick 37 and tick 40, the velocity SMOOTHLY DECAYS toward zero and then
+STAYS at noise-level (10⁻⁴-10⁻⁸) for the rest of the window through tick 60
+- towed effectively comes to REST, rather than continuing in unconstrained
+free fall as it did (by established signature) in both Trial 1 and Trial
+2. This is the actual earliest point this run's own trajectory departs
+from the prior established pattern - roughly 15-20 ticks earlier than
+where this investigation had previously localized the divergence (tick 60
+itself). Found entirely from already-retained velocity logs - no new
+instrumentation or run was needed to see THIS much.
+
+### The mechanism at ticks ~37-40 remains unconfirmed - a real, disclosed gap
+
+Checked directly: zero `buoyantForcesDiagnostic` lines (per-float or
+invocation marker) exist for `towed` anywhere between `gameTime≈4`
+(the original ATTACH-phase submersion, expected) and `gameTime=264` - the
+`DiagnosticContext` window armed by this session's own instrumentation
+covers only `258-263`+`264`, nowhere near ticks 37-40 (which, by the same
+tick-to-gameTime mapping established earlier this investigation, fall
+around `gameTime≈241-244`). This is a direct, real consequence of this
+session's own window-narrowing (added specifically per 54494's "bound to
+fixture/body/window" instruction) - not a bug, but it means NO per-float
+query-level detail (water-found/not-found, fraction, exact point) exists
+for the actual settling event, in this run OR in Trial 1/2 (neither had
+any such per-float instrumentation at all). The MECHANISM behind towed
+coming to rest at tick ~37-40 - re-entering water, a native contact, or
+something else - is NOT established by this entry. Not guessed at.
+
+### Retained, not contradicted
+
+Per 54532: the prior native-inertia-consumer conclusion (that
+`getMassTracker()`/the `ShapeAwareBoxPhysicsObject` substitution is Java-
+metadata-only, never consulted by the actual native body-creation path) is
+RETAINED - nothing in this run's own evidence contradicts it; multiple
+changed artifacts exist between Trial 1/2 and this run (that substitution,
+this session's own diagnostic logging) and are confounders for THIS run's
+own tick7-vs-8 crash-magnitude difference, but say nothing new about that
+separate, already-established, already-verified conclusion.
+
+### Falsifiable mechanism / justified next read-only step
+
+No further read-only analysis of EXISTING retained logs can resolve the
+tick~37-40 mechanism - confirmed, not assumed, that no per-float query
+data exists for that window in any retained run. The justified next step,
+NOT executed here: a future authorized run with the `DiagnosticContext`
+window EXTENDED to cover `TOWING_UNAVAILABLE` ticks ~30-45 (not just
+55-60), with an explicit, falsifiable prediction stated in advance - if
+`scanFound=true`/`fraction>0` appears for `towed` in that window, that
+would support a real re-submersion event explaining the velocity decay; if
+`scanFound=false` throughout while the velocity still decays to rest, that
+would point to a different (native contact/other) damping mechanism, not
+buoyancy. Neither is picked here. No run proposed or executed in this
+entry - diagnostic evidence and a justified next-step proposal only.
+
+### Disposition
+
+Read-only analysis of the one already-executed run. No new native run
+performed. No speculative physics fix proposed. Native gate: the one-run
+grant remains CONSUMED; this entry does not request or imply another.
