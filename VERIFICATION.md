@@ -11311,3 +11311,128 @@ execution without a new explicit coordinator release. The underlying investigati
 questions (identity/missing-index gaps, whether/how to address this one-tick latency or the
 fixture's own tolerance for it, full hitch/reconnect-crash resolution) remain open and
 unresolved; none of this is claimed as final acceptance.
+
+## Per 54742: a bounded PRODUCTION recovery-timing fix - orphan release moved from
+## ServerTickEvent.Post to ServerTickEvent.Pre, eliminating the confirmed one-tick gap structurally
+
+John's comment 54742 (coordinator-relayed): under the fixture's required strict exactly-once
+contract, implement an actual PRODUCTION fix for the confirmed one-tick dispatch gap - not a
+fixture reorder, not a weakened invariant. Select a verified pre-entity-dispatch hook from the
+real pinned engine's own event order; separate orphan recovery from the unrelated Post cleanup
+rather than moving everything; preserve the real `disconnectTrailer` behavior; add focused
+event-order test coverage; prepare (not launch) a new immutable packet.
+
+### Pinned engine event order, verified directly from source
+
+Checked NeoForge's own `EventHooks.java` (pinned NeoForge `21.1.265` per `build.gradle`'s
+`moddev { version = '21.1.265' }` - the exact patch build could not be resolved to a specific
+git tag/commit via `gh api repos/neoforged/NeoForge/tags`, so this was read from the `1.21.1`
+branch instead; stated as a scoped limitation, not claimed as the exact byte-identical patch
+source):
+
+```java
+/** Fires {@link ServerTickEvent.Pre}. Called from the HEAD of {@link MinecraftServer#tickServer(BooleanSupplier)}. */
+/** Fires {@link ServerTickEvent.Post}. Called from the TAIL of {@link MinecraftServer#tickServer(BooleanSupplier)}. */
+```
+
+`tickServer` is the real top-level per-tick method (covers level/entity ticking and everything
+else in a tick) - `Pre` fires before ALL of it, `Post` fires after ALL of it. Combined with the
+already-established native-step/entity-ticking ordering, this confirms: a sweep registered on
+`Pre` runs strictly BEFORE that same tick's own entity-ticking (where `BuoyantBody.step()` /
+`stepInvocationCount++` actually happens) - genuinely earlier than `Post`, which (as already
+confirmed) only runs AFTER that tick's entity-ticking has already completed.
+
+### The fix
+
+Extracted the orphan-connection-release block out of `PhysicsBridge.cleanup()` into its own new
+method, `PhysicsBridge.releaseOrphanedTowingConnections()` - the EXACT SAME adapter binding
+(`releaseOrphanedConnections` generic orchestration, real `EntityVehicleF_Physics`/
+`TowingConnection` types, real `disconnectTrailer(index)` call, same fallback-to-null-only-when-
+index-missing behavior) with ZERO logic change - only its CALL SITE moved. `cleanup()` no longer
+performs this sweep at all; it still performs every UNRELATED thing it always did (the dead-
+vehicle/registry/pendingInheritedVelocity/handbrake/H-pattern sweeps), unchanged, still on
+`ServerTickEvent.Post` - "do not blindly move all cleanup," per 54742's own instruction.
+
+Wired a NEW `ServerTickEvent.Pre` listener in `DynamicImmersiveVehicles.java` calling
+`releaseOrphanedTowingConnections()` - called from EXACTLY this one place, so it never runs
+twice in the same tick (no duplicate dispatch, confirmed by construction, not merely asserted).
+
+**Why this eliminates the gap**: the confirmed mechanism (prior entry) was that the orphaning
+event (the fixture's own `towing.remove()`) happens mid-tick, inside a `Post` listener
+registered AFTER `cleanup()`'s own (old) `Post` slot - so the OLD sweep could not see the new
+orphan until the FOLLOWING tick's `Post` phase, by which point that tick's own entity-ticking
+(always before any `Post` listener) had already run blocked. With the sweep moved to `Pre`: the
+very next tick's `Pre` phase - which runs BEFORE that tick's own entity-ticking - sees and
+releases the orphan left over from the end of the PRIOR tick, in time for THAT SAME tick's
+entity-ticking to dispatch normally. Zero structural latency, not merely a smaller one.
+
+### Safety review
+
+- `disconnectTrailer`'s own real target/index computation and effects (parent-list removal,
+  `connectionGroupsIndexesInUse`, parking-brake, client packet) are completely unchanged - the
+  extracted method calls the identical real method, at the identical real index, under the
+  identical re-check-before-dispatch orchestration already reviewed in prior cycles (54662/54665).
+- Server-thread safety: both `Pre` and `Post` fire on the same server thread as entity-ticking
+  (standard NeoForge/Forge event-bus guarantee for tick events) - no new concurrency surface
+  introduced; this sweep already ran on the server thread before (via `Post`), just earlier in
+  the same tick's own timeline now.
+- Valid (non-orphaned, including freshly-reconnected `TOWING_REPLACEMENT`) connections are
+  provably never touched - `hasConnection`/`anchorIsValid` are re-read fresh immediately before
+  any dispatch, per the existing (54662/54665-reviewed) orchestration; moving the CALL SITE
+  earlier in the tick changes nothing about that re-check's own correctness, confirmed by the
+  unchanged generic `releaseOrphanedConnections` method itself, and newly re-tested below.
+- Registry/lifecycle mutation safety: `cleanup()`'s own untouched sweeps (registry.removeIf,
+  pendingInheritedVelocity, handbrake/H-pattern maps) are unaffected - verified by inspection,
+  their own code block is byte-for-byte unchanged, only relocated within the same file.
+- Identity/missing-index gaps (the `registryBodyIdentity`/stale-index-fallback caveats already
+  documented in prior cycles) remain explicitly open - not claimed resolved by this change.
+
+### New focused tests (`PhysicsBridgeClassificationTest`, +5, now 35 total)
+
+Since no pure unit test in this suite can exercise a live NeoForge event bus (confirmed,
+consistent with every prior entry's own stated testing boundary), these model the real tick
+order at the LOGIC level via a new `simulateTick(candidate, ops, sweepBeforeDispatch)` helper
+(sweep optionally before or after a simulated dispatch-blocked check), using the EXISTING
+`FakeOrphanCandidate`/`fakeOps()` fakes (no new test-only algorithm - same generic
+`releaseOrphanedConnections` method under test throughout):
+
+- `sweepingBeforeDispatchOnTheVeryNextTickAvoidsAnyStarvedTick` - the FIXED (Pre-timing) model:
+  confirms zero starved ticks.
+- `sweepingAfterDispatchStillStarvesExactlyOneTick_theConfirmedPriorBehavior` - the OLD
+  (Post-timing) model, kept as a documented contrast: confirms exactly the one-tick gap already
+  measured in the real `M545-packet-95bc8ed-flagon` run - demonstrating the fix actually fixes
+  the confirmed real behavior, not a hypothetical one.
+- `subsequentTicksAfterReleaseContinueDispatchingNormallyEveryTick` - 10+ further ticks, exactly
+  one dispatch each, exactly one release total.
+- `aValidReplacementConnectionIsNeverDisconnectedBySweepingBeforeDispatch` - a valid (never-
+  orphaned) connection dispatches every tick and is never touched by the sweep.
+- `thePreTimingSweepNeverRunsTwicePerSimulatedTick` - confirms the sweep itself executes exactly
+  once per simulated tick (matching the real fix's exactly-one-listener wiring).
+
+Compiled and tested under the exclusive Gradle lock: FULL suite, 889 tests (884 + 5 new), 0
+failures/errors.
+
+### New immutable validation packet prepared for independent review - NOT launched
+
+Per 54742's own instruction ("Return exact diff, serialized test receipt and NEW immutable
+isolated validation packet for independent review. NO native launch or deployment authorized"):
+a new packet was prepared for this commit, following the exact same convention as every prior
+entry - see that packet's own `PACKET-NOTES.md` for its exact name/hashes. `launch-wrapper.sh`
+was NOT invoked - the prior run (per 54727) is the one and only native execution this entire
+correction cycle has performed; this is a NEW production code change requiring its OWN new,
+explicit release before any further native execution, exactly like every prior code change in
+this investigation.
+
+### Disposition
+
+Implemented a bounded, genuinely root-cause PRODUCTION fix for the confirmed one-tick dispatch
+gap: orphan-connection release extracted (zero logic change, only its call site moved) from
+`PhysicsBridge.cleanup()`'s `ServerTickEvent.Post` into its own method on a new
+`ServerTickEvent.Pre` listener, verified against NeoForge's own pinned-branch source to
+genuinely run before that tick's own entity-ticking - eliminating the latency structurally, not
+by weakening the fixture's invariant or reordering fixture code. `cleanup()`'s own unrelated
+sweeps are completely untouched. Added 5 new tests modeling both the fixed and the (confirmed
+real) prior-behavior timing at the logic level. Full suite green (889 tests, 0 failures). A new
+immutable packet prepared for independent review - NOT launched; the prior native run remains
+this cycle's only execution. Identity/missing-index gaps and the broader hitch/reconnect-crash
+investigation remain open, not claimed resolved by this fix.

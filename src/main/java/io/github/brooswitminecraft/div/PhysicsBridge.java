@@ -1324,20 +1324,40 @@ public final class PhysicsBridge {
    else ops.fallbackClearConnection(v);
   }
  }
- public static void cleanup() {
-  // This sweep targets a towed vehicle orphaned by its anchor entity's removal (not ordinary
-  // disconnection): its own towedByConnection.towingEntity.isValid is false, but
-  // AEntityG_Towable.blockMainUpdateCall() prevents its update() - the only place MTS's own
-  // auto-disconnect check lives - from ever running again while towedByConnection stays
-  // non-null. Calls the REAL disconnectTrailer (same target/index computation
-  // AEntityG_Towable.update() itself uses), not a partial reimplementation - see
-  // releaseOrphanedConnections's own doc for the collect/re-check/dispatch orchestration, and
-  // VERIFICATION.md for why a direct field null was rejected (does not reproduce
-  // disconnectTrailer's own connectionGroupsIndexesInUse/parking-brake/client-packet effects).
-  // Calling disconnectTrailer on an already-invalid entity is not new risk this introduces -
-  // MTS's own update() already does exactly that in the ordinary (unblocked) case. This adapter
-  // only binds releaseOrphanedConnections's own generic orchestration to the real
-  // BodyRegistry/EntityVehicleF_Physics/TowingConnection types.
+ /**
+  * MINECRAFT-545/547 (John's comments 54742/54730/54727): the orphan-connection-release sweep,
+  * EXTRACTED out of {@link #cleanup()} into its own method so it can run on
+  * {@code ServerTickEvent.Pre} instead of {@code cleanup()}'s own {@code ServerTickEvent.Post} -
+  * fixing the confirmed, structurally-bounded one-tick dispatch gap documented in
+  * VERIFICATION.md ("Corrections per 54727/54730"): with the release on Post, a connection
+  * orphaned mid-tick (inside some OTHER, later-registered Post listener - e.g. a towing
+  * vehicle's own removal) cannot be detected until the FOLLOWING tick's Post phase, by which
+  * point that tick's own entity-ticking (which happens strictly BEFORE any Post listener, every
+  * tick) has already run blocked - costing one whole tick of starved dispatch. Running this
+  * sweep on Pre instead (confirmed via NeoForge's own source doc comment - {@code
+  * EventHooks.onPreServerTick}: "Called from the HEAD of {@code
+  * MinecraftServer#tickServer(BooleanSupplier)}", i.e. before ANY of that tick's own level/
+  * entity ticking) means the very next tick's Pre phase sees and releases an orphan created at
+  * the end of the PRIOR tick's Post phase, BEFORE that next tick's own entity-ticking runs -
+  * eliminating the gap structurally, not by weakening any invariant or reordering the fixture.
+  * <p>This targets a towed vehicle orphaned by its anchor entity's removal (not ordinary
+  * disconnection): its own towedByConnection.towingEntity.isValid is false, but
+  * AEntityG_Towable.blockMainUpdateCall() prevents its update() - the only place MTS's own
+  * auto-disconnect check lives - from ever running again while towedByConnection stays
+  * non-null. Calls the REAL disconnectTrailer (same target/index computation
+  * AEntityG_Towable.update() itself uses), not a partial reimplementation - see
+  * releaseOrphanedConnections's own doc for the collect/re-check/dispatch orchestration, and
+  * VERIFICATION.md for why a direct field null was rejected (does not reproduce
+  * disconnectTrailer's own connectionGroupsIndexesInUse/parking-brake/client-packet effects).
+  * Calling disconnectTrailer on an already-invalid entity is not new risk this introduces -
+  * MTS's own update() already does exactly that in the ordinary (unblocked) case. This adapter
+  * only binds releaseOrphanedConnections's own generic orchestration to the real
+  * BodyRegistry/EntityVehicleF_Physics/TowingConnection types.
+  * <p>Called from EXACTLY ONE place (a new {@code ServerTickEvent.Pre} listener in
+  * {@code DynamicImmersiveVehicles}) - {@link #cleanup()} no longer performs this sweep at all,
+  * so this never runs twice in the same tick (no duplicate dispatch).
+  */
+ public static void releaseOrphanedTowingConnections() {
   var active = new java.util.ArrayList<EntityVehicleF_Physics>();
   registry.forEachActive((v, b) -> active.add(v));
   releaseOrphanedConnections(active, new OrphanedConnectionOps<EntityVehicleF_Physics>() {
@@ -1349,7 +1369,7 @@ public final class PhysicsBridge {
    public void disconnectAtIndex(EntityVehicleF_Physics v, int index) {
     var towing = v.towedByConnection.towingVehicle;
     if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
-      "[DIV lifecycleDiagnostic] cleanup releasing orphaned towedByConnection v=" + v.uniqueUUID
+      "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections releasing orphaned towedByConnection v=" + v.uniqueUUID
         + " removedTowingEntity=" + v.towedByConnection.towingEntity.uniqueUUID + " indexInParentList=" + index);
     towing.disconnectTrailer(index);
    }
@@ -1360,10 +1380,12 @@ public final class PhysicsBridge {
     // already absent, connectionGroupsIndexesInUse, client packet, parking brake) cannot run
     // without a valid index - this is a reduced, not equivalent, recovery for this one edge case.
     if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
-      "[DIV lifecycleDiagnostic] cleanup falling back to direct null (connection missing from parent's own list) v=" + v.uniqueUUID);
+      "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back to direct null (connection missing from parent's own list) v=" + v.uniqueUUID);
     v.towedByConnection = null;
    }
   });
+ }
+ public static void cleanup() {
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
   registry.removeIf((v, b) -> !v.isValid, (v, b) -> {

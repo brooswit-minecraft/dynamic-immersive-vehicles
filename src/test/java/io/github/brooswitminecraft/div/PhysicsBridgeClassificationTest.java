@@ -236,6 +236,7 @@ class PhysicsBridgeClassificationTest {
   int indexInParent;
   int disconnectCalls = 0, fallbackCalls = 0;
   int lastReceivedIndex = Integer.MIN_VALUE;
+  int dispatchCount = 0; // 54742: simulated per-tick entity-dispatch counter, for the Pre/Post timing-model tests below
   FakeOrphanCandidate(boolean hasConnection, boolean anchorValid, int indexInParent) {
    this.hasConnection = hasConnection; this.anchorValid = anchorValid; this.indexInParent = indexInParent;
   }
@@ -340,5 +341,91 @@ class PhysicsBridgeClassificationTest {
   PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
   assertEquals(1, v.disconnectCalls, "a still-invalid connection must remain eligible even if it changed between collection and dispatch");
   assertEquals(5, v.lastReceivedIndex, "the NEW connection's own index must be used, not a stale phase-1 value");
+ }
+
+ /** MINECRAFT-545/547 (John's comments 54727/54730/54742): a pure-logic model of one simulated
+  * Minecraft tick's real event order - {@code sweepBeforeDispatch} runs (or not), THEN
+  * {@code dispatch} runs (incrementing {@code dispatchCount} unless the candidate is currently
+  * orphaned: has a connection whose anchor is invalid) - standing in for
+  * {@code ServerTickEvent.Pre -> entity-ticking} within one real tick, without a live NeoForge
+  * event bus (which no pure unit test in this suite can exercise). */
+ private static void simulateTick(FakeOrphanCandidate v, PhysicsBridge.OrphanedConnectionOps<FakeOrphanCandidate> ops, boolean sweepBeforeDispatch) {
+  if (sweepBeforeDispatch) PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
+  boolean blocked = v.hasConnection && !v.anchorValid;
+  if (!blocked) v.dispatchCount++;
+  if (!sweepBeforeDispatch) PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
+ }
+
+ @Test void sweepingBeforeDispatchOnTheVeryNextTickAvoidsAnyStarvedTick() {
+  // 54742's own fix: moving the sweep to run BEFORE dispatch each tick (modeling
+  // ServerTickEvent.Pre, which fires before that tick's own entity-ticking). The orphaning
+  // itself happens AFTER this tick's own dispatch already ran (modeling removal happening
+  // inside some OTHER, later Post listener) - so THIS tick's dispatch is unaffected regardless.
+  // The very NEXT tick's sweep (now running before ITS dispatch) must release the connection in
+  // time for that SAME tick's dispatch to succeed - zero starved ticks.
+  var v = new FakeOrphanCandidate(true, true, 0); // starts with a VALID connection
+  var ops = fakeOps();
+  simulateTick(v, ops, true); // tick R: dispatches fine (valid), THEN becomes orphaned below
+  v.anchorValid = false; // the anchor's removal, happening AFTER tick R's own dispatch (e.g. mid-Post)
+  simulateTick(v, ops, true); // tick R+1: sweep (Pre) runs BEFORE dispatch - releases it in time
+  assertEquals(2, v.dispatchCount, "with the sweep running before dispatch, NO tick is starved - R+1 dispatches normally");
+  assertEquals(1, v.disconnectCalls);
+ }
+
+ @Test void sweepingAfterDispatchStillStarvesExactlyOneTick_theConfirmedPriorBehavior() {
+  // The OLD (Post-timing) behavior, kept here as a documented contrast: with the sweep running
+  // AFTER dispatch (modeling the original ServerTickEvent.Post placement), the tick immediately
+  // following the orphaning event is STILL blocked (dispatch checked before that tick's own
+  // sweep runs) - exactly the confirmed one-tick gap from the M545-packet-95bc8ed-flagon run.
+  var v = new FakeOrphanCandidate(true, true, 0);
+  var ops = fakeOps();
+  simulateTick(v, ops, false); // tick R: dispatches fine, THEN becomes orphaned below
+  v.anchorValid = false;
+  simulateTick(v, ops, false); // tick R+1: dispatch checked FIRST (still blocked) - starved - THEN sweep releases it
+  assertEquals(1, v.dispatchCount, "tick R+1 must be starved under the OLD Post-timing model - this is the confirmed prior behavior, not the fix");
+  simulateTick(v, ops, false); // tick R+2: now released, dispatches normally again
+  assertEquals(2, v.dispatchCount);
+ }
+
+ @Test void subsequentTicksAfterReleaseContinueDispatchingNormallyEveryTick() {
+  var v = new FakeOrphanCandidate(true, true, 0);
+  var ops = fakeOps();
+  simulateTick(v, ops, true);
+  v.anchorValid = false;
+  for (int i = 0; i < 10; i++) simulateTick(v, ops, true);
+  assertEquals(11, v.dispatchCount, "every tick from the very first sweep onward must dispatch exactly once, with no further gaps");
+  assertEquals(1, v.disconnectCalls, "the connection must be released exactly once, never repeatedly");
+ }
+
+ @Test void aValidReplacementConnectionIsNeverDisconnectedBySweepingBeforeDispatch() {
+  // A fresh, VALID replacement connection (e.g. TOWING_REPLACEMENT's own reconnect) must dispatch
+  // normally every tick and never be touched by the sweep, regardless of sweep timing.
+  var v = new FakeOrphanCandidate(true, true, 3);
+  var ops = fakeOps();
+  for (int i = 0; i < 5; i++) simulateTick(v, ops, true);
+  assertEquals(5, v.dispatchCount, "a valid connection must dispatch every single tick");
+  assertEquals(0, v.disconnectCalls);
+  assertEquals(0, v.fallbackCalls);
+ }
+
+ @Test void thePreTimingSweepNeverRunsTwicePerSimulatedTick() {
+  // "no duplicate dispatch": confirms the fixed model's own simulateTick helper calls the sweep
+  // EXACTLY once per simulated tick (matching the real fix - releaseOrphanedTowingConnections
+  // is called from exactly one listener, never both Pre and Post) - a second redundant sweep in
+  // the SAME tick would still be idempotent (per repeatedSweepIsIdempotent above) but is not
+  // what the real fix does.
+  var v = new FakeOrphanCandidate(true, false, 0);
+  int[] sweepCalls = {0};
+  var ops = new PhysicsBridge.OrphanedConnectionOps<FakeOrphanCandidate>() {
+   public boolean hasConnection(FakeOrphanCandidate c) { sweepCalls[0]++; return c.hasConnection; }
+   public boolean anchorIsValid(FakeOrphanCandidate c) { return c.anchorValid; }
+   public int indexInParentList(FakeOrphanCandidate c) { return c.indexInParent; }
+   public void disconnectAtIndex(FakeOrphanCandidate c, int index) { c.disconnectCalls++; c.hasConnection = false; }
+   public void fallbackClearConnection(FakeOrphanCandidate c) { c.fallbackCalls++; c.hasConnection = false; }
+  };
+  simulateTick(v, ops, true);
+  // hasConnection is read exactly twice per releaseOrphanedConnections call (collection phase +
+  // dispatch-time re-check) - two calls confirms the sweep itself ran exactly once this tick.
+  assertEquals(2, sweepCalls[0], "the sweep must run exactly once per tick in the fixed model");
  }
 }

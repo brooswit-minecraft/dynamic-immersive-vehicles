@@ -24,6 +24,15 @@ public final class DynamicImmersiveVehicles {
    var registrar = event.registrar("1");
    registrar.playToServer(WheelAuxPayload.TYPE, WheelAuxPayload.STREAM_CODEC, WheelAuxPayload::handle);
   });
+  // MINECRAFT-545/547 (John's comments 54727/54730/54742): orphan-connection release runs on
+  // ServerTickEvent.Pre - fires at the HEAD of MinecraftServer#tickServer, before THIS tick's
+  // own entity-ticking - specifically so a connection orphaned during the PRIOR tick's own
+  // ServerTickEvent.Post phase (after that tick's entity-ticking already ran) is released
+  // before THIS tick's entity-ticking, not one tick late. See
+  // PhysicsBridge.releaseOrphanedTowingConnections's own doc for the full derivation. Extracted
+  // from cleanup() (below), which no longer performs this sweep - never both, no duplicate
+  // dispatch.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Pre event) -> PhysicsBridge.releaseOrphanedTowingConnections());
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
   // Ticket MINECRAFT-504: per-server-tick continuation for the hybrid H-pattern climb and the
   // analog handbrake's staleness timeout - see PhysicsBridge.advanceWheelAuxInputs's own doc for
