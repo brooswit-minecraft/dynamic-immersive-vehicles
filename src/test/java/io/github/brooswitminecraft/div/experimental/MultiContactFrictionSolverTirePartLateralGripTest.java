@@ -117,9 +117,9 @@ class MultiContactFrictionSolverTirePartLateralGripTest {
   var reducedGripContact = new MultiContactFrictionSolver.FrictionContact(new Vector3d(0,0,0), FORWARD, RIGHT, NORMAL, 1.0, 1.0, 1.0, 0.0, 1.0,
     composedLateralGripOverrideRatio(0.2, VEHICLE_LATERAL_GRIP));
   double driveForcePerWheel = 400.0; // well under the 2000N circular/elliptical longitudinal budget
-  MultiContactFrictionSolver.solveFriction(new MultiContactFrictionSolver.FrictionContact[]{fullGripContact}, MASS, INERTIA, IDENTITY, IDENTITY,
+  var fullResults = MultiContactFrictionSolver.solveFriction(new MultiContactFrictionSolver.FrictionContact[]{fullGripContact}, MASS, INERTIA, IDENTITY, IDENTITY,
     velocityFull, angularFull, 0, driveForcePerWheel, FRICTION, VEHICLE_LATERAL_GRIP, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
-  MultiContactFrictionSolver.solveFriction(new MultiContactFrictionSolver.FrictionContact[]{reducedGripContact}, MASS, INERTIA, IDENTITY, IDENTITY,
+  var reducedResults = MultiContactFrictionSolver.solveFriction(new MultiContactFrictionSolver.FrictionContact[]{reducedGripContact}, MASS, INERTIA, IDENTITY, IDENTITY,
     velocityReduced, angularReduced, 0, driveForcePerWheel, FRICTION, VEHICLE_LATERAL_GRIP, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
   double forwardFull = velocityFull.dot(FORWARD), forwardReduced = velocityReduced.dot(FORWARD);
   assertTrue(Double.isFinite(forwardFull) && Double.isFinite(forwardReduced), "non-finite forward speed");
@@ -127,6 +127,19 @@ class MultiContactFrictionSolverTirePartLateralGripTest {
   assertTrue(relativeDelta < 0.005,
     "a per-tire reduced lateral-grip override should not meaningfully reduce longitudinal/drive authority, full=" + forwardFull
       + " reduced=" + forwardReduced + " relativeDelta=" + relativeDelta);
+  // Self-review finding: the ticket explicitly requires a driven-wheel combination regression
+  // against the shared friction envelope, not just a forward-speed comparison - assert this
+  // overridden tire's own achieved (longitudinal, lateral) force stays within its EFFECTIVE
+  // ellipse, i.e. the circumscribing friction-circle radius normal*friction (the same budget the
+  // combined braking+cornering test below checks), confirming the reduced lateral semi-axis
+  // never lets the driven wheel's combined force exceed what the ellipse actually allows.
+  double budget = NORMAL * FRICTION + 1e-6;
+  var reducedDriven = reducedResults[0];
+  assertTrue(Double.isFinite(reducedDriven.longitudinal()) && Double.isFinite(reducedDriven.lateral()),
+    "non-finite driven+cornering result with a reduced lateral-grip override " + reducedDriven);
+  double achieved = Math.hypot(reducedDriven.longitudinal(), reducedDriven.lateral());
+  assertTrue(achieved <= budget,
+    "achieved combined force " + achieved + " for the overridden driven wheel must stay within the friction-circle budget " + budget);
  }
 
  /** Combined braking + cornering regression against the shared friction ellipse (ticket's own

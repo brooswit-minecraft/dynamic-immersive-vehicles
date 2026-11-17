@@ -1616,6 +1616,43 @@ class OverridesTest {
   }
  }
 
+ // Review finding (PR #51/Jira comment 54581): swappingTheResolvedTireLateralGripChangesTheComposedRatio
+ // in MultiContactFrictionSolverTirePartLateralGripTest only exercises local arithmetic on two
+ // already-resolved doubles - it never changes live Overrides state, so it would pass even if
+ // real installed-tire replacement/removal kept returning a stale override. This regression
+ // drives the REAL active-config seam (Overrides.apply, the same one a live config reload uses)
+ // for one canonical installed-part key: apply a part entry, observe its resolved lateral
+ // multiplier through PhysicsBridge.tirePartLateralGripMultiplier; replace that same key's entry
+ // with a different value and observe the NEW value take effect; then remove the entry entirely
+ // and confirm the exact vehicle-level fallback is restored, not the removed value or a stale
+ // cache - the ticket's explicit "canonical-key resolution/inheritance, removal/replacement"
+ // coverage requirement, proven through live state rather than local arithmetic.
+ @Test void tirePartLateralGripMultiplierObservesLiveReplacementAndRestoresVehicleFallbackOnRemoval() {
+  try {
+   double vehicleLateralGrip = 0.6;
+   var initial = new Overrides.Tuning(); initial.lateralGripMultiplier = 0.3;
+   var applyInitial = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:canonical_tire", initial)));
+   assertTrue(applyInitial.success(), "the initial parts.<tire>.lateralGripMultiplier config must apply cleanly");
+   assertEquals(0.3, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "the installed tire's resolved lateralGripMultiplier must observe the just-applied part override");
+
+   var replacement = new Overrides.Tuning(); replacement.lateralGripMultiplier = 0.9;
+   var applyReplacement = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:canonical_tire", replacement)));
+   assertTrue(applyReplacement.success(), "replacing the same canonical tire key's part entry must apply cleanly");
+   assertEquals(0.9, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "replacing the part entry for the SAME canonical key must be observed as the new resolved value, not the stale prior override");
+
+   var applyRemoval = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(), java.util.Map.of()));
+   assertTrue(applyRemoval.success(), "removing the tire's part entry entirely must itself apply cleanly");
+   assertEquals(vehicleLateralGrip, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "removing the part entry entirely must restore the exact vehicle-level fallback, not the removed override or a stale cache");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  @Test void nonUnitVehicleLateralGripMultiplierFallsThroughUnchangedWhenNoPartOverrideExists() {
   double vehicleLateralGrip = 0.6;
   double resolved = PhysicsBridge.tirePartLateralGripMultiplier("packid:no_override_tire", vehicleLateralGrip);
