@@ -20,6 +20,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
       - name: Resolve the checked-out commit and a safe artifact label
         id: resolved
         env:
