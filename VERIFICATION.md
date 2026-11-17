@@ -5678,9 +5678,13 @@ to compute a real inertia tensor itself.
 
 - `BoxInertia.java` (new, pure math, zero Sable/Minecraft dependency):
   the standard solid-rectangular-box inertia tensor about its own center,
-  `I_xx=m/3*(hy²+hz²)` etc. - textbook rigid-body mechanics, the same
-  uniform-density assumption the flawed fallback already implicitly made,
-  just actually accounting for shape.
+  `I_xx=m/3*(hy²+hz²)` etc. - textbook rigid-body mechanics. This is a
+  CHOSEN model (uniform-density solid box), not a proven match to this
+  hull's actual mass distribution. It is a DIFFERENT model from the
+  flawed fallback, not a correction to the same one: `mass/6` has no
+  shape term and no coherent physical model behind it at all - it is
+  neither uniform-density nor point-mass (a true point mass has ZERO
+  rotational inertia, which `mass/6` is not).
 - `ShapeAwareBoxPhysicsObject.java` (new): extends `BoxPhysicsObject`,
   overrides `getMassTracker()` to return a `MassData` built from
   `BoxInertia.solidBoxTensor(mass, halfExtents)` instead of the base
@@ -5740,3 +5744,128 @@ Patch + regression ready for review. No native/Minecraft run has been
 performed for this fix - still gated on independent review of the actual
 mechanism/diff per 54407's own "native run remains gated on coordinator
 review." PR #39 stays draft/unmerged.
+
+## Consumer/wiring evidence, frame-convention check, and wording corrections (54411)
+
+John's comment 54411 independently reviewed `b1264a7` (confirmed clean
+tree, 84 XML files/795 tests/0 failures/errors/skips) and raised four
+concrete, still-open items before treating this as more than candidate
+progress: (1) does the native-facing path actually invoke the OVERRIDDEN
+`getMassTracker()`, with correct constructor-ordering; (2) the exact
+tensor/inverse/COM frame convention; (3) finite/positive/nondegenerate
+input guarantees against BuoyantBody's EXISTING invariants, not new
+speculative robustness; (4) reuse the project's own established
+Minecraft-aware unit-test pattern (from MINECRAFT-546) rather than
+treating the classpath gap as absolute impossibility - plus two wording
+corrections. All four addressed below; no native run performed.
+
+### (4) Reused the established `unitTest` pattern - the classpath gap is now closed
+
+Found the exact precedent in this project's own history: commit
+`0ce3285` ("MINECRAFT-546: enable moddev unitTest support...") added
+`unitTest { enable(); testedMod = mods.dynamicimmersivevehicles }` inside
+`build.gradle`'s `neoForge { ... }` block - the moddev plugin's own
+official mechanism for wiring real Minecraft/NeoForge classes onto the
+`test` sourceSet's classpath. That commit is NOT an ancestor of this
+branch's current HEAD (confirmed via `git merge-base --is-ancestor`) -
+it exists in this repo's history but was never merged in here. Re-added
+the identical one-line change (same block, same pattern, same comment
+style) to `build.gradle`.
+
+**This resolved the classpath gap entirely.** Re-created
+`ShapeAwareBoxPhysicsObjectTest.java` (removed in the prior round) - it
+now PASSES, 5/5 tests, constructing real `Pose3d`/`BoxPhysicsObject`/
+`ShapeAwareBoxPhysicsObject` instances directly, no `NoClassDefFoundError`.
+This is still NOT a native-pipeline run - no dedicated server, no
+`onAddition`/`addBox`/live Rapier instance - `getMassTracker()` remains a
+plain Java method call on a never-added object, exactly as before; only
+the class-loading gap (needing `net.minecraft.core.Position` to resolve)
+is what `unitTest` fixes.
+
+### (1) Consumer/wiring evidence: virtual dispatch and constructor ordering
+
+**Constructor ordering, checked via bytecode (not assumed):** disassembled
+the PINNED jar's own `BoxPhysicsObject(Pose3dc, Vector3dc, double)`
+constructor with `javap -c`. It calls `Object.<init>`, then directly sets
+`pose`/`halfExtents`/`active`/`mass` fields - **it does not call
+`getMassTracker()` or any other overridable method during construction.**
+This rules out the classic "virtual call from a superclass constructor
+reads an uninitialized subclass field" hazard: nothing in the
+superclass's own constructor can observe `ShapeAwareBoxPhysicsObject`'s
+`massData` field before the subclass's own constructor body finishes
+setting it (immediately after `super(...)` returns, before the
+constructor exits - ordinary, safe Java semantics).
+
+**Virtual dispatch through the interface the native-facing path actually
+uses, checked with a real test (not assumed):** disassembled
+`BoxPhysicsObject.onAddition()` - it calls
+`physicsSystem.getPipeline().addBox(this)`. The new
+`fixedIsActuallyDispatchedThroughPhysicsPipelineBodyNotJustItsOwnReference`
+test holds a `ShapeAwareBoxPhysicsObject` only through a
+`PhysicsPipelineBody`-typed reference (the same interface
+`getMassTracker()` is declared on, and the type `addBox` itself takes a
+value as) and confirms `getMassTracker()` still returns the overridden,
+shape-aware tensor through that reference - standard Java virtual
+dispatch, verified live, not merely argued from the JLS. The actual
+native `addBox`/JNI boundary beyond this Java-level call is still
+untraced (native code, not reachable from a unit test) - stated as a
+real, remaining limit, not closed.
+
+### (2) Frame/inverse convention
+
+Checked a NEWER, differently-versioned Sable checkout's own native JNI
+mass-properties function (`Java_..._Rapier3D_setMassProperties` in
+`sable_rapier/.../rapier/src/lib.rs`) for how an inertia matrix is
+actually consumed natively: it reads a flattened 9-element array as 3
+COLUMN vectors (`Mat3::from_cols`) and applies it via
+`MassProperties::with_inertia_matrix`. **This is NOT proven to be the
+PINNED 2.0.5 version's own implementation** - stated as supportive
+context only, not established fact for the version this build actually
+uses. The mitigating factor that actually matters here: `BoxInertia`'s
+own tensor is PURELY DIAGONAL (confirmed by the already-passing
+`offDiagonalTermsAreZeroForAnAxisAlignedBox` test) - a diagonal matrix is
+identical whether read row-major or column-major, so this fix's own
+correctness does not depend on resolving that open convention question.
+
+### (3) Finite/positive/nondegenerate inputs, checked against EXISTING invariants only
+
+Re-read `BuoyantBody`'s own constructor: it already throws
+`InvalidChassisGeometry` unless `max.x>min.x && max.y>min.y && max.z>min.z`
+AND `min.x` is finite (and by the same per-axis min/max reduction over
+finite collision-box values, every component of both `min`/`max` is
+finite) - BEFORE `half`/`mass` are ever computed. This guarantees
+`half.x/y/z` are each strictly positive and finite by the time
+`ShapeAwareBoxPhysicsObject`'s constructor runs - the SAME guarantee the
+plain `BoxPhysicsObject` constructor already relied on, not a new one.
+`mass` itself (`tuning.massKg` or a `v.getMass()`-derived fallback) has
+no NEW exposure here either: the plain legacy constructor already
+divides by `mass` for inverse mass, so a degenerate `mass` was already a
+pre-existing risk surface, unchanged by this fix - per 54411's own
+direction, no new speculative validation was added for it.
+
+### Wording corrections
+
+- `BoxInertia.java`'s own doc comment wrongly implied `mass/6` reflects
+  "the same implicit uniform-density assumption" the new formula uses -
+  corrected: `mass/6` has NO shape term and no coherent physical model
+  at all - it is neither uniform-density NOR point-mass (a true point
+  mass has ZERO rotational inertia, which `mass/6` plainly is not). The
+  new solid-box tensor is a DIFFERENT chosen model, not a correction to
+  the same one.
+- Restated plainly, again: the solid-box model remains a CHOSEN
+  assumption, not proven to match this hull's actual mass distribution;
+  the crash mechanism remains a candidate, not an established fact,
+  pending discriminating validation.
+
+### Updated regression receipt
+
+Full suite forced (`--rerun-tasks test`, not cached): **800 tests, 0
+failures, 0 errors, 0 skipped** (795 + 5 new `ShapeAwareBoxPhysicsObjectTest`
+cases, now actually running instead of removed). `unitTest` enablement
+required one network fetch (Minecraft asset index, already a documented,
+one-time cost from the MINECRAFT-546 precedent's own commit message) -
+completed successfully in this environment.
+
+No native/Minecraft dedicated-server run was performed. Native gate
+remains closed pending the coordinator's own review of this evidence and
+an isolated packet, per 54411.

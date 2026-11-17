@@ -13,10 +13,13 @@ import org.joml.Vector3dc;
  * <p>Formula: for a solid cuboid of FULL side lengths (Lx, Ly, Lz), the standard inertia about
  * its own center is {@code I_xx = m/12*(Ly^2+Lz^2)} (and the cyclic equivalents for Y/Z). With
  * half-extents {@code hx=Lx/2}, {@code Ly^2 = 4*hy^2}, giving {@code I_xx = m/3*(hy^2+hz^2)} -
- * this is a standard, textbook rigid-body mechanics result, not a DIV-specific invention; it
- * assumes uniform density over the full box volume (the same implicit assumption Sable's own
- * flawed fallback already made by treating the body as a single mass point with no shape at
- * all - this corrects that assumption's scope, not its nature).
+ * this is a standard, textbook rigid-body mechanics result, not a DIV-specific invention. It
+ * is a CHOSEN model (a uniform-density solid box), not a proven match to this hull's actual
+ * mass distribution - no such measurement exists. This is explicitly a different model from
+ * Sable's own {@code mass/6} fallback, not merely a correction to the SAME one: {@code mass/6}
+ * has no shape term in it at all (not uniform-density, not point-mass - a true point mass has
+ * ZERO rotational inertia, which {@code mass/6} is not either) - it is simply shape-ignorant,
+ * with no coherent physical model behind it.
  */
 final class BoxInertia {
  private BoxInertia() {}
