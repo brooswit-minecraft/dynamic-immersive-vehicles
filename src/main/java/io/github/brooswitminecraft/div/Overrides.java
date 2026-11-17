@@ -403,11 +403,16 @@ public final class Overrides {
    if (suspensionTravel != null && !(suspensionTravel > 0 && suspensionTravel <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (friction != null && !(friction > 0 && friction <= 3)) throw new IllegalArgumentException("invalid vehicle tuning");
    // MINECRAFT-534: strictly positive, same "never zero" reasoning friction's own bound above
-   // documents - PhysicsBridge.tirePartRollingResistance divides a resolved value back by this
-   // same vehicle-resolved rollingResistance to form a pure ratio (mirroring tirePartFriction's
-   // own division by tuning.friction), so a zero value would be a division-by-zero. Capped at 10
-   // to match GroundSurfaceOverrides' own rollingResistanceMultiplier range - a consistent bound
-   // across both the ground-surface and tire-part multipliers that compose together.
+   // uses - a zero or negative multiplier is a degenerate tuning value, not a real one. There is
+   // no division in the actual composition: PhysicsBridge.tirePartRollingResistance returns this
+   // fully-resolved value outright (the part's own override, or else the vehicle's own resolved
+   // value unchanged), and PhysicsBridge.stepGround multiplies it directly by the ground
+   // surface's own rollingResistanceMultiplier - review correction, PR #30/comment 54071 (an
+   // earlier version of this code divided by tuning.rollingResistance here, which silently
+   // cancelled a configured vehicle-level value back to 1.0; see this field's own doc above).
+   // Capped at 10 to match GroundSurfaceOverrides' own rollingResistanceMultiplier range - a
+   // consistent bound across both the ground-surface and tire-part multipliers that compose
+   // together.
    if (rollingResistance != null && !(rollingResistance > 0 && rollingResistance <= 10)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (driveForce != null && !(driveForce >= 0 && driveForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (brakeForce != null && !(brakeForce >= 0 && brakeForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
