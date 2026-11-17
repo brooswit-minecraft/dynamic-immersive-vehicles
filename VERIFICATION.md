@@ -9268,3 +9268,46 @@ overwritten. Raw receipts now archived for every preflight/negative-test
 claim. No native run performed or requested. Native hold remains CLOSED.
 Awaiting the coordinator's own account of how the discrepant hash was
 obtained, or further instruction.
+
+## Root cause of 54650's hash mismatch found and fixed per 54654: locale-dependent sort collation
+
+John's 54654 found the actual root cause independently: `sort -k2`'s own
+collation order is LOCALE-DEPENDENT. Reproducing the exact same pipeline
+(`find . -type f -exec sha256sum {} + | sort -k2 | sha256sum`) against
+the SAME files under `LC_ALL=C.UTF-8` gives one hash; under
+`LC_ALL=en_US.UTF-8` gives a DIFFERENT hash (the one actually archived).
+There was no file drift - the file mtimes I checked in the prior entry
+were never proof of anything, since the function itself was
+non-deterministic ACROSS ENVIRONMENTS, not across time. My own prior
+investigation was itself incomplete: I confirmed internal consistency
+(live recompute matched the archive, in my own shell, at that moment)
+but never tested whether the ALGORITHM was deterministic independent of
+ambient locale - the actual question John's finding answers.
+
+### Fix
+
+`compute_runtime_byte_manifest` (`runtime-manifest.sh`) now pins
+`LC_ALL=en_US.UTF-8` explicitly on the `sort -k2` step itself, inside the
+function - matching the already-archived manifest, confirmed installed
+on this system (`en_US.utf8`). This is a stronger fix than relying on the
+launch environment to remember to set `LC_ALL` (John's own suggested
+mitigation in 54654): the function itself is now deterministic
+regardless of the caller's ambient locale, so no future caller can
+reintroduce this exact non-determinism by omitting an environment
+variable. No baseline overwrite needed - the archived
+`runtime-byte-manifest.sha256` values were already correct; only the
+function's own determinism needed fixing.
+
+Verified: ran the function three times, once under each of
+`LC_ALL=C.UTF-8`, `LC_ALL=en_US.UTF-8`, and `LC_ALL=C` as the AMBIENT
+shell locale - all three now produce output that matches the archived
+manifest exactly (the function's own internal pin overrides whatever the
+caller's environment happens to be). Re-ran the full 9-check
+`preflight.sh` against the real packet with the fix installed and
+explicit `LC_ALL=en_US.UTF-8` - still `PREFLIGHT_OK`, all 9 checks pass.
+
+### Disposition
+
+Root cause resolved per 54654/54655's own account - not a file-drift
+bug, a locale-nondeterminism bug in my own hashing function, now fixed
+at the source rather than relying on launch-environment convention.
