@@ -235,6 +235,7 @@ class PhysicsBridgeClassificationTest {
   boolean anchorValid;
   int indexInParent;
   int disconnectCalls = 0, fallbackCalls = 0;
+  int lastReceivedIndex = Integer.MIN_VALUE;
   FakeOrphanCandidate(boolean hasConnection, boolean anchorValid, int indexInParent) {
    this.hasConnection = hasConnection; this.anchorValid = anchorValid; this.indexInParent = indexInParent;
   }
@@ -245,7 +246,7 @@ class PhysicsBridgeClassificationTest {
    public boolean anchorIsValid(FakeOrphanCandidate v) { return v.anchorValid; }
    public int indexInParentList(FakeOrphanCandidate v) { return v.indexInParent; }
    public void disconnectAtIndex(FakeOrphanCandidate v, int index) {
-    v.disconnectCalls++; v.hasConnection = false; // mirrors the real disconnectTrailer's own towedByConnection=null effect
+    v.disconnectCalls++; v.lastReceivedIndex = index; v.hasConnection = false; // mirrors the real disconnectTrailer's own towedByConnection=null effect
    }
    public void fallbackClearConnection(FakeOrphanCandidate v) {
     v.fallbackCalls++; v.hasConnection = false;
@@ -254,9 +255,13 @@ class PhysicsBridgeClassificationTest {
  }
 
  @Test void eligibleInvalidAnchorConnectionInvokesDisconnectExactlyOnceAtItsRealIndex() {
+  // MINECRAFT-545/547 (John's comment 54665): the earlier version of this test only counted
+  // calls, never asserting the ACTUAL index value received - a coverage gap, not evidence the
+  // real index was ever passed through correctly. Now asserted directly.
   var v = new FakeOrphanCandidate(true, false, 2);
   PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), fakeOps());
   assertEquals(1, v.disconnectCalls);
+  assertEquals(2, v.lastReceivedIndex, "disconnectAtIndex must receive this candidate's own real indexInParentList() value");
   assertEquals(0, v.fallbackCalls);
  }
 
@@ -289,12 +294,13 @@ class PhysicsBridgeClassificationTest {
  }
 
  @Test void aCandidateWhoseAnchorBecomesValidBeforeDispatchIsNeverDisconnected() {
-  // MINECRAFT-545/547 (John's comment 54662's own race guard): a candidate collected as
-  // orphaned in phase 1 must be RE-CHECKED, fresh, immediately before phase 2 acts on it - an
-  // earlier candidate's own disconnect must never be trusted to leave a LATER candidate's own
-  // eligibility unchanged. Simulated here by directly flipping anchorValid to true between
+  // MINECRAFT-545/547 (John's comments 54662/54665): the dispatch phase re-checks CURRENT
+  // eligibility (hasConnection/anchorIsValid), fresh, immediately before acting on each
+  // candidate - NOT an identity-snapshot guard (54665's own correction: this does not ask "is
+  // this the same connection object collected in phase 1," only "is whatever connection v has
+  // right now still orphaned"). Simulated here by flipping anchorValid to true between
   // collection and dispatch (standing in for some other effect making the connection valid
-  // again by the time dispatch actually reaches it).
+  // again by the time dispatch actually reaches it) - a now-valid connection must be skipped.
   var v = new FakeOrphanCandidate(true, false, 0);
   var ops = new PhysicsBridge.OrphanedConnectionOps<FakeOrphanCandidate>() {
    boolean firstRead = true;
@@ -312,5 +318,27 @@ class PhysicsBridgeClassificationTest {
   PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
   assertEquals(0, v.disconnectCalls, "a connection that became valid again before dispatch must never be disconnected");
   assertEquals(0, v.fallbackCalls);
+ }
+
+ @Test void aCandidateWhoseConnectionChangedButIsStillInvalidRemainsEligible() {
+  // MINECRAFT-545/547 (John's comment 54665's own precise correction): the exact converse of
+  // the test above - this is NOT an identity-snapshot guard, so a candidate whose connection
+  // changed to a DIFFERENT one that is STILL invalid must remain eligible and be disconnected
+  // (at the NEW connection's own real index), not skipped merely because "something changed."
+  // indexInParentList(v) is only ever read ONCE, during dispatch (collection reads only
+  // hasConnection/anchorIsValid) - so a "changed" connection is simulated by that one dispatch-
+  // time read itself returning the NEW connection's own different index (5, not the phase-1
+  // candidate's original 0), while anchorIsValid stays false throughout.
+  var v = new FakeOrphanCandidate(true, false, 0);
+  var ops = new PhysicsBridge.OrphanedConnectionOps<FakeOrphanCandidate>() {
+   public boolean hasConnection(FakeOrphanCandidate c) { return c.hasConnection; }
+   public boolean anchorIsValid(FakeOrphanCandidate c) { return c.anchorValid; } // false throughout
+   public int indexInParentList(FakeOrphanCandidate c) { return 5; } // the changed connection's own real index
+   public void disconnectAtIndex(FakeOrphanCandidate c, int index) { c.disconnectCalls++; c.lastReceivedIndex = index; c.hasConnection = false; }
+   public void fallbackClearConnection(FakeOrphanCandidate c) { c.fallbackCalls++; }
+  };
+  PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
+  assertEquals(1, v.disconnectCalls, "a still-invalid connection must remain eligible even if it changed between collection and dispatch");
+  assertEquals(5, v.lastReceivedIndex, "the NEW connection's own index must be used, not a stale phase-1 value");
  }
 }

@@ -9685,3 +9685,51 @@ anything under another packet's directory.
 
 Updated packet ready, per 54662's own instruction - prepared only. NO launch until the
 coordinator/parent explicitly releases a further reviewed run. Native hold remains CLOSED.
+
+## Compiled-byte drift explained per 54665/54668/54669: comment-only source change, evidence captured
+
+John's 54665 asked for a precise terminology correction; implementing it required editing
+`PhysicsBridge.java` again AFTER `M545-packet-435937b` had already been prepared and hashed -
+changing the live compiled bytes out from under that already-archived packet. 54668 caught this
+exact drift independently (reviewing the packet mid-flight) and correctly blocked any launch;
+54669 asked for the exact evidence explaining the change, a fresh packet, and no further launch
+until that new packet is itself reviewed and released.
+
+### Exact change and evidence
+
+Production diff (`PhysicsBridge.java`): ONE six-line javadoc paragraph added to
+`releaseOrphanedConnections`'s own doc comment (the "current-eligibility check, not an identity-
+snapshot guard" clarification John's 54665 asked for) - no other production line touched. Test
+diff (`PhysicsBridgeClassificationTest.java`): functional - captures the actual received index
+in `disconnectAtIndex` and asserts it (54665's own "does not assert received index" finding);
+corrects the race-guard test's own description to match 54665's current-eligibility
+clarification; adds `aCandidateWhoseConnectionChangedButIsStillInvalidRemainsEligible` (54665's
+own "no test currently mutates candidate collection during disconnect" finding).
+
+Captured concrete before/after evidence rather than asserting equivalence without it (54669's
+own explicit instruction: "do not claim binary equivalence without evidence"): stashed the
+current changes, recompiled to get the OLD `PhysicsBridge.class`, saved a copy, restored the
+changes, recompiled again for the NEW `PhysicsBridge.class`. `javap -p -c` (bytecode
+instructions only, no debug info) on both is BYTE-IDENTICAL (`diff` empty). `javap -p -c -l`
+(bytecode + line-number table) differs in exactly one place: every `LineNumberTable` entry at or
+after the edited method shifts by exactly 6 - precisely the length of the added javadoc
+paragraph. This is `javac`'s own default debug-info behavior (source line numbers embedded for
+the debugger), not a behavioral change - the actual bytecode instructions are unchanged, which is
+why the aggregate SHA256 of `build/classes/java/main` changed despite no logic change: the hash
+is over raw file bytes, and `LineNumberTable` entries are real bytes in the `.class` file even
+though they affect no runtime behavior.
+
+### Packet 435937b preserved unchanged
+
+Per 54669's own explicit instruction, `M545-packet-435937b` and its own archived
+`runtime-byte-manifest.sha256` were NOT touched, refreshed, or used for any launch - the drift
+this entry explains is real, and the old packet now correctly reflects a stale, pre-edit build.
+A separate, freshly-named packet follows in the next entry, prepared against the new commit
+these changes are part of.
+
+### Disposition
+
+Comment-only production change, functional test change, both explained with direct before/after
+bytecode evidence rather than an unverified equivalence claim. Old packet preserved untouched.
+No further terminology/refactor churn after this commit, per 54669's own explicit instruction.
+No native run performed. A new packet follows, not yet reviewed or released.

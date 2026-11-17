@@ -1291,7 +1291,13 @@ public final class PhysicsBridge {
   * RE-CHECK {@code hasConnection}/{@code anchorIsValid} fresh immediately before acting on each
   * candidate - an earlier candidate's own disconnect must never be trusted to leave a later
   * candidate's own eligibility unchanged; the phase-1 list is a set of candidates to re-verify,
-  * never a decision already made. */
+  * never a decision already made.
+  * <p>This re-check is a CURRENT-ELIGIBILITY check, not an identity-snapshot guard: it asks
+  * "is whatever connection {@code v} has right now still orphaned," never "is this literally
+  * the same connection object collected in phase 1." A candidate whose connection became valid
+  * (or disappeared) is skipped; a candidate whose connection changed to a DIFFERENT one that is
+  * still invalid remains eligible and IS disconnected - correct under the current invariant
+  * (release any currently-orphaned connection), not a gap. */
  interface OrphanedConnectionOps<V> {
   boolean hasConnection(V v);
   /** Only ever called when {@link #hasConnection} is currently true for the same {@code v}. */
