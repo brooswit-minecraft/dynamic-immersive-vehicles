@@ -2222,4 +2222,45 @@ class OverridesTest {
   assertEquals(sharedValue, PhysicsBridge.directionalDampingRatio(directional.suspensionDampingRatioCompression, axleResolvedBase), 0.0);
   assertEquals(sharedValue, PhysicsBridge.directionalDampingRatio(directional.suspensionDampingRatioRebound, axleResolvedBase), 0.0);
  }
+
+ /**
+  * Review finding (comment 54547): {@code resolveFields} validated each of {@code packMetadata}/
+  * {@code ivAdapted}/{@code physicallyDerived} individually (and {@code override} was already
+  * validated at config-load time) but never validated the actual COMPOSED {@code result} it
+  * returns - a field-by-field precedence chain can pick a directional damping ratio from one
+  * source and an axle spring multiplier from a DIFFERENT source, each individually valid against
+  * only its own source's other fields, yet unstable together once resolved onto the same wheel.
+  * Reproduces the reviewer's own exact numbers: at travel 0.3, an operator-configured compression
+  * ratio of 1.8 is safe alone (bound ~2.2167 at the unconfigured multiplier 1.0), and a pack-
+  * metadata front spring multiplier of 4.0 is safe alone (bound ~0.948892900565 at the
+  * unconfigured fallback ratio 0.7) - but {@code resolved()} composing the two together puts
+  * ratio 1.8 against the front axle's OWN effective multiplier 4.0, whose bound is that same
+  * ~0.9489, so the composed tuple is actually unstable and must now be rejected.
+  */
+ @Test void resolvedMustRejectACrossPrecedenceCombinationOfADirectionalRatioAndAnAxleSpringMultiplierThatIsUnstableOnlyTogether() {
+  try {
+   var operatorOverride = new Overrides.Tuning();
+   operatorOverride.suspensionTravel = 0.3;
+   operatorOverride.suspensionDampingRatioCompression = 1.8; // safe alone at the unconfigured multiplier 1.0
+   assertDoesNotThrow(operatorOverride::validate, "test setup sanity: the operator's own override must be valid in isolation");
+
+   var packMetadata = new Overrides.Tuning();
+   packMetadata.suspensionSpringMultiplierFront = 4.0; // safe alone at the unconfigured fallback ratio 0.7
+   assertDoesNotThrow(packMetadata::validate, "test setup sanity: the pack metadata's own fields must be valid in isolation");
+
+   Overrides.setForTest(java.util.Map.of("packid:cross_precedence_unstable", operatorOverride));
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:cross_precedence_unstable", packMetadata, null, null),
+     "a directional ratio from one precedence source combined with an axle spring multiplier from ANOTHER must be rejected when the EFFECTIVE combination is unstable, even though each source passes validation alone");
+
+   // A safe cross-precedence combination must still resolve successfully - this is not a
+   // blanket rejection of composing fields from different sources.
+   var safePackMetadata = new Overrides.Tuning();
+   safePackMetadata.suspensionSpringMultiplierFront = 1.0;
+   var resolved = Overrides.resolved("packid:cross_precedence_unstable", safePackMetadata, null, null);
+   assertEquals(1.8, resolved.suspensionDampingRatioCompression, 0.0);
+   assertEquals(1.0, resolved.suspensionSpringMultiplierFront, 0.0);
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
 }

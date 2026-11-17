@@ -1225,6 +1225,19 @@ public final class Overrides {
   // (treated as "off", see AxleDriveForceSharing's own doc) unless some level actually sets it.
   result.axleDriveForceSharing = firstNonNullBoolean(override!=null?override.axleDriveForceSharing:null, packMetadata!=null?packMetadata.axleDriveForceSharing:null, ivAdapted!=null?ivAdapted.axleDriveForceSharing:null, physicallyDerived!=null?physicallyDerived.axleDriveForceSharing:null);
   result.ackermannSteering = firstNonNullBoolean(override!=null?override.ackermannSteering:null, packMetadata!=null?packMetadata.ackermannSteering:null, ivAdapted!=null?ivAdapted.ackermannSteering:null, physicallyDerived!=null?physicallyDerived.ackermannSteering:null);
+  // Review finding (54547): validating packMetadata/ivAdapted/physicallyDerived individually
+  // above (and override, already validated at config-load time by apply()'s own loop) only
+  // proves each SOURCE is internally consistent on its own - it does not prove the actual
+  // EFFECTIVE combination this method just composed above is. A field-by-field precedence chain
+  // can legitimately pick a damping ratio from one source and a spring multiplier (vehicle-wide
+  // or axle-specific) from a DIFFERENT source, each individually valid against ITS OWN source's
+  // other fields, yet unstable together once resolved onto the same wheel - exactly the
+  // suspensionDampingRatioCompression/Rebound-plus-cross-source-axle-multiplier case this
+  // ticket's own "resolved/inherited combinations" acceptance requirement names. Validating the
+  // final composed `result` here (the same combined travel-aware stability guard, run against
+  // the tuple that will actually reach PhysicsBridge.stepGround) closes that gap - never trust
+  // per-source validity as a substitute for validating what precedence actually produced.
+  result.validate();
   return result;
  }
  /** Builds a {@code TwoBodyChassis.Config} from a resolved Tuning's {@code upperMassFraction}
