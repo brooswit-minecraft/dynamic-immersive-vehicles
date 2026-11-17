@@ -7301,3 +7301,111 @@ Diff + receipt correction + real pinned-source finding, committed. No
 native run performed or requested. No gameplay/fixture physics/timing/
 pass-fail change. Native gate remains CLOSED. No causal claim made or
 acceptance criteria weakened.
+
+## Completing the isolated setup packet per 54505 (preparation only, no native run)
+
+Correcting the prior entry's own packet draft: it named the PRE-CHANGE
+commit `465d0e7` as "source HEAD" even though that same entry's own work
+landed as `a0ddcfa` - stale by one commit at the moment of writing. Current
+HEAD after this round's own disarm-ordering fix (below) is
+`738b09132f06b41172e0fda586dcc6d7b3306a26`.
+
+### Lifecycle fix: `disarm()` is now reliable regardless of `unforceChunkGrid`
+
+Per 54505: `disarm()` previously ran AFTER `unforceChunkGrid`, with nothing
+guarding it - an exception from that existing call (unchanged here) would
+have skipped diagnostic teardown entirely. Reordered so `disarm()` runs
+FIRST, unconditionally reliable at the terminal point regardless of whether
+`unforceChunkGrid` later throws - `unforceChunkGrid`'s own cleanup/physics
+semantics and error handling are untouched. Re-verified: 16/16 tests still
+pass (`DiagnosticWindowTest` 4, `DiagnosticContextTest` 5,
+`BuoyantForcesWaterScanBoundsTest` 7), recorded in `/tmp/div-gradle-slot.owner`
+as `M545-compile24`/`M545-test11`, both `RESULT=COMPLETE rc=0` (an earlier
+attempt, `M545-compile23`, correctly recorded `RESULT=FAILED rc=1` when
+another ticket - M548 - was legitimately holding the exclusive lock for its
+own `clean build`; waited for it to release rather than forcing or
+fabricating a result).
+
+### Isolated packet - prepared, not executed
+
+Per 54505's explicit list - "preparation/build-manifest work within existing
+serialized scope is authorized, not native execution." Created
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-packet-738b091/` (new,
+distinctly-named - NOT called "trial"/"rundir" since no run happens) and, all
+under the existing exclusive lock with proper owner-file receipts
+(`M545-packet-prep`, `RESULT=COMPLETE rc=0`):
+
+- Ran `gradle prepareServerRun createServerLaunchScript` with
+  `DIV_ISOLATED_RUN_DIR=<packet dir>/rundir DIV_BUOYANT_HITCH_PROBE=true` -
+  regenerating `build/moddev/runServer.sh` and its companion classpath/VM-
+  arg/program-arg files AGAINST THE CURRENT COMMITTED SOURCE (738b091), not
+  reusing trial1/trial2's own stale copies (which predate every diagnostic-
+  logging change this session made).
+- Independently re-read the regenerated `runServer.sh`'s own literal `cd`
+  argument immediately after generation: `cd
+  '/home/booswrit/div-evidence/MINECRAFT-545-547/M545-packet-738b091/rundir'`
+  - byte-for-byte the intended path, confirmed before copying anything.
+- Copied all four generated files into the packet dir and hashed them
+  (`generated-launch-artifacts.sha256`). `serverRunClasspath.txt`/
+  `serverRunVmArgs.txt`/`serverRunProgramArgs.txt` hash BYTE-IDENTICAL to
+  trial1's own retained copies; only `runServer.sh` differs (the baked-in
+  `cd` path, expected).
+- **Live-readback effective classpath hashes** (`live-readback-effective-
+  classpath-hashes.sha256`): parsed the real classpath line and hashed every
+  one of its 100 entries' ACTUAL current bytes (individual files for jars;
+  every contained `.class`/resource file, matching the SAME per-file
+  convention trial1's own retained copy already uses, for the two directory
+  entries) - 252 lines, all 100 classpath entries resolved to a real file/
+  directory, zero `MISSING`. Diffed directly against trial1's own retained
+  copy of the same file - a REAL, measured baseline comparison, not asserted:
+  - `BuoyantForces.class`/`BuoyantHitchProbe.class` changed hash - EXPECTED,
+    the files actually edited this investigation.
+  - New classes present now but absent from trial1's own capture:
+    `DiagnosticWindow.class`, `DiagnosticContext.class`,
+    `BuoyantForces$FluidHeightLookup.class`, `BuoyantForces$WaterScanResult.class`
+    (expected, added this session) - and also `BoxInertia.class`/
+    `ShapeAwareBoxPhysicsObject(.class/$1.class)`, which this investigation's
+    own earlier history says were committed BEFORE trial1/trial2 ran
+    (`b1264a7`) - their absence from trial1's own retained classpath capture
+    is a genuine inconsistency in that PAST evidence, not explained or
+    further chased here; disclosed, not papered over.
+  - `BuoyantBody.class` ALSO shows a changed hash, despite `BuoyantBody.java`
+    not being edited in any of this session's three diagnostic-logging
+    rounds - NOT asserted as proof of an unnoticed source change; ordinary
+    javac/incremental-compile output is not always byte-reproducible across
+    separate invocations even for unchanged source (debug-info/constant-
+    pool-ordering artifacts). Stated as an open, unexplained difference, not
+    a finding.
+  - One dependency jar, `j2objc-annotations-2.8.jar`, appears in the CURRENT
+    classpath but is entirely ABSENT from trial1's own retained capture -
+    the dependency SET itself has drifted slightly since trial1 was
+    captured (plausibly other tickets' own merged work on this shared repo,
+    visible in `/tmp/div-gradle-slot.owner`'s own interleaved history) - a
+    real, disclosed difference, not caused by this investigation's own
+    changes and not further chased here.
+- **Input manifest** (`isolated-input-manifest.sha256`): hashed the current
+  seed config/eula/server.properties files from the shared `run/` directory.
+  Nine of ten files hash IDENTICAL to trial1's own retained manifest;
+  `server.properties` differs - expected, since trial1's own copy had
+  `level-seed=545547` fixed for that specific matched comparison, while the
+  currently-shared `run/server.properties` reflects whatever is presently
+  active there (other tickets' own use of the same shared directory) - NOT
+  yet overridden for any specific future run's own seed requirement; stated
+  as an open input, not fixed by this entry.
+- **Launch/shutdown template**: copied trial1's own already-proven
+  `launch-wrapper.sh` verbatim, substituting only the directory name/owner
+  tag (confirmed via direct `diff` - those are the ONLY two changed lines) -
+  reusing the proven lock-claim/FIFO-stop/orderly-shutdown/owner-receipt
+  mechanism exactly, not inventing a new one. NOT executed - `rundir/` is
+  confirmed empty (`find` returns zero entries) and no process under this
+  packet's own owner tag was ever launched.
+
+### Disposition
+
+No native run performed or requested - every step above is generation/
+hashing/copying of already-existing proven artifacts and templates, done
+under the existing exclusive slot with proper receipts. Native gate remains
+CLOSED pending independent review of this packet. No gameplay/fixture
+physics change. Preserving all original worlds/evidence (trial1/trial2/the
+original non-crash run are untouched - only read from, never modified) and
+lock identity.
