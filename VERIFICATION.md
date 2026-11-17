@@ -7409,3 +7409,87 @@ CLOSED pending independent review of this packet. No gameplay/fixture
 physics change. Preserving all original worlds/evidence (trial1/trial2/the
 original non-crash run are untouched - only read from, never modified) and
 lock identity.
+
+## Correcting packet claims per 54518; actually populating the isolated rundir
+
+Per 54518's independent review of 299764b/the packet dir - several real
+corrections, plus completing what the packet's own prior entry left
+incomplete:
+
+### The packet's own rundir was actually EMPTY - now populated
+
+Confirmed: the prior entry only hashed the SHARED `run/` directory's own
+config/eula/server.properties - it never actually copied them into the
+packet's own isolated `rundir/`. Fixed: copied all ten files into
+`M545-packet-738b091/rundir/` (its own `config/` subdirectory plus
+`eula.txt`/`server.properties` at its root) - a real, separate, isolated
+copy, not a reference to the shared files. Set `level-seed=545547` in THIS
+copy only (confirmed via diff: exactly one line differs from the shared
+`run/server.properties`, `level-seed=` → `level-seed=545547`; `level-name=world`
+confirmed present and unchanged) - the shared `run/server.properties` itself
+was never touched. Regenerated `isolated-input-manifest.sha256` against
+these new isolated copies: all ten files now hash IDENTICAL to trial1's own
+retained manifest, including `server.properties` (previously mismatched
+when comparing against the shared file) - confirms this new isolated
+config set is a genuine, verified match to the proven trial baseline.
+
+### Retracted: "BuoyantBody.class change may be javac nondeterminism"
+
+Wrong - verified directly: `git merge-base --is-ancestor b1264a7 HEAD`
+confirms `b1264a7` (the `ShapeAwareBoxPhysicsObject` substitution commit,
+committed `2026-11-17T01:07:47Z`, confirmed AFTER Trial 2 ended
+`00:42:28Z`) IS an ancestor of current HEAD; `git merge-base --is-ancestor
+b1264a7 11f6b51` confirms it is NOT an ancestor of `11f6b51` (the commit
+trial1's own classpath/baseline was built from). `git diff 11f6b51..HEAD --
+.../BuoyantBody.java` shows, explicitly, `new BoxPhysicsObject(...)` →
+`new ShapeAwareBoxPhysicsObject(...)` - a REAL source change, already
+documented elsewhere in this file, that simply predates trial1/trial2 by
+less than it predates HEAD. The changed `BuoyantBody.class` hash reflects
+this real, already-known, already-labeled-inert (Java-metadata-only, per
+its own commit's doc) change - NOT unexplained javac non-determinism.
+Retracting that guess outright. No retained standalone `BuoyantBody.class`
+exists in trial1's own packet to diff bytecode-for-bytecode against, so
+this is a SOURCE-level comparison (via `git diff`), not a bytecode one -
+stated precisely, not implied to be more than it is. Separating this
+intended Java-metadata constructor change clearly from this investigation's
+own diagnostic-logging changes (`BuoyantForces`/`BuoyantHitchProbe`/the new
+`DiagnosticWindow`/`DiagnosticContext` classes) - different changes, from
+different, already-dated points in this investigation's history.
+
+### Retracted: "j2objc dependency set has drifted since trial1"
+
+Wrong - verified directly: trial1's OWN retained `serverRunClasspath.txt`
+and the current one are BYTE-IDENTICAL (same SHA-256,
+`317bc204cd86ae752bf135f5e5dd8dd1544173d953c084fe33ad1f094c41e914`,
+confirmed independently both by my own earlier entry and again here), and
+BOTH literally contain the `com.google.j2objc/j2objc-annotations/2.8` cache
+path - the classpath itself was ALWAYS the same; nothing about the
+dependency set changed. What actually differs: trial1's own retained
+`live-readback-effective-classpath-hashes.sha256` is simply MISSING this
+one jar's hash line (244 lines captured against a 99-entry classpath,
+every other entry present) - a one-off capture gap in that EARLIER
+evidence-generation step, not a dependency difference now. My own current
+`live-readback-effective-classpath-hashes.sha256` DOES include it
+(`f02a95fa1a5e95edb3ed859fd0fb7df709d121a35290eff8b74dce2ab7f4d6ed`).
+Retracting "dependency set has drifted" outright - no cause for the
+original gap is evident from existing records, and none is invented here;
+the dependency set itself is confirmed unchanged.
+
+### Standing precondition restated, not newly satisfied
+
+`build/moddev/runServer.sh` and its companion args files are SHARED,
+mutable worktree files (any other ticket's own Gradle task can regenerate
+them in place) - the copies already archived in this packet are evidence
+of what was true AT GENERATION TIME, not a standing guarantee. Restating
+trial1's own precondition exactly: before any future actual release, the
+live files must be re-read and re-verified byte-for-byte under the
+exclusive lock immediately before that specific launch - not assumed from
+this entry alone.
+
+### Disposition
+
+No native run performed. Native gate remains CLOSED pending independent
+review. Original worlds/evidence (trial1/trial2/the non-crash reference
+run) untouched throughout - only read from. The shared `run/` directory's
+own `server.properties` was read but never modified; only the NEW isolated
+copy under the packet's own `rundir/` was edited.
