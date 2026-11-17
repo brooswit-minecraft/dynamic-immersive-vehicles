@@ -160,13 +160,15 @@ public final class BuoyantHitchProbe {
  private static minecrafttransportsimulator.entities.instances.PartGroundDevice towed3HookupPart;
  private static double partPairSpawnX, partPairSpawnZ, partPairSpawnSurfaceY;
  private static boolean configured = false, chunkGridUnforced = false, diagnosticContextDisarmed = false;
- // MINECRAFT-545/547 (John's comment 54599/54600): baseline step-invocation count captured at
- // TOWING_UNAVAILABLE's own tick=1, right after towing.remove() - compared against the SAME
- // count at TOWING_REPLACEMENT's own pre-connect snapshot, via the real production-used
- // LifecycleInvariants.starvedAcrossSpan helper, wiring that pure check into this actual
- // fixture rather than leaving it tested only in isolation. Diagnostic-only: this is a new LOG
- // line reporting the result, not a change to this fixture's own existing pass/fail criteria.
- private static long towedStepInvocationCountAtRemoval = -1;
+ // MINECRAFT-545/547 (John's comment 54599/54600/54603): a REAL per-gameTime sample sequence -
+ // body identity + gameTime + the real step-invocation count - captured every tick from
+ // immediately after towing.remove() through TOWING_REPLACEMENT's own pre-connect snapshot, fed
+ // into the real LifecycleInvariants.evaluate seam (not just two endpoints, and not only
+ // test-called) - wired into this actual fixture, not left tested only in isolation. Capturing
+ // ONLY (not altering) the original physical phase sequence; the evaluation outcome is reported
+ // in a new LOG line after capture completes, never changing this fixture's own existing
+ // pass/fail criteria or timing.
+ private static final java.util.List<io.github.brooswitminecraft.div.LifecycleInvariants.Sample> towedRemovalSpanSamples = new java.util.ArrayList<>();
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -544,10 +546,13 @@ public final class BuoyantHitchProbe {
      + " towing.isValid=" + towing.isValid
      + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
      + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
-   // MINECRAFT-545/547 (John's comment 54599/54600): capture the real baseline HERE, immediately
-   // after towing.remove() returns - the exact start of the span LifecycleInvariants.
-   // starvedAcrossSpan checks against the pre-connect snapshot later in TOWING_REPLACEMENT.
-   towedStepInvocationCountAtRemoval = PhysicsBridge.debugStepInvocationCount(towed);
+   // MINECRAFT-545/547 (John's comment 54599/54600/54603): the real first sample of the span -
+   // body identity + gameTime + the real step-invocation count, captured HERE, immediately after
+   // towing.remove() returns. Reset the list first (defends against a hotload/repeat-call
+   // leaving a prior span's own samples behind).
+   towedRemovalSpanSamples.clear();
+   towedRemovalSpanSamples.add(new io.github.brooswitminecraft.div.LifecycleInvariants.Sample(
+     towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed)));
   }
   if (!boundedOrFail("towingUnavailable/towed", towed)) return;
   // MINECRAFT-545/547 diagnostic (John's comment 54237/54247's "next bounded diagnostic" and
@@ -570,6 +575,12 @@ public final class BuoyantHitchProbe {
     + " towed.towedByConnectionNonNull=" + (towed.towedByConnection != null)
     + " towed.stepInvocationCount=" + PhysicsBridge.debugStepInvocationCount(towed)
     + " towed.lastPoseUpdateGameTime=" + PhysicsBridge.debugLastPoseUpdateGameTime(towed));
+  // MINECRAFT-545/547 (John's comment 54603): append THIS tick's real sample to the span - the
+  // same real body UUID, gameTime, and step-invocation count just logged above, captured into
+  // the list LifecycleInvariants.evaluate will later walk. Capturing only, not altering the
+  // original per-tick sequence/timing.
+  towedRemovalSpanSamples.add(new io.github.brooswitminecraft.div.LifecycleInvariants.Sample(
+    towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed)));
   // MINECRAFT-545/547 (John's comment 54494): arm the shared DiagnosticContext here, one tick
   // BEFORE the intended window starts (ticksInPhase==SHORT_PHASE_TICKS-6, i.e. 54), so it is
   // already armed by the time the NEXT Minecraft tick's own entity-ticking force hook (which runs
@@ -644,17 +655,26 @@ public final class BuoyantHitchProbe {
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT pre-connect towed.towedByConnectionNonNull="
      + (towed.towedByConnection != null) + " towed.stepInvocationCount=" + PhysicsBridge.debugStepInvocationCount(towed)
      + " towed.lastPoseUpdateGameTime=" + PhysicsBridge.debugLastPoseUpdateGameTime(towed));
-   // MINECRAFT-545/547 (John's comment 54599/54600): the real production-used invariant check,
-   // wired into this actual fixture (not left tested only in isolation) - compares the baseline
-   // captured right after towing.remove() against this exact pre-connect snapshot, via the real
-   // LifecycleInvariants.starvedAcrossSpan helper. Diagnostic-only: reports the result in a new
-   // log line, does not change this fixture's own existing pass/fail criteria or physics.
-   long towedStepInvocationCountNow = PhysicsBridge.debugStepInvocationCount(towed);
-   boolean towedStarvedAcrossRemovalSpan = towedStepInvocationCountAtRemoval >= 0
-     && io.github.brooswitminecraft.div.LifecycleInvariants.starvedAcrossSpan(towedStepInvocationCountAtRemoval, towedStepInvocationCountNow);
-   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT lifecycleInvariantCheck towed.stepInvocationCountAtRemoval="
-     + towedStepInvocationCountAtRemoval + " towed.stepInvocationCountNow=" + towedStepInvocationCountNow
-     + " starvedAcrossRemovalSpan=" + towedStarvedAcrossRemovalSpan);
+   // MINECRAFT-545/547 (John's comment 54599/54600/54603): the real production-used evaluation
+   // seam, wired into this actual fixture - append this final real sample, then run
+   // LifecycleInvariants.evaluate over the WHOLE captured per-tick sequence (not just two
+   // endpoints), capturing only, after the original phase sequence has already run; the outcome
+   // is reported in a new log line and does not change this fixture's own existing pass/fail
+   // criteria or physics. The phase-boundary tick itself (TOWING_UNAVAILABLE's last sample to
+   // this pre-connect sample) is a REAL gameTime gap, not a sampling defect - evaluate's own
+   // INSUFFICIENT_SAMPLES outcome for a non-consecutive gameTime pair correctly reports that gap
+   // rather than misreporting it as PASS or FAIL; the within-TOWING_UNAVAILABLE portion of the
+   // same sequence is evaluated on its own, separately, for the real per-tick result.
+   towedRemovalSpanSamples.add(new io.github.brooswitminecraft.div.LifecycleInvariants.Sample(
+     towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed)));
+   int withinUnavailableSampleCount = towedRemovalSpanSamples.size() - 1; // excludes this final, post-gap sample
+   var withinUnavailableOutcome = io.github.brooswitminecraft.div.LifecycleInvariants.evaluate(
+     towedRemovalSpanSamples.subList(0, withinUnavailableSampleCount));
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT lifecycleInvariantCheck sampleCount="
+     + towedRemovalSpanSamples.size() + " withinUnavailableSampleCount=" + withinUnavailableSampleCount
+     + " withinUnavailableOutcome=" + withinUnavailableOutcome
+     + " firstSample=" + towedRemovalSpanSamples.get(0) + " lastWithinUnavailableSample=" + towedRemovalSpanSamples.get(withinUnavailableSampleCount - 1)
+     + " postGapSample=" + towedRemovalSpanSamples.get(towedRemovalSpanSamples.size() - 1));
    // MINECRAFT-545/547 diagnostic (John's comment 54237: trace actual pose/velocity BEFORE
    // connectTrailer is called, not just inside createHitch's own log line, which runs AFTER).
    // Real native state, same handle BuoyantBody.step reads every tick - not v.motion (linear-

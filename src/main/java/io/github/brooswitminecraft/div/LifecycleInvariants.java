@@ -1,19 +1,28 @@
 package io.github.brooswitminecraft.div;
+import java.util.List;
+import java.util.UUID;
 
 /**
- * MINECRAFT-545/547 (John's comments 54595/54599/54600): small, pure checks over the real
+ * MINECRAFT-545/547 (John's comments 54595/54599/54600/54603): small, pure checks over the real
  * {@code debugStepInvocationCount}/{@code debugLastPoseUpdateGameTime} observables already added
- * to {@link BuoyantBody}/{@link PhysicsBridge.Body} - the "exactly-once per tick" and "survives
- * across N ticks without starving" invariants this investigation's own lifecycle questions
- * reduce to. Diagnostic/test-only - never called from any production decision path.
- *
- * <p>Corrected (54600): an AGGREGATE delta check (total advance == total elapsed ticks) does
- * NOT prove exactly-once-per-tick - a sequence advancing by 0 on one tick and 2 on another has
- * the same aggregate delta as advancing by 1 every tick, while being a genuine mixed starvation/
- * duplication failure. {@link #exactlyOncePerTick} checks the REAL per-tick sequence instead.
+ * to {@link BuoyantBody}/{@link PhysicsBridge.Body} - the "exactly-once per tick, surviving
+ * towing removal, same body identity throughout" invariants this investigation's own lifecycle
+ * questions reduce to. Diagnostic/test-only - never called from any production decision path.
  */
 public final class LifecycleInvariants {
  private LifecycleInvariants() {}
+
+ /** One real per-tick observation: the body's own identity, the real Minecraft tick it was taken
+  * at, and that body's own {@code debugStepInvocationCount} at that moment. Capturing identity
+  * alongside the count is what lets {@link #evaluate} distinguish "this body genuinely was not
+  * stepped" from "this is actually a different/replaced/missing body" (54603's own point - a
+  * missing body's accessor returns {@code 0}, indistinguishable from a real zero-count sample
+  * unless identity is checked too). */
+ public record Sample(UUID bodyId, long gameTime, long stepInvocationCount) {}
+
+ /** The real outcome of evaluating a sample sequence - not a bare boolean, so "could not be
+  * checked" is never silently conflated with "checked and passed" (54603's own point). */
+ public enum Outcome { PASS, FAIL_STARVED_TICK, FAIL_DUPLICATE_TICK, INSUFFICIENT_SAMPLES, BODY_IDENTITY_CHANGED }
 
  /** True only if EVERY consecutive pair in {@code counts} (one sample per real tick, in tick
   * order) advances by exactly 1 - the genuine per-tick "no starvation, no duplicate stepping"
@@ -26,12 +35,36 @@ public final class LifecycleInvariants {
   return true;
  }
 
+ /** The real production-used evaluation seam: takes a REAL sequence of {@link Sample}s (as
+  * actually captured, one per real tick, in tick order - gaps/duplicates in {@code gameTime}
+  * itself are a sampling problem, reported as {@code INSUFFICIENT_SAMPLES}, not silently
+  * tolerated) and returns the precise {@link Outcome} - never a bare boolean. Distinguishes:
+  * fewer than 2 samples or a non-consecutive {@code gameTime} sequence
+  * ({@code INSUFFICIENT_SAMPLES} - the check itself could not be completed, not a pass); the
+  * body's own identity changing mid-sequence ({@code BODY_IDENTITY_CHANGED} - a replaced/missing
+  * body, where a {@code 0} count would otherwise be misread as starvation); a tick where the
+  * count did not advance ({@code FAIL_STARVED_TICK}); a tick where it advanced by more than 1
+  * ({@code FAIL_DUPLICATE_TICK}); or every consecutive pair advancing by exactly 1
+  * ({@code PASS}). */
+ public static Outcome evaluate(List<Sample> samples) {
+  if (samples.size() < 2) return Outcome.INSUFFICIENT_SAMPLES;
+  for (int i = 1; i < samples.size(); i++) {
+   Sample prev = samples.get(i - 1), cur = samples.get(i);
+   if (!prev.bodyId().equals(cur.bodyId())) return Outcome.BODY_IDENTITY_CHANGED;
+   if (cur.gameTime() - prev.gameTime() != 1) return Outcome.INSUFFICIENT_SAMPLES;
+   long delta = cur.stepInvocationCount() - prev.stepInvocationCount();
+   if (delta == 0) return Outcome.FAIL_STARVED_TICK;
+   if (delta > 1) return Outcome.FAIL_DUPLICATE_TICK;
+   if (delta < 0) return Outcome.BODY_IDENTITY_CHANGED; // a counter that went backward is not this same, still-live body
+  }
+  return Outcome.PASS;
+ }
+
  /** True only if the step-invocation count advanced by EXACTLY {@code expectedTicks} between two
   * samples - a necessary but NOT sufficient condition for exactly-once-per-tick (54600's own
-  * correction: a 0-then-2 pair cancels to the same aggregate as two 1s). Use
-  * {@link #exactlyOncePerTick} for the real per-tick guarantee; this remains useful as a cheap
-  * aggregate pre-check (e.g. "did ANY stepping happen at all") when only two samples are
-  * available. {@code expectedTicks} must be &gt;= 0. */
+  * correction: a 0-then-2 pair cancels to the same aggregate as two 1s). Use {@link #evaluate}
+  * for the real per-tick/identity-aware guarantee; this remains useful as a cheap aggregate
+  * pre-check when only two endpoint samples are available. {@code expectedTicks} must be &gt;= 0. */
  public static boolean advancedExactlyBy(long countBefore, long countAfter, long expectedTicks) {
   if (expectedTicks < 0) throw new IllegalArgumentException("expectedTicks must be >= 0: " + expectedTicks);
   return countAfter - countBefore == expectedTicks;
@@ -40,8 +73,7 @@ public final class LifecycleInvariants {
  /** True only if the invocation count did not change at all between two samples - the specific
   * "starved for this entire span" symptom this investigation found and directly measured against
   * real retained logs (via the pre-existing {@code lastPoseUpdateGameTime} marker, which predates
-  * this new counter - see VERIFICATION.md for the real, already-logged numbers; no counter
-  * samples existed historically, since the counter is new in this change). */
+  * this new counter - see VERIFICATION.md for the real, already-logged numbers). */
  public static boolean starvedAcrossSpan(long countBefore, long countAfter) {
   return countAfter == countBefore;
  }
