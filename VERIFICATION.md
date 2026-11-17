@@ -4945,3 +4945,59 @@ produced - a fresh build artifact (gradle's own `clean` ran first), not
 byte-comparable to the PR-branch jar's own prior sha, but the real JUnit
 pass/fail/skip counts are the actual completion evidence, matching the
 PR-branch build's own 895/0/0/0 exactly.
+
+## Post-merge (MINECRAFT-540, 2026-11-17)
+
+Independent review (Jira comment 54444) approved exact head
+`9f8ab3be9c20ad7b043fb755e0a95e9e434b8abd` - this repo's own append-only
+`[review] APPROVED ... @ <sha>` convention, the same shape every sibling
+ticket this sprint uses in place of a native GitHub PR review object; that
+40-character sha was verified to match the PR's own `headRefOid` exactly
+before acting on it. As sole merge owner, merged PR #41 into `main` at
+merge commit `ee07f21e667e39ddb11dbc789e36ae8942bbe569` - a clean merge
+(`main` had only advanced by one documentation-only commit,
+`8d9afa1`/MINECRAFT-544's own post-merge-evidence commit, since the
+approved head; no production/test conflict). No branch-protection bypass
+or settings change; this repo has no required status checks.
+
+This ticket itself went through four same-day current-main reconciliations
+before approval (M539, M546, M543, M541, M544 all landed in sequence while
+this PR was in review) - each one resolved the identical shape of
+conflict, the hot-reload `Set.of(...)` field-name literal in
+`PhysicsBridgeLiveOverrideApplicationTest`, by including every peer's
+field name alongside this ticket's own `ackermannSteering`, with
+`Overrides`/`PhysicsBridge` production code auto-merging cleanly every
+time (no peer's own production lines ever overlapped this ticket's
+`stepGround` Ackermann-setup block). A separate design iteration mid-review
+(Wroosbit comment 54164, John's follow-up 54166/54173) replaced an initial
+independent per-wheel full-lock clamp with a shared-curvature limit so
+both steering wheels keep one common turning center at the extreme, per
+John's explicit direction, with new turning-center-invariant regression
+coverage added at his request.
+
+Post-merge hosted CI on this merge commit (run `44009630383`, triggered by
+the push) failed in under 10 seconds across all five jobs, each annotated
+"The job was not started because recent account payments have failed or
+your spending limit needs to be increased" - the same pre-existing,
+already-disclosed zero-runner-inventory billing blockage every recent DIV
+ticket on this repo has hit. `.github/workflows/` contains only `ci.yml`
+(triggered on `pull_request`/`push: [main]`, no tag/`workflow_dispatch`
+trigger) - no `release.yml` or tag-based release workflow exists in this
+repo beyond that billing-blocked CI, and this change (an additive
+`Overrides`/`PhysicsBridge` schema and production steering-geometry
+change, no version bump) does not warrant inventing one.
+
+Combined verification performed directly against the merged `main` head
+(this checkout, `ee07f21`, pulled fresh via `git fetch`+`merge --ff-only`):
+local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon clean build` - `BUILD SUCCESSFUL`.
+The real JUnit XML reports total **924 tests**, 0 skipped, 0 failures, 0
+errors across the whole suite at this exact merged head. `build/libs/
+dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` (sha256
+`4bf991136b37d8b4f08b634c91fb0805d3dc9d4e1091ff609aecd0112292d900`) was
+produced - a fresh build artifact (gradle's own `clean` ran first), not
+byte-comparable to the PR-branch jar's own prior sha, but the real JUnit
+pass/fail/skip counts are the actual completion evidence, matching the
+PR-branch build's own 924/0/0/0 exactly.
