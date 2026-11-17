@@ -8242,3 +8242,106 @@ the next unexamined location is named precisely (`WrapperWorld`'s own
 server tick entry point / the server-side `EntityManager` subclass) for
 whoever continues this specific trace. Native gate: one-run grant remains
 CONSUMED.
+
+## The missing recursive driver found - a complete, source-confirmed starvation mechanism (54565/54568)
+
+John's own independent, fresh decompile of `AEntityG_Towable.class` found
+exactly what this entry's earlier search missed: `doPostUpdateLogic()`
+(lines 264-275 of the SAME decompiled file this investigation already
+had saved at `/tmp/mts_inspect/decompiled/.../AEntityG_Towable.java` -
+re-verified directly, byte-for-byte matching John's own independent read):
+
+```java
+public void doPostUpdateLogic() {
+    super.doPostUpdateLogic();
+    if (!this.towingConnections.isEmpty()) {
+        for (TowingConnection connection : this.towingConnections) {
+            ...
+            EntityManager.doTick((AEntityA_Base) connection.towedVehicle);
+            if (connection.towedVehicle.towedByConnection != null) continue;
+            break;
+        }
+    }
+    ...
+}
+```
+
+This IS the alternate recursive driver my own earlier search missed -
+not because the jar-wide raw-byte search was wrong about WHERE "doTick"
+appears (it correctly found this exact class), but because I
+mischaracterized that match as "the method definition site only" without
+re-decompiling/re-reading this specific method, despite already having
+this exact file saved from earlier in this investigation. A real search
+completeness error on my own part, not a tooling limitation - corrected
+now by actually reading the method body.
+
+### The complete mechanism, now fully source-confirmed
+
+1. `EntityManager.doTick(entity)` calls `entity.update()` then (for any
+   `AEntityD_Definable`) `definable.doPostUpdateLogic()` - confirmed
+   earlier in this entry's own decompile of `doTick` itself.
+2. For a TOWING vehicle, `doPostUpdateLogic()` (above) directly calls
+   `EntityManager.doTick(towedVehicle)` for each of its
+   `towingConnections` - bypassing `towed`'s own `blockMainUpdateCall()`
+   gate entirely, since this is a direct call, not a re-entry into the
+   gated main-loop `forEach`. **This is how a towed vehicle is normally
+   ticked at all**, despite its own `blockMainUpdateCall()` being `true`
+   continuously from `ATTACH` onward (confirmed earlier this entry) -
+   resolving the contradiction cleanly.
+3. This recursive call only fires while `towing` itself is still ticked -
+   i.e., still present in `EntityManager`'s own tickable lists.
+4. `towing.remove()` → `AEntityA_Base.remove()` (confirmed by John:
+   sets `isValid=false`, then calls `world.removeEntity(this)`) →
+   `EntityManager.removeEntity` strips `towing` from `allEntities` AND
+   every tickable/definable-tickable list.
+5. Once `towing` is removed, ITS OWN `doTick`/`doPostUpdateLogic` never
+   fires again - so the recursive `doTick(towed)` call-site disappears
+   with it.
+6. `towed`'s own main-loop path is independently blocked the whole time
+   (step 2's gate, confirmed constant). With BOTH paths now gone,
+   `towed.update()` - hence `moveVehicle()`, hence DIV's own
+   `BuoyantBody.step()` - never runs again. This matches every log
+   observation already established in this investigation exactly: ticked
+   continuously through `ATTACH`/`DETACH`, zero step-entry/diagnostic
+   lines for the entire `TOWING_UNAVAILABLE` window, resuming only once
+   `TOWING_REPLACEMENT` connects a fresh `towing2` (restoring its own
+   recursive call).
+7. This also explains why MTS's own auto-disconnect safety check (inside
+   `update()`: `if (towedByConnection!=null && !towedByConnection
+   .towingEntity.isValid) disconnectTrailer(...)`, found earlier this
+   entry) never fires either: it requires `update()` to run, which is
+   PRECISELY what towing's removal cuts off - a genuine starvation/
+   deadlock in MTS's own native code specific to a towing vehicle being
+   removed directly (`.remove()`) rather than via an orderly
+   `disconnectTrailer` call (which explicitly nulls `towedByConnection`
+   and updates the connection lists, side-stepping this entirely).
+
+### Scope of this finding, stated precisely
+
+This is a STATIC, source-level mechanism, fully confirmed via the pinned
+jar's own decompiled bytecode (hash
+`1d2f7512604636265703b29fdf13d7f8ef2323694b6435f4392973da6e78d251`),
+independently cross-checked between this entry's own saved decompile and
+a fresh one. It is NOT yet re-asserted here as formally proven runtime
+causation for this exact execution (no new runtime trace was added in
+this entry beyond what's already retained) - though it is consistent with
+every single retained log observation across this entire investigation
+(Trial 1/2, the authorized run, and the original non-crash reference) to
+a degree no prior hypothesis achieved. This is entirely MTS's OWN
+(third-party) native behavior - no claim is made about Sable's own native
+physics solver, and no DIV-side fix is proposed or implied by this entry.
+Whether/how DIV's own code should respond to this MTS-level starvation
+(e.g., calling `disconnectTrailer` itself instead of relying on
+`towing.remove()` alone, if that's even within DIV's own control for a
+despawn triggered by something else) is a separate, unaddressed design
+question - not decided here.
+
+### Disposition
+
+A complete, source-confirmed mechanism is now on record, resolving the
+specific "why does towed stop being ticked" question this sub-trace
+pursued across multiple rounds. No native run was performed. No DIV code
+change, patch, or fix is proposed in this entry - per 54565/54568's own
+explicit caution against treating a source-level finding as proof of
+runtime causation or a native-solver fix without further confirmation.
+Native gate: one-run grant remains CONSUMED.
