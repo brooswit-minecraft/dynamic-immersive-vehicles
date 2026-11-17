@@ -345,6 +345,31 @@ public final class Overrides {
   // Same shape as suspensionDampingRatioFront immediately above, for the geometric rear axle
   // group instead.
   public Double suspensionDampingRatioRear;
+  // MINECRAFT-551: optional, per-vehicle DIRECTIONAL overrides of suspensionDampingRatio -
+  // selected at runtime by the SIGN of the suspension anchor's own actual signed velocity (see
+  // TireForces.suspension's 5-arg overload and PhysicsBridge.stepGround's call site), never by
+  // compression depth alone. Same dimensionless ratio, same [strictly-positive, 2.0] bound as
+  // suspensionDampingRatio (validate() below). No FALLBACK entry (same "inherit, don't re-
+  // default" shape suspensionDampingRatioFront/Rear already use) - null means this direction
+  // simply inherits whichever per-wheel ratio AxleSuspensionDistribution.dampingRatios already
+  // resolved for that wheel (its own axle override if set, else the vehicle-wide
+  // suspensionDampingRatio) - so a vehicle that never sets either field is byte-identical to
+  // before this ticket, on every wheel, in both directions.
+  // <p>Unlike suspensionDampingRatioFront/Rear (which stay scoped to one geometric axle), this
+  // pair is intentionally VEHICLE-WIDE and, once set, applies to every wheel in that direction
+  // regardless of axle - a configured compression/rebound value always wins over an axle-specific
+  // suspensionDampingRatioFront/Rear for that direction (the axle override only still matters as
+  // the inherited fallback for the OTHER, unset direction). This is a deliberate, documented
+  // precedence choice, not an oversight: a per-axle-AND-per-direction knob (four more fields) is
+  // the broader "separate high/low-speed curves"-shaped expansion this ticket's own scope
+  // explicitly rules out. Setting suspensionDampingRatioCompression==suspensionDampingRatioRebound
+  // to the same value reproduces the EXACT existing symmetric (direction-independent) damping
+  // behavior at that value, vehicle-wide - the required default/equal-value equivalence.
+  public Double suspensionDampingRatioCompression;
+  // Same shape as suspensionDampingRatioCompression immediately above, applied when the
+  // suspension anchor's signed velocity indicates the suspension is REBOUNDING/extending
+  // (normalSpeed>0) instead of compressing (normalSpeed<0).
+  public Double suspensionDampingRatioRebound;
   // MINECRAFT-535: optional, bounded body-local directional multipliers on top of the existing
   // isotropic waterDrag - longitudinal (bow/stern, the hull's own forward axis), lateral
   // (port/starboard), and vertical (heave) each independently scale the SAME quadratic drag
@@ -579,6 +604,11 @@ public final class Overrides {
    // one geometric axle instead of the whole vehicle, so it is rejected by the exact same rule.
    if (suspensionDampingRatioFront != null && !(Double.isFinite(suspensionDampingRatioFront) && suspensionDampingRatioFront > 0 && suspensionDampingRatioFront <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (suspensionDampingRatioRear != null && !(Double.isFinite(suspensionDampingRatioRear) && suspensionDampingRatioRear > 0 && suspensionDampingRatioRear <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-551: same bounds as suspensionDampingRatio above - a directional override is
+   // still the same dimensionless ratio, just selected by anchor-velocity sign instead of applied
+   // uniformly.
+   if (suspensionDampingRatioCompression != null && !(Double.isFinite(suspensionDampingRatioCompression) && suspensionDampingRatioCompression > 0 && suspensionDampingRatioCompression <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (suspensionDampingRatioRebound != null && !(Double.isFinite(suspensionDampingRatioRebound) && suspensionDampingRatioRebound > 0 && suspensionDampingRatioRebound <= 2.0)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (suspensionSpringMultiplierFront != null && !(Double.isFinite(suspensionSpringMultiplierFront) && suspensionSpringMultiplierFront > 0.5 && suspensionSpringMultiplierFront <= 4.0)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (suspensionSpringMultiplierRear != null && !(Double.isFinite(suspensionSpringMultiplierRear) && suspensionSpringMultiplierRear > 0.5 && suspensionSpringMultiplierRear <= 4.0)) throw new IllegalArgumentException("invalid vehicle tuning");
    // Review finding (comments 53839/53840): the flat 2.0 ceiling above only proves stable at
@@ -611,7 +641,8 @@ public final class Overrides {
    // pass alone while their actual configured combination does not.
    if (suspensionDampingRatio != null || suspensionSpringMultiplier != null
      || suspensionDampingRatioFront != null || suspensionDampingRatioRear != null
-     || suspensionSpringMultiplierFront != null || suspensionSpringMultiplierRear != null) {
+     || suspensionSpringMultiplierFront != null || suspensionSpringMultiplierRear != null
+     || suspensionDampingRatioCompression != null || suspensionDampingRatioRebound != null) {
     double travelForStabilityCheck = suspensionTravel != null ? suspensionTravel : FALLBACK.suspensionTravel;
     double baseRatio = suspensionDampingRatio != null ? suspensionDampingRatio : FALLBACK.suspensionDampingRatio;
     double baseMultiplier = suspensionSpringMultiplier != null ? suspensionSpringMultiplier : FALLBACK.suspensionSpringMultiplier;
@@ -630,6 +661,23 @@ public final class Overrides {
     double rearRatio = suspensionDampingRatioRear != null ? suspensionDampingRatioRear : baseRatio;
     double rearMultiplier = suspensionSpringMultiplierRear != null ? suspensionSpringMultiplierRear : baseMultiplier;
     if (rearRatio > maxStableSuspensionDampingRatio(travelForStabilityCheck, rearMultiplier)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+    // MINECRAFT-551: suspensionDampingRatioCompression/Rebound are VEHICLE-WIDE (see their own
+    // doc) - once set, either one applies to every wheel in that direction regardless of axle, so
+    // it must be checked against EVERY axle's own effective spring multiplier (base/front/rear),
+    // not only the vehicle-wide one, since Body.stepGround's per-wheel integration runs against
+    // that wheel's own axle-resolved spring rate. When unset, the directional value simply
+    // inherits the already-checked base/frontRatio/rearRatio above, so no new check is needed for
+    // that direction.
+    if (suspensionDampingRatioCompression != null) {
+     if (suspensionDampingRatioCompression > maxStableSuspensionDampingRatio(travelForStabilityCheck, baseMultiplier)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+     if (suspensionDampingRatioCompression > maxStableSuspensionDampingRatio(travelForStabilityCheck, frontMultiplier)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+     if (suspensionDampingRatioCompression > maxStableSuspensionDampingRatio(travelForStabilityCheck, rearMultiplier)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+    }
+    if (suspensionDampingRatioRebound != null) {
+     if (suspensionDampingRatioRebound > maxStableSuspensionDampingRatio(travelForStabilityCheck, baseMultiplier)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+     if (suspensionDampingRatioRebound > maxStableSuspensionDampingRatio(travelForStabilityCheck, frontMultiplier)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+     if (suspensionDampingRatioRebound > maxStableSuspensionDampingRatio(travelForStabilityCheck, rearMultiplier)*STABILITY_MARGIN) throw new IllegalArgumentException("invalid vehicle tuning");
+    }
    }
   }
   /** See the {@code suspensionDampingRatio} cross-field check in {@link #validate()} - a modest
@@ -753,6 +801,8 @@ public final class Overrides {
    if (suspensionSpringMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'suspensionSpringMultiplier' (vehicle-only concept - no part-level consumer yet)");
    if (suspensionDampingRatioFront != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatioFront' (vehicle-only concept - a part has no own axle position)");
    if (suspensionDampingRatioRear != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatioRear' (vehicle-only concept - a part has no own axle position)");
+   if (suspensionDampingRatioCompression != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatioCompression' (vehicle-only concept - no part-level consumer yet)");
+   if (suspensionDampingRatioRebound != null) throw new IllegalArgumentException("part overrides do not support 'suspensionDampingRatioRebound' (vehicle-only concept - no part-level consumer yet)");
    if (suspensionSpringMultiplierFront != null) throw new IllegalArgumentException("part overrides do not support 'suspensionSpringMultiplierFront' (vehicle-only concept - a part has no own axle position)");
    if (suspensionSpringMultiplierRear != null) throw new IllegalArgumentException("part overrides do not support 'suspensionSpringMultiplierRear' (vehicle-only concept - a part has no own axle position)");
    if (toeFrontDegrees != null) throw new IllegalArgumentException("part overrides do not support 'toeFrontDegrees' (vehicle-only concept - a part has no own axle position)");
@@ -862,6 +912,8 @@ public final class Overrides {
   c.suspensionSpringMultiplier=t.suspensionSpringMultiplier;
   c.suspensionDampingRatioFront=t.suspensionDampingRatioFront;
   c.suspensionDampingRatioRear=t.suspensionDampingRatioRear;
+  c.suspensionDampingRatioCompression=t.suspensionDampingRatioCompression;
+  c.suspensionDampingRatioRebound=t.suspensionDampingRatioRebound;
   c.suspensionSpringMultiplierFront=t.suspensionSpringMultiplierFront;
   c.suspensionSpringMultiplierRear=t.suspensionSpringMultiplierRear;
   c.longitudinalWaterDragMultiplier=t.longitudinalWaterDragMultiplier;
@@ -918,6 +970,8 @@ public final class Overrides {
   m.suspensionSpringMultiplier = child.suspensionSpringMultiplier!=null?child.suspensionSpringMultiplier:parent.suspensionSpringMultiplier;
   m.suspensionDampingRatioFront = child.suspensionDampingRatioFront!=null?child.suspensionDampingRatioFront:parent.suspensionDampingRatioFront;
   m.suspensionDampingRatioRear = child.suspensionDampingRatioRear!=null?child.suspensionDampingRatioRear:parent.suspensionDampingRatioRear;
+  m.suspensionDampingRatioCompression = child.suspensionDampingRatioCompression!=null?child.suspensionDampingRatioCompression:parent.suspensionDampingRatioCompression;
+  m.suspensionDampingRatioRebound = child.suspensionDampingRatioRebound!=null?child.suspensionDampingRatioRebound:parent.suspensionDampingRatioRebound;
   m.suspensionSpringMultiplierFront = child.suspensionSpringMultiplierFront!=null?child.suspensionSpringMultiplierFront:parent.suspensionSpringMultiplierFront;
   m.suspensionSpringMultiplierRear = child.suspensionSpringMultiplierRear!=null?child.suspensionSpringMultiplierRear:parent.suspensionSpringMultiplierRear;
   m.longitudinalWaterDragMultiplier = child.longitudinalWaterDragMultiplier!=null?child.longitudinalWaterDragMultiplier:parent.longitudinalWaterDragMultiplier;
@@ -1147,6 +1201,13 @@ public final class Overrides {
   // second, independently-defaulted value.
   result.suspensionDampingRatioFront = firstNonNull(override!=null?override.suspensionDampingRatioFront:null, packMetadata!=null?packMetadata.suspensionDampingRatioFront:null, ivAdapted!=null?ivAdapted.suspensionDampingRatioFront:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatioFront:null);
   result.suspensionDampingRatioRear = firstNonNull(override!=null?override.suspensionDampingRatioRear:null, packMetadata!=null?packMetadata.suspensionDampingRatioRear:null, ivAdapted!=null?ivAdapted.suspensionDampingRatioRear:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatioRear:null);
+  // MINECRAFT-551: no FALLBACK entry (mirrors suspensionDampingRatioFront/Rear immediately
+  // above) - stays null (no directional override configured) unless some level actually sets it,
+  // which is exactly the signal PhysicsBridge.stepGround needs to inherit the per-wheel ratio
+  // AxleSuspensionDistribution.dampingRatios already resolved, instead of a second,
+  // independently-defaulted value.
+  result.suspensionDampingRatioCompression = firstNonNull(override!=null?override.suspensionDampingRatioCompression:null, packMetadata!=null?packMetadata.suspensionDampingRatioCompression:null, ivAdapted!=null?ivAdapted.suspensionDampingRatioCompression:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatioCompression:null);
+  result.suspensionDampingRatioRebound = firstNonNull(override!=null?override.suspensionDampingRatioRebound:null, packMetadata!=null?packMetadata.suspensionDampingRatioRebound:null, ivAdapted!=null?ivAdapted.suspensionDampingRatioRebound:null, physicallyDerived!=null?physicallyDerived.suspensionDampingRatioRebound:null);
   result.suspensionSpringMultiplierFront = firstNonNull(override!=null?override.suspensionSpringMultiplierFront:null, packMetadata!=null?packMetadata.suspensionSpringMultiplierFront:null, ivAdapted!=null?ivAdapted.suspensionSpringMultiplierFront:null, physicallyDerived!=null?physicallyDerived.suspensionSpringMultiplierFront:null);
   result.suspensionSpringMultiplierRear = firstNonNull(override!=null?override.suspensionSpringMultiplierRear:null, packMetadata!=null?packMetadata.suspensionSpringMultiplierRear:null, ivAdapted!=null?ivAdapted.suspensionSpringMultiplierRear:null, physicallyDerived!=null?physicallyDerived.suspensionSpringMultiplierRear:null);
   result.longitudinalWaterDragMultiplier = firstNonNull(override!=null?override.longitudinalWaterDragMultiplier:null, packMetadata!=null?packMetadata.longitudinalWaterDragMultiplier:null, ivAdapted!=null?ivAdapted.longitudinalWaterDragMultiplier:null, physicallyDerived!=null?physicallyDerived.longitudinalWaterDragMultiplier:null, FALLBACK.longitudinalWaterDragMultiplier);

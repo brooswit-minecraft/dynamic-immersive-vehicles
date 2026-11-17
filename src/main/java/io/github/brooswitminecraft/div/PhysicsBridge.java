@@ -390,7 +390,11 @@ public final class PhysicsBridge {
   * (MINECRAFT-534, stepGround reads tuning.rollingResistance fresh every tick at the
   * FrictionContact-construction call site, same as every other field in this list)/
   * marineSteerDegrees (MINECRAFT-544, BuoyantForces.apply reads tuning.marineSteerDegrees fresh
-  * every tick for propeller thrust direction, same as maxSteerDegrees itself). Mutating
+  * every tick for propeller thrust direction, same as maxSteerDegrees itself)/
+  * suspensionDampingRatioCompression/suspensionDampingRatioRebound (MINECRAFT-551, stepGround
+  * reads both fresh every tick via the per-wheel wheelCompressionRatio/wheelReboundRatio
+  * computation feeding TireForces.suspension's 5-arg overload, same reasoning as
+  * suspensionDampingRatio immediately above). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -457,6 +461,11 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.suspensionDampingRatioFront, fresh.suspensionDampingRatioFront)) { target.suspensionDampingRatioFront = fresh.suspensionDampingRatioFront; appliedOut.add("suspensionDampingRatioFront"); }
   if (!java.util.Objects.equals(target.suspensionDampingRatioRear, fresh.suspensionDampingRatioRear)) { target.suspensionDampingRatioRear = fresh.suspensionDampingRatioRear; appliedOut.add("suspensionDampingRatioRear"); }
   if (!java.util.Objects.equals(target.suspensionSpringMultiplierFront, fresh.suspensionSpringMultiplierFront)) { target.suspensionSpringMultiplierFront = fresh.suspensionSpringMultiplierFront; appliedOut.add("suspensionSpringMultiplierFront"); }
+  // MINECRAFT-551: stepGround reads tuning.suspensionDampingRatioCompression/Rebound fresh every
+  // tick via the per-wheel wheelCompressionRatio/wheelReboundRatio computation, same "no separate
+  // cached field" shape as every other suspension field above.
+  if (!java.util.Objects.equals(target.suspensionDampingRatioCompression, fresh.suspensionDampingRatioCompression)) { target.suspensionDampingRatioCompression = fresh.suspensionDampingRatioCompression; appliedOut.add("suspensionDampingRatioCompression"); }
+  if (!java.util.Objects.equals(target.suspensionDampingRatioRebound, fresh.suspensionDampingRatioRebound)) { target.suspensionDampingRatioRebound = fresh.suspensionDampingRatioRebound; appliedOut.add("suspensionDampingRatioRebound"); }
   if (!java.util.Objects.equals(target.suspensionSpringMultiplierRear, fresh.suspensionSpringMultiplierRear)) { target.suspensionSpringMultiplierRear = fresh.suspensionSpringMultiplierRear; appliedOut.add("suspensionSpringMultiplierRear"); }
   // MINECRAFT-535: BuoyantForces.apply reads tuning.longitudinal/lateral/verticalWaterDragMultiplier
   // fresh every tick, same "no separate cached field" shape as waterDrag/angularWaterDrag above.
@@ -1237,6 +1246,20 @@ public final class PhysicsBridge {
   */
  static double suspensionDamperForShare(double mass, double loadShare, double spring, double dampingRatio) {
   return 2*Math.sqrt(spring*mass*loadShare)*dampingRatio;
+ }
+ /**
+  * MINECRAFT-551: this wheel's own effective ratio for ONE direction (compression or rebound) -
+  * {@code directionalOverride} (the vehicle-wide {@code Overrides.Tuning#suspensionDampingRatioCompression}/
+  * {@code Rebound}, whichever the caller is resolving) when configured, else exactly {@code
+  * axleResolvedRatio} (this wheel's own already axle-resolved {@code suspensionDampingRatio} -
+  * {@link AxleSuspensionDistribution#dampingRatios}'s own output). Never a second,
+  * independently-defaulted value - an unconfigured direction inherits the SAME per-wheel ratio
+  * the symmetric (pre-this-ticket) path already used, so a vehicle that never sets either
+  * directional field is byte-identical on every wheel, and explicitly setting both directions to
+  * the same value reproduces the corresponding existing symmetric setting exactly.
+  */
+ static double directionalDampingRatio(Double directionalOverride, double axleResolvedRatio) {
+  return directionalOverride != null ? directionalOverride : axleResolvedRatio;
  }
  /**
   * MINECRAFT-520: this wheel's own composed {@code MultiContactFrictionSolver.FrictionContact}
@@ -2222,6 +2245,13 @@ public final class PhysicsBridge {
    // per-wheel value on every wheel.
    double[] axleSpringMultipliers=AxleSuspensionDistribution.springMultipliers(loadShareZ,tuning.suspensionSpringMultiplier,tuning.suspensionSpringMultiplierFront,tuning.suspensionSpringMultiplierRear);
    double[] axleDampingRatios=AxleSuspensionDistribution.dampingRatios(loadShareZ,tuning.suspensionDampingRatio,tuning.suspensionDampingRatioFront,tuning.suspensionDampingRatioRear);
+   // MINECRAFT-551: compression/rebound each independently inherit the per-wheel axleDampingRatios
+   // resolved immediately above (which already applied the axle override chain) whenever the
+   // corresponding directional field is unset - never a second, independently-defaulted value.
+   // When set, tuning.suspensionDampingRatioCompression/Rebound is VEHICLE-WIDE (see its own doc
+   // for why this deliberately does not get its own Front/Rear pair) and applies to every wheel
+   // in that direction, overriding axleDampingRatios for that direction only. See
+   // #directionalDampingRatio below for the actual per-wheel resolution.
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
@@ -2233,6 +2263,15 @@ public final class PhysicsBridge {
     double wheelDampingRatio=axleDampingRatios[wheelIdx];
     double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity,wheelSpringMultiplier);
     double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring,wheelDampingRatio);
+    // MINECRAFT-551: this wheel's own effective compression/rebound ratio - the configured
+    // vehicle-wide directional override if set, else exactly wheelDampingRatio (this wheel's own
+    // already axle-resolved base) above, so an unconfigured vehicle (or one that only configures
+    // axle overrides, never compression/rebound) gets byte-identical wheelDamperCompression==
+    // wheelDamperRebound==wheelDamper on every wheel.
+    double wheelCompressionRatio=directionalDampingRatio(tuning.suspensionDampingRatioCompression,wheelDampingRatio);
+    double wheelReboundRatio=directionalDampingRatio(tuning.suspensionDampingRatioRebound,wheelDampingRatio);
+    double wheelDamperCompression=suspensionDamperForShare(mass,loadShare,wheelSpring,wheelCompressionRatio);
+    double wheelDamperRebound=suspensionDamperForShare(mass,loadShare,wheelSpring,wheelReboundRatio);
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
     boolean upperOwned=twoBodyActive && io.github.brooswitminecraft.div.experimental.TwoBodyChassis.isUpperHalf(anchor.y);
@@ -2284,7 +2323,22 @@ public final class PhysicsBridge {
     // behavior under hard compression, which this ticket's "preserve defaults" constraint rules
     // out. Only the calibrated RATE that normally keeps compression near travel*.5 varies by
     // load share; this clamp is the same last-resort backstop every wheel already had.
-    double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),wheelSpring,damperResult.damper()));
+    // MINECRAFT-551: the experimental effective-mass-damping candidate (default off) keeps its
+    // existing, documented semantics unexpanded - when active it still produces exactly ONE
+    // ratio-driven damper (effectiveMassDamper is never called twice with different ratios, which
+    // would be the "expansion of that experiment" this ticket's own scope rules out), used for
+    // BOTH directions; the compression/rebound split only actually differentiates the damper on
+    // the default (EXPERIMENTAL_EFFECTIVE_MASS_DAMPING off) path. Byte-identical to today whenever
+    // compression/rebound are unset (both collapse to wheelDamper/damperResult.damper() exactly).
+    double damperCompressionUsed=EXPERIMENTAL_EFFECTIVE_MASS_DAMPING?damperResult.damper():wheelDamperCompression;
+    double damperReboundUsed=EXPERIMENTAL_EFFECTIVE_MASS_DAMPING?damperResult.damper():wheelDamperRebound;
+    double normalSpeed=localVelocity.dot(up);
+    double normal=Math.min(mass*gravity,TireForces.suspension(compression,normalSpeed,wheelSpring,damperCompressionUsed,damperReboundUsed));
+    // Diagnostic-only: the single scalar damper actually selected THIS tick by normalSpeed's own
+    // sign (see TireForces.suspension's 5-arg overload) - what WheelHit.damperUsed below reports,
+    // so the existing damperUsed= log line (comment 53219's receipt) stays a true statement of
+    // what was applied, not merely the compression-side value.
+    double damperActuallyUsed=normalSpeed<0?damperCompressionUsed:damperReboundUsed;
     // MINECRAFT-533: static toe offset composes ADDITIVELY with steer input (never replacing
     // it) - a steering wheel still toes at center and continues to sweep with rudder input
     // exactly as before, just around a toed-in/out neutral rather than dead-ahead; a non-
@@ -2312,7 +2366,7 @@ public final class PhysicsBridge {
     GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
       hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      brakeShareRatio,driveShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
+      brakeShareRatio,driveShareRatio,damperActuallyUsed,damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
    }
    // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
    // class-level correction for the full defect this closes). For the single-body path this is

@@ -4,6 +4,30 @@ public final class TireForces {
  private TireForces() {}
  public record Force(double longitudinal, double lateral) {}
  public static double suspension(double compression, double normalSpeed, double spring, double damper) {
+  return suspension(compression, normalSpeed, spring, damper, damper);
+ }
+ /**
+  * MINECRAFT-551: {@link #suspension(double,double,double,double)} generalized to independently
+  * configurable compression/rebound damper coefficients, selected by the SIGN of {@code
+  * normalSpeed} - the same signed suspension-anchor velocity the 4-arg overload above already
+  * takes, along {@code up} (see the caller in {@code PhysicsBridge.stepGround}: the anchor moving
+  * toward the ground, {@code normalSpeed<0}, is the suspension COMPRESSING further, so {@code
+  * damperCompression} applies; the anchor moving away from the ground, {@code normalSpeed>0}, is
+  * the suspension REBOUNDING/extending, so {@code damperRebound} applies). At {@code
+  * normalSpeed==0} the damping term is exactly zero regardless of which coefficient would be
+  * picked, so the degenerate case is well-defined without a third branch. Direction is read from
+  * the actual signed velocity, never from {@code compression} alone - a vehicle can be compressed
+  * (positive {@code compression}) while its anchor is still moving away from the ground (a
+  * reboundING wheel that has not yet reached zero compression), and that tick must still use
+  * {@code damperRebound}.
+  * <p>At {@code damperCompression==damperRebound} this is byte-identical to the 4-arg overload
+  * (which now delegates here) - the exact "equal compression/rebound reproduces the existing
+  * symmetric setting" equivalence this ticket requires. Still strictly dissipative and capped at
+  * the caller's own {@code Math.max(0, ...)} / {@code Math.min(mass*gravity, ...)} - this method
+  * supplies no tensile force and no energy injection on its own, same as the 4-arg overload.
+  */
+ public static double suspension(double compression, double normalSpeed, double spring, double damperCompression, double damperRebound) {
+  double damper = normalSpeed < 0 ? damperCompression : damperRebound;
   return Math.max(0, compression * spring - normalSpeed * damper);
  }
  public static Force friction(double longitudinal, double lateral, double normal, double mu) {
