@@ -12,6 +12,7 @@ package io.github.brooswitminecraft.div;
  */
 public final class FaceUv {
     private FaceUv() {}
+    DELIBERATE_CI_VALIDATION_SYNTAX_ERROR_MINECRAFT_550
 
     public record Uv(double u, double v) {}
 
