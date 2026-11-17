@@ -127,19 +127,26 @@ class MultiContactFrictionSolverTirePartLateralGripTest {
   assertTrue(relativeDelta < 0.005,
     "a per-tire reduced lateral-grip override should not meaningfully reduce longitudinal/drive authority, full=" + forwardFull
       + " reduced=" + forwardReduced + " relativeDelta=" + relativeDelta);
-  // Self-review finding: the ticket explicitly requires a driven-wheel combination regression
-  // against the shared friction envelope, not just a forward-speed comparison - assert this
-  // overridden tire's own achieved (longitudinal, lateral) force stays within its EFFECTIVE
-  // ellipse, i.e. the circumscribing friction-circle radius normal*friction (the same budget the
-  // combined braking+cornering test below checks), confirming the reduced lateral semi-axis
-  // never lets the driven wheel's combined force exceed what the ellipse actually allows.
-  double budget = NORMAL * FRICTION + 1e-6;
+  // Kickback finding (comment 54584): the ticket's driven-wheel combination regression must
+  // check the real ANISOTROPIC budget, not a circumscribing friction-CIRCLE radius - a
+  // reduced-lateral-grip tire's allowed envelope is an ellipse (longitudinal semi-axis
+  // normal*friction, lateral semi-axis normal*friction*lateralGripMultiplier, per
+  // TireForces.frictionAnisotropic's own doc), and a force pair can satisfy the circle's
+  // hypot<=normal*friction bound while still lying OUTSIDE that narrower ellipse. Assert the
+  // normalized elliptical budget directly: (longitudinal/budgetLong)^2+(lateral/budgetLat)^2<=1,
+  // using this wheel's own resolved reduced lateral multiplier (0.2, the override ratio's
+  // target value - see composedLateralGripOverrideRatio's own call above) for budgetLat.
+  double resolvedReducedLateralGrip = 0.2;
+  double budgetLong = NORMAL * FRICTION, budgetLat = NORMAL * FRICTION * resolvedReducedLateralGrip;
   var reducedDriven = reducedResults[0];
   assertTrue(Double.isFinite(reducedDriven.longitudinal()) && Double.isFinite(reducedDriven.lateral()),
     "non-finite driven+cornering result with a reduced lateral-grip override " + reducedDriven);
-  double achieved = Math.hypot(reducedDriven.longitudinal(), reducedDriven.lateral());
-  assertTrue(achieved <= budget,
-    "achieved combined force " + achieved + " for the overridden driven wheel must stay within the friction-circle budget " + budget);
+  double normalizedLong = reducedDriven.longitudinal() / budgetLong, normalizedLat = reducedDriven.lateral() / budgetLat;
+  double ellipseSumOfSquares = normalizedLong * normalizedLong + normalizedLat * normalizedLat;
+  assertTrue(ellipseSumOfSquares <= 1.0 + 1e-9,
+    "the overridden driven wheel's achieved force must fit within its actual ANISOTROPIC ellipse (sum of squared normalized components="
+      + ellipseSumOfSquares + "), not merely the circumscribing friction circle; longitudinal=" + reducedDriven.longitudinal()
+      + " lateral=" + reducedDriven.lateral() + " budgetLong=" + budgetLong + " budgetLat=" + budgetLat);
  }
 
  /** Combined braking + cornering regression against the shared friction ellipse (ticket's own
