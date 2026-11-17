@@ -6838,3 +6838,86 @@ divergence whose own cause is unidentified. No DIV-fixable bug is established
 in this entry. No production change, instrumentation commit, or native run is
 made. Native gate remains CLOSED. PR #39 reconciliation-with-main authorization
 (54458) is acknowledged, not acted on - no specific merge need identified yet.
+
+## Correcting remaining overreach; minimal instrumentation packet proposal (54469)
+
+Per 54469: identical cached v.position at the later pre-connect snapshot, plus
+an identical FINAL saved pool, does NOT establish historical native pose/
+orientation or the exact rotated float query inputs AT tick=60 itself - "refutes"
+was too strong. Neither the seed/terrain/contact explanation nor other
+environment effects are conclusively ruled out by what was actually measured;
+the same-tick water-reentry/joint-creation coincidence is explicitly NOT a
+cause. Retracting "refutes" - restating as: the prior entry's specific
+evidence (identical cached position one tick later, identical final pool) is
+real, but does not by itself close the question of what the rotated per-float
+query actually saw at tick=60 - that remains genuinely unmeasured, not merely
+"unconfirmed-but-leaning-one-way." No new causal claim is substituted.
+
+### Minimal instrumentation proposal (NOT implemented, no edit/run made)
+
+Per 54469's explicit list, the exact insertion point and fields:
+
+**Hook**: one new unconditional log statement inside `BuoyantForces.apply`'s
+per-float loop (`BuoyantForces.java`, immediately after line 68's `fraction`
+computation, BEFORE line 71's `if (fraction <= 0) continue;`) - firing for
+EVERY enumerated float, every tick, regardless of outcome. Placing it before
+the skip (not after, and not behind the existing `GroundContactDiagnostics`-
+gated line at 120) is what lets its mere presence prove the call ran and the
+float was enumerated - removing the inference 54464 flagged, for every tick
+logged, not just the ones that already happen to log today. Same hook serves
+both `towed` and `towing2`/any body, since `BuoyantForces.apply` is already
+shared code (per the class's own doc).
+
+**Fields, per float per tick**:
+- `v.uniqueUUID` (body id)
+- `level.getGameTime()` (so probe-phase and native tick correlate directly,
+  not by log-line adjacency guessing - the exact gap 54469 itself had to
+  route around in the prior entry)
+- the probe's own current phase/tick label (would require passing a phase
+  tag through, or cross-referencing `BuoyantHitchProbe`'s own `TOWING_UNAVAILABLE
+  tick=N` counter by gameTime once both carry it - today only the probe side
+  has a phase label and only `BuoyantForces` has gameTime, which is the actual
+  gap this fixes)
+- `pose.position()` and `q` (orientation) exactly as consumed by this call -
+  NOT `v.position` (MTS's separate cached field, already shown to differ in
+  freshness from this value elsewhere in this investigation)
+- `BuoyantBody.debugLastPoseUpdateGameTime` (already exists, MINECRAFT-545/547
+  diagnostic field) - the pose's own refresh age relative to current gameTime,
+  so staleness is visible, not assumed current
+- `flt.localOffset`, `center`, `radius` (the exact per-float geometry inputs)
+- the computed rotated world `point` (x, y, z) - the actual query location
+- `Mth.floor(point.x)`, `Mth.floor(point.z)`, `Mth.floor(point.y+radius+1)`
+  (the exact integer block coordinates `waterSurfaceAt` starts its scan from)
+- the scan's lower bound (`floor(fromY)-24`)
+- the scan's actual result: either the found block's `y + fluid.getHeight(...)`,
+  or an explicit `NO_WATER_FOUND_IN_RANGE` sentinel (not merely absence of a
+  line) - this is what lets a future run distinguish WATER-ABSENT (no fluid
+  tag found anywhere in the 24-block window) from WATER-PRESENT-BUT-
+  UNSUBMERGED (a real surface found, but `point.y - radius` still above it) -
+  two mechanistically different outcomes the current logging cannot tell
+  apart historically, since both currently produce "no line."
+- the computed `fraction` and an explicit skip/no-skip marker
+
+**Scope**: only `TOWING_UNAVAILABLE` ticks 55-61 (real gameTime≈259-265) for
+this specific fixture, both bodies - not a general always-on change.
+
+**Discriminating predictions, stated in advance**: if a future matched run's
+own tick=60 scan result is `NO_WATER_FOUND_IN_RANGE`, that supports a genuine
+absence (terrain/contact or fixture-geometry explanation, still to be
+determined which). If instead it returns a real found height with
+`point.y - radius` close above it (a near-miss margin), that points to timing/
+orientation sensitivity in the per-float geometry itself, not terrain absence.
+Both remain open; this entry does not pick between them.
+
+**Unavailable historical operands, stated plainly**: none of the above exist
+for ticks 55-60 in the already-retained logs - this is a GOING-FORWARD
+proposal only, requiring a new run to produce, which is not authorized here.
+No run is requested or executed in this entry.
+
+### Disposition
+
+No causal conclusion is drawn or re-asserted. No code change, instrumentation
+commit, or native run is made - this entry is the bounded packet specification
+itself, pending direction on whether/when to implement and run it. Preserving
+all existing constraints: native gate CLOSED, worlds/evidence/fixture
+untouched, sole owner, existing slot only, no external outreach.
