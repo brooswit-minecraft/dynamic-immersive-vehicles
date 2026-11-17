@@ -2278,7 +2278,12 @@ public final class PhysicsBridge {
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
     case ROTOR -> stepRotor(v,q,up,installedPropellers);
    };
-   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
+   // MINECRAFT-545/547 (John's comment 54706): this Body's own `box` is a plain BoxPhysicsObject
+   // (not the shape-aware variant) - its getMassTracker() would silently give Sable's shape-
+   // ignorant mass/6 fallback, so a correct solid-box MassData is built directly from this
+   // Body's own mass/halfExtents fields instead. Used only by
+   // BuoyantForces.SEQUENTIAL_DRAG_BOUND_ENABLED (off by default; see that field's own doc).
+   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle,BoxInertia.solidBoxMassData(mass,halfExtents));
    if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));

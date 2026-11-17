@@ -1,5 +1,6 @@
 package io.github.brooswitminecraft.div;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
+import dev.ryanhcode.sable.api.physics.mass.MassData;
 import dev.ryanhcode.sable.companion.math.Pose3d;
 import io.github.brooswitminecraft.div.mixin.PartEngineAccessor;
 import io.github.brooswitminecraft.div.mixin.PartPropellerAccessor;
@@ -50,11 +51,38 @@ import java.util.Map;
 final class BuoyantForces {
  private BuoyantForces() {}
 
+ /**
+  * MINECRAFT-545/547 (John's comments 54700/54703/54706): UNWIRED-BY-DEFAULT candidate for
+  * bounding each float's drag impulse via {@link ProposedFreshVelocityDragCallSite}'s virtual-
+  * buoyancy-first scheme, using FRESH per-float velocity (via {@code handle.getLinearVelocity}/
+  * {@code getAngularVelocity}, addressing the confirmed stale-once-per-tick-snapshot finding -
+  * see VERIFICATION.md "Corrections per 54700") instead of this method's own cached
+  * {@code velocity}/{@code angular} parameters. OFF by default - set
+  * {@code -Ddiv.sequentialDragBound=true} to enable; never set in any shipped/default
+  * configuration. When {@code false} (always, today), the per-float force computed and applied
+  * below is IDENTICAL to the code path that existed before this flag was added - zero behavior
+  * change. Production activation/native execution remain gated per every standing instruction
+  * in this investigation; this exists as a reviewable patch artifact, not an activated feature.
+  */
+ static final boolean SEQUENTIAL_DRAG_BOUND_ENABLED = Boolean.getBoolean("div.sequentialDragBound");
+
  /** Applies this tick's forces to handle and returns whether anything was submerged/thrusting
   * (the caller's cue to wake the Sable body). */
+ /**
+  * {@code massData} (MINECRAFT-545/547, John's comment 54706): the body's own solid-box
+  * {@code MassData}, needed ONLY by the {@link #SEQUENTIAL_DRAG_BOUND_ENABLED} candidate branch
+  * below - both real call sites (BuoyantBody, PhysicsBridge.Body) already have what they need to
+  * build one correctly (BuoyantBody's own {@code box} is already a {@code ShapeAwareBoxPhysicsObject}
+  * with a correct {@code getMassTracker()}; PhysicsBridge.Body's own {@code box} is a plain
+  * {@code BoxPhysicsObject}, whose {@code getMassTracker()} would silently give Sable's
+  * shape-ignorant {@code mass/6} fallback - so it builds one directly from its own
+  * {@code mass}/{@code halfExtents} fields via {@link BoxInertia#solidBoxMassData} instead).
+  * When the flag above is {@code false} (always, today), this parameter is read NOWHERE below -
+  * passing it costs nothing and changes nothing.
+  */
  static boolean apply(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning, Vector3d center,
      double hullVolume, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d angular,
-     RigidBodyHandle handle) {
+     RigidBodyHandle handle, MassData massData) {
   var floats = floats(v);
   double volumePerFloat = floats.isEmpty() ? 0 : hullVolume / floats.size();
   boolean awake = false;
@@ -136,12 +164,54 @@ final class BuoyantForces {
    // each default to 1.0 (Overrides.FALLBACK), which reproduces the exact prior isotropic
    // -dragMagnitude/speed*localVelocity force component-for-component - see
    // Buoyancy.directionalDragForce's own doc for why.
-   if (speed > 1e-6) {
-    Vector3d bodyVelocity = inverse.transform(new Vector3d(localVelocity));
-    double longitudinal = Buoyancy.directionalDragForce(speed, bodyVelocity.z, fraction, tuning.waterDrag, tuning.longitudinalWaterDragMultiplier);
-    double lateral = Buoyancy.directionalDragForce(speed, bodyVelocity.x, fraction, tuning.waterDrag, tuning.lateralWaterDragMultiplier);
-    double vertical = Buoyancy.directionalDragForce(speed, bodyVelocity.y, fraction, tuning.waterDrag, tuning.verticalWaterDragMultiplier);
-    force.add(q.transform(new Vector3d(lateral, vertical, longitudinal)));
+   // MINECRAFT-545/547 (John's comment 54706): extracted into a reusable lambda, taking an
+   // arbitrary WORLD-frame point velocity rather than always `localVelocity`, SOLELY so the
+   // SEQUENTIAL_DRAG_BOUND_ENABLED candidate branch below can recompute drag fresh from a
+   // virtual post-buoyancy point velocity instead of reusing this (pre-buoyancy) one - the
+   // DEFAULT call immediately below still passes `localVelocity`, so the unconditional result is
+   // byte-for-byte identical to before this refactor.
+   java.util.function.Function<org.joml.Vector3dc, Vector3d> dragWorldForceFrom = (pointVelocityWorld) -> {
+    double spd = pointVelocityWorld.length();
+    Vector3d result = new Vector3d(0, 0, 0);
+    if (spd > 1e-6) {
+     Vector3d bodyVel = inverse.transform(new Vector3d(pointVelocityWorld));
+     double lon = Buoyancy.directionalDragForce(spd, bodyVel.z, fraction, tuning.waterDrag, tuning.longitudinalWaterDragMultiplier);
+     double lat = Buoyancy.directionalDragForce(spd, bodyVel.x, fraction, tuning.waterDrag, tuning.lateralWaterDragMultiplier);
+     double vert = Buoyancy.directionalDragForce(spd, bodyVel.y, fraction, tuning.waterDrag, tuning.verticalWaterDragMultiplier);
+     result.add(q.transform(new Vector3d(lat, vert, lon)));
+    }
+    return result;
+   };
+   if (speed > 1e-6) force.add(dragWorldForceFrom.apply(localVelocity));
+
+   // MINECRAFT-545/547 (John's comments 54700/54703/54706): UNWIRED-BY-DEFAULT candidate. When
+   // SEQUENTIAL_DRAG_BOUND_ENABLED is false (always, today), forceToApply stays IDENTICAL to
+   // `force` above - zero behavior change. When enabled: reads FRESH per-float velocity from
+   // the handle (not this method's own once-per-tick `velocity`/`angular` parameters - the
+   // confirmed staleness gap, VERIFICATION.md "Corrections per 54700"), converts to LOCAL frame
+   // (matching massData's own body-local tensor frame), recomputes drag fresh from a VIRTUAL
+   // post-buoyancy state (buoyancy's own impulse applied to a COPY of velocity, never the real
+   // body - VERIFICATION.md "Corrections per 54706"), and bounds that recomputed drag against
+   // that same virtual state - buoyancy itself is never touched/scaled.
+   Vector3d forceToApply = force;
+   if (SEQUENTIAL_DRAG_BOUND_ENABLED && massData != null) {
+    Vector3d localArm = anchor; // anchor is already body-local, pre-q-transform - no extra conversion needed
+    Vector3d freshLocalLinear = inverse.transform(handle.getLinearVelocity(new Vector3d()));
+    Vector3d freshLocalAngular = inverse.transform(handle.getAngularVelocity(new Vector3d()));
+    Vector3d localBuoyancyOnly = inverse.transform(new Vector3d(buoyancyOnlyForce));
+    ProposedFreshVelocityDragCallSite.DragForceFromVelocity recomputeDragLocal = (localLinVel, localAngVel) -> {
+     Vector3d localPointVelocity = new Vector3d(localAngVel).cross(localArm, new Vector3d()).add(new Vector3d(localLinVel));
+     Vector3d worldPointVelocity = q.transform(new Vector3d(localPointVelocity));
+     Vector3d worldDragForce = dragWorldForceFrom.apply(worldPointVelocity);
+     return inverse.transform(worldDragForce);
+    };
+    Vector3d combinedLocal = ProposedFreshVelocityDragCallSite.virtualBuoyancyFirstCombinedForce(
+      massData, localArm, localBuoyancyOnly, recomputeDragLocal, freshLocalLinear, freshLocalAngular, PhysicsBridge.DT);
+    forceToApply = q.transform(combinedLocal);
+    if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+      "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
+        + " sequentialDragBoundCandidate=true floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
+        + " unconditionalForce=" + force + " candidateForceToApply=" + forceToApply);
    }
    // MINECRAFT-545/547 (John's comment 54357) - diagnostic-only, gated behind the existing
    // GroundContactDiagnostics flag (same opt-in every other per-tick diagnostic in this codebase
@@ -173,9 +243,9 @@ final class BuoyantForces {
       + " floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
       + " submergedFraction=" + fraction + " worldArm=" + arm
       + " buoyancyOnlyForce=" + buoyancyOnlyForce + " dragOnlyForce=" + dragOnlyForce
-      + " appliedImpulse=" + new Vector3d(force).mul(PhysicsBridge.DT));
+      + " appliedImpulse=" + new Vector3d(forceToApply).mul(PhysicsBridge.DT));
    }
-   handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(force).mul(PhysicsBridge.DT)));
+   handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(forceToApply).mul(PhysicsBridge.DT)));
   }
   // MINECRAFT-518: rotational (roll/pitch/yaw) water drag, opposing the hull's own angular
   // velocity - the rotational analogue of each float's own linear drag term above, averaged

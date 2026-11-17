@@ -1,5 +1,8 @@
 package io.github.brooswitminecraft.div;
+import dev.ryanhcode.sable.api.physics.mass.MassData;
 import org.joml.Matrix3d;
+import org.joml.Matrix3dc;
+import org.joml.Vector3d;
 import org.joml.Vector3dc;
 
 /**
@@ -30,5 +33,31 @@ final class BoxInertia {
   double iyy = mass / 3.0 * (hx * hx + hz * hz);
   double izz = mass / 3.0 * (hx * hx + hy * hy);
   return new Matrix3d(ixx, 0, 0, 0, iyy, 0, 0, 0, izz);
+ }
+
+ /**
+  * A real {@code MassData} wrapping {@link #solidBoxTensor} - for callers (MINECRAFT-545/547,
+  * John's comment 54706) that need the full {@code MassData} interface (e.g.
+  * {@code MassData.getInverseNormalMass}), not merely the raw tensor. Center of mass at the
+  * origin (the box's own geometric center), matching this ticket's existing assumption
+  * throughout.
+  * <p>CONFIRMED (not merely chosen) to match Rapier's own real native computation for the
+  * {@code ColliderBuilder::mass(mass)} creation path {@code createBox} actually uses - traced
+  * through the exact pinned dependency chain to upstream {@code parry3d 0.26.0}'s own cuboid
+  * mass-properties source; see VERIFICATION.md "Corrections per 54703" for the full derivation.
+  * Rapier's own native computation runs in single precision ({@code f32}, its own crate's
+  * default feature) - this is a formula match, not a bit-identical numeric one (54706).
+  */
+ static MassData solidBoxMassData(double mass, Vector3dc halfExtents) {
+  Matrix3dc inertia = solidBoxTensor(mass, halfExtents);
+  Matrix3dc inverseInertia = new Matrix3d(inertia).invert();
+  double inverseMass = 1.0 / mass;
+  return new MassData() {
+   public double getMass() { return mass; }
+   public double getInverseMass() { return inverseMass; }
+   public Matrix3dc getInertiaTensor() { return inertia; }
+   public Matrix3dc getInverseInertiaTensor() { return inverseInertia; }
+   public Vector3dc getCenterOfMass() { return new Vector3d(0, 0, 0); }
+  };
  }
 }

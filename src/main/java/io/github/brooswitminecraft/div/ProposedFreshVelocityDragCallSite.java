@@ -4,59 +4,70 @@ import org.joml.Vector3d;
 import org.joml.Vector3dc;
 
 /**
- * UNWIRED production-integration DESIGN for review only (MINECRAFT-545/547, John's comment
- * 54703's own follow-up request for "a reviewable actual call-site integration diff"). NOT
- * called from {@code BuoyantForces.apply} or any other production path.
+ * UNWIRED production-integration DESIGN for review only (MINECRAFT-545/547, John's comments
+ * 54700/54703/54706). NOT called from {@code BuoyantForces.apply} or any other production path.
  *
- * <p>Mirrors {@code BuoyantForces.apply}'s own REAL per-float shape as closely as possible,
- * without a live {@code RigidBodyHandle}/{@code ServerLevel} (so it stays pure and testable):
- * same frame convention (LOCAL frame throughout - {@code localLinearVelocity}/
- * {@code localAngularVelocity} are expected ALREADY inverse-transformed, exactly as a real
- * caller would need to do to a fresh world-frame handle read, same as {@code BuoyantForces.apply}
- * already does for {@code arm}/{@code force} before calling {@code applyImpulseAtPoint}), same
- * separation of buoyancy and drag into two force vectors before they are summed into one
- * combined impulse.
+ * <p>CORRECTED ACCEPTANCE CRITERION (54706): a prior version of this design, and its own test,
+ * treated "the combined buoyancy+drag impulse adds kinetic energy" as evidence of a problem.
+ * That is WRONG - buoyancy is PHYSICALLY ALLOWED to add kinetic energy (it is the force that
+ * accelerates a resting submerged body upward; requiring the total impulse to be non-energy-
+ * adding would require capping BUOYANCY itself, which every instruction in this investigation
+ * explicitly forbids). The actual goal is narrower: bounded DRAG must never add energy BEYOND
+ * what buoyancy alone, for that same step, already would have - buoyancy itself stays entirely
+ * free to add energy.
  *
- * <p><b>Fresh velocity timing</b>: this method's own {@code localLinearVelocity}/
- * {@code localAngularVelocity} parameters are meant to represent a FRESH, per-float read (e.g.
- * {@code inverse.transform(handle.getLinearVelocity(new Vector3d()))}) - not the real
- * {@code BuoyantForces.apply}'s own once-per-tick cached parameters (confirmed stale, see
- * VERIFICATION.md "Corrections per 54700"). This design does not itself perform that read (it
- * has no handle to read from) - a real integration would need to call it once per float, with a
- * fresh read each time, exactly where the real per-float loop currently uses its own stale
- * {@code velocity}/{@code angular} parameters instead.
- *
- * <p><b>Isolated drag vs. buoyancy ordering, and the OPEN cross-term question (54703)</b>: this
- * method bounds ONLY the drag force (via {@link ProposedBoundedDragIntegration#boundedDragForce})
- * and NEVER touches, scales, or caps buoyancy - buoyancy is added back, unmodified, after
- * bounding drag, exactly mirroring {@code BuoyantForces.apply}'s own existing
- * {@code buoyancyOnlyForce} separation. <b>This does NOT, by itself, prove the resulting COMBINED
- * (buoyancy+bounded-drag) impulse - the one single impulse actually applied in one
- * {@code applyImpulseAtPoint} call, exactly as the real code does today - stays non-energy-
- * adding.</b> {@code impulseEnergyChange} is linear in its own impulse magnitude plus a quadratic
- * self-term; summing two DIFFERENT additive force contributions (buoyancy, drag) into one
- * impulse before measuring its energy effect is subject to the SAME kind of cross-term the
- * confirmed 54694 finding already identified for summing two SEPARATE sequential impulses - just
- * in a one-shot form here (one impulse built from two additive vector contributions, rather than
- * two sequential impulse calls). Bounding drag's own magnitude in isolation says nothing about
- * the cross term between drag and buoyancy's OWN simultaneous contribution to that same combined
- * impulse. This is reported here as an OPEN, UNRESOLVED question - NOT solved by this class, and
- * not claimed to be. Solving it correctly would require evaluating the full combined impulse's
- * energy effect directly (e.g. via {@link Buoyancy#impulseEnergyChange} called ONCE with the
- * combined impulse, the way 54694 established is correct for multiple contributions) rather than
- * bounding drag in isolation - a materially different design, out of scope for this cycle.
+ * <p><b>The virtual-buoyancy-first scheme (54706's own authorized design)</b>: compute a
+ * VIRTUAL post-buoyancy velocity state (buoyancy's own impulse applied to a COPY of the current
+ * velocity - never the real body), recompute drag's own physical force FRESH from that virtual
+ * state (never the original, pre-buoyancy state), and bound it against that SAME virtual state.
+ * Buoyancy's own force is NEVER touched, scaled, or capped.
+ * <p>This still results in exactly ONE real {@code applyImpulseAtPoint} call per float, matching
+ * today's production code exactly - because impulse application is a simple ADDITIVE velocity
+ * update (linear: {@code v += impulse/mass}; angular: {@code omega += invInertia*(arm x impulse)}),
+ * applying ONE combined impulse ({@code buoyancy + boundedDrag}) to the REAL body produces the
+ * IDENTICAL resulting velocity as applying buoyancy, then drag, as two SEPARATE sequential
+ * impulses (impulse summation and cross-product both distribute over addition - there is no
+ * order dependence at the velocity-update level, only kinetic energy, a quadratic function of
+ * velocity, depends on path in general - but since both orderings reach the SAME final velocity
+ * here, the final KE is identical too, trivially). This is what lets drag be bounded against
+ * the state it will ACTUALLY see without needing two real native calls per float.
+ * <p>Numeric-precision note (54706): the NATIVE engine computes in single-precision
+ * ({@code f32]} - Rapier's own {@code rapier3d} crate defaults to {@code features = ["dim3",
+ * "f32", "std"]}, confirmed via its pinned {@code Cargo.toml}, and {@code sable_rapier}'s own
+ * dependency on it does not opt into the {@code f64} variant) while this design computes in
+ * Java {@code double} (f64). The CONFIRMED formula equivalence (VERIFICATION.md "Corrections
+ * per 54703") is a formula match, NOT a claim of bit-identical numeric results - any validation
+ * against a real native run must use a tolerance appropriate to {@code f32} precision, not an
+ * exact-equality or double-precision-tight comparison.
  */
 final class ProposedFreshVelocityDragCallSite {
  private ProposedFreshVelocityDragCallSite() {}
 
- /** One float's combined (buoyancy + bounded-drag) force, in LOCAL frame, mirroring
-  * {@code BuoyantForces.apply}'s own per-float combination - EXCEPT drag is bounded against
-  * fresh per-float state first (see class doc for what that bound does and does not prove about
-  * the resulting combined impulse). */
- static Vector3d combinedFloatForce(MassData massData, Vector3dc arm, Vector3dc buoyancyOnlyForce,
-     Vector3dc physicalDragForce, Vector3dc localLinearVelocity, Vector3dc localAngularVelocity, double dt) {
+ /** Recomputes a drag force from a (possibly virtual) linear/angular velocity pair - the real
+  * {@code BuoyantForces.apply} would supply its own existing per-axis directional-drag formula
+  * here; kept as a callback so this design does not need to duplicate that formula. */
+ @FunctionalInterface interface DragForceFromVelocity {
+  Vector3d compute(Vector3dc linearVelocity, Vector3dc angularVelocity);
+ }
+
+ /**
+  * The virtual-buoyancy-first combined force for one float, per the class doc's scheme.
+  * {@code buoyancyForce} is returned unmodified, additively, in the result - never scaled.
+  * {@code recomputeDrag} is called with the VIRTUAL post-buoyancy velocity, never the original.
+  */
+ static Vector3d virtualBuoyancyFirstCombinedForce(MassData massData, Vector3dc arm, Vector3dc buoyancyForce,
+     DragForceFromVelocity recomputeDrag, Vector3dc localLinearVelocity, Vector3dc localAngularVelocity, double dt) {
+  SequentialImpulseEnergyLedger virtualLedger = new SequentialImpulseEnergyLedger(massData, localLinearVelocity, localAngularVelocity);
+  double buoyancyMagnitude = buoyancyForce.length();
+  if (Double.isFinite(buoyancyMagnitude) && buoyancyMagnitude > 0 && Double.isFinite(dt) && dt > 0) {
+   Vector3d buoyancyDirection = new Vector3d(buoyancyForce).normalize();
+   virtualLedger.applyImpulseAndMeasureEnergyChange(arm, buoyancyDirection, buoyancyMagnitude * dt);
+  }
+
+  Vector3d recomputedDragForce = recomputeDrag.compute(virtualLedger.linearVelocity(), virtualLedger.angularVelocity());
   Vector3d boundedDrag = ProposedBoundedDragIntegration.boundedDragForce(
-    massData, arm, physicalDragForce, localLinearVelocity, localAngularVelocity, dt);
-  return new Vector3d(buoyancyOnlyForce).add(boundedDrag);
+    massData, arm, recomputedDragForce, virtualLedger.linearVelocity(), virtualLedger.angularVelocity(), dt);
+
+  return new Vector3d(buoyancyForce).add(boundedDrag);
  }
 }

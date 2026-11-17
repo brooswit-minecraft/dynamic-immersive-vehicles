@@ -10895,3 +10895,124 @@ bound is inert and preserving buoyancy exactly when it triggers - with its genui
 (drag-alone bounding vs. the real combined one-shot impulse) demonstrated and reported open, not
 papered over. No production wiring, no native run performed or requested - native hold remains
 CLOSED pending a new explicit coordinator release.
+
+## Corrections per 54706: corrected acceptance criterion, virtual-buoyancy-first scheme, actual
+## BuoyantForces.java patch (gated, zero default behavior change), precision caveat, packet prep
+
+John's comment 54706 made a real physics correction to the 54703-cycle test, authorized the next
+design step, and explicitly asked for an actual patch to the real `BuoyantForces.java` call
+site (not another standalone mirror) - all under the same standing authorization (no native run).
+
+### Corrected acceptance criterion: buoyancy is ALLOWED to add kinetic energy
+
+The 54703-cycle's own test (`theCombinedImpulseAppliedInOneShotCanStillAddEnergyEvenWhenDragAloneIsBounded`)
+treated "the combined buoyancy+drag impulse adds energy" as evidence of a problem. **This was
+wrong**: buoyancy is PHYSICALLY ALLOWED to add kinetic energy - it is the force that accelerates
+a resting submerged body upward. Requiring the TOTAL impulse to be non-energy-adding would
+require capping buoyancy itself, which every instruction in this investigation explicitly
+forbids. That test is REMOVED (it tested the wrong thing, not merely a wrong implementation).
+The real goal, corrected: bounded DRAG must never add energy BEYOND what buoyancy alone, for
+that same step, already would have - buoyancy stays entirely free to add energy on its own.
+
+### The virtual-buoyancy-first scheme (54706's own authorized design)
+
+Added `ProposedFreshVelocityDragCallSite.virtualBuoyancyFirstCombinedForce(...)`: computes a
+VIRTUAL post-buoyancy velocity state (buoyancy's own impulse applied to a COPY of velocity,
+never the real body), recomputes drag's own physical force FRESH from that virtual state (never
+the original pre-buoyancy state, via a `DragForceFromVelocity` callback so this design does not
+duplicate `BuoyantForces`'s own per-axis drag formula), and bounds that recomputed drag against
+that SAME virtual state. Buoyancy's own force is never touched, scaled, or capped.
+
+Key proof, stated in the class doc: this still results in exactly ONE real
+`applyImpulseAtPoint` call per float, matching production exactly, because impulse application
+is a simple ADDITIVE velocity update (linear: `v += impulse/mass`; angular cross products
+distribute over addition too) - applying ONE combined impulse (`buoyancy + boundedDrag`) to the
+real body produces the IDENTICAL resulting velocity (and therefore identical final KE) as
+applying buoyancy, then drag, as two separate sequential impulses. This is what lets drag be
+bounded against the state it will ACTUALLY see without needing two real native calls per float.
+
+New/replacement tests (`ProposedFreshVelocityDragCallSiteTest`, rewritten): compare final
+combined KE against a `buoyancy-only` baseline (same buoyancy, no drag, same original state) -
+not against the pre-step state - for both a drag-opposing-motion case and a drag-aiding-motion
+case (54706's "same/opposite direction" ask); a buoyancy-passthrough test; and a multi-float
+test with rotated/off-center arms at incident-scale linear AND angular velocity, checking the
+corrected invariant at EACH float's own live step.
+
+### Actual `BuoyantForces.java` patch delivered - gated, zero default behavior change
+
+54706: "Deliver actual BuoyantForces call-site patch for review, not another standalone mirror."
+Patched the real file:
+- Added `BuoyantForces.SEQUENTIAL_DRAG_BOUND_ENABLED = Boolean.getBoolean("div.sequentialDragBound")`
+  (off by default, same pattern as the existing `GroundContactDiagnostics.ENABLED`).
+- Added a `MassData massData` parameter to `BuoyantForces.apply(...)`'s signature. Updated BOTH
+  real call sites: `BuoyantBody.step` passes `box.getMassTracker()` (its own `box` is already a
+  `ShapeAwareBoxPhysicsObject` with a correct tensor); `PhysicsBridge.Body`'s per-tick call
+  builds one directly via the new `BoxInertia.solidBoxMassData(mass, halfExtents)` production
+  utility (its own `box` is a PLAIN `BoxPhysicsObject` - calling `getMassTracker()` on it would
+  silently give Sable's shape-ignorant `mass/6` fallback instead).
+- Extracted the existing per-axis directional-drag computation into a reusable lambda
+  (`dragWorldForceFrom`), taking an arbitrary world-frame point velocity instead of always
+  `localVelocity` - the UNCONDITIONAL call site still passes `localVelocity`, so the default
+  result is byte-for-byte identical to before this refactor.
+- Added the gated branch: when `SEQUENTIAL_DRAG_BOUND_ENABLED && massData != null`, reads FRESH
+  per-float velocity via `handle.getLinearVelocity()`/`getAngularVelocity()` (not this method's
+  own once-per-tick `velocity`/`angular` parameters - the confirmed staleness finding,
+  "Corrections per 54700"), converts to LOCAL frame (`anchor` is already body-local, pre-
+  `q.transform` - no extra conversion needed for the arm), and calls the new virtual-buoyancy-
+  first scheme; its result becomes `forceToApply`, used for the ACTUAL applied impulse. When the
+  flag is `false` (always, today), `forceToApply` is reference-identical to the pre-existing
+  `force` - the loop's logic, including every existing diagnostic, is otherwise untouched.
+- The `appliedImpulse=` diagnostic line and the actual `handle.applyImpulseAtPoint(...)` call
+  now both reference `forceToApply` (always equal to `force` when disabled) instead of `force`
+  directly, so the diagnostic stays honest about what is actually applied either way.
+
+**Verified zero default behavior change empirically, not just by inspection**: ran the FULL test
+suite (not just the new/touched tests) after this patch - 884 tests total, 0 failures/errors.
+
+**Testing boundary, stated honestly**: `BuoyantForces.apply` itself requires a live
+`ServerLevel`/`EntityVehicleF_Physics`/`RigidBodyHandle` that no pure unit test in this suite
+constructs (confirmed: no existing test calls `apply()` directly either - only its already-
+extracted pure helpers, e.g. `scanForWater`, are unit-tested) - this patch's own NEW branch is
+reviewable by reading, exactly like the rest of `apply()`'s MTS/Sable-dependent body already is,
+not exercised by a new JUnit test against the real method. The LOGIC it delegates to
+(`ProposedFreshVelocityDragCallSite`/`ProposedBoundedDragIntegration`/`SequentialImpulseEnergyLedger`)
+is fully unit-tested already, per the entries above.
+
+### Precision caveat corrected - formula match, not bit-identical numerics
+
+54706: "Avoid claiming bit-identical native inertia from matching formula alone; account for
+native numeric precision in validation tolerances." Checked `rapier3d`'s own pinned
+`Cargo.toml`: `default = ["dim3", "f32", "std"]` - Rapier computes natively in SINGLE precision
+(`f32`), and `sable_rapier`'s own dependency on it does not opt into the `f64` variant. This
+ticket's model computes in Java `double` (f64). The 54703 finding remains correct as a FORMULA
+match (confirmed via the exact pinned dependency chain) but is NOT a claim of bit-identical
+numeric results - corrected in `BoxInertia.solidBoxMassData`'s own doc, and noted explicitly in
+`ProposedFreshVelocityDragCallSite`'s class doc: any future validation against a real native run
+must use an `f32`-appropriate tolerance, not exact equality or a double-precision-tight one.
+
+### Immutable validation packet prepared for next review - NOT launched
+
+Per 54706's own instruction ("prepare... but do not launch it"), a new packet was prepared
+against this cycle's commit, following the exact same convention as every prior
+`M545-packet-*` entry (regenerated launch artifacts + their hashes, runtime-byte-manifest,
+isolated-input-manifest, baseline-original-run-config/world hashes, templated
+`preflight.sh`/`runtime-manifest.sh`/`launch-wrapper.sh`) - see the packet directory itself,
+named after this cycle's exact commit hash, for the full receipt trail. `launch-wrapper.sh` was
+NOT invoked - no native execution occurred or was attempted this cycle, same as every other
+entry in this investigation since the second authorized run.
+
+Compiled and tested under the exclusive Gradle lock: FULL suite (884 tests), 0 failures/errors -
+not just the newly-touched tests.
+
+### Disposition
+
+Retracted a test with a wrong physics acceptance criterion (buoyancy IS allowed to add energy);
+implemented the virtual-buoyancy-first scheme John authorized, with correctly-scoped tests
+comparing against a buoyancy-only baseline; delivered an ACTUAL patch to the real
+`BuoyantForces.java` call site, gated off by default (`-Ddiv.sequentialDragBound=true`,
+never set in any default configuration), verified to change nothing when disabled via the FULL
+test suite (884 tests, 0 failures); corrected the native-precision claim from "matching formula"
+to "formula match, not bit-identical numerics" given Rapier's own confirmed single-precision
+(`f32`) default; prepared (not launched) the next immutable validation packet. No production
+activation (the flag stays off everywhere), no native run performed or requested - native hold
+remains CLOSED pending a new explicit coordinator release.

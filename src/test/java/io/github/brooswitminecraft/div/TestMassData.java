@@ -23,7 +23,7 @@ final class TestMassData {
  private TestMassData() {}
 
  static MassData solidBox(double mass, Vector3dc halfExtents) {
-  return solidBoxWithCenterOfMass(mass, halfExtents, new Vector3d(0, 0, 0));
+  return BoxInertia.solidBoxMassData(mass, halfExtents); // same production utility real call sites now use (54706)
  }
 
  /** Same solid-box model as {@link #solidBox}, but with a non-origin center of mass - exists
