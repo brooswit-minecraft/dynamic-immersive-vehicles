@@ -386,22 +386,22 @@ class BuoyancyTest {
     "impulseEnergyChange(sum of impulses, s, k) must match the true combined effect exactly");
  }
 
- @Test void impulseEnergyChangeOfTheSummedImpulseMatchesIndependentVectorRigidBodyEnergyForAnOffCenterImpulseOnAnAsymmetricBox() {
-  // MINECRAFT-545/547, John's comment 54694: a genuine VECTOR check, independent of
+ @Test void impulseEnergyChangeMatchesIndependentVectorRigidBodyEnergyForAnOffCenterImpulseOnAnAsymmetricBox() {
+  // MINECRAFT-545/547, John's comments 54694/54697: a genuine VECTOR check, independent of
   // impulseEnergyChange's own scalar formula - computes kinetic energy directly from real
   // linear/angular velocity and a real (non-uniform, i.e. asymmetric) solid-box inertia tensor,
   // via 0.5*m*|v|^2 + 0.5*omega.(I*omega), for an impulse applied off-center (so it changes both
   // linear and angular velocity, not just linear) - then confirms that independently-computed
-  // energy change matches impulseEnergyChange(J, s, k) where s and k come from
-  // MassData.getInverseNormalMass, the same real Sable API this fix is scoped to use.
+  // energy change matches impulseEnergyChange(J, s, k), where s and k are obtained by calling
+  // the REAL MassData.getInverseNormalMass default method (54697: a prior version of this test
+  // hand-derived the cross/dot formula manually instead of invoking the actual API this fix is
+  // scoped to use - fixed here).
   double mass = 400.0;
   org.joml.Vector3d halfExtents = new org.joml.Vector3d(2.0, 1.0, 4.0); // asymmetric: not a cube, distinct per-axis inertia
-  double ix = mass / 6.0 * (halfExtents.y * halfExtents.y + halfExtents.z * halfExtents.z);
-  double iy = mass / 6.0 * (halfExtents.x * halfExtents.x + halfExtents.z * halfExtents.z);
-  double iz = mass / 6.0 * (halfExtents.x * halfExtents.x + halfExtents.y * halfExtents.y);
-  org.joml.Matrix3d inertia = new org.joml.Matrix3d().scaling(ix, iy, iz);
-  org.joml.Matrix3d inverseInertia = new org.joml.Matrix3d(inertia).invert();
-  double inverseMass = 1.0 / mass;
+  dev.ryanhcode.sable.api.physics.mass.MassData massData = TestMassData.solidBox(mass, halfExtents);
+  org.joml.Matrix3dc inertia = massData.getInertiaTensor();
+  org.joml.Matrix3dc inverseInertia = massData.getInverseInertiaTensor();
+  double inverseMass = massData.getInverseMass();
 
   org.joml.Vector3d arm = new org.joml.Vector3d(1.5, -0.8, 3.0); // off-center application point, relative to COM
   org.joml.Vector3d direction = new org.joml.Vector3d(0.0, 1.0, 0.0).normalize(); // impulse direction (unit)
@@ -413,12 +413,16 @@ class BuoyancyTest {
   org.joml.Vector3d pointVelocityBefore = new org.joml.Vector3d(angularVelocityBefore).cross(arm).add(linearVelocityBefore);
   double s = pointVelocityBefore.dot(direction);
 
-  // k: inverse effective mass at this point/direction, via the real default-method formula
-  org.joml.Vector3d armCrossDir = new org.joml.Vector3d(arm).cross(direction);
-  org.joml.Vector3d invInertiaTimesCross = inverseInertia.transform(new org.joml.Vector3d(armCrossDir));
-  double k = armCrossDir.dot(invInertiaTimesCross) + inverseMass;
+  // k: inverse effective mass at this point/direction, via the REAL Sable default method -
+  // not a hand-derived reimplementation of its cross/dot formula.
+  double k = massData.getInverseNormalMass(arm, direction);
 
-  double jSum = -27.3; // an arbitrary, not-at-the-bound impulse magnitude along direction, opposing s
+  // 54697: the prior version of this test picked J=-27.3 against s=-1.75 - SAME sign, so J was
+  // AIDING s, not opposing it, despite the comment claiming otherwise. Fixed: derive J from the
+  // bound itself, scaled below 1.0, which is guaranteed (by construction) to oppose s.
+  double bound = Buoyancy.maxDissipativeImpulseMagnitude(s, k);
+  double jSum = -Math.signum(s) * bound * 0.6;
+  assertTrue(Math.signum(jSum) != Math.signum(s), "the chosen impulse must actually oppose s, not aid it");
   double predictedEnergyChange = Buoyancy.impulseEnergyChange(jSum, s, k);
 
   // Independently apply the impulse as a real rigid-body linear+angular update and recompute KE
@@ -438,6 +442,49 @@ class BuoyancyTest {
     "impulseEnergyChange's scalar prediction must match independently-computed vector rigid-body energy change for an off-center impulse on an asymmetric box");
  }
 
+ @Test void impulseEnergyChangeMatchesIndependentVectorEnergyWhenTheImpulseDirectionIsNotAlignedWithAnyPrincipalAxis() {
+  // 54697: the prior test used only an axis-aligned impulse direction against a diagonal
+  // (unrotated) inertia tensor, where the cross-coupling terms the inverse-inertia transform
+  // can produce are mostly invisible. This test uses a direction with components on all three
+  // axes, so getInverseNormalMass's matrix-vector transform is genuinely exercised, not merely
+  // a disguised scalar divide.
+  double mass = 250.0;
+  org.joml.Vector3d halfExtents = new org.joml.Vector3d(3.0, 0.75, 1.5);
+  dev.ryanhcode.sable.api.physics.mass.MassData massData = TestMassData.solidBox(mass, halfExtents);
+  org.joml.Matrix3dc inertia = massData.getInertiaTensor();
+  org.joml.Matrix3dc inverseInertia = massData.getInverseInertiaTensor();
+  double inverseMass = massData.getInverseMass();
+
+  org.joml.Vector3d arm = new org.joml.Vector3d(-2.2, 1.1, -0.9);
+  org.joml.Vector3d direction = new org.joml.Vector3d(0.4, 0.6, -0.69).normalize(); // not axis-aligned
+
+  org.joml.Vector3d linearVelocityBefore = new org.joml.Vector3d(43.90, -12.0, 7.5); // incident-scale
+  org.joml.Vector3d angularVelocityBefore = new org.joml.Vector3d(1.5, -2.0, 0.8);
+
+  org.joml.Vector3d pointVelocityBefore = new org.joml.Vector3d(angularVelocityBefore).cross(arm).add(linearVelocityBefore);
+  double s = pointVelocityBefore.dot(direction);
+  double k = massData.getInverseNormalMass(arm, direction);
+
+  double bound = Buoyancy.maxDissipativeImpulseMagnitude(s, k);
+  double jSum = -Math.signum(s) * bound * 1.3; // deliberately PAST the bound, should add energy
+  double predictedEnergyChange = Buoyancy.impulseEnergyChange(jSum, s, k);
+
+  org.joml.Vector3d impulseVector = new org.joml.Vector3d(direction).mul(jSum);
+  org.joml.Vector3d angularImpulseVector = new org.joml.Vector3d(arm).cross(impulseVector);
+  org.joml.Vector3d linearVelocityAfter = new org.joml.Vector3d(linearVelocityBefore).add(new org.joml.Vector3d(impulseVector).mul(inverseMass));
+  org.joml.Vector3d angularVelocityAfter = new org.joml.Vector3d(angularVelocityBefore).add(inverseInertia.transform(new org.joml.Vector3d(angularImpulseVector)));
+
+  double keBefore = 0.5 * mass * linearVelocityBefore.lengthSquared()
+    + 0.5 * angularVelocityBefore.dot(inertia.transform(new org.joml.Vector3d(angularVelocityBefore)));
+  double keAfter = 0.5 * mass * linearVelocityAfter.lengthSquared()
+    + 0.5 * angularVelocityAfter.dot(inertia.transform(new org.joml.Vector3d(angularVelocityAfter)));
+  double actualEnergyChange = keAfter - keBefore;
+
+  assertTrue(actualEnergyChange > 0, "an impulse deliberately past its own dissipative bound must add energy");
+  assertEquals(actualEnergyChange, predictedEnergyChange, 1e-6,
+    "impulseEnergyChange's scalar prediction must match the independent vector result even for a non-axis-aligned direction/arm");
+ }
+
  @Test void maxDissipativeImpulseMagnitudeIsZeroForNonPositiveOrNonFiniteEffectiveMass() {
   // No positive bound is well-defined without a positive effective mass to divide by -
   // including the non-finite (NaN/Infinite) case explicitly, not merely zero/negative.
@@ -445,6 +492,17 @@ class BuoyancyTest {
   assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(50, -1));
   assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(50, Double.NaN));
   assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(50, Double.NEGATIVE_INFINITY));
+ }
+
+ @Test void maxDissipativeImpulseMagnitudeIsZeroWhenTheFiniteInputsWouldOverflowTheResultItself() {
+  // 54697: finite, individually-valid inputs can still make 2*|s|/k overflow double range -
+  // the input guards above don't catch this, since both s and k are finite here. The RESULT
+  // must also be guarded, conservatively, the same way every other invalid case returns 0.
+  assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(Double.MAX_VALUE, 1.0));
+  assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(-Double.MAX_VALUE, 1.0));
+  assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(Double.MAX_VALUE, Double.MIN_VALUE));
+  // a merely large, non-overflowing case must still compute normally, not get caught by the guard
+  assertEquals(2 * 1.0e200 / 1.0, Buoyancy.maxDissipativeImpulseMagnitude(1.0e200, 1.0), 1e-9);
  }
 
  @Test void zeroPreImpulseVelocityHasNoDissipativeImpulseBudget() {

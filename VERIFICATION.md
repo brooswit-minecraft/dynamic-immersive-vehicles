@@ -10456,3 +10456,141 @@ off-center impulse on an asymmetric box; native-evidence resolution taken to its
 (direct `Rapier3D` JNI-stub decompilation). No arbitrary damping/caps/fixture-bound-weakening, no
 reflection, no dependency upgrade, no native-private bypass, no production wiring. No native run
 performed or requested - native hold remains CLOSED pending a new explicit coordinator release.
+
+## Corrections per 54697: test bugs fixed, native source recovered (NOT exhausted), real
+## sequential-impulse vector candidate built and tested
+
+John's comment 54697 reviewed the exact diff of `a3e48ee` and confirmed the cross-term
+retraction and finite-input guard were correct, but found several concrete bugs in the new
+vector test from that same commit, and rejected the "native evidence exhausted at the JNI stub"
+conclusion as premature. All addressed this cycle; still no production wiring, no native run.
+
+### Test bugs found and fixed
+
+- **Wrong inertia coefficient.** The test built its box inertia tensor using `mass/6.0 *
+  (sum of squared half-extents)`. The correct solid-box formula - the SAME one this ticket's own
+  `BoxInertia.solidBoxTensor` already implements correctly - is `mass/3.0 * (...)` (confirmed by
+  re-deriving from the standard full-side-length formula `I=m/12*(h^2+d^2)` with
+  `h=2*halfExtent`). The test had silently reused Sable's own shape-ignorant `mass/6` fallback
+  (the exact thing `BoxInertia`'s own doc comment calls out as having "no shape term in it at
+  all") instead of the real model this fix is scoped to validate.
+- **Impulse aiding, not opposing, velocity.** The test picked `s=-1.75`-ish and `J=-27.3` by
+  hand - same sign, so the chosen impulse AIDED the existing motion instead of opposing it, while
+  the surrounding comment claimed the opposite. Fixed: the impulse magnitude in every corrected/
+  new test is now derived from `-Math.signum(s) * bound * <fraction>`, which is dissipative-by-
+  construction, with an explicit assertion that the sign is actually opposing.
+- **Hand-derived effective mass instead of the real API.** The test manually recomputed the
+  cross/dot formula that `MassData.getInverseNormalMass` already implements as a default method,
+  rather than calling that method. Fixed: added `TestMassData.solidBox(mass, halfExtents)` (a
+  small test-support factory building a real `MassData` instance) and switched both the fixed
+  test and the new one to call `massData.getInverseNormalMass(arm, direction)` directly.
+- **Only an unrotated diagonal tensor, only axis-aligned directions.** Added a second test,
+  `impulseEnergyChangeMatchesIndependentVectorEnergyWhenTheImpulseDirectionIsNotAlignedWithAnyPrincipalAxis`,
+  using an impulse direction with nonzero components on all three axes against the same kind of
+  diagonal box tensor - this genuinely exercises `getInverseNormalMass`'s matrix-vector
+  transform's cross-coupling terms, which an axis-aligned direction mostly hides. (A fully
+  rotated, i.e. off-diagonal-in-world-frame, tensor is still open - noted below, not claimed
+  done.)
+- **Bound guarded against invalid inputs, not against overflow of its own output.**
+  `maxDissipativeImpulseMagnitude` only guarded its two inputs; `2*|s|/k` can still overflow
+  `double` range for finite, individually-valid inputs (e.g. `s=Double.MAX_VALUE, k=1`). Fixed in
+  `Buoyancy.java`: the computed bound itself is now checked with `Double.isFinite`, returning the
+  same conservative `0` as every other invalid case. New test
+  `maxDissipativeImpulseMagnitudeIsZeroWhenTheFiniteInputsWouldOverflowTheResultItself` covers
+  both the overflow case and a merely-large-but-non-overflowing case (`s=1e200`), confirming the
+  guard doesn't over-trigger.
+
+### Native source: NOT exhausted - recovered the actual Rust implementation, resolving the synchronicity question
+
+54697 correctly rejected "the JNI stub has no body" as proof the native source was unavailable -
+54413/54418 already demonstrated the real pinned `sable_rapier` Rust source is readable via
+`gh api repos/ryanhcode/sable/contents/...?ref=<pinned tag's commit>`. Recovered the exact same
+way, same pinned tag/commit as those entries (`mc1.21.1-2.0.5-neoforge`, `6966d2928340de7631abcecf8549904b877df0a8`,
+re-confirmed live via `gh api repos/ryanhcode/sable/git/refs/tags/mc1.21.1-2.0.5-neoforge`),
+file `sable_rapier/src/main/rust/rapier/src/lib.rs`:
+
+```rust
+// Java_..._Rapier3D_applyForce
+let force: Vec3 = rb.rotation().mul_vec3(Vec3::new(fx, fy, fz));
+let force_pos = rb.position().transform_point(Vec3::new(x, y, z));
+rb.apply_impulse(force, wake_up > 0);
+let torque_impulse = (force_pos - rb.position().translation).cross(force);
+rb.apply_torque_impulse(torque_impulse, wake_up > 0);
+
+// Java_..._Rapier3D_applyForceAndTorque
+let force: Vec3 = rb.rotation().mul_vec3(Vec3::new(fx, fy, fz));
+rb.apply_impulse(force, wake_up > 0);
+let torque: Vec3 = rb.rotation().mul_vec3(Vec3::new(tx, ty, tz));
+rb.apply_torque_impulse(torque, wake_up > 0);
+```
+
+Both native functions call Rapier's own `RigidBody::apply_impulse`/`apply_torque_impulse`
+directly and unconditionally, on every single invocation - there is no accumulation buffer and
+no deferral to the next `step()` call anywhere in this function. Combined with the already-
+decompiled Java call chain (`RigidBodyHandle.applyImpulseAtPoint` ->
+`RapierPhysicsPipeline.applyImpulse` -> `Rapier3D.applyForce`, confirmed one native call per Java
+call via `javap`), this **definitively resolves** the previously-UNVERIFIED "native
+synchronicity" question (which earlier entries in this investigation stated as unresolved,
+method-naming inference only): every call `BuoyantForces.apply`'s own per-float loop makes to
+`handle.applyImpulseAtPoint` mutates the body's REAL rigid-body velocity IMMEDIATELY. Each
+float's impulse is applied against whatever velocity every PRIOR float's impulse (in the same
+tick) already produced - never against one shared, frozen pre-tick snapshot.
+
+This also rules out, definitively rather than just mathematically (as 54694/54697 already did
+independently), BOTH prior multi-float models: summing `impulseEnergyChange` per impulse against
+one shared snapshot (54694), and calling it once with every float's impulse combined into a
+single scalar `J` against a single `k` (54697 - different floats act at different points/
+directions, each with its own effective mass; there is no one `k` that represents them jointly).
+The physically correct model, now confirmed to match what the native engine actually does, is
+SEQUENTIAL: apply each float's impulse as a real linear+angular velocity update, in dispatch
+order, bounding each one against the CURRENT (already-updated) state at the moment it is
+applied.
+
+### New UNWIRED candidate: `SequentialImpulseEnergyLedger`
+
+Added `SequentialImpulseEnergyLedger` (main) and `SequentialImpulseEnergyLedgerTest` (4 tests) -
+not called from `BuoyantForces.apply` or any other production path. It holds real mutable
+linear/angular velocity, and for each float, in dispatch order: computes the dissipative-impulse
+bound at that float's own arm/direction against the CURRENT state (`currentMaxDissipativeImpulseMagnitude`,
+using the real `MassData.getInverseNormalMass`), then applies a real linear+angular impulse
+update (`applyImpulseAndMeasureEnergyChange`, matching the native engine's own
+`v += impulse/mass`, `omega += inverseInertia*(arm x impulse)`), returning the actual measured
+kinetic-energy change for that single application. Tests cover: three nonparallel off-center
+impulses on an asymmetric box at incident-scale velocity, each bounded against the live
+sequential state, confirmed to keep the TRUE combined energy change non-positive; confirmation
+that the bound at a fixed point/direction genuinely changes after an earlier impulse updates the
+real state (the mechanism the shared-snapshot approach got wrong); a single application kept at
+its own current bound not increasing energy; a single application deliberately past its own
+current bound adding energy. Drag/physical force DIRECTION is unchanged from the existing
+`BuoyantForces` model - this candidate only proposes HOW an energy-dissipativity bound could be
+evaluated sequentially per float, not a different force model. Integration/scaling tradeoff: this
+is a per-tick, per-float bound evaluated with real (not frozen) state - using it in production
+would mean computing it once per float, in the SAME order `BuoyantForces.apply`'s own loop
+already uses, immediately before (not after) that float's impulse is actually applied.
+
+### Still open, not claimed done
+
+- A genuinely ROTATED (off-diagonal-in-world-frame, not merely non-axis-aligned-direction) box
+  tensor test is not yet added - the current tests use a diagonal body-local tensor with varying
+  impulse directions, which exercises `getInverseNormalMass`'s cross-coupling but not an actual
+  rotated frame.
+- `SequentialImpulseEnergyLedger` is a candidate/diagnostic utility only - not wired into
+  `BuoyantForces.apply`, and wiring it in would require its own separate review/diff, explicitly
+  out of scope here.
+- No native run performed or requested this cycle either - native hold remains CLOSED pending a
+  new explicit coordinator release.
+
+Compiled and tested under the exclusive Gradle lock (`/tmp/div-gradle-slot.lock`/
+`/tmp/div-gradle-slot.owner`, labels `M545-54697-fix-<timestamp>`/`M545-54697-fix2-<timestamp>`):
+`BuoyancyTest` (48 tests), `SequentialImpulseEnergyLedgerTest` (4 tests),
+`PhysicsBridgeClassificationTest`, `LifecycleInvariantsTest` all green, 0 failures/errors.
+
+### Disposition
+
+Test bugs (wrong inertia coefficient, impulse aiding instead of opposing velocity, hand-derived
+effective mass instead of the real API, overflow-unguarded bound output) fixed and verified;
+native source recovered directly (not declared exhausted) at the same pinned tag/commit used in
+54413/54418, definitively resolving the native-synchronicity question that had stood unresolved
+through this entire investigation; a real, tested, UNWIRED sequential-impulse vector candidate
+implemented per the model that finding confirms is correct. No production wiring, no native run
+performed or requested - native hold remains CLOSED pending a new explicit coordinator release.

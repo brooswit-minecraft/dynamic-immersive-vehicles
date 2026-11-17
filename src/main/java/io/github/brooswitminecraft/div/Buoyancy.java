@@ -256,9 +256,15 @@ public final class Buoyancy {
   * guarded {@code inverseEffectiveMass}, not {@code preImpulsePointVelocityAlongDirection} - a
   * non-finite {@code s} with a valid {@code k} previously propagated NaN/Infinity straight
   * through, not a conservative {@code 0}) returns {@code 0} - no positive bound is well-defined
-  * without both a finite velocity component and a positive, finite effective mass to divide by. */
+  * without both a finite velocity component and a positive, finite effective mass to divide by.
+  * <p>CORRECTED (54697): finite VALID inputs can still produce a non-finite RESULT via overflow
+  * ({@code 2*|s|/k} overflows {@code double} range for, e.g., {@code s=Double.MAX_VALUE, k=1}) -
+  * the input guard above does not catch this. The result itself is now also guarded: a non-
+  * finite computed bound returns the conservative {@code 0}, same as every other invalid case
+  * here, rather than silently handing a caller an {@code Infinity} "bound". */
  public static double maxDissipativeImpulseMagnitude(double preImpulsePointVelocityAlongDirection, double inverseEffectiveMass) {
   if (!(inverseEffectiveMass > 0) || !Double.isFinite(inverseEffectiveMass) || !Double.isFinite(preImpulsePointVelocityAlongDirection)) return 0;
-  return 2 * Math.abs(preImpulsePointVelocityAlongDirection) / inverseEffectiveMass;
+  double bound = 2 * Math.abs(preImpulsePointVelocityAlongDirection) / inverseEffectiveMass;
+  return Double.isFinite(bound) ? bound : 0;
  }
 }
