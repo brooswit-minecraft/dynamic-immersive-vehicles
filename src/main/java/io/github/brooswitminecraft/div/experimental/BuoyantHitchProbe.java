@@ -186,6 +186,20 @@ public final class BuoyantHitchProbe {
    LOGGER.error("[DIV buoyantHitchProbe] FAILED - unexpected exception in phase " + phase, ex);
    phase = Phase.FAILED;
   }
+  // MINECRAFT-545/547 (John's comment 54505): run BEFORE the chunk-grid release below, not
+  // after - previously disarm() sat after unforceChunkGrid with nothing guarding it, so an
+  // exception from unforceChunkGrid (an existing call, unchanged here) would have skipped
+  // diagnostic teardown entirely. Ordered first so it is reliable regardless of whether that
+  // call throws, without changing unforceChunkGrid's own cleanup/physics semantics or error
+  // handling at all. DiagnosticContext.disarm() previously had NO production caller at all -
+  // clear the shared diagnostic state here, at the terminal point (runs exactly once, DONE or
+  // FAILED, any abort path included via the catch block's own FAILED transition) -
+  // diagnostic-only, no physics/world cleanup change.
+  if ((phase == Phase.DONE || phase == Phase.FAILED) && !diagnosticContextDisarmed) {
+   diagnosticContextDisarmed = true;
+   io.github.brooswitminecraft.div.DiagnosticContext.disarm();
+   LOGGER.info("[DIV buoyantHitchProbe] diagnosticContextDisarmed=true phase=" + phase);
+  }
   // Release the chunk-force grid this probe's own setup requested once there is nothing left
   // to run (DONE or FAILED) - every phase transition above still needs the grid loaded, so this
   // can only run exactly once, at the very end, regardless of which terminal state is reached.
@@ -193,16 +207,6 @@ public final class BuoyantHitchProbe {
    chunkGridUnforced = true;
    unforceChunkGrid(level);
    LOGGER.info("[DIV buoyantHitchProbe] released terrain chunk grid");
-  }
-  // MINECRAFT-545/547 (John's comment 54494): DiagnosticContext.disarm() previously had NO
-  // production caller at all - clear the shared diagnostic state here, at the SAME terminal
-  // point as the chunk-grid release above (runs exactly once, DONE or FAILED, any abort path
-  // included via the catch block's own FAILED transition) - diagnostic-only, no physics/world
-  // cleanup change.
-  if ((phase == Phase.DONE || phase == Phase.FAILED) && !diagnosticContextDisarmed) {
-   diagnosticContextDisarmed = true;
-   io.github.brooswitminecraft.div.DiagnosticContext.disarm();
-   LOGGER.info("[DIV buoyantHitchProbe] diagnosticContextDisarmed=true phase=" + phase);
   }
  }
 
