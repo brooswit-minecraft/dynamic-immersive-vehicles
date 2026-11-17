@@ -9144,3 +9144,53 @@ All four concrete gaps from 54638 fixed and verified; packet
 passing against the real, current commit. No native run performed or
 requested. Native hold remains CLOSED. Awaiting further readback before
 considering this packet ready for native release.
+
+## Corrections per 54644 (readback of 7ca4203): pipefail bug fixed; test-count claim corrected
+
+### runtime-manifest.sh: `set -u` alone does not propagate pipeline failure (FIXED)
+
+John's 54644 found the prior hard-fail fix (54638's own correction) was
+itself incomplete: `set -u` does not make a pipeline's exit status
+reflect an early stage's failure - bash reports only the LAST command's
+own exit status unless `pipefail` is explicitly on. A failing `find` (or
+the first `sha256sum` in the directory-aggregate pipeline) whose output
+happens to be empty can still let `sort`/`sha256sum`/`awk` downstream
+exit 0 on empty input, so the `|| return 1` after the pipeline never
+actually fired - the exact silent-mask failure mode this function exists
+to prevent, just one stage further in than the "entry does not exist"
+case already fixed.
+
+Fix: `compute_runtime_byte_manifest` now turns `pipefail` on for its own
+duration (saved/restored on every exit path, including the early-return
+failure branches), so a pipeline's exit status reflects failure at ANY
+stage. Confirmed via a direct negative test: a classpath entry directory
+containing one `chmod 000` unreadable file now correctly produces
+`RUNTIME_MANIFEST_GENERATION_FAILED` and exit code 1 - this exact case
+would have silently produced a (wrong but "successful") aggregate hash
+under the pre-fix version, since `sort`/`sha256sum`/`awk` after the
+`sha256sum ... ; Permission denied` line all still exit 0. Dry-ran the
+full 9-check preflight.sh again against the real, current packet with
+the fixed script installed - still `PREFLIGHT_OK`, exit 0, no regression
+to the happy path.
+
+### Test-count claim corrected: 21 tests, not 24
+
+My own prior comment (54641) claimed "24 LifecycleInvariantsTest tests
+total." That was wrong - verified directly against both the source file
+(`grep -c "@Test"` = 21) and the actual retained JUnit XML report
+(`build/test-results/test/TEST-...LifecycleInvariantsTest.xml`,
+`tests="21" ... failures="0" errors="0"`) - John's own figure (21) was
+correct. The error: miscounting how many NEW tests each fix actually
+added (2 from the bug-1/2/3 fix, not 4; 3 from the 54635 identity fix,
+not folded in correctly) rather than re-deriving the running total from
+the file itself each time. Also confirmed the full retained suite total
+John cited: summing `tests="N"` across all 89 retained
+`build/test-results/test/*.xml` files gives exactly 837, matching
+54644's own figure.
+
+### Disposition
+
+Both concrete issues from 54644 addressed: the pipefail bug fixed and
+negative-tested; the test-count claim corrected against the actual
+source file and retained XML receipt, not re-derived from memory. No
+native run performed or requested. Native hold remains CLOSED.
