@@ -9194,3 +9194,77 @@ Both concrete issues from 54644 addressed: the pipefail bug fixed and
 negative-tested; the test-count claim corrected against the actual
 source file and retained XML receipt, not re-derived from memory. No
 native run performed or requested. Native hold remains CLOSED.
+
+## Response to 54650: hash-mismatch investigation (not reproduced); raw receipts archived
+
+John's 15:34 UTC independent readiness check reported his own
+recalculation of the runtime-byte-manifest's two directory-aggregate
+hashes (`build/classes/java/main`, `build/resources/main`) using my own
+exact algorithm did NOT match the archived `runtime-byte-manifest.sha256`
+in `M545-packet-4b6190b` (classes expected `78d1fb0a...`, his actual
+`2f9fdf21...`; resources expected `0442a30c...`, his actual `b712cd92...`
+- all 98 jar hashes matched). He explicitly instructed: investigate and
+report the cause, do not merely overwrite the expected hashes.
+
+### Investigation performed (no native run)
+
+Re-ran the exact same algorithm against the LIVE worktree right now
+(15:37 UTC): `build/classes/java/main` aggregate = `78d1fb0a...`,
+`build/resources/main` aggregate = `0442a30c...` - BOTH match the
+archived packet values, NOT John's reported "actual" values. A full
+line-by-line diff of the entire 100-entry archived manifest against a
+freshly regenerated one right now shows ZERO differences (`diff` exit
+0). Checked file mtimes under both directories: the most recent file in
+either directory is timestamped `2026-11-17T14:59:05Z`. Checked
+`/tmp/div-gradle-slot.owner`: the last claim/release before this check is
+`M545-packet-4b6190b-prep`, released at `2026-11-17T14:59:06Z` - the same
+run that generated the archived manifest - and no other claim has
+occurred since. Both independent signals (file mtimes, lock receipts)
+agree: nothing has touched these two build-output directories since the
+exact run that produced the archived manifest, and the live state right
+now is still byte-identical to it.
+
+**I cannot reproduce the mismatch John found.** I am not overwriting
+anything, since there is nothing in my own repeated, receipt-backed
+verification that disagrees with what's already archived. Reporting this
+plainly rather than guessing at a cause I have not actually confirmed
+(a transient read during some other, unlogged process; a difference in
+exactly which path or moment was recalculated; a copy/paste error) - any
+of these remain possible, but none are confirmed from my side. This is
+reported as an unresolved discrepancy for the coordinator, not a fix.
+
+### Raw receipts now archived (54650's own point: "currently only prose
+found")
+
+Added `receipts/` under `M545-packet-4b6190b` with real captured command
+output, not prose summaries:
+- `hash-mismatch-investigation-<ts>.txt` - the full diff, live
+  recalculation, mtimes, and lock-receipt evidence above.
+- `fresh-recheck-manifest-<ts>.sha256` - the complete freshly-regenerated
+  100-entry manifest.
+- `preflight-dry-run-<ts>.log` - a fresh full 9-check preflight.sh run
+  against the real packet, raw stdout/stderr, `exit_code=0`.
+- `negative-test-eula-tamper-<ts>.log`,
+  `negative-test-world-baseline-tamper-<ts>.log`,
+  `negative-test-runtime-manifest-tamper-<ts>.log`,
+  `negative-test-pipefail-unreadable-file-<ts>.log` - raw output for four
+  of the previously prose-only negative tests, all against disposable
+  copies/synthetic fixtures (no live file touched), each ending
+  `exit_code=1` with the correct `PREFLIGHT_FAILED`/
+  `RUNTIME_MANIFEST_GENERATION_FAILED` reason.
+
+The one negative test that DID require a live-shared-file mutation (the
+`run/config/mtsconfig.json` drift test from the 54638 fix, already fully
+reverted and reconfirmed byte-identical to baseline) is NOT repeated here
+- John's 54650 explicitly said not to repeat it; future negative tests
+stay on disposable fixtures only, as already done for all four tests
+captured in this entry.
+
+### Disposition
+
+Hash-mismatch not reproduced after real investigation (mtimes + lock
+receipts + full-manifest diff, all in the archived receipt file); nothing
+overwritten. Raw receipts now archived for every preflight/negative-test
+claim. No native run performed or requested. Native hold remains CLOSED.
+Awaiting the coordinator's own account of how the discrepant hash was
+obtained, or further instruction.
