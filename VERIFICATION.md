@@ -10739,3 +10739,159 @@ UNWIRED production-integration design (`ProposedBoundedDragIntegration`) address
 velocity timing, drag-direction preservation, and buoyancy separation, for review only. No
 production wiring, no native run performed or requested - native hold remains CLOSED pending a
 new explicit coordinator release.
+
+## Corrections per 54703: a confirmed doc/behavior mismatch fixed with a physically-motivated
+## bound, invalid-input contract completed, native mass/inertia equivalence DEFINITIVELY
+## RESOLVED by tracing the real dependency chain, and a call-site mirror delivered with its
+## cross-term gap stated honestly, not papered over
+
+John's comment 54703 confirmed the direction/COM fixes from `2ee52a3` as real progress, then
+found a concrete documentation/behavior mismatch in `ProposedBoundedDragIntegration`, and asked
+for several follow-ups under the same standing authorization (no native run).
+
+### Confirmed bug: the prior bound landed exactly on the reversal boundary, contradicting its own doc
+
+The prior version capped a drag impulse at `Buoyancy.maxDissipativeImpulseMagnitude` (the
+ENERGY-NEUTRAL bound, `2*|s|/k`) and documented this as giving "a strictly interior, never-
+boundary result." John pointed out the scale factor (`bound / physicalImpulseMagnitude`) makes
+the RESULTING impulse land EXACTLY AT that bound whenever clamping triggers - and per that
+method's own doc (already corrected in the 54694 cycle), landing exactly at the energy-neutral
+bound causes a velocity REVERSAL, not a safe stop. The prior version's own test
+(`aDragForceExceedingTheOpposingBoundIsScaledDownButKeepsItsDirection`) literally asserted this
+exact-boundary equality - confirming the contradiction directly, not merely by inspection.
+
+**Fix**: added `Buoyancy.maxNonReversingImpulseMagnitude(s, k) = maxDissipativeImpulseMagnitude(s, k) / 2`
+- derived from setting `d/dJ(impulseEnergyChange) = s + k*J = 0`, giving `J = -s/k`: the single
+point where the opposed point-velocity component is driven to EXACTLY ZERO (the parabola's own
+minimum, i.e. maximum dissipation), not merely non-positive. This is the physically-motivated
+"drag arrests motion, it does not reverse it" choice John asked for, not an arbitrary safety
+factor - and it inherits every existing guard on `maxDissipativeImpulseMagnitude` for free.
+`ProposedBoundedDragIntegration.boundedDragForce` now caps at this value. New test
+(`aDragForceExceedingTheBoundIsScaledDownToExactlyArrestTheOpposedPointVelocityComponentNotReverseIt`)
+confirms directly, via the ledger, that the resulting point-velocity component lands at exactly
+zero, not reversed - not merely re-asserting the impulse-magnitude arithmetic.
+
+### Invalid-input contract completed
+
+- **Non-finite/non-positive `dt`**: previously unguarded - a NaN `dt` could produce a NaN
+  result. Now returns a conservative zero vector for `dt` that is not finite and positive (zero,
+  negative, NaN, ±Infinity) - tested explicitly for all five cases
+  (`anInvalidDtProducesAConservativeZeroNotNaNOrTheRawForceUnchanged`).
+- **Non-finite `physicalDragForce`**: previously, a NaN-containing force slipped through as
+  "unchanged" because the old zero-magnitude guard (`!(forceMagnitude > 0)`) is false for NaN
+  (any comparison against NaN is false), so the "exceeds bound" branch never triggered and the
+  raw NaN vector was returned. Now explicitly checked first (`!Double.isFinite(forceMagnitude)`)
+  and returns a conservative zero. Tested
+  (`aNonFiniteDragForceProducesAConservativeZeroNotReturnedUnchanged`).
+
+### Frame documentation corrected
+
+54703: "fresh getters alone are not body-local transforms." The class doc previously implied
+reading velocity fresh was itself sufficient. Corrected to state explicitly that `arm`,
+`physicalDragForce`, both velocities, and the tensor must ALL already share one frame before
+calling this method - a fresh WORLD-frame handle read still needs the SAME
+`inverse.transform(...)` `BuoyantForces.apply` already applies to `arm`/`force`, which this
+method does not perform itself.
+
+### Multi-float clamping test added
+
+`multipleFloatsClampedSequentiallyKeepTheirTrueCombinedEnergyChangeNonPositiveAndNoPointVelocityReverses`:
+three floats with deliberately oversized physical drag forces, each clamped against the live
+sequential ledger state (fresh per float, matching the confirmed native application order),
+confirming both the true combined energy change stays non-positive AND no float's own opposed
+point-velocity component is driven past zero into reversal.
+
+### Native mass/inertia equivalence - DEFINITIVELY RESOLVED (not merely "chosen"), by tracing the exact pinned dependency chain
+
+54703: "Complete the already-requested read-only pinned native creation/mass-property source
+trace now." Previously this was an open caveat ("not confirmed to equal what Rapier computes
+internally"). Traced it to a definitive conclusion this cycle:
+
+1. `sable_rapier`'s own `Cargo.toml` (same pinned commit used throughout this investigation,
+   `6966d2928340de7631abcecf8549904b877df0a8`) depends on a FORK, `ryanhcode/rapier` at
+   `rev = "38e92f117590862481a53df6fc69a5d893e29186"` (re-confirmed live via
+   `gh api repos/ryanhcode/rapier/git/commits/38e92f1...`).
+2. That fork's own `Cargo.toml` depends on the UPSTREAM, UNMODIFIED crate `parry3d = "0.26.0"`
+   (from crates.io) for shape/mass-properties computation - confirmed exactly via the real
+   `Cargo.lock` at `sable_rapier/src/main/rust/Cargo.lock`:
+   `name = "parry3d"`, `version = "0.26.0"`, `source = "registry+...crates.io-index"`.
+3. `dimforge/parry` tag `v0.26.0` exists exactly (confirmed via `gh api repos/dimforge/parry/tags`).
+   Its `src/mass_properties/mass_properties_cuboid.rs`, function `cuboid_volume_unit_inertia`,
+   computes (3D): `unit_inertia = Vector::new(iy+iz, ix+iz, ix+iy)` where
+   `ix = hx^2/3, iy = hy^2/3, iz = hz^2/3` - i.e. `unit_Ixx = (hy^2+hz^2)/3` etc. - and
+   `from_cuboid(density, half_extents)` sets `principal_inertia = unit_inertia * mass` where
+   `mass = volume * density`.
+4. 54413 already established the real native `createBox` calls
+   `ColliderBuilder::new(...).mass(mass as Real).build()` - the `Mass` variant, not `Density`.
+   Traced `ColliderMassProps::mass_properties` (in `rapier`'s own `collider_components.rs`,
+   same pinned fork/rev): the `Mass(mass)` branch computes `shape.mass_properties(1.0)` (density
+   1.0, giving `unit_mass = volume`, `unit_inertia_tensor = unit_inertia * volume`) then calls
+   `mprops.set_mass(mass, true)`.
+5. `MassProperties::set_mass(new_mass, true)` (in `parry`'s `mass_properties.rs`) computes
+   `inv_principal_inertia *= new_inv_mass * curr_mass`. Substituting:
+   `inv_I_new = (1/(unit_inertia*volume)) * (volume/new_mass) = 1/(unit_inertia*new_mass)`, i.e.
+   `I_new = unit_inertia * new_mass` - EXACTLY preserving the shape-only `unit_inertia` ratio,
+   now scaled by the GIVEN mass instead of the density-derived one.
+
+**Conclusion, definitively established through this exact pinned chain (not assumed)**: Rapier's
+REAL native inertia for a `createBox(mass, half_extents)` call is
+`I_xx = mass/3*(hy^2+hz^2)`, `I_yy = mass/3*(hx^2+hz^2)`, `I_zz = mass/3*(hx^2+hy^2)` -
+**EXACTLY** the formula `BoxInertia.solidBoxTensor` already implements (and which
+`TestMassData`/`SequentialImpulseEnergyLedger`'s tests already use). The open caveat that this
+ticket's chosen model might not match Rapier's own internal computation is now RESOLVED, in the
+positive: it does match, exactly, for the `Mass`-variant creation path `createBox` actually uses.
+(`from_cuboid` also confirms `local_com = Vector::ZERO` - consistent with every test's own
+zero-COM assumption for a geometrically-centered box, separately from the nonzero-COM contract
+test added in the 54700 cycle, which exercises the GENERAL case regardless of this specific
+shape's own COM.) `SequentialImpulseEnergyLedger`'s and `TestMassData`'s own class docs updated
+to state this resolution precisely, replacing the prior open-caveat language.
+
+### Call-site integration mirror delivered, with its real cross-term gap stated honestly
+
+54703: "deliver reviewable actual call-site integration diff... A drag-only budget checked
+before a simultaneous buoyancy impulse does not by itself prove incremental drag dissipation
+relative to buoyancy; specify the operator order or account for cross terms."
+
+Added `ProposedFreshVelocityDragCallSite.combinedFloatForce(...)` (+ 3 tests) - mirrors
+`BuoyantForces.apply`'s own per-float combination (`buoyancyOnlyForce.add(boundedDrag)`,
+LOCAL frame throughout, matching its existing `inverse.transform(...)` convention) as closely as
+possible without a live handle. Confirmed by test: when drag is within bound, the combined
+result exactly matches the real code's own unbounded sum (the bound is genuinely inert when it
+doesn't trigger); when drag exceeds bound, buoyancy passes through completely unchanged -
+confirmed by recovering it from the combined result and comparing exactly.
+
+**The cross-term question is reported OPEN, not solved** - per 54703's own instruction to
+"specify the operator order or account for cross terms" rather than silently assume either is
+fine. Bounding drag's magnitude in ISOLATION does not prove the REAL combined impulse
+(buoyancy+bounded-drag, summed into ONE vector and applied as ONE `applyImpulseAtPoint` call,
+exactly as the production code does today) stays non-energy-adding - buoyancy's own simultaneous
+contribution to that same impulse is not accounted for by drag's own bound, for the same
+cross-term reason 54694 already established for summing separate impulses (just in a one-shot
+additive-vector form here, not a sequential-impulse form). New test
+(`theCombinedImpulseAppliedInOneShotCanStillAddEnergyEvenWhenDragAloneIsBounded`) demonstrates
+this gap is REAL, not merely theoretical: a sufficiently large buoyancy contribution, combined
+with an already-individually-bounded drag, still produces a measured net energy-adding combined
+impulse. Solving this correctly would require evaluating the full combined impulse's energy
+effect directly (via `impulseEnergyChange` called once with the combined magnitude, as 54694
+established) rather than bounding drag in isolation - a materially different design, explicitly
+out of scope for this cycle, stated as such in the new class's own doc.
+
+Compiled and tested under the exclusive Gradle lock (`/tmp/div-gradle-slot.lock`/
+`/tmp/div-gradle-slot.owner`, labels `M545-54703-fix-<timestamp>`/`M545-54703-fix2-<timestamp>`):
+`BuoyancyTest` (48 tests), `SequentialImpulseEnergyLedgerTest` (10 tests),
+`ProposedBoundedDragIntegrationTest` (8 tests), `ProposedFreshVelocityDragCallSiteTest`
+(3 tests), `PhysicsBridgeClassificationTest`, `LifecycleInvariantsTest` all green, 0
+failures/errors.
+
+### Disposition
+
+Confirmed doc/behavior mismatch fixed with a physically-motivated (not arbitrary) non-reversing
+bound, directly verified against resulting velocity; invalid-dt/invalid-force contract completed
+and tested; frame documentation corrected; a multi-float clamping test added. The native mass/
+inertia equivalence caveat open since 54413 is now DEFINITIVELY RESOLVED (confirmed match,
+traced through the exact pinned dependency chain to Rapier's real `Mass`-variant creation path).
+A call-site integration mirror delivered, reproducing the real combination exactly when the
+bound is inert and preserving buoyancy exactly when it triggers - with its genuine cross-term gap
+(drag-alone bounding vs. the real combined one-shot impulse) demonstrated and reported open, not
+papered over. No production wiring, no native run performed or requested - native hold remains
+CLOSED pending a new explicit coordinator release.

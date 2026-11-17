@@ -45,13 +45,17 @@ import org.joml.Vector3dc;
  * per-float loop computes every float's {@code localVelocity} from the CALLER-SUPPLIED
  * {@code velocity}/{@code angular} parameters (one snapshot, taken once before the loop runs),
  * not from a fresh per-float handle read - confirmed, not assumed.
- * <p>CAVEAT, NOT YET CLOSED (54700): the solid-box mass/inertia model this class's own tests use
- * ({@link TestMassData#solidBox}, matching {@link BoxInertia#solidBoxTensor}) is a CHOSEN model.
- * It is NOT confirmed to equal what Rapier itself actually computes internally for a cuboid
- * collider at {@code createBox} time (54413 already established Rapier computes its own mass
- * properties independently of Sable's Java-side {@code MassData}/{@code getMassTracker()} for
- * that creation path) - this class's energy predictions are only as good as that unconfirmed
- * equivalence, which remains open.
+ * <p>RESOLVED (54703, was an open caveat since 54700): the solid-box mass/inertia model this
+ * class's own tests use ({@link TestMassData#solidBox}, matching
+ * {@link BoxInertia#solidBoxTensor}) is CONFIRMED to match what Rapier's native {@code createBox}
+ * path actually computes internally - traced through the exact pinned dependency chain
+ * (VERIFICATION.md "Corrections per 54703"): {@code sable_rapier}'s pinned fork of {@code rapier}
+ * depends on upstream {@code parry3d 0.26.0} (exact, from the real {@code Cargo.lock}); its
+ * {@code ColliderBuilder::mass(mass)} path (the one 54413 confirmed {@code createBox} actually
+ * uses) computes {@code shape.mass_properties(1.0)} then {@code set_mass(mass, true)}, which
+ * algebraically preserves the shape's own {@code mass/3 * (...)} ratio while substituting the
+ * given mass - EXACTLY {@code BoxInertia.solidBoxTensor}'s own formula. This class's energy
+ * predictions are therefore grounded in a CONFIRMED-equivalent model, not merely a chosen one.
  */
 final class SequentialImpulseEnergyLedger {
  private final MassData massData;

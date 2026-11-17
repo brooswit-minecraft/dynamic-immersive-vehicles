@@ -12,11 +12,12 @@ import org.joml.Vector3dc;
  * cross/dot formula inline, which a prior test version did and which 54697 asked be corrected).
  * Builds real solid-box {@code MassData} instances using the SAME formula as
  * {@link BoxInertia#solidBoxTensor} (mass/3, not Sable's own shape-ignorant mass/6 fallback).
- * <p>CAVEAT (54700): this is a CHOSEN uniform-density solid-box model - not confirmed to equal
- * what Rapier itself actually computes internally for a cuboid collider at native creation time
- * (54413 already established Rapier computes its own mass properties independently of Sable's
- * Java-side {@code MassData} for that specific path). Energy predictions made using these
- * instances are only as good as that unconfirmed equivalence.
+ * <p>RESOLVED (54703, was an open caveat since 54700): this uniform-density solid-box model is
+ * CONFIRMED (not merely chosen) to match what Rapier's native {@code createBox} path actually
+ * computes internally for the {@code ColliderBuilder::mass(mass)} variant that path uses (54413) -
+ * traced through the exact pinned dependency chain to upstream {@code parry3d 0.26.0}'s own
+ * {@code mass/3 * (...)} cuboid formula; see VERIFICATION.md "Corrections per 54703" for the
+ * full derivation.
  */
 final class TestMassData {
  private TestMassData() {}

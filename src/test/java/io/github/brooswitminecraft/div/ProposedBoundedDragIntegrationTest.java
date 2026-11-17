@@ -5,8 +5,8 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * MINECRAFT-545/547, John's comment 54700: tests for the UNWIRED production-integration design
- * {@link ProposedBoundedDragIntegration}. Not called from any production path.
+ * MINECRAFT-545/547, John's comments 54700/54703: tests for the UNWIRED production-integration
+ * design {@link ProposedBoundedDragIntegration}. Not called from any production path.
  */
 class ProposedBoundedDragIntegrationTest {
  private static final double DT = 0.05;
@@ -25,34 +25,35 @@ class ProposedBoundedDragIntegrationTest {
   assertEquals(0, new Vector3d(smallDrag).sub(result).length(), 1e-12, "a drag force already well within bound must be returned unchanged");
  }
 
- @Test void aDragForceExceedingTheOpposingBoundIsScaledDownButKeepsItsDirection() {
+ @Test void aDragForceExceedingTheBoundIsScaledDownToExactlyArrestTheOpposedPointVelocityComponentNotReverseIt() {
+  // 54703: a prior version capped at the ENERGY-NEUTRAL bound, which (confirmed by its own
+  // test asserting exact equality) lands exactly at the reversal boundary - the opposite of the
+  // "strictly interior" claim in its own doc. Fixed to cap at maxNonReversingImpulseMagnitude:
+  // the resulting impulse must drive the opposed point-velocity component to EXACTLY ZERO, not
+  // reverse it - confirmed here directly from the resulting velocity, not just the impulse math.
   double mass = 400.0;
   MassData massData = TestMassData.solidBox(mass, new Vector3d(2.0, 1.0, 4.0));
   Vector3d arm = new Vector3d(1.5, -0.8, 3.0);
-  // Arrange linear velocity so the point-velocity's y-component is negative (so a +y drag force
-  // OPPOSES it - the dissipative case).
   Vector3d linearVelocity = new Vector3d(0, 43.90, 0);
   Vector3d angularVelocity = new Vector3d(0, 0, 0);
-  Vector3d largeDrag = new Vector3d(0, -2_000_000.0, 0); // deliberately far past the real bound (~55798 impulse units here), opposing the +y velocity
+  Vector3d largeDrag = new Vector3d(0, -2_000_000.0, 0); // deliberately far past any real bound here
 
   Vector3d result = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, largeDrag, linearVelocity, angularVelocity, DT);
 
   assertTrue(result.length() < largeDrag.length(), "an over-bound drag force must be scaled down");
   assertTrue(result.y < 0, "direction must be preserved - still opposing +y");
-  // Confirm the result's own impulse magnitude lands exactly at the forward dissipative bound.
-  double resultImpulseMagnitude = result.length() * DT;
-  Vector3d pointVelocity = new Vector3d(angularVelocity).cross(arm).add(linearVelocity);
-  Vector3d direction = new Vector3d(largeDrag).normalize();
-  double s = pointVelocity.dot(direction);
-  double k = massData.getInverseNormalMass(new Vector3d(arm).add(massData.getCenterOfMass()), direction);
-  double expectedBound = Buoyancy.maxDissipativeImpulseMagnitude(s, k);
-  assertEquals(expectedBound, resultImpulseMagnitude, 1e-6, "the scaled result must land exactly at the forward dissipative bound");
+
+  // Independently apply the RESULTING (scaled) impulse via the ledger and confirm the
+  // point-velocity component along the drag direction lands at exactly zero, not reversed.
+  SequentialImpulseEnergyLedger ledger = new SequentialImpulseEnergyLedger(massData, linearVelocity, angularVelocity);
+  Vector3d direction = new Vector3d(largeDrag).normalize(); // points -y, same direction result itself points
+  ledger.applyImpulseAndMeasureEnergyChange(arm, direction, result.length() * DT); // positive forward magnitude along that same direction
+  Vector3d pointVelocityAfter = new Vector3d(ledger.angularVelocity()).cross(arm).add(new Vector3d(ledger.linearVelocity()));
+  double sAfter = pointVelocityAfter.dot(direction);
+  assertEquals(0, sAfter, 1e-6, "the opposed point-velocity component must land at exactly zero, never past it into reversal");
  }
 
  @Test void aDragForceThatAidsRatherThanOpposesThePointVelocityIsScaledEntirelyToZero() {
-  // The sign case the class doc calls out explicitly: when the drag direction AIDS (rather
-  // than opposes) the point-velocity component along itself, ANY forward magnitude adds
-  // energy - the bound must collapse to exactly zero, not merely "small".
   double mass = 400.0;
   MassData massData = TestMassData.solidBox(mass, new Vector3d(2.0, 1.0, 4.0));
   Vector3d arm = new Vector3d(1.5, -0.8, 3.0);
@@ -75,7 +76,6 @@ class ProposedBoundedDragIntegrationTest {
  }
 
  @Test void scalingNeverProducesAMagnitudeLargerThanThePhysicalForceItself() {
-  // Sanity bound on the scale factor itself - never boosts, regardless of inputs.
   double mass = 250.0;
   MassData massData = TestMassData.solidBox(mass, new Vector3d(3.0, 0.75, 1.5));
   Vector3d arm = new Vector3d(-2.2, 1.1, -0.9);
@@ -86,5 +86,91 @@ class ProposedBoundedDragIntegrationTest {
   Vector3d result = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, drag, linearVelocity, angularVelocity, DT);
 
   assertTrue(result.length() <= drag.length() + 1e-9, "the result's magnitude must never exceed the physical force's own magnitude");
+ }
+
+ @Test void anInvalidDtProducesAConservativeZeroNotNaNOrTheRawForceUnchanged() {
+  // 54703: "Invalid dt (zero/negative/nonfinite) ... must have an explicit safe contract;
+  // ... NaN dt can produce NaN output" - a prior version had no guard for this at all.
+  double mass = 400.0;
+  MassData massData = TestMassData.solidBox(mass, new Vector3d(2.0, 1.0, 4.0));
+  Vector3d arm = new Vector3d(1.5, -0.8, 3.0);
+  Vector3d linearVelocity = new Vector3d(0, 43.90, 0);
+  Vector3d angularVelocity = new Vector3d(0, 0, 0);
+  Vector3d drag = new Vector3d(0, -50.0, 0);
+
+  for (double badDt : new double[] {0.0, -0.05, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
+   Vector3d result = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, drag, linearVelocity, angularVelocity, badDt);
+   assertTrue(result.isFinite(), "an invalid dt (" + badDt + ") must never produce a non-finite result");
+   assertEquals(0, result.length(), 1e-12, "an invalid dt (" + badDt + ") has no well-defined budget - must return a conservative zero, not the raw force unchanged");
+  }
+ }
+
+ @Test void aNonFiniteDragForceProducesAConservativeZeroNotReturnedUnchanged() {
+  // 54703: "current NaN force can be returned unchanged" - a prior version's zero-magnitude
+  // guard (`!(forceMagnitude > 0)`) let a NaN-containing force slip through as "unchanged"
+  // because any comparison against NaN is false, so the "exceeds bound" check never triggered.
+  double mass = 400.0;
+  MassData massData = TestMassData.solidBox(mass, new Vector3d(2.0, 1.0, 4.0));
+  Vector3d arm = new Vector3d(1.5, -0.8, 3.0);
+  Vector3d linearVelocity = new Vector3d(0, 43.90, 0);
+  Vector3d angularVelocity = new Vector3d(0, 0, 0);
+
+  Vector3d nanDrag = new Vector3d(0, Double.NaN, 0);
+  Vector3d result = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, nanDrag, linearVelocity, angularVelocity, DT);
+  assertTrue(result.isFinite(), "a non-finite drag force must never produce a non-finite result");
+  assertEquals(0, result.length(), 1e-12, "a non-finite drag force has no well-defined budget - must return a conservative zero");
+ }
+
+ @Test void multipleFloatsClampedSequentiallyKeepTheirTrueCombinedEnergyChangeNonPositiveAndNoPointVelocityReverses() {
+  // 54703: "test actual before/after energy and point velocity when clamping is active,
+  // including multiple floats." Applies the CLAMPED result for several floats, in sequence
+  // (via the real sequential ledger, matching confirmed native application order), and checks
+  // both the true combined energy change and that no float's own opposed point-velocity
+  // component is driven past zero into reversal.
+  double mass = 400.0;
+  Vector3d halfExtents = new Vector3d(2.0, 1.0, 4.0);
+  MassData massData = TestMassData.solidBox(mass, halfExtents);
+  SequentialImpulseEnergyLedger ledger = new SequentialImpulseEnergyLedger(
+    massData, new Vector3d(0, 59.09, 10.0), new Vector3d(5.0, -8.0, 3.0));
+
+  Vector3d[] arms = {
+   new Vector3d(1.8, -0.9, 3.5),
+   new Vector3d(-1.8, -0.9, 3.5),
+   new Vector3d(0.0, 0.9, -3.5),
+  };
+  // Deliberately oversized physical drag forces - each would far exceed its own bound unclamped.
+  Vector3d[] physicalDrags = {
+   new Vector3d(0, -5_000_000.0, 0),
+   new Vector3d(300_000.0, -4_000_000.0, 100_000.0),
+   new Vector3d(-200_000.0, -3_000_000.0, 150_000.0),
+  };
+
+  double totalEnergyChange = 0;
+  for (int i = 0; i < arms.length; i++) {
+   Vector3d freshLinear = new Vector3d(ledger.linearVelocity());
+   Vector3d freshAngular = new Vector3d(ledger.angularVelocity());
+   Vector3d clamped = ProposedBoundedDragIntegration.boundedDragForce(massData, arms[i], physicalDrags[i], freshLinear, freshAngular, DT);
+   Vector3d impulseVector = new Vector3d(clamped).mul(DT);
+   double impulseMagnitude = impulseVector.length();
+   if (impulseMagnitude == 0) continue;
+   Vector3d direction = new Vector3d(clamped).normalize();
+
+   // Confirm no reversal BEFORE applying, using the ledger's own live state (matching what
+   // boundedDragForce itself just bounded against).
+   Vector3d pointVelocityBefore = new Vector3d(ledger.angularVelocity()).cross(arms[i]).add(new Vector3d(ledger.linearVelocity()));
+   double sBefore = pointVelocityBefore.dot(direction);
+
+   totalEnergyChange += ledger.applyImpulseAndMeasureEnergyChange(arms[i], direction, impulseMagnitude);
+
+   Vector3d pointVelocityAfter = new Vector3d(ledger.angularVelocity()).cross(arms[i]).add(new Vector3d(ledger.linearVelocity()));
+   double sAfter = pointVelocityAfter.dot(direction);
+   if (sBefore < 0) {
+    assertTrue(sAfter >= sBefore - 1e-6 && sAfter <= 1e-6,
+     "a clamped, opposing drag impulse must move the point-velocity component toward zero and never past it into the opposite sign");
+   }
+  }
+
+  assertTrue(totalEnergyChange <= 1e-6,
+   "three floats' clamped drag impulses, applied sequentially against live state, must keep the true combined energy change non-positive");
  }
 }

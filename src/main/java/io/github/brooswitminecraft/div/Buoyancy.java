@@ -267,4 +267,20 @@ public final class Buoyancy {
   double bound = 2 * Math.abs(preImpulsePointVelocityAlongDirection) / inverseEffectiveMass;
   return Double.isFinite(bound) ? bound : 0;
  }
+ /**
+  * The impulse magnitude (opposing {@code preImpulsePointVelocityAlongDirection}) that brings
+  * the point-velocity component along that direction EXACTLY TO ZERO - i.e. the single point
+  * where {@code impulseEnergyChange} is most negative (its parabola's minimum: setting
+  * {@code d/dJ(J*s+0.5*k*J^2) = s+k*J = 0} gives {@code J=-s/k}), not merely non-positive.
+  * <p>ADDED (John's comment 54703): {@link #maxDissipativeImpulseMagnitude} itself (the
+  * energy-NEUTRAL bound, {@code 2*|s|/k}) is NOT a "stops, doesn't reverse" bound - at that
+  * exact value the velocity component REVERSES SIGN at the SAME magnitude (see that method's
+  * own doc). A caller that wants "this impulse never makes the point-velocity component along
+  * this direction reverse sign" - the physically natural "drag fully arrests this component of
+  * motion, nothing more" choice - needs HALF of that bound, {@code |s|/k}, which is exactly what
+  * this method returns. Shares every guard {@code maxDissipativeImpulseMagnitude} already has
+  * (non-finite/non-positive inputs, overflow) since it is defined directly in terms of it. */
+ public static double maxNonReversingImpulseMagnitude(double preImpulsePointVelocityAlongDirection, double inverseEffectiveMass) {
+  return maxDissipativeImpulseMagnitude(preImpulsePointVelocityAlongDirection, inverseEffectiveMass) / 2.0;
+ }
 }
