@@ -8730,3 +8730,132 @@ compatibility fix implemented - still conditional on a justified, failing-
 before regression against the real dispatch chain, which remains
 infrastructure-blocked as reported earlier this entry. Native gate: one-
 run grant remains CONSUMED; nothing in this entry requests another.
+
+## Three concrete bugs fixed per 54616; bug 4 (wrapper preflight) in progress
+
+John's independent review of 432397f (54616) found four real, concrete
+problems with the prior change - not a request to re-prove what was
+already established, a bug report against the instrumentation itself.
+Addressed bugs 1-3 in this entry; bug 4 (the launch-wrapper preflight)
+follows in the next commit/entry. No native run performed or requested.
+
+### Bug 1 - duplicate same-gameTime sample at tick 1 (FIXED)
+
+`towingUnavailable()`'s own `ticksInPhase==1` block appended a sample
+immediately after `towing.remove()` returns, and the UNCONDITIONAL
+per-tick block (which also runs for `ticksInPhase==1`, since it carries no
+guard excluding it) appended ANOTHER sample at the identical `gameTime` -
+no real tick elapses between the two appends. `evaluate()`'s own logic was
+never wrong: a zero `gameTime` delta between consecutive samples IS a
+non-consecutive pair, correctly `INSUFFICIENT_SAMPLES` - but that correct,
+immediate verdict made the real per-tick sequence that followed
+unreachable in practice, since the very first pair always failed the
+check before any real interval was walked.
+
+Fix: removed the duplicate append inside the `ticksInPhase==1` block,
+keeping only its `.clear()` call (defends against a hotload/repeat-call
+leaving a prior span's samples behind). The unconditional per-tick block
+is now the SOLE capture point, tick 1 included - exactly one sample per
+real tick.
+
+Regression tests added to `LifecycleInvariantsTest`:
+`evaluateReportsInsufficientForTheExactPreFixDuplicateFirstSamplePattern`
+(pins the exact pre-fix shape, confirming `evaluate` itself was always
+correct given that input) and
+`evaluatePassesForTheFixedSingleFirstSamplePerTickSequence` (confirms the
+fixed shape is actually walkable).
+
+### Bug 2 - entity UUID cannot see a same-entity body swap (FIXED)
+
+`Sample.bodyId` is the ENTITY's own UUID (`v.uniqueUUID`), unchanged even
+when DIV's OWN registry entry for that entity is torn down and
+reconstructed as a fresh body instance under the same entity -
+`debugStepInvocationCount`'s accessor returning a low/zero count in that
+case is indistinguishable, from the entity UUID alone, from this SAME
+still-live body genuinely failing to advance.
+
+Fix: added `PhysicsBridge.debugRegistryBodyIdentity(EntityVehicleF_Physics)`
+- returns `0` when `registry.get(v)` is currently absent, otherwise
+`System.identityHashCode` of the actual `VehicleBody` instance currently
+registered (necessarily different the instant a fresh instance replaces
+it - construction always allocates a new object). `Sample` gained a new
+`registryBodyIdentity` field (entity UUID NOT renamed or repurposed, per
+John's own explicit instruction); `evaluate()` now checks it alongside
+`bodyId` on every consecutive pair, before the step-count delta, so a
+swapped-in fresh body is reported as `BODY_IDENTITY_CHANGED` even when its
+own step count happens to advance by exactly 1 (what a per-tick walk alone
+would otherwise call `PASS`). Both probe call sites updated to pass the
+new observable.
+
+Regression tests added:
+`evaluateBodyIdentityChangedWhenTheSameEntityUuidGetsAFreshRegistryBody`
+(same UUID, step count advances by 1, but registry identity changed - must
+still report `BODY_IDENTITY_CHANGED`, not `PASS`) and
+`evaluateBodyIdentityChangedWhenTheRegistryBodyDisappearsEntirely` (same
+UUID, registry identity goes from present to `0`/absent).
+
+### Bug 3 - no connection-membership observations beyond a non-null
+pointer; no detach/reconnect check; outcome was LOG-only (FIXED)
+
+Added, log-only (no established "wrong" value exists yet to assert
+against, so these are new exploratory observations, not new failure
+conditions): every `TOWING_UNAVAILABLE` tick now also logs whether
+`towed.towedByConnection.towingVehicle == towing` (the connection object
+still identifies the now-removed `towing` as its owner) and whether
+`towing.towingConnections.contains(towed.towedByConnection)` (the REAL
+list MTS's own `doPostUpdateLogic` would recurse over if `towing` were
+ever ticked again still holds this connection) - both read-only over the
+same public fields/lists MTS's own dispatch code reads, confirmed present
+via decompile (`AEntityG_Towable.towingConnections`,
+`TowingConnection.towingVehicle`).
+
+Added a genuine detach/reconnect-specific check in `TOWING_REPLACEMENT`,
+immediately after `towing2.connectTrailer(connection, false)`: confirms
+`towed.towedByConnection == connection` (the exact new object, not merely
+non-null), `towed.towedByConnection.towingVehicle == towing2`, and
+`towing2.towingConnections.contains(connection)` - the real bidirectional
+rewiring `connectTrailer`'s own contract promises, not just a non-null
+pointer that a stale/wrong connection object could also satisfy.
+
+Turned the previously LOG-only `withinUnavailableOutcome` into a real
+terminal diagnostic ASSERTION: if it is `FAIL_STARVED_TICK` or
+`FAIL_DUPLICATE_TICK`, the fixture now sets `phase = Phase.FAILED` and
+stops - a genuine lifecycle defect is now a visible fixture failure, not
+merely a line a human had to separately notice. Deliberately NOT asserted
+on `INSUFFICIENT_SAMPLES`/`BODY_IDENTITY_CHANGED` - both mean the check
+itself could not be completed (a sampling gap or an identity change),
+never "checked and found broken"; asserting on either would misreport a
+measurement limitation as a lifecycle defect. The assertion is placed at
+the END of `towingReplacement`'s own `ticksInPhase==1` block, AFTER every
+piece of that tick's evidence (the full within-TOWING_UNAVAILABLE sample
+sequence, the pre-connect snapshot, the actual `connectTrailer` call, and
+the new post-connect reconnect check) has already run and already been
+logged - "defer outcome failure until evidence captured," per 54616's own
+wording - and the original physical phase sequence/timing is completely
+unchanged in the non-failing case.
+
+### Verification performed
+
+Compiled and ran the full test suite (`gradle compileJava test`) under
+the exclusive `/tmp/div-gradle-slot.lock`, receipts logged in
+`/tmp/div-gradle-slot.owner` (labels
+`MINECRAFT-545-fix-bug1-20261117T143618Z`,
+`MINECRAFT-545-fix-bug2-20261117T144003Z`,
+`MINECRAFT-545-fix-bug3-20261117T144419Z`) - all three runs
+`RESULT=PASS`. 20 `LifecycleInvariantsTest` tests (16 prior + 4 new) and
+the rest of the existing suite pass. No native/Minecraft execution
+performed - compile and pure-JUnit only.
+
+### Not yet addressed in this entry
+
+Bug 4 (54616, point 4): the launch-wrapper's own fail-closed preflight
+inside the same FD9 lock lifetime, before `exec`, verifying actual
+referenced classes/resources/jars/arg-file runtime BYTES (not just
+arg-text hashes) plus the unique rundir/seed/fresh-world/original-baseline
+conditions. Follows in the next commit.
+
+### Disposition
+
+Three of four concrete bugs from 54616 fixed and regression-tested; no
+native run performed or requested. Native hold remains CLOSED per 54616's
+own closing line.

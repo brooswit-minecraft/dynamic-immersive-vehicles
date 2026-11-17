@@ -1196,6 +1196,24 @@ public final class PhysicsBridge {
   if (body instanceof BuoyantBody bb) return bb.debugStepInvocationCount;
   return 0;
  }
+ /** Diagnostic/test-only companion to {@link #debugStepInvocationCount} (John's comment 54616,
+  * bug 2): {@code v.uniqueUUID} is the ENTITY's own identity, unchanged even when THIS registry's
+  * own body for {@code v} disappears or is replaced by a fresh instance (e.g. a reconnect that
+  * tears down and reconstructs the native body under the same entity) - a real body swap, not
+  * the same still-live body genuinely failing to advance. {@link #debugStepInvocationCount}
+  * returning {@code 0} is indistinguishable, from the entity UUID alone, between "this body
+  * genuinely never stepped" and "there is currently no body at all / a different body now."
+  * Returns {@code 0} if {@code registry.get(v)} is currently absent (no body registered for this
+  * entity right now); otherwise {@code System.identityHashCode} of the actual {@code VehicleBody}
+  * instance registry.get(v) returns right now - stable for as long as the SAME instance stays
+  * registered, and necessarily different the instant a fresh instance replaces it (construction
+  * always allocates a new object; Java never reuses an identity hash across live distinct
+  * instances of the same reference). Never called from any production code path - this reads
+  * {@code registry} for diagnostic observation only, never to make a production decision. */
+ public static int debugRegistryBodyIdentity(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  return body == null ? 0 : System.identityHashCode(body);
+ }
  /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
   * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL
   * anchor-world position at ANY bracket by rotating a connection's own authored local offset by

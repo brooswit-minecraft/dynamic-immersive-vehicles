@@ -546,13 +546,15 @@ public final class BuoyantHitchProbe {
      + " towing.isValid=" + towing.isValid
      + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
      + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
-   // MINECRAFT-545/547 (John's comment 54599/54600/54603): the real first sample of the span -
-   // body identity + gameTime + the real step-invocation count, captured HERE, immediately after
-   // towing.remove() returns. Reset the list first (defends against a hotload/repeat-call
-   // leaving a prior span's own samples behind).
+   // MINECRAFT-545/547 (John's comment 54616): reset the list here, immediately after
+   // towing.remove() returns (defends against a hotload/repeat-call leaving a prior span's own
+   // samples behind) - but do NOT also append a sample here. The unconditional per-tick block
+   // below runs on this same call (ticksInPhase==1 is not excluded from it) and appends the real
+   // first sample at this identical gameTime; appending here too produced two samples with a
+   // zero gameTime delta between them, so evaluate()'s very first consecutive-pair check always
+   // returned INSUFFICIENT_SAMPLES before any real per-tick interval was ever walked. The
+   // unconditional block is now the sole capture point for every tick, tick 1 included.
    towedRemovalSpanSamples.clear();
-   towedRemovalSpanSamples.add(new io.github.brooswitminecraft.div.LifecycleInvariants.Sample(
-     towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed)));
   }
   if (!boundedOrFail("towingUnavailable/towed", towed)) return;
   // MINECRAFT-545/547 diagnostic (John's comment 54237/54247's "next bounded diagnostic" and
@@ -575,12 +577,26 @@ public final class BuoyantHitchProbe {
     + " towed.towedByConnectionNonNull=" + (towed.towedByConnection != null)
     + " towed.stepInvocationCount=" + PhysicsBridge.debugStepInvocationCount(towed)
     + " towed.lastPoseUpdateGameTime=" + PhysicsBridge.debugLastPoseUpdateGameTime(towed));
+  // MINECRAFT-545/547 (John's comment 54616, bug 3): a non-null towedByConnection pointer alone
+  // does not show whether that connection object still identifies THIS (now-removed, invalid)
+  // towing vehicle as its owner, nor whether towing's OWN towingConnections list - the real list
+  // MTS's doPostUpdateLogic would recurse over if towing were ever ticked again - still holds
+  // this connection. Both are read-only observations over the SAME public fields/lists MTS's own
+  // dispatch code reads (towing.towingConnections, TowingConnection.towingVehicle); logged every
+  // tick, every tick of this window - not asserted against here, since the established finding is
+  // that both stay true/stale throughout (remove() does not clear either), and a fixture that
+  // failed on that expected, already-understood staleness would be asserting the wrong thing.
+  var towedConnection = towed.towedByConnection;
+  LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE tick=" + ticksInPhase
+    + " towedConnection.towingVehicleIsRemovedTowing=" + (towedConnection != null && towedConnection.towingVehicle == towing)
+    + " towing.towingConnectionsStillContainsIt=" + (towedConnection != null && towing.towingConnections.contains(towedConnection)));
   // MINECRAFT-545/547 (John's comment 54603): append THIS tick's real sample to the span - the
   // same real body UUID, gameTime, and step-invocation count just logged above, captured into
   // the list LifecycleInvariants.evaluate will later walk. Capturing only, not altering the
   // original per-tick sequence/timing.
   towedRemovalSpanSamples.add(new io.github.brooswitminecraft.div.LifecycleInvariants.Sample(
-    towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed)));
+    towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed),
+    PhysicsBridge.debugRegistryBodyIdentity(towed)));
   // MINECRAFT-545/547 (John's comment 54494): arm the shared DiagnosticContext here, one tick
   // BEFORE the intended window starts (ticksInPhase==SHORT_PHASE_TICKS-6, i.e. 54), so it is
   // already armed by the time the NEXT Minecraft tick's own entity-ticking force hook (which runs
@@ -666,7 +682,8 @@ public final class BuoyantHitchProbe {
    // rather than misreporting it as PASS or FAIL; the within-TOWING_UNAVAILABLE portion of the
    // same sequence is evaluated on its own, separately, for the real per-tick result.
    towedRemovalSpanSamples.add(new io.github.brooswitminecraft.div.LifecycleInvariants.Sample(
-     towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed)));
+     towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed),
+     PhysicsBridge.debugRegistryBodyIdentity(towed)));
    int withinUnavailableSampleCount = towedRemovalSpanSamples.size() - 1; // excludes this final, post-gap sample
    var withinUnavailableOutcome = io.github.brooswitminecraft.div.LifecycleInvariants.evaluate(
      towedRemovalSpanSamples.subList(0, withinUnavailableSampleCount));
@@ -687,6 +704,15 @@ public final class BuoyantHitchProbe {
    var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
    towing2.connectTrailer(connection, false);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position);
+   // MINECRAFT-545/547 (John's comment 54616, bug 3): the detach/reconnect-specific check -
+   // confirms the reconnect actually rewired BOTH directions (towed's own pointer AND towing2's
+   // own list), the real connection-ownership state connectTrailer's own doc promises, not merely
+   // that towed.towedByConnection became non-null again (which a stale/wrong connection object
+   // could also satisfy).
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT post-connect reconnect check"
+     + " towed.towedByConnectionIsNewConnection=" + (towed.towedByConnection == connection)
+     + " towed.towedByConnection.towingVehicleIsTowing2=" + (towed.towedByConnection != null && towed.towedByConnection.towingVehicle == towing2)
+     + " towing2.towingConnectionsContainsIt=" + towing2.towingConnections.contains(connection));
    // MINECRAFT-545/547 (John's comment 54486): the same expected-body marker as
    // TOWING_UNAVAILABLE's own tail, extended to cover this phase's intended transition tick (its
    // own ticksInPhase==1, not TOWING_UNAVAILABLE's nonexistent "tick 61") for both towed and the
@@ -700,6 +726,26 @@ public final class BuoyantHitchProbe {
        java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), 1, 1))
     LOGGER.info("[DIV buoyantHitchProbe] expectedBodyThisTick=true v=" + towing2.uniqueUUID
       + " ticksInPhase=" + ticksInPhase + " gameTime=" + level.getGameTime() + " phase=TOWING_REPLACEMENT");
+   // MINECRAFT-545/547 (John's comment 54616, bug 3): the real terminal diagnostic ASSERTION -
+   // deferred to HERE, the end of this tick's own block, so every piece of evidence this tick was
+   // ever going to capture (the full within-TOWING_UNAVAILABLE sample sequence above, this
+   // pre-connect snapshot, the actual connectTrailer call, and the post-connect reconnect check)
+   // has already run and already been logged before this can fail anything - a reader always gets
+   // the full evidence trail regardless of the verdict, and the original physical phase
+   // sequence/timing (spawn towing2, snapshot, connect, check) is completely unchanged either way.
+   // Previously withinUnavailableOutcome was LOG-only - a reader had to notice a FAIL_* value in
+   // the log themselves. A genuine FAIL_STARVED_TICK/FAIL_DUPLICATE_TICK is now a real fixture
+   // failure, not merely a line a human must separately find. INSUFFICIENT_SAMPLES/
+   // BODY_IDENTITY_CHANGED are deliberately NOT treated as failures here - both mean "the check
+   // itself could not be completed," not "checked and found broken" (54603's own distinction);
+   // asserting on an incomplete check would misreport a measurement gap as a lifecycle defect.
+   if (withinUnavailableOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_STARVED_TICK
+       || withinUnavailableOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_DUPLICATE_TICK) {
+    LOGGER.error("[DIV buoyantHitchProbe] FAILED - lifecycleInvariantCheck withinUnavailableOutcome=" + withinUnavailableOutcome
+      + " (a real per-tick stepping defect across the TOWING_UNAVAILABLE span, not a sampling gap)");
+    phase = Phase.FAILED;
+    return;
+   }
   }
   if (!boundedOrFail("towingReplacement/towing2", towing2) || !boundedOrFail("towingReplacement/towed", towed)) return;
   double distance = anchorDistance(towing2, towing2Definition);

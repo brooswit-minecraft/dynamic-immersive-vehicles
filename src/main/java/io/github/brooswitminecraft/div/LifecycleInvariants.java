@@ -12,13 +12,19 @@ import java.util.UUID;
 public final class LifecycleInvariants {
  private LifecycleInvariants() {}
 
- /** One real per-tick observation: the body's own identity, the real Minecraft tick it was taken
-  * at, and that body's own {@code debugStepInvocationCount} at that moment. Capturing identity
-  * alongside the count is what lets {@link #evaluate} distinguish "this body genuinely was not
-  * stepped" from "this is actually a different/replaced/missing body" (54603's own point - a
-  * missing body's accessor returns {@code 0}, indistinguishable from a real zero-count sample
-  * unless identity is checked too). */
- public record Sample(UUID bodyId, long gameTime, long stepInvocationCount) {}
+ /** One real per-tick observation: the ENTITY's own identity ({@code bodyId}, e.g.
+  * {@code v.uniqueUUID}), the real Minecraft tick it was taken at, that body's own
+  * {@code debugStepInvocationCount} at that moment, and {@code registryBodyIdentity} - the
+  * REGISTRY's own body-presence/generation marker ({@code PhysicsBridge.debugRegistryBodyIdentity},
+  * {@code 0} when no body is currently registered, otherwise a value that changes the instant a
+  * fresh body instance replaces the one previously registered for this same entity). 54603 added
+  * {@code bodyId} to distinguish "this body genuinely was not stepped" from "this is actually a
+  * different/replaced/missing body" - but 54616 (bug 2) found that check alone insufficient: the
+  * ENTITY's own UUID never changes even when the underlying native body IS torn down and
+  * reconstructed under that same entity, so two samples can share an identical {@code bodyId}
+  * while actually straddling a real body swap. {@code registryBodyIdentity} is the separate,
+  * correct observable for that - never collapsed into or substituted for the entity UUID. */
+ public record Sample(UUID bodyId, long gameTime, long stepInvocationCount, int registryBodyIdentity) {}
 
  /** The real outcome of evaluating a sample sequence - not a bare boolean, so "could not be
   * checked" is never silently conflated with "checked and passed" (54603's own point). */
@@ -51,6 +57,13 @@ public final class LifecycleInvariants {
   for (int i = 1; i < samples.size(); i++) {
    Sample prev = samples.get(i - 1), cur = samples.get(i);
    if (!prev.bodyId().equals(cur.bodyId())) return Outcome.BODY_IDENTITY_CHANGED;
+   // 54616 (bug 2): the entity UUID check above cannot see a real body swap under the SAME
+   // entity - registryBodyIdentity is the separate observable for that. A transition either INTO
+   // or OUT OF "no body registered" (0 on one side, nonzero on the other), or between two
+   // different nonzero instances, is a real body-presence/generation change, checked before the
+   // step-count delta below so a swapped-in fresh body's own low/zero count is never misread as
+   // this same body starving.
+   if (prev.registryBodyIdentity() != cur.registryBodyIdentity()) return Outcome.BODY_IDENTITY_CHANGED;
    if (cur.gameTime() - prev.gameTime() != 1) return Outcome.INSUFFICIENT_SAMPLES;
    long delta = cur.stepInvocationCount() - prev.stepInvocationCount();
    if (delta == 0) return Outcome.FAIL_STARVED_TICK;
