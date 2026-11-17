@@ -10594,3 +10594,148 @@ native source recovered directly (not declared exhausted) at the same pinned tag
 through this entire investigation; a real, tested, UNWIRED sequential-impulse vector candidate
 implemented per the model that finding confirms is correct. No production wiring, no native run
 performed or requested - native hold remains CLOSED pending a new explicit coordinator release.
+
+## Corrections per 54700: two real ledger bugs fixed, covariance/independent-energy/incident
+## tests added, BuoyantForces's actual velocity-read timing confirmed, overclaim softened, and
+## an UNWIRED production-integration design delivered for review
+
+John's comment 54700 confirmed the native Rust trace from `8262f8c` was independently re-read
+and verified correct, called the ledger candidate "real progress," and asked for the review
+gaps below closed under the same standing authorization (no native run).
+
+### Two real bugs in `SequentialImpulseEnergyLedger` found and fixed
+
+1. **Direction-normalization inconsistency.** `currentMaxDissipativeImpulseMagnitude` used the
+   caller's RAW `direction` for the velocity-component side (`s`), while
+   `MassData.getInverseNormalMass` silently normalizes its own copy for the effective-mass side
+   (`k`) - for any non-unit-length `direction`, `s` and `k` would be computed against different
+   effective bases, silently corrupting the result. Fixed: both methods now normalize `direction`
+   once, internally, consistently for both sides - and reject a zero-length or non-finite
+   direction with `IllegalArgumentException` rather than silently producing NaN/Infinity.
+2. **`arm`-vs-`position`/COM contract bug.** `MassData.getInverseNormalMass(position, direction)`
+   takes a POSITION and subtracts `getCenterOfMass()` internally. The ledger's own `arm`
+   parameter is COM-relative (the standard `torque = arm x force` convention, matching
+   `BuoyantForces.apply`'s own existing `arm` values) - calling `getInverseNormalMass(arm, ...)`
+   directly was WRONG whenever the real COM is non-zero, since that method would subtract the
+   COM a second time. This was latent in every earlier test because every test's own `MassData`
+   happened to return COM=(0,0,0). Fixed: the ledger now passes `position = arm + getCenterOfMass()`
+   to `getInverseNormalMass`, so `position - COM` correctly reduces back to the given `arm`
+   regardless of where the real COM is.
+
+### New tests (`SequentialImpulseEnergyLedgerTest`, now 10 total)
+
+- `aZeroOrNonFiniteDirectionIsRejected` - the new `IllegalArgumentException` guard, for both
+  methods, for zero-length and non-finite direction inputs.
+- `aNonUnitLengthDirectionProducesTheSamePhysicalResultAsItsNormalizedEquivalent` - confirms the
+  normalization fix: the same physical direction gives the identical bound/energy-change/
+  resulting-velocity regardless of the caller's vector's own magnitude.
+- `aNonZeroCenterOfMassIsHandledConsistentlyBetweenTheArmContractAndGetInverseNormalMass` -
+  confirms the COM fix directly, using a deliberately non-origin COM (`TestMassData.solidBoxWithCenterOfMass`,
+  new factory) and independently recomputing the expected bound using the documented
+  `position = arm + COM` contract.
+- `aRotatedWorldFrameSystemProducesTheSameEnergyChangeAsTheEquivalentLocalFrameSystem` - the
+  genuinely rotated covariance test 54700 asked for: rotates the ENTIRE system (tensor via new
+  `TestMassData.rotatedSolidBox`, arm, direction, both velocities) by the same arbitrary
+  rotation, confirms the scalar energy change agrees, AND confirms the rotated run's resulting
+  velocities, transformed back by the inverse rotation, match the local-frame run's own
+  resulting velocities exactly - full covariance, not merely scalar agreement. (A prior test
+  only varied the impulse DIRECTION against a still-diagonal tensor - this is a genuinely
+  different, stronger check.)
+- `theSumOfReturnedEnergyChangesMatchesIndependentlyRecomputedTotalKineticEnergyChangeOutsideTheLedger` -
+  recomputes total kinetic energy before/after using ONLY the ledger's exposed
+  `linearVelocity()`/`angularVelocity()` plus the test's own separately-written expression - not
+  by calling the class under test's own private `kineticEnergy()` method - confirming it matches
+  the sum of per-impulse returned deltas.
+- `multipleFloatsWithMixedDirectionsStayJointlyNonPositiveAtIncidentScaleLinearAndAngularVelocity` -
+  four genuinely mixed-direction floats (including a negative-component direction) at
+  incident-scale LINEAR AND ANGULAR velocity (angular magnitude ~34 rad/s, matching the retained
+  native evidence from the second authorized run), bounded sequentially, confirmed jointly
+  non-positive.
+
+### `BuoyantForces.apply`'s actual velocity-read timing - confirmed, not assumed
+
+54700: "immediate native application does NOT prove production calculates each drag from fresh
+velocity; review the actual `BuoyantForces` snapshot/getter placement separately." Read
+`BuoyantForces.apply` directly (not inferred): its per-float loop computes every float's
+`localVelocity` via `new Vector3d(angular).cross(arm).add(velocity)`, where `velocity`/`angular`
+are the METHOD'S OWN PARAMETERS - a single snapshot the caller took once, before this whole
+method (and its per-float loop) runs. There is no fresh per-float read of
+`handle.getLinearVelocity()`/`getAngularVelocity()` inside that loop - only the SEPARATE
+rotational-drag term, after the loop, already reads `handle.getAngularVelocity()` fresh (the
+53689 fix). **Confirmed fact, not an evaluation**: `BuoyantForces.apply` today computes every
+float's drag FORCE from one stale, once-per-tick snapshot, even though (per `8262f8c`'s native
+trace) each float's resulting IMPULSE is APPLIED immediately/sequentially. Native application
+synchronicity and Java-side force-calculation freshness are two independent facts; neither one
+proves the other. No behavior change made - this is a factual finding, not a fix.
+
+### Overclaim softened
+
+54700: "Combined VECTOR impulse analysis is not ruled out merely by immediate semantics (the
+incorrect scalar sum was). Avoid overclaiming that point." `SequentialImpulseEnergyLedger`'s own
+class doc previously implied sequential application was established as THE correct model.
+Corrected: immediate native application rules out the two SCALAR approaches this investigation
+actually tried and disproved (shared-snapshot sum, 54694; single-combined-scalar-J-against-one-k,
+54697) - it does not, by itself, rule out every possible correctly-formed VECTOR combined-impulse
+analysis (e.g. one full vector energy expression using accumulated total linear/angular
+impulse). The sequential ledger is stated as A valid model, confirmed consistent with native
+semantics - not claimed to be the only one.
+
+### New UNWIRED production-integration design, for review: `ProposedBoundedDragIntegration`
+
+Added `ProposedBoundedDragIntegration.boundedDragForce(...)` (+ 5 tests,
+`ProposedBoundedDragIntegrationTest`) - NOT called from `BuoyantForces.apply` or any other
+production path; production activation/native execution remain gated exactly as before. Scales
+a drag force's magnitude toward zero (never up, never sign-flipped) when its resulting impulse
+would exceed the sequential dissipative bound at that float's own arm/direction, evaluated
+against CALLER-SUPPLIED current linear/angular velocity (a real caller would need to read these
+FRESH per float, addressing the staleness finding above - the method takes them as inputs rather
+than reading a handle itself, so this stays pure/testable without a live Sable runtime). Buoyancy
+is never passed in, touched, or capped - only the drag contribution is bounded, mirroring how
+`BuoyantForces.apply` already keeps `buoyancyOnlyForce` separate from the combined force.
+Correctly handles the sign case 54700's own review would have caught: a forward (same-direction)
+impulse is only dissipative when it OPPOSES the point-velocity component along itself; when the
+drag direction AIDS that component instead (possible because full point velocity includes a
+rotational contribution the axis-local drag force doesn't itself account for), the bound
+collapses to exactly 0, not `maxDissipativeImpulseMagnitude`'s own "always opposing" value
+applied blindly - tested explicitly (`aDragForceThatAidsRatherThanOpposesThePointVelocityIsScaledEntirelyToZero`).
+Numerical tradeoff documented in the class's own doc: scaling toward zero preserves direction
+exactly but forfeits landing exactly at the energy-neutral boundary (which reverses velocity, not
+"stops" it). Frame handling: performs no transform of its own - expects already-local-frame
+vectors, exactly matching `BuoyantForces.apply`'s own existing convention for its
+`handle.applyImpulseAtPoint` calls.
+
+### Still open, not claimed done
+
+- The solid-box mass/inertia model this ticket's tests use is not confirmed to equal what Rapier
+  itself computes internally for a cuboid collider at `createBox` time (54413) - every energy
+  prediction here is only as good as that unconfirmed equivalence. Explicitly documented as an
+  open caveat in both `SequentialImpulseEnergyLedger`'s and `TestMassData`'s own class docs.
+  Resolving it would require tracing Rapier's own (external, vendored) mass-properties
+  computation, not yet attempted.
+- `BuoyantForces.apply`'s stale-per-tick-velocity-snapshot behavior for its per-float drag
+  calculation is reported as a confirmed fact only - no fix proposed or made; whether it should
+  change is a separate design decision, out of scope here.
+- `ProposedBoundedDragIntegration` is a reviewable design, not an activated path - wiring
+  anything from this investigation into `BuoyantForces.apply` remains a separate, explicitly
+  out-of-scope step requiring its own review.
+- No native run performed or requested this cycle either - native hold remains CLOSED pending a
+  new explicit coordinator release.
+
+Compiled and tested under the exclusive Gradle lock (`/tmp/div-gradle-slot.lock`/
+`/tmp/div-gradle-slot.owner`, labels `M545-54700-fix-<timestamp>`/`M545-54700-fix2-<timestamp>`):
+`BuoyancyTest` (48 tests), `SequentialImpulseEnergyLedgerTest` (10 tests),
+`ProposedBoundedDragIntegrationTest` (5 tests), `PhysicsBridgeClassificationTest`,
+`LifecycleInvariantsTest` all green, 0 failures/errors.
+
+### Disposition
+
+Two real ledger bugs (direction-normalization inconsistency, arm-vs-COM contract) fixed and
+regression-tested; genuine rotated-frame covariance, independent-external-energy, nonzero-COM,
+non-unit-direction, and incident-scale-linear-and-angular multi-float tests added; confirmed as
+fact (not fixed) that `BuoyantForces.apply`'s per-float drag calculation uses one stale per-tick
+velocity snapshot, independent of native application synchronicity; softened an overclaim that
+sequential application was the ONLY valid multi-float vector model; delivered a real, tested,
+UNWIRED production-integration design (`ProposedBoundedDragIntegration`) addressing fresh-
+velocity timing, drag-direction preservation, and buoyancy separation, for review only. No
+production wiring, no native run performed or requested - native hold remains CLOSED pending a
+new explicit coordinator release.
