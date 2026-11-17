@@ -6440,3 +6440,77 @@ Continuing with 54434's own comparison work (reported in the immediately
 preceding entry) - unaffected by this arithmetic correction, since that
 comparison used the raw logged velocity/position samples directly, not
 this summation.
+
+## Deterministic arithmetic correction; stale-cache consumer trace (54448)
+
+John's comment 54448: correct the hand-estimated angular sum with an
+actual deterministic parser (not further hand arithmetic), and trace
+whether the observed stale `v.motion`/pose actually feeds any
+production decision before its own refresh - existence of a stale
+diagnostic cache alone is not a bug mechanism. Both addressed here,
+read-only, no code change.
+
+### Deterministic re-parse of the exact 6 lines
+
+Wrote and ran a small Python parser (regex-extracting `worldArm`/
+`appliedImpulse` directly from each of Trial 1's lines
+2041/2042/2049/2050/2063/2064, `gameTime` 201-203, `v=51da4a15-...`)
+rather than hand arithmetic. Per-line cross products and the running sum
+are shown in the tool output (reproducible, not just asserted):
+
+```
+SUM appliedImpulse            = (-0.247931, 562.09, -0.356100)
+SUM (worldArm × appliedImpulse) = (-50.185616219, -0.230858682, -52.710453734)
+```
+
+**Matches John's own parsed value EXACTLY, including the Z component**
+(`-52.710453734`, not the prior entry's hand-estimated `-52.71`-ish/`-53.97`
+figures - the earlier hand computation had an actual arithmetic error in
+the Z cross-product terms, not merely rounding, now corrected by an
+actual deterministic derivation shown above rather than re-asserted).
+
+### Consumer trace: does the stale `v.motion`/pose feed any production decision?
+
+Searched `PhysicsBridge.java` for every production (non-diagnostic) read
+of `v.motion`/`v.position` for a `BuoyantBody`-backed vehicle:
+
+- **Body construction's own velocity seed** (`initialVelocity` from
+  `v.motion`, lines ~1964/2000): only consulted when a body is FIRST
+  constructed or reconstructed (`BuoyantBody`'s/`Body`'s own
+  constructor). `towed`'s own body persists continuously across
+  `TOWING_UNAVAILABLE`→`TOWING_REPLACEMENT` (never destroyed/
+  reconstructed in this window) - **this path does not apply to `towed`
+  here.**
+- **`createHitch`'s own actual joint-anchor construction**: confirmed
+  (already established earlier in this investigation, re-confirmed by
+  re-reading the call) to use ONLY `HitchJoint.anchorLocalOffset(body
+  .center(), connectionOffsetVehicleLocal(...))` - the connection's own
+  authored local offset and the body's STATIC geometric center. **Zero
+  dependency on `v.position`/`v.motion`.**
+- **`pendingInheritedVelocity`/`captureReplacementState`**: only staged
+  when an existing body is replaced/removed (category change, despawn).
+  `towed`'s own body is not replaced in this window - **does not apply.**
+- The ONLY other touches of `v.motion`/`v.position` found in
+  `PhysicsBridge.java` are the WRITE at the tail of `step()` itself
+  (not a read) and this probe's OWN test-fixture code (`anchorDistance`/
+  `towing2.motion.length()` in `towingReplacement()`, and the diagnostic
+  `pre-connect` log line) - test assertions and logging, not production
+  decisions.
+
+**Conclusion for the paths actually traced: the observed `v.motion`/pose
+staleness does not feed `createHitch`, inherited-velocity capture, or
+any body-construction decision in this bracket - confirmed by reading
+the actual consumers, not inferred from the cache's mere existence.**
+NOT independently traced: whether MTS's own internal `connectTrailer`
+implementation (third-party code, not DIV's own source) reads
+`v.motion`/`v.position` for anything during the connection itself -
+stated as unchecked, not excluded.
+
+### Disposition
+
+No DIV-fixable bug identified in this entry either. The traced paths are
+excluded as the stale-cache mechanism's consumer; the MTS-internal path
+remains open and unchecked. No minimal instrumentation packet is
+proposed yet, since the specifically-asked-about DIV-side consumers have
+now been excluded rather than left speculative - reporting back for
+whether to trace the MTS-internal path next or redirect.
