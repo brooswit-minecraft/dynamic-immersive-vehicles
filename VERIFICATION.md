@@ -8499,3 +8499,80 @@ mechanism from prior entries remains the explanation for WHY; this entry
 confirms its predicted symptom directly. No DIV fix implemented or
 proposed. No native run performed. Native gate: one-run grant remains
 CONSUMED.
+
+## Precision correction per 54596; honest infeasibility report on the authorized JVM regression per 54595
+
+Per 54596's own independent check: correcting the prior entry's "frozen
+through all of 264" framing. The `createHitch` snapshot at
+`sampleGameTime=264` captures state BEFORE that tick's own step (its own
+`knownEventPhase=createHitch(before-this-ticks-step)` label, already
+established earlier this investigation) - and the `BuoyantForces.apply`
+`poseRefresh` line also at `gameTime=264` (already found in the prior
+entry's own data) shows stepping DOES resume within that same tick,
+AFTER the `createHitch` snapshot. Correct framing: `towed`'s own pose-
+update timestamp is frozen for 60 FULL ticks (`204` through `263`
+inclusive), still showing the pre-step snapshot value at the moment of
+`createHitch`'s own read within tick `264` - not "frozen through all of
+264." The underlying 60-tick starvation finding is unchanged; only the
+boundary's own precise wording is corrected.
+
+Also per 54596: the source has exactly one write site per class
+(`BuoyantBody.java` line 115 / `PhysicsBridge.java` line 2096, both only
+inside their own `step()`, immediately after `box.updatePose()`) -
+confirmed again directly via `grep`, no other assignment exists. But
+repeated calls within the SAME tick would write the IDENTICAL
+`level.getGameTime()` value both times - so this timestamp alone CANNOT
+distinguish "stepped once" from "stepped twice in the same tick",
+invalidating regression invariant 1's own ">1 detects duplicate" framing
+from the prior entry. A real invocation COUNTER (not this timestamp) is
+needed for that specific invariant - noted, not yet built.
+
+### Attempting the authorized JVM lifecycle regression - genuine infrastructure blocker found
+
+Per 54595's explicit authorization to implement (not just design) a
+regression using the EXISTING Minecraft-aware `unitTest` support,
+exercising the REAL pinned `EntityManager`/`AEntityG_Towable` dispatch
+(not a toy duplicate): checked this project's own test suite directly
+(`grep` across `src/test/java/`) for any existing precedent constructing
+a live `ServerLevel`/`MinecraftServer`/`EntityManager` instance - found
+NONE. The existing `unitTest` wiring (established earlier this
+investigation for `ShapeAwareBoxPhysicsObjectTest`) only ever
+instantiated bare Java objects (a `Pose3d`, a `BoxPhysicsObject`) - never
+a live, ticking World/Level with real registered entities.
+
+`EntityManager` is `abstract`, requiring a concrete subclass whose
+`getWorld()` returns a real `AWrapperWorld` wrapping an actual NeoForge
+`Level` - and exercising its own real dispatch (`addEntity`/the gated
+`forEach`/`removeEntity`/`doPostUpdateLogic` recursion, all already read
+this investigation) against TWO real `EntityVehicleF_Physics` instances
+genuinely requires a live, ticking server-side world - not something
+buildable as a bare-object JVM test the way the existing `unitTest`
+precedent works. Building this would mean either (a) a full headless
+NeoForge dedicated-server bootstrap, or (b) NeoForge's own GameTest
+framework (a real, ticking, in-process test world) - NEITHER of which
+exists in this project today, and either would itself be substantial new
+test infrastructure, not a small addition to the existing pattern.
+
+**Reporting this precisely as the exact blocker requested, not a refusal
+to attempt it**: implementing a regression against the REAL pinned
+dispatch seam (as explicitly required, not a toy duplicate) needs a
+headless/GameTest-capable Minecraft test harness this project does not
+yet have. This is a genuine missing-infrastructure gap, not a native-run
+request in disguise - no such harness was built or attempted in this
+entry, and nothing in this entry ran, loaded, or ticked a real Minecraft
+world. Per 54595's own explicit alternative ("report concrete test/fix/
+head/receipt OR exact blocker"), this is the exact blocker: the project
+needs a GameTest (or equivalent headless) harness added before a true
+lifecycle regression against the real dispatch chain can be built - a
+decision and scope (new build-tooling/dependency, not covered by
+"focused JVM validation under the existing exclusive slot" alone) this
+entry does not make unilaterally.
+
+### Disposition
+
+Precision correction made. Genuine infrastructure blocker reported
+precisely, not a stall. No toy/non-representative test was built in its
+place. No DIV fix implemented (per 54595's own conditional: only
+justified once a real failing-before regression exists, which itself
+requires the missing harness). No native run performed. Native gate: one-
+run grant remains CONSUMED; this entry does not request another.
