@@ -545,7 +545,8 @@ after changes.
       "waterDrag": 400.0,
       "propellerForce": 6000.0,
       "angularWaterDrag": 0.0,
-      "maxSteerDegrees": 30.0
+      "maxSteerDegrees": 30.0,
+      "marineSteerDegrees": 20.0
     },
     "examplepack:ordinary_plane": {
       "driveForce": 9000.0,
@@ -559,6 +560,17 @@ after changes.
   }
 }
 ```
+
+`marineSteerDegrees` (optional, 0-60 degrees) is an independent steering
+limit for water-propeller thrust direction (float-only hulls, and the water
+side of an amphibious vehicle) - a separate bound from `maxSteerDegrees`,
+which continues to govern ground wheel steering only. Leaving it unset
+inherits whichever `maxSteerDegrees` this same vehicle resolves to, so an
+unconfigured vehicle's propeller steering is byte-identical to before this
+option existed; setting it lets a vehicle's water handling (e.g. a tighter
+or wider rudder-propeller swing) diverge from its wheel steering angle
+without touching `maxSteerDegrees` at all. No part-level consumer - rejected
+on a `parts` entry, same as `maxSteerDegrees` itself.
 
 `brakeBiasFront` (optional, 0.0-1.0) splits `brakeForce`'s total budget
 between the front and rear axle, instead of evenly across every wheel. Axle
@@ -875,7 +887,7 @@ break anything already running.
 
 A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
-`brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
+`brakeForce`, `maxSteerDegrees`, `marineSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
 `controlSurfaceSlope`, `aileronAuthorityScale`, `elevatorAuthorityScale`, `rudderAuthorityScale`,
 `cyclicLimitDegrees`, `cyclicAuthorityScale`,

@@ -63,6 +63,21 @@ public final class Overrides {
   public Double driveForce;
   public Double brakeForce;
   public Double maxSteerDegrees;
+  // MINECRAFT-544: independent marine propeller-steering limit, for BuoyantForces.apply's
+  // rudder-driven propeller thrust direction only (float-only hulls AND the water side of an
+  // amphibious vehicle - never ground wheel steering, which stays on maxSteerDegrees alone, see
+  // PhysicsBridge.stepGround's own `steer` computation). Deliberately NOT given a flat {@link
+  // #FALLBACK} entry like maxSteerDegrees/driveForce/etc. - null/unset means "no separate marine
+  // limit configured", which {@link #resolveFields} resolves to THIS SAME ENTRY's own resolved
+  // maxSteerDegrees instead of a second hardcoded constant, so an unconfigured (or amphibious,
+  // wheel-steering) vehicle's propeller thrust direction is byte-identical to before this ticket.
+  // Re-read live every tick by BuoyantForces.apply, same "no separate cached field" shape as
+  // waterDrag/maxSteerDegrees itself - see PhysicsBridge.applyLiveSafeFields. Review correction:
+  // unlike maxSteerDegrees' own strictly-positive bound, 0.0 IS a valid value here (inclusive) -
+  // a vehicle whose propellers physically cannot swivel (straight thrust only) while its wheels
+  // still steer independently through maxSteerDegrees is a real, sensible configuration, not a
+  // degenerate one; see #validate's own bound.
+  public Double marineSteerDegrees;
   // Float-only hulls (boats/pontoons) only: hullFillFactor shrinks the chassis bounding-box
   // volume down to the fraction of it the actual hull displaces (a real hull is not a solid
   // box), waterDrag scales quadratic water drag, and propellerForce is the thrust budget split
@@ -397,6 +412,14 @@ public final class Overrides {
    if (driveForce != null && !(driveForce >= 0 && driveForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (brakeForce != null && !(brakeForce >= 0 && brakeForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (maxSteerDegrees != null && !(maxSteerDegrees > 0 && maxSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-544: review correction - UNLIKE maxSteerDegrees' own strictly-positive bound,
+   // 0.0 is a valid, inclusive lower bound here: a vehicle whose water propellers physically
+   // cannot swivel at all (straight thrust only) while its wheels still steer independently
+   // through maxSteerDegrees is a real configuration this field must be able to express, not a
+   // degenerate one - same "exact 0 is a legitimate extreme" reasoning brakeBiasFront/
+   // antiRollStiffness already use. Upper bound stays the documentable 60deg ceiling, same as
+   // maxSteerDegrees.
+   if (marineSteerDegrees != null && !(marineSteerDegrees >= 0 && marineSteerDegrees <= 60)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (hullFillFactor != null && !(hullFillFactor > 0 && hullFillFactor <= 1)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (waterDrag != null && !(waterDrag >= 0 && waterDrag <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
    if (propellerForce != null && !(propellerForce >= 0 && propellerForce <= 100000)) throw new IllegalArgumentException("invalid vehicle tuning");
@@ -691,6 +714,7 @@ public final class Overrides {
    // still exactly validate()'s own rollingResistance>0 && rollingResistance<=10 check above.
    if (brakeForce != null) throw new IllegalArgumentException("part overrides do not support 'brakeForce' (no part-level consumer yet)");
    if (maxSteerDegrees != null) throw new IllegalArgumentException("part overrides do not support 'maxSteerDegrees' (no part-level consumer yet)");
+   if (marineSteerDegrees != null) throw new IllegalArgumentException("part overrides do not support 'marineSteerDegrees' (vehicle-only concept - no part-level consumer yet)");
    if (hullFillFactor != null) throw new IllegalArgumentException("part overrides do not support 'hullFillFactor' (no part-level consumer yet)");
    if (waterDrag != null) throw new IllegalArgumentException("part overrides do not support 'waterDrag' (no part-level consumer yet)");
    if (propellerForce != null) throw new IllegalArgumentException("part overrides do not support 'propellerForce' (no part-level consumer yet)");
@@ -747,7 +771,11 @@ public final class Overrides {
   * parasiticDragMultiplier 1.0 is a pure no-op against the existing native-derived parasitic
   * budget; oswaldEfficiency falls back to {@link FlightForces#DEFAULT_OSWALD_EFFICIENCY} (0.8),
   * the exact value that class previously hardcoded - an unconfigured fixed-wing vehicle's drag
-  * is byte-identical to before this ticket. */
+  * is byte-identical to before this ticket. MINECRAFT-544: marineSteerDegrees deliberately has NO
+  * entry here (same "no flat fallback" shape as brakeBiasFront/toeFrontDegrees) - its own
+  * fallback, this same resolved entry's maxSteerDegrees, is vehicle-instance-dependent whenever
+  * maxSteerDegrees itself comes from pack/native/physically-derived data rather than this flat
+  * 30deg, so it cannot be a single constant here; see resolveFields' own marineSteerDegrees line. */
  private static final Tuning FALLBACK = new Tuning();
  static {
   FALLBACK.suspensionTravel=0.3; FALLBACK.friction=1.0; FALLBACK.driveForce=8000.0; FALLBACK.brakeForce=12000.0;
@@ -811,6 +839,7 @@ public final class Overrides {
   c.enabled=t.enabled; c.massKg=t.massKg; c.suspensionTravel=t.suspensionTravel; c.friction=t.friction;
   c.rollingResistance=t.rollingResistance;
   c.driveForce=t.driveForce; c.brakeForce=t.brakeForce; c.maxSteerDegrees=t.maxSteerDegrees;
+  c.marineSteerDegrees=t.marineSteerDegrees;
   c.hullFillFactor=t.hullFillFactor; c.waterDrag=t.waterDrag; c.propellerForce=t.propellerForce;
   c.selfRightStrength=t.selfRightStrength; c.selfRightDamping=t.selfRightDamping; c.selfRightMaxTorque=t.selfRightMaxTorque;
   c.selfRightFadeStartDegrees=t.selfRightFadeStartDegrees; c.selfRightFadeEndDegrees=t.selfRightFadeEndDegrees;
@@ -854,6 +883,7 @@ public final class Overrides {
   m.driveForce = child.driveForce!=null?child.driveForce:parent.driveForce;
   m.brakeForce = child.brakeForce!=null?child.brakeForce:parent.brakeForce;
   m.maxSteerDegrees = child.maxSteerDegrees!=null?child.maxSteerDegrees:parent.maxSteerDegrees;
+  m.marineSteerDegrees = child.marineSteerDegrees!=null?child.marineSteerDegrees:parent.marineSteerDegrees;
   m.hullFillFactor = child.hullFillFactor!=null?child.hullFillFactor:parent.hullFillFactor;
   m.waterDrag = child.waterDrag!=null?child.waterDrag:parent.waterDrag;
   m.propellerForce = child.propellerForce!=null?child.propellerForce:parent.propellerForce;
@@ -1064,6 +1094,12 @@ public final class Overrides {
   result.driveForce = firstNonNull(override!=null?override.driveForce:null, packMetadata!=null?packMetadata.driveForce:null, ivAdapted!=null?ivAdapted.driveForce:null, physicallyDerived!=null?physicallyDerived.driveForce:null, FALLBACK.driveForce);
   result.brakeForce = firstNonNull(override!=null?override.brakeForce:null, packMetadata!=null?packMetadata.brakeForce:null, ivAdapted!=null?ivAdapted.brakeForce:null, physicallyDerived!=null?physicallyDerived.brakeForce:null, FALLBACK.brakeForce);
   result.maxSteerDegrees = firstNonNull(override!=null?override.maxSteerDegrees:null, packMetadata!=null?packMetadata.maxSteerDegrees:null, ivAdapted!=null?ivAdapted.maxSteerDegrees:null, physicallyDerived!=null?physicallyDerived.maxSteerDegrees:null, FALLBACK.maxSteerDegrees);
+  // MINECRAFT-544: no flat FALLBACK entry - an unconfigured marineSteerDegrees falls through to
+  // THIS SAME RESULT's own just-resolved maxSteerDegrees (never a second hardcoded constant), so
+  // a vehicle that never sets marineSteerDegrees gets byte-identical propeller steering to before
+  // this ticket, including when maxSteerDegrees itself is pack/native/physically-derived rather
+  // than the flat fallback.
+  result.marineSteerDegrees = firstNonNull(override!=null?override.marineSteerDegrees:null, packMetadata!=null?packMetadata.marineSteerDegrees:null, ivAdapted!=null?ivAdapted.marineSteerDegrees:null, physicallyDerived!=null?physicallyDerived.marineSteerDegrees:null, result.maxSteerDegrees);
   result.hullFillFactor = firstNonNull(override!=null?override.hullFillFactor:null, packMetadata!=null?packMetadata.hullFillFactor:null, ivAdapted!=null?ivAdapted.hullFillFactor:null, physicallyDerived!=null?physicallyDerived.hullFillFactor:null, FALLBACK.hullFillFactor);
   result.waterDrag = firstNonNull(override!=null?override.waterDrag:null, packMetadata!=null?packMetadata.waterDrag:null, ivAdapted!=null?ivAdapted.waterDrag:null, physicallyDerived!=null?physicallyDerived.waterDrag:null, FALLBACK.waterDrag);
   result.propellerForce = firstNonNull(override!=null?override.propellerForce:null, packMetadata!=null?packMetadata.propellerForce:null, ivAdapted!=null?ivAdapted.propellerForce:null, physicallyDerived!=null?physicallyDerived.propellerForce:null, FALLBACK.propellerForce);

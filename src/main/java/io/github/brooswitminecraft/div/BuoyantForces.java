@@ -27,7 +27,11 @@ import java.util.Map;
  * and quadratic water drag are sampled per installed canFloat device at that device's own world
  * position against the live Minecraft water surface, which naturally produces a righting torque
  * from uneven submersion - no separate stability code needed. Installed non-rotor propellers add
- * forward/reverse thrust, steered by rudder input, allocated per actual engine-to-propeller
+ * forward/reverse thrust, steered by rudder input - MINECRAFT-544: bounded by {@code
+ * tuning.marineSteerDegrees}, an independent limit from the ground {@code tuning.maxSteerDegrees}
+ * that {@link Overrides} resolves to inherit maxSteerDegrees's own resolved value when left
+ * unconfigured, so wheel steering and water-propeller steering can diverge without one affecting
+ * the other - allocated per actual engine-to-propeller
  * linkage (not reachable through IV's public API - see {@link PartEngineAccessor}/
  * {@link PartPropellerAccessor}) rather than one vehicle-wide signal applied to every installed
  * propeller; an installed rotor propeller is excluded here deliberately - its thrust is already
@@ -146,8 +150,12 @@ final class BuoyantForces {
     drivenBy.putIfAbsent(linked, Buoyancy.signedPropellerDrive(linked.desiredLinearVelocity, v.throttleVar.currentValue));
    }
   }
-  double steer = (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE) * Math.toRadians(tuning.maxSteerDegrees);
-  Vector3d forward = q.transform(new Vector3d(Math.sin(steer), 0, Math.cos(steer)));
+  // MINECRAFT-544: marineSteerDegrees is an independent bound from the ground maxSteerDegrees -
+  // it inherits maxSteerDegrees's own resolved value when left unconfigured (see
+  // Overrides.resolveFields), so an amphibious vehicle's water-propeller thrust direction stays
+  // byte-identical to before this ticket until an operator configures a separate marine limit.
+  double steer = Buoyancy.propellerSteerAngleRadians(v.rudderInputVar.currentValue, EntityVehicleF_Physics.MAX_RUDDER_ANGLE, tuning.marineSteerDegrees);
+  Vector3d forward = q.transform(Buoyancy.propellerThrustDirection(steer));
   var propellers = nonRotorPropellers(v);
   // Buoyancy.isPropellerOperational is the exact pure predicate this selection applies - only
   // an operational propeller counts toward the shared thrust budget's denominator, so a
