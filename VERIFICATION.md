@@ -5142,3 +5142,112 @@ exists (Step 1) - this proposal does not attempt to supply one.
 
 **This is a proposal for review, not an execution - no run has been
 started, and none will be without separate, explicit authorization.**
+
+## Narrow correction to the next-experiment proposal (54387) - PLAN ONLY, no execution/build/setup mutation
+
+John's comment 54387 corrected three framing errors in the 54385 proposal
+and asked for one narrower, concrete, launcher-correctness-aware plan.
+**Nothing in this section has been executed, built, or set up** - per
+54387's own instruction, this is read-only design, returned for parent
+authorization before any of it runs.
+
+### Corrections accepted
+
+1. "No true pre-failure snapshot found in retained evidence" should have
+   been scoped precisely: it means no such snapshot was found in the
+   evidence directories actually SEARCHED
+   (`/home/booswrit/div-evidence/MINECRAFT-545-547/`) - NOT a universal
+   claim that none could exist anywhere. Restated correctly here.
+2. The one existing successful isolated world
+   (`M545-isolated-rundir-20261116T224049Z`) is a POST-run world (the
+   state AFTER a non-crash completed) - it is NOT a pre-failure baseline
+   and must not be reused or mutated as a "starting point" for the trials
+   below. It stays exactly as retained; both new trials get their OWN,
+   entirely separate, freshly-generated directories.
+3. The prior N=5 with an outcome-dependent early-stop rule is not a clean
+   fixed-sample design and does not support any precise rate claim.
+   Replaced with exactly N=2, fixed in advance, no early stop, no
+   extension - reported only as a descriptive count (0/2, 1/2, or 2/2),
+   never as a rate or statistical bound.
+4. Leaving the world seed to vary (as 54385 proposed) conflates
+   "fresh-world variability" with "pure execution/solver nondeterminism."
+   Corrected: both trials now use an explicit, FIXED, IDENTICAL seed -
+   isolating whatever differs between two runs of the SAME scenario
+   (same code, same config, same seed) to actual execution-time behavior
+   alone, not world identity.
+
+### The critical launcher-correctness issue (54387's own catch)
+
+`launch-wrapper.sh` (as already built) hardcodes `ISO_DIR` and `RUN_SH`
+as literal paths pointing at the FIRST trial's own directory and at
+`build/moddev/runServer.sh`. That generated script itself hardcodes a
+literal `cd '<old isolated rundir>'` as its FIRST shell command, BAKED IN
+at the time `gradle prepareServerRun createServerLaunchScript` last ran
+with that specific `DIV_ISOLATED_RUN_DIR`. **Changing `launch-wrapper.sh`'s
+own `ISO_DIR` constant alone does NOT redirect where Minecraft itself
+runs** - `runServer.sh` must be REGENERATED, once per trial, against that
+trial's own new directory, and the regenerated script's own `cd` target
+must be independently read and confirmed (not merely trusted from the
+gradle log) before that trial's wrapper is ever invoked.
+
+### Corrected plan: exactly TWO matched isolated trials, fixed seed
+
+**Proposed unique destinations (not yet created):**
+- Trial 1: `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-trial1-seed545547/rundir`
+- Trial 2: `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-trial2-seed545547/rundir`
+
+**Fixed seed:** `level-seed=545547` (an arbitrary but FIXED, documented
+literal - the exact value doesn't matter, only that it is IDENTICAL and
+pinned in both trials' `server.properties`, unlike the original run which
+left it empty/random).
+
+**Per-trial setup checklist, performed identically for trial 1 then
+trial 2, strictly sequential under the one shared exclusive lock (never
+parallel, never a new worker) - executed only once parent authorization
+is given, not now:**
+1. Re-verify the worktree is unchanged (`git status` clean at the same
+   commit already hashed in `compiled-instrumentation.sha256`/
+   `effective-classpath-hashes.sha256`) - if it has changed, re-hash
+   before proceeding; do not launch against drifted artifacts.
+2. Create that trial's own directory; copy `config/`/`eula.txt` from the
+   ORIGINAL `run/` exactly as before (`cp -L`), but write
+   `server.properties` with `level-seed=545547` substituted in (every
+   other field identical to the original, hash-diffed to confirm ONLY
+   that one line changed).
+3. Confirm via `realpath` + per-file `stat -c '%d:%i'` that this trial's
+   directory and copied files share no path/symlink/hardlink with
+   `run/`, with the OTHER trial's directory, or with the already-retained
+   `M545-isolated-rundir-20261116T224049Z` - exactly the non-aliasing
+   proof already established, extended to cover the second trial and the
+   first trial's own prior directory too.
+4. Confirm no `world/` directory exists yet in that trial's own rundir.
+5. Run `gradle prepareServerRun createServerLaunchScript` under the
+   exclusive lock with `DIV_ISOLATED_RUN_DIR` set to THIS trial's own
+   directory and `DIV_BUOYANT_HITCH_PROBE=true` (same flags as the first
+   run, nothing added or removed - scenario/logging bytes unchanged).
+6. **Independently read** the regenerated `build/moddev/runServer.sh`'s
+   own literal `cd '...'` argument and confirm, byte-for-byte, it equals
+   THIS trial's own directory - not the other trial's, not the original
+   isolated run's, not `run/`. Do not proceed on a mismatch.
+7. Only after steps 1-6 all pass: construct that trial's OWN wrapper
+   (a fresh copy of `launch-wrapper.sh` with `ISO_DIR`/`RUN_SH`/
+   `OWNER_TAG` set to match exactly what was just verified in step 6 -
+   not edited independently of it) and launch it, same self-contained
+   lock/terminal-detection/bounded-timeout behavior as already proven.
+
+**Stopping:** exactly 2 trials, no more, no fewer, regardless of outcome.
+
+**Retention:** both trials' worlds/logs retained unconditionally at their
+own distinct directories; the original `run/` and the FIRST isolated
+run's own world/evidence (`M545-isolated-rundir-20261116T224049Z`) stay
+completely untouched throughout - never reused, overwritten, or deleted.
+
+**Outcome reporting (descriptive only, stated in advance):** report
+exactly which of trial 1 / trial 2 reproduced the known crash, as a count
+- "0/2", "1/2", or "2/2" reproduced - explicitly NOT a rate, NOT a
+statistical bound, and NOT evidence of a specific solver cause under any
+outcome.
+
+**This is a plan returned for parent authorization - no directory has
+been created, no gradle task run, no world generated, and no launch
+performed for this section.**
