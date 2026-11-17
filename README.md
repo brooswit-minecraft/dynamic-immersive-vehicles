@@ -1228,12 +1228,33 @@ full fallback contract.
 
 ## Build
 
-CI uses Java 21 and Gradle 8.8. It resolves the exact official dependency
-artifacts at build time and uploads only this project's jar, checksums, and test
-reports. A second, bounded `runtime-smoke` job boots a headless dedicated
-server with those same pinned dependencies to check NeoForge/Mixin startup
-only; see [VERIFICATION.md](VERIFICATION.md) for what it does and does not
-prove. To run the same tasks locally with Gradle 8.8:
+CI uses Java 21 and Gradle 8.8 and is split across three workflows
+(MINECRAFT-550), each with a different trigger and purpose:
+
+- **`ci.yml`** (every PR and `main` push) - the ordinary regression gate.
+  `build` compiles and runs the full automated test suite; it does not
+  package or upload the addon jar (that is release packaging, not routine
+  validation - see below). `runtime-smoke` boots a headless dedicated
+  server with the same pinned dependencies to check that NeoForge starts
+  and this addon's Mixins apply; see [VERIFICATION.md](VERIFICATION.md) for
+  what it does and does not prove. A newer push to the same PR/branch
+  cancels a still-running older run for it.
+- **`diagnostics.yml`** (manual - `gh workflow run diagnostics.yml`, or the
+  Actions tab) - the investigation-only runtime probes from past reviews
+  (`anchor-frame-probe`, `two-body-impulse-probe`, `ground-support-fixture`).
+  These settle specific past questions by booting a real headless server;
+  they are not ordinary per-PR regression checks, so they run on demand
+  instead of on every push, while staying available rather than being
+  silently dropped. See VERIFICATION.md for what each one proves.
+- **`release.yml`** (manual - `gh workflow run release.yml -f ref=<ref>`) -
+  builds the addon jar and its checksum from a chosen branch/tag/commit and
+  attaches them to the workflow run as a downloadable artifact. It does not
+  create or publish a GitHub Release; every existing release on this repo
+  was hand-created with hand-written notes (`gh release list`), and that
+  review/notes step stays manual - download this run's jar, then
+  `gh release create <tag> <jar> <checksum> --notes ...` as before.
+
+To run the same compile/test task locally with Gradle 8.8:
 
 ```text
 gradle --no-daemon clean build
