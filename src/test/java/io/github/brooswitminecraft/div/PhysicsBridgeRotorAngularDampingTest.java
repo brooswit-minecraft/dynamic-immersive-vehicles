@@ -154,4 +154,98 @@ class PhysicsBridgeRotorAngularDampingTest {
   double omegaUp = angularVelocity.dot(axes[2]);
   return 0.5*(inertiaBody.z*omegaForward*omegaForward + inertiaBody.x*omegaRight*omegaRight + inertiaBody.y*omegaUp*omegaUp);
  }
+
+ // MINECRAFT-554: the 3-coefficient (pitch/roll/yaw) overload of rotorAngularDampingTorque -
+ // PhysicsBridge.stepRotor resolves each axis's own override-or-fallback-to-scalar coefficient
+ // and calls this overload directly; the pre-existing single-coefficient overload above now
+ // merely delegates to it with the same value three times (equal-value parity, asserted below).
+
+ @Test void singleCoefficientOverloadDelegatesToPerAxisOverloadWithTheSameValueOnAllThreeAxes_equalValueParity() {
+  var axes = identityAxes();
+  Vector3d angularVelocity = new Vector3d(1.5, -2.0, 3.0);
+  Vector3d inertiaBody = new Vector3d(40.0, 55.0, 30.0);
+  Vector3d viaSingle = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, axes[0], axes[1], axes[2], inertiaBody, 2.0, PhysicsBridge.DT);
+  Vector3d viaPerAxisAllEqual = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, axes[0], axes[1], axes[2], inertiaBody, 2.0, 2.0, 2.0, PhysicsBridge.DT);
+  assertEquals(viaSingle.x, viaPerAxisAllEqual.x, 1e-12);
+  assertEquals(viaSingle.y, viaPerAxisAllEqual.y, 1e-12);
+  assertEquals(viaSingle.z, viaPerAxisAllEqual.z, 1e-12);
+ }
+
+ @Test void zeroCoefficientOnAllThreeAxesProducesExactlyZeroTorqueVector_zeroOffParity() {
+  var axes = identityAxes();
+  Vector3d angularVelocity = new Vector3d(1.5, -2.0, 3.0);
+  Vector3d inertiaBody = new Vector3d(40.0, 55.0, 30.0);
+  Vector3d damping = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, axes[0], axes[1], axes[2], inertiaBody, 0.0, 0.0, 0.0, PhysicsBridge.DT);
+  assertEquals(0, damping.x, 1e-12); assertEquals(0, damping.y, 1e-12); assertEquals(0, damping.z, 1e-12);
+ }
+
+ @Test void mixedPerAxisCoefficientsDampEachAxisIndependentlyAtItsOwnRate() {
+  // Ticket's "mixed-axis" acceptance case: pitch/roll/yaw given three DIFFERENT coefficients -
+  // each axis's damping must reflect only its OWN coefficient, never another axis's.
+  var axes = identityAxes(); // forward (roll), right (pitch), up (yaw)
+  Vector3d inertiaBody = new Vector3d(40.0, 55.0, 30.0);
+  double pitchCoeff = 1.0, rollCoeff = 3.0, yawCoeff = 6.0;
+
+  Vector3d pitchOnlyVelocity = new Vector3d(axes[1]).mul(-3.0);
+  Vector3d pitchOnlyDamping = PhysicsBridge.rotorAngularDampingTorque(pitchOnlyVelocity, axes[0], axes[1], axes[2], inertiaBody, pitchCoeff, rollCoeff, yawCoeff, PhysicsBridge.DT);
+  Vector3d pitchOnlyAtItsOwnCoeffAlone = PhysicsBridge.rotorAngularDampingTorque(pitchOnlyVelocity, axes[0], axes[1], axes[2], inertiaBody, pitchCoeff, PhysicsBridge.DT);
+  assertEquals(pitchOnlyAtItsOwnCoeffAlone.length(), pitchOnlyDamping.length(), 1e-9,
+    "pitch-only angular velocity must be damped exactly as if every axis shared pitch's own coefficient");
+
+  Vector3d rollOnlyVelocity = new Vector3d(axes[0]).mul(4.0);
+  Vector3d rollOnlyDamping = PhysicsBridge.rotorAngularDampingTorque(rollOnlyVelocity, axes[0], axes[1], axes[2], inertiaBody, pitchCoeff, rollCoeff, yawCoeff, PhysicsBridge.DT);
+  Vector3d rollOnlyAtItsOwnCoeffAlone = PhysicsBridge.rotorAngularDampingTorque(rollOnlyVelocity, axes[0], axes[1], axes[2], inertiaBody, rollCoeff, PhysicsBridge.DT);
+  assertEquals(rollOnlyAtItsOwnCoeffAlone.length(), rollOnlyDamping.length(), 1e-9);
+
+  Vector3d yawOnlyVelocity = new Vector3d(axes[2]).mul(2.5);
+  Vector3d yawOnlyDamping = PhysicsBridge.rotorAngularDampingTorque(yawOnlyVelocity, axes[0], axes[1], axes[2], inertiaBody, pitchCoeff, rollCoeff, yawCoeff, PhysicsBridge.DT);
+  Vector3d yawOnlyAtItsOwnCoeffAlone = PhysicsBridge.rotorAngularDampingTorque(yawOnlyVelocity, axes[0], axes[1], axes[2], inertiaBody, yawCoeff, PhysicsBridge.DT);
+  assertEquals(yawOnlyAtItsOwnCoeffAlone.length(), yawOnlyDamping.length(), 1e-9);
+ }
+
+ @Test void mixedPerAxisCoefficientsOnARotatedBodyStillPointAlongEachOwnRotatedAxis() {
+  // The ticket's "rotated-body/frame" case, repeated for mixed (not just uniform) per-axis
+  // coefficients - a tumbled orientation spinning about all three local axes at once must still
+  // produce a damping vector decomposable along those same (rotated) local axes, with each
+  // component's magnitude tracking only its own coefficient.
+  Vector3d inertiaBody = new Vector3d(40.0, 55.0, 30.0);
+  Quaterniond q = new Quaterniond().rotateXYZ(Math.toRadians(37), Math.toRadians(-52), Math.toRadians(81));
+  Vector3d forward = q.transform(new Vector3d(WORLD_FORWARD));
+  Vector3d up = q.transform(new Vector3d(WORLD_UP));
+  Vector3d right = new Vector3d(up).cross(forward);
+  double rollRate = 4.0, pitchRate = -2.0, yawRate = 1.0;
+  Vector3d angularVelocity = new Vector3d(forward).mul(rollRate).fma(pitchRate, right).fma(yawRate, up);
+
+  double pitchCoeff = 1.5, rollCoeff = 5.0, yawCoeff = 0.5;
+  Vector3d damping = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, forward, right, up, inertiaBody, pitchCoeff, rollCoeff, yawCoeff, PhysicsBridge.DT);
+
+  double dampingAlongForward = damping.dot(forward);
+  double dampingAlongRight = damping.dot(right);
+  double dampingAlongUp = damping.dot(up);
+  assertEquals(0, new Vector3d(damping).sub(new Vector3d(forward).mul(dampingAlongForward)).sub(new Vector3d(right).mul(dampingAlongRight)).sub(new Vector3d(up).mul(dampingAlongUp)).length(), 1e-9,
+    "the damping vector must decompose exactly onto the rotated forward/right/up axes with nothing left over");
+  assertTrue(dampingAlongForward < 0, "roll (forward-axis) damping must oppose the positive roll rate");
+  assertTrue(dampingAlongRight > 0, "pitch (right-axis) damping must oppose the negative pitch rate");
+  assertTrue(dampingAlongUp < 0, "yaw (up-axis) damping must oppose the positive yaw rate");
+ }
+
+ @Test void extremeDtAndPerAxisCoefficientsStayBoundedInTheAssembledVector() {
+  var axes = identityAxes();
+  Vector3d angularVelocity = new Vector3d(2.0, -3.0, 1.0);
+  Vector3d inertiaBody = new Vector3d(40.0, 55.0, 30.0);
+  double maxPossibleImpulseMagnitude = new Vector3d(
+    inertiaBody.x*Math.abs(angularVelocity.dot(axes[1])),
+    inertiaBody.y*Math.abs(angularVelocity.dot(axes[2])),
+    inertiaBody.z*Math.abs(angularVelocity.dot(axes[0]))).length();
+  for (double dt : new double[]{1e-6, 0.05, 10.0}) {
+   for (double[] coeffs : new double[][]{{RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT, 0.0, 1e9}, {1e9, RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT, 1e9}}) {
+    Vector3d damping = PhysicsBridge.rotorAngularDampingTorque(angularVelocity, axes[0], axes[1], axes[2], inertiaBody, coeffs[0], coeffs[1], coeffs[2], dt);
+    assertTrue(Double.isFinite(damping.x) && Double.isFinite(damping.y) && Double.isFinite(damping.z),
+      "dt="+dt+" coeffs="+java.util.Arrays.toString(coeffs)+" produced a non-finite damping vector");
+    double impulseMagnitude = damping.length()*dt;
+    assertTrue(impulseMagnitude <= maxPossibleImpulseMagnitude + 1e-6,
+      "dt="+dt+" coeffs="+java.util.Arrays.toString(coeffs)+" produced an impulse magnitude ("+impulseMagnitude+") exceeding the combined per-axis angular-momentum bound ("+maxPossibleImpulseMagnitude+")");
+   }
+  }
+ }
 }

@@ -43,6 +43,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   fresh.parasiticDragMultiplier = 1.3; fresh.oswaldEfficiency = 0.65;
   // MINECRAFT-537: rotorAngularDampingCoefficient must go through this same live-mutation path too.
   fresh.rotorAngularDampingCoefficient = 3.5;
+  // MINECRAFT-554: the three new per-axis rotorAngularDampingCoefficientPitch/Roll/Yaw overrides
+  // must go through this same live-mutation path too.
+  fresh.rotorAngularDampingCoefficientPitch = 2.0; fresh.rotorAngularDampingCoefficientRoll = 2.5; fresh.rotorAngularDampingCoefficientYaw = 3.0;
   // MINECRAFT-542: fixedWingAngularDampingCoefficient must go through this same live-mutation
   // path too - a wholly separate field from rotorAngularDampingCoefficient above.
   fresh.fixedWingAngularDampingCoefficient = 2.5;
@@ -78,6 +81,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.1, target.suspensionDampingRatio);
   assertEquals(1.3, target.parasiticDragMultiplier); assertEquals(0.65, target.oswaldEfficiency);
   assertEquals(3.5, target.rotorAngularDampingCoefficient);
+  assertEquals(2.0, target.rotorAngularDampingCoefficientPitch); assertEquals(2.5, target.rotorAngularDampingCoefficientRoll); assertEquals(3.0, target.rotorAngularDampingCoefficientYaw);
   assertEquals(2.5, target.fixedWingAngularDampingCoefficient);
   assertEquals(0.9, target.rotorAirDragCoefficient);
   assertEquals(2.5, target.toeFrontDegrees); assertEquals(-1.5, target.toeRearDegrees);
@@ -87,7 +91,7 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(1.2, target.suspensionDampingRatioFront); assertEquals(0.9, target.suspensionDampingRatioRear);
   assertEquals(1.8, target.suspensionSpringMultiplierFront); assertEquals(0.75, target.suspensionSpringMultiplierRear);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","marineSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","aileronAuthorityScale","elevatorAuthorityScale","rudderAuthorityScale","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","fixedWingAngularDampingCoefficient","rotorAirDragCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing","ackermannSteering",
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","rotorAngularDampingCoefficientPitch","rotorAngularDampingCoefficientRoll","rotorAngularDampingCoefficientYaw","fixedWingAngularDampingCoefficient","rotorAirDragCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing","ackermannSteering",
       "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier",
       "suspensionDampingRatioFront","suspensionDampingRatioRear","suspensionSpringMultiplierFront","suspensionSpringMultiplierRear"),
     new TreeSet<>(applied));
