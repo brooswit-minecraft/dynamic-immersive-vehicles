@@ -8034,3 +8034,70 @@ used for TOWING_UNAVAILABLE's per-tick velocity line - a single boolean,
 answering directly whether this MTS-native path is what's firing, without
 needing the water-geometry window extension proposed earlier. No native
 run performed in this entry. Native gate: one-run grant remains CONSUMED.
+
+## Continued pinned caller trace per 54554 - found the main-loop exclusion gate, driver still unlocated
+
+Per 54554: finish the actual selection→recursion→dispatch chain, not stop
+at the single auto-disconnect line already found. Decompiled (via `cfr`,
+same jar hash `1d2f7512604636265703b29fdf13d7f8ef2323694b6435f4392973da6e78d251`)
+`minecrafttransportsimulator.baseclasses.EntityManager.class` and
+`AEntityA_Base.class`, saved under `/tmp/mts_time_check/decompiled2/`.
+
+### Found: the main-tick-loop exclusion gate, exact condition
+
+`EntityManager`'s own main dispatch (lines 187-190 of the decompiled
+source):
+```java
+this.allNormalTickableEntities.forEach(entity -> {
+    if (!(entity instanceof AEntityG_Towable) || !((AEntityG_Towable)entity).blockMainUpdateCall()) {
+        EntityManager.doTick(entity);
+    }
+});
+```
+`AEntityG_Towable.blockMainUpdateCall()` (confirmed at line 195-196 of the
+earlier decompile):
+```java
+public boolean blockMainUpdateCall() {
+    return this.towedByConnection != null;
+}
+```
+This is a PURE check on `towedByConnection` alone - no validity check on
+the towing vehicle it points to. `EntityManager.doTick` (the main per-tick
+dispatch) is skipped for `towed` whenever `towedByConnection != null` -
+true continuously from the moment `towed` is first attached, through
+`DETACH`'s own reconnect, through `TOWING_UNAVAILABLE`'s entire 60 ticks,
+regardless of whether `towing` itself still exists.
+
+### This alone does not explain the observed behavior - a real inconsistency, disclosed not resolved
+
+Since `blockMainUpdateCall()`'s condition is identical BEFORE and AFTER
+`towing.remove()` (true the whole time `towed` stays connected), this gate
+by itself cannot explain why `towed` was clearly ticked normally during
+`ATTACH`/most of `TOWING_UNAVAILABLE`'s own predecessor state (confirmed
+step-entry/`buoyantForcesDiagnostic` lines right up to `gameTime=203`,
+immediately before `towing.remove()`) but stops being ticked afterward.
+Searched the rest of `AEntityG_Towable.update()`'s own body (lines
+110-183) directly for any recursive call driving a towed vehicle's own
+`update()`/`moveVehicle` from its towing vehicle's side - found NONE;
+that method's own towing-side logic is reconnect/save-restore/interaction
+bookkeeping only, not a tick-dispatch recursion.
+
+**This means the actual mechanism that normally ticks `towed` while
+`towing` exists has NOT yet been located** - `EntityManager`'s own main
+loop appears to exclude it the whole time regardless, so some OTHER
+caller (not yet found in this entry) must be responsible, and THAT
+caller's own dependency on `towing`'s continued existence/validity -
+whatever it turns out to be - is the real remaining question. Not
+guessing at what that caller is. Per 54554's own framing, this is
+reported as the open QUESTION this trace has narrowed to, not a cause.
+
+### Disposition
+
+Confirmed, with exact cited source/jar hash, one real necessary piece
+(the main-loop's own towed-exclusion condition, independent of towing's
+validity) - but NOT yet the sufficient explanation, since that gate alone
+predates and survives `towing.remove()` identically. No native run
+performed. No new measurement proposed without first locating the actual
+driver - continuing the caller trace is the honest next step, not
+executed further in this already-large entry given budget. Native gate:
+one-run grant remains CONSUMED.
