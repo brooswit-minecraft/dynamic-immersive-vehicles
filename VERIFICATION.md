@@ -8645,3 +8645,88 @@ fix implemented (54595's own condition for that - a justified, failing-
 before regression against the real dispatch chain - still requires the
 native-run-adjacent harness not yet authorized). No native run performed.
 Native gate: one-run grant remains CONSUMED.
+
+## Real per-sample evaluation seam implemented per 54603; new isolated packet prepared (not run)
+
+Per 54603's own corrections - all addressed:
+
+### (1) `exactlyOncePerTick` is now wired, via a real per-sample evaluation seam
+
+Added `LifecycleInvariants.Sample` (body UUID + gameTime + the real
+invocation count), `Outcome` (`PASS`/`FAIL_STARVED_TICK`/
+`FAIL_DUPLICATE_TICK`/`INSUFFICIENT_SAMPLES`/`BODY_IDENTITY_CHANGED` - a
+real enum, not a bare boolean, so "could not be checked" is never
+conflated with "checked and passed"), and `evaluate(List<Sample>)` - the
+actual production-used seam, walking every consecutive pair in a REAL
+per-tick sequence.
+
+### (2) Body generation/presence distinguished from a genuine zero-count
+
+`evaluate` checks body identity BEFORE interpreting any count delta - a
+missing/replaced body (whose `debugStepInvocationCount` accessor returns
+`0`, per `PhysicsBridge`'s own existing doc) now reports
+`BODY_IDENTITY_CHANGED`, not a false `FAIL_STARVED_TICK`. A counter that
+decreases is treated the same way (not a new/invented failure category).
+
+### (3) Real gameTime sequence validation
+
+`evaluate` requires each consecutive sample pair's `gameTime` to differ
+by exactly `1`; a gap reports `INSUFFICIENT_SAMPLES` - distinguishing a
+genuine sampling defect from an actual pass/fail finding.
+
+### (4) Wired into the actual retained fixture across the full span
+
+Replaced the single two-endpoint comparison with a REAL per-tick sample
+list (`towedRemovalSpanSamples`), appended: once immediately after
+`towing.remove()` returns; once every tick of `TOWING_UNAVAILABLE`'s own
+existing per-tick loop; once more at `TOWING_REPLACEMENT`'s own pre-
+connect snapshot. The real phase-boundary gameTime gap (`TOWING_UNAVAILABLE`'s
+own tick counter resets into `TOWING_REPLACEMENT`'s separate tick=1,
+already established earlier this investigation) is handled explicitly:
+the WITHIN-`TOWING_UNAVAILABLE` portion of the sequence is evaluated on
+its own (excluding the post-gap sample), reported via a new
+`lifecycleInvariantCheck` log line - diagnostic-only, capturing after the
+original phase sequence has already run, never altering this fixture's
+own existing pass/fail criteria, timing, or physics.
+
+### (5) Focused tests cover the real seam, not just arithmetic
+
+16 tests total (up from 9): `evaluate`'s own `PASS`/the exact balanced-
+`0`-then-`+2` case 54603 named (confirmed `FAIL_STARVED_TICK`, with the
+aggregate check alone shown to still incorrectly pass it, demonstrating
+precisely why the per-tick walk is needed)/a single-tick duplicate/a
+sparse non-consecutive gameTime gap/fewer-than-two samples/a replaced-
+body case/a backward-moving-counter case - alongside the existing pure
+arithmetic tests. Compiled cleanly and ran 16/16 passing, alongside the
+other three pure suites with no regression (`M545-seam-compile2`,
+`RESULT=COMPLETE rc=0`).
+
+### New isolated packet prepared against this commit - NOT executed
+
+Per 54603's own note that preparing (not running) a packet needs no
+additional permission: created
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-packet-2a03b04/`
+(named for this round's own commit) under the existing exclusive slot
+(`M545-packet2-prep`, `RESULT=COMPLETE rc=0`). Regenerated the real
+launch artifacts against this commit; confirmed the `cd` path is byte-
+correct; `serverRunClasspath.txt`/`serverRunVmArgs.txt`/
+`serverRunProgramArgs.txt` hash IDENTICAL to the prior packet (expected -
+only Java source changed, not dependencies/VM args); only `runServer.sh`
+differs (its own baked-in directory path). Populated a real isolated
+config copy with `level-seed=545547` set only there (confirmed via `diff`
+- exactly one line differs from the shared file); the input manifest
+matches the retained baseline on all ten files. Confirmed, read-only: the
+shared `run/world/level.dat`/`level.dat_old` are still byte-identical to
+the original retained baseline - nothing touched. Reused the SAME proven
+`launch-wrapper.sh` verbatim (only the directory name/owner tag differ,
+confirmed via `diff`). Confirmed `rundir/` is empty - NOT executed, no
+process launched under this packet's own tag.
+
+### Disposition
+
+Diff + 16 tests + a prepared (not executed) isolated packet, all per
+54603's own explicit corrections. No native run performed. No DIV
+compatibility fix implemented - still conditional on a justified, failing-
+before regression against the real dispatch chain, which remains
+infrastructure-blocked as reported earlier this entry. Native gate: one-
+run grant remains CONSUMED; nothing in this entry requests another.
