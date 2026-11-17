@@ -5237,3 +5237,41 @@ JUnit XML reports total **1002 tests**, 0 skipped, 0 failures, 0 errors
 across the whole suite (12 from `GearForceScaleTest`, up from 10 - the
 two new regression cases above - plus every pre-existing test run
 unchanged alongside them, confirming no regression from the fix itself).
+
+## Current-main reconciliation against M554 (MINECRAFT-553, 2026-11-17)
+
+Wroosbit's review (Jira 54631) caught the real conflict: `main` advanced
+to `8c03270` (PR #52/MINECRAFT-554's per-axis rotor pitch/roll/yaw angular-
+rate damping merged) while this branch was still built from `61cc476`,
+making PR #53 `CONFLICTING` on GitHub - exactly the adjacent-field/Set-
+assertion collision flagged in advance in this ticket's own earlier
+comment (both tickets' new field inserting near `ackermannSteering`, and
+both extending the same `PhysicsBridgeLiveOverrideApplicationTest` field-
+list/Set assertion).
+
+**Resolution:** `git merge origin/main` - auto-merged cleanly in
+`Overrides.java`/`PhysicsBridge.java`/`OverridesTest.java`/
+`PhysicsBridgeRotorAngularDampingTest.java` (git's own line-level merge
+correctly interleaved both tickets' independent insertions with no manual
+intervention). One real conflict, exactly where predicted:
+`PhysicsBridgeLiveOverrideApplicationTest`'s single `Set.of(...)` literal
+of every live-safe field name - resolved by including BOTH this ticket's
+`"gearRatioAware"` and M554's `"rotorAngularDampingCoefficientPitch"/
+"...Roll"/"...Yaw"` in the merged list (confirmed by grep sweep: both
+`gearRatioAware` and `rotorAngularDampingCoefficientPitch` now appear
+throughout `Overrides.java`/`PhysicsBridge.java` with no field lost from
+either ticket, no semantic collision - independent fields, independent
+wiring).
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock`, held for the whole Gradle lifetime).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline test --console=plain`
+against the merged head - `BUILD SUCCESSFUL`. The real JUnit XML reports
+total **1013 tests**, 0 skipped, 0 failures, 0 errors across the whole
+suite (up from 1002 - M554's own ~11 new rotor-axis tests merged in
+alongside this ticket's, none lost, no regression either direction).
+
+Pushed merge commit `8d9e0ab44ecbb53bb157199ac3ab2823ac57d3f1` to
+`minecraft-553/gear-aware-ground-drive`. GitHub confirms PR #53 is now
+`MERGEABLE` (was `CONFLICTING` at the prior head) at this exact commit.
+Returning this non-conflicting head for review.
