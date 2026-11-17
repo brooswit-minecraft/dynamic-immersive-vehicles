@@ -168,11 +168,23 @@ class MultiContactFrictionSolverTirePartLateralGripTest {
   double brakeForcePerWheel = 5000.0;
   var results = MultiContactFrictionSolver.solveFriction(contacts, MASS, INERTIA, IDENTITY, IDENTITY, velocity, angular,
     brakeForcePerWheel, 0, FRICTION, vehicleLateralGrip, DT, MultiContactFrictionSolver.FRICTION_SOLVER_ITERATIONS);
-  double budget = NORMAL * FRICTION + 1e-6; // every wheel's own effective friction-circle radius, with float slack
-  for (var r : results) {
+  // Self-review finding: a circumscribing friction-CIRCLE bound (hypot<=normal*friction) admits
+  // force pairs outside the overridden wheel's actual ANISOTROPIC ellipse - assert each wheel's
+  // own normalized elliptical budget using ITS OWN resolved lateral multiplier (0.3 for the
+  // overridden tire, 1.0/unconfigured for the fallback tire), same fix already applied to the
+  // driven+cornering test above.
+  double budgetLong = NORMAL * FRICTION;
+  double[] resolvedLateralGrip = {0.3, vehicleLateralGrip};
+  for (int i = 0; i < results.length; i++) {
+   var r = results[i];
    assertTrue(Double.isFinite(r.longitudinal()) && Double.isFinite(r.lateral()), "non-finite combined-demand result " + r);
-   double achieved = Math.hypot(r.longitudinal(), r.lateral());
-   assertTrue(achieved <= budget, "achieved combined force " + achieved + " must stay within the friction-circle budget " + budget);
+   double budgetLat = NORMAL * FRICTION * resolvedLateralGrip[i];
+   double normalizedLong = r.longitudinal() / budgetLong, normalizedLat = r.lateral() / budgetLat;
+   double ellipseSumOfSquares = normalizedLong * normalizedLong + normalizedLat * normalizedLat;
+   assertTrue(ellipseSumOfSquares <= 1.0 + 1e-9,
+     "wheel " + i + " achieved force must fit within its actual ANISOTROPIC ellipse (sum of squared normalized components="
+       + ellipseSumOfSquares + "), not merely the circumscribing friction circle; longitudinal=" + r.longitudinal()
+       + " lateral=" + r.lateral() + " budgetLong=" + budgetLong + " budgetLat=" + budgetLat);
   }
  }
 }
