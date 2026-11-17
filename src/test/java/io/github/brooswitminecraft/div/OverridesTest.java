@@ -1481,6 +1481,200 @@ class OverridesTest {
   }
  }
 
+ // MINECRAFT-552: installed-tire lateral-grip overrides - lateralGripMultiplier is now a
+ // supported part field, same exact shape as friction's own MINECRAFT-529 coverage above
+ // (bounds, extends-inheritance, vehicle-fallthrough precedence, independent per-wheel
+ // resolution, valid/invalid reload retention), applied to only the lateral friction-ellipse
+ // semi-axis, never the longitudinal (drive/brake) one - a tire can override this without
+ // touching friction/rollingResistance.
+
+ @Test void partEntrySettingLateralGripMultiplierPassesTheSupportedFieldsCheck() {
+  var part = new Overrides.Tuning(); part.lateralGripMultiplier = 0.4;
+  assertDoesNotThrow(part::validateSupportedForPart,
+    "MINECRAFT-552: an installed tire part's own lateralGripMultiplier override must be an accepted part field");
+ }
+
+ @Test void partEntrySettingOutOfRangeLateralGripMultiplierStillFailsPlainValidation() {
+  var tooHigh = new Overrides.Tuning(); tooHigh.lateralGripMultiplier = 1.1;
+  assertThrows(IllegalArgumentException.class, tooHigh::validate);
+  var tooLow = new Overrides.Tuning(); tooLow.lateralGripMultiplier = 0.0;
+  assertThrows(IllegalArgumentException.class, tooLow::validate);
+ }
+
+ @Test void partEntrySettingNonFiniteLateralGripMultiplierStillFailsPlainValidation() {
+  // Self-review finding: the ticket explicitly requires non-finite coverage, not just finite
+  // out-of-range values - validate()'s own lateralGripMultiplier check is
+  // Double.isFinite(...) && >0 && <=1, so NaN and either infinity must all fail loudly too.
+  var nan = new Overrides.Tuning(); nan.lateralGripMultiplier = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nan::validate, "a NaN lateralGripMultiplier must fail validate()");
+  var positiveInfinity = new Overrides.Tuning(); positiveInfinity.lateralGripMultiplier = Double.POSITIVE_INFINITY;
+  assertThrows(IllegalArgumentException.class, positiveInfinity::validate, "a positive-infinity lateralGripMultiplier must fail validate()");
+  var negativeInfinity = new Overrides.Tuning(); negativeInfinity.lateralGripMultiplier = Double.NEGATIVE_INFINITY;
+  assertThrows(IllegalArgumentException.class, negativeInfinity::validate, "a negative-infinity lateralGripMultiplier must fail validate()");
+ }
+
+ @Test void partLateralGripMultiplierOverrideInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.lateralGripMultiplier = 0.55;
+   var part = new Overrides.Tuning(); part.extendsTemplate = "tire-base";
+   Overrides.setForTest(java.util.Map.of("tire-base", template), java.util.Map.of(), java.util.Map.of("packid:inherited_tire", part));
+   var merged = Overrides.effectivePartOverride("packid:inherited_tire");
+   assertEquals(0.55, merged.lateralGripMultiplier, "a part inheriting lateralGripMultiplier from a template must fold it in exactly like any other field");
+   assertDoesNotThrow(merged::validateSupportedForPart);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartLateralGripMultiplierOverrideWinsOverTheVehicleResolvedValue() {
+  try {
+   var part = new Overrides.Tuning(); part.lateralGripMultiplier = 0.3;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:slick_tire", part));
+   assertEquals(0.3, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:slick_tire", 1.0),
+     "an explicit part-level lateralGripMultiplier override must win outright (replace, not multiply) over the vehicle's own resolved value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartLateralGripMultiplierFallsThroughToTheVehicleResolvedValueWhenNoPartOverrideExists() {
+  assertEquals(1.0, PhysicsBridge.tirePartLateralGripMultiplier("packid:ordinary_tire_with_no_override", 1.0),
+    "no parts entry at all for this tire key must be a true no-op, reproducing the vehicle's resolved lateralGripMultiplier unchanged");
+ }
+
+ @Test void tirePartLateralGripMultiplierResolvesIndependentlyPerWheelKeySoDifferentInstalledTiresGetDifferentGrip() {
+  try {
+   var slick = new Overrides.Tuning(); slick.lateralGripMultiplier = 0.2;
+   var grippy = new Overrides.Tuning(); grippy.lateralGripMultiplier = 1.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:slick_tire", slick, "examplepack:grippy_tire", grippy));
+   assertEquals(0.2, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:slick_tire", 0.7));
+   assertEquals(1.0, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:grippy_tire", 0.7));
+   assertEquals(0.7, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:unconfigured_tire", 0.7),
+     "a third, unconfigured tire key on the same vehicle must stay at the vehicle's own resolved value - independent wheel identities");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartLateralGripMultiplierIsIndependentOfTirePartFrictionAndRollingResistanceOnTheSamePart() {
+  try {
+   var part = new Overrides.Tuning(); part.lateralGripMultiplier = 0.25; // friction/rollingResistance left unset
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:only_lateral_grip_tire", part));
+   assertEquals(0.25, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:only_lateral_grip_tire", 1.0));
+   assertEquals(1.0, PhysicsBridge.tirePartFriction("examplepack:only_lateral_grip_tire", 1.0),
+     "a part overriding only lateralGripMultiplier must leave friction completely untouched - independent fields");
+   assertEquals(1.0, PhysicsBridge.tirePartRollingResistance("examplepack:only_lateral_grip_tire", 1.0),
+     "a part overriding only lateralGripMultiplier must leave rollingResistance completely untouched - independent fields");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void validThenInvalidPartLateralGripMultiplierReloadAppliesThenRetainsThePriorGoodTireOverride() {
+  try {
+   var goodTire = new Overrides.Tuning(); goodTire.lateralGripMultiplier = 0.65;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", goodTire)));
+   assertTrue(goodResult.success(), "a valid parts.<tire>.lateralGripMultiplier reload must apply cleanly");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "PhysicsBridge.tirePartLateralGripMultiplier must observe the newly-applied valid part lateralGripMultiplier override");
+
+   var invalidTire = new Overrides.Tuning(); invalidTire.lateralGripMultiplier = 0.0; // out of range: must be >0
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", invalidTire)));
+   assertFalse(badResult.success(), "an out-of-range part lateralGripMultiplier (0.0) reload must be rejected, not silently applied");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "a rejected reload must retain the PRIOR GOOD part lateralGripMultiplier override, not the invalid value or the vehicle fallback");
+
+   var tooHighTire = new Overrides.Tuning(); tooHighTire.lateralGripMultiplier = 1.5; // out of range: must be <=1
+   var badResult2 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", tooHighTire)));
+   assertFalse(badResult2.success(), "an out-of-range part lateralGripMultiplier (1.5) reload must also be rejected");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "a second rejected reload must still retain the same prior good part lateralGripMultiplier override");
+
+   // Self-review finding: the ticket explicitly requires non-finite reload coverage too, not
+   // just finite out-of-range values - Tuning.validate()'s own lateralGripMultiplier check uses
+   // Double.isFinite(...) (see that bound's own doc), so both NaN and an infinity must also be
+   // rejected while retaining the same prior good override.
+   var nanTire = new Overrides.Tuning(); nanTire.lateralGripMultiplier = Double.NaN;
+   var badResult3 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", nanTire)));
+   assertFalse(badResult3.success(), "a NaN part lateralGripMultiplier reload must be rejected, not silently applied");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "a NaN-rejected reload must still retain the same prior good part lateralGripMultiplier override");
+
+   var infiniteTire = new Overrides.Tuning(); infiniteTire.lateralGripMultiplier = Double.POSITIVE_INFINITY;
+   var badResult4 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", infiniteTire)));
+   assertFalse(badResult4.success(), "a positive-infinity part lateralGripMultiplier reload must be rejected, not silently applied");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "an infinity-rejected reload must still retain the same prior good part lateralGripMultiplier override");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // Review finding (PR #51/Jira comment 54581): swappingTheResolvedTireLateralGripChangesTheComposedRatio
+ // in MultiContactFrictionSolverTirePartLateralGripTest only exercises local arithmetic on two
+ // already-resolved doubles - it never changes live Overrides state, so it would pass even if
+ // real installed-tire replacement/removal kept returning a stale override. This regression
+ // drives the REAL active-config seam (Overrides.apply, the same one a live config reload uses)
+ // for one canonical installed-part key: apply a part entry, observe its resolved lateral
+ // multiplier through PhysicsBridge.tirePartLateralGripMultiplier; replace that same key's entry
+ // with a different value and observe the NEW value take effect; then remove the entry entirely
+ // and confirm the exact vehicle-level fallback is restored, not the removed value or a stale
+ // cache - the ticket's explicit "canonical-key resolution/inheritance, removal/replacement"
+ // coverage requirement, proven through live state rather than local arithmetic.
+ @Test void tirePartLateralGripMultiplierObservesLiveReplacementAndRestoresVehicleFallbackOnRemoval() {
+  try {
+   double vehicleLateralGrip = 0.6;
+   var initial = new Overrides.Tuning(); initial.lateralGripMultiplier = 0.3;
+   var applyInitial = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:canonical_tire", initial)));
+   assertTrue(applyInitial.success(), "the initial parts.<tire>.lateralGripMultiplier config must apply cleanly");
+   assertEquals(0.3, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "the installed tire's resolved lateralGripMultiplier must observe the just-applied part override");
+
+   var replacement = new Overrides.Tuning(); replacement.lateralGripMultiplier = 0.9;
+   var applyReplacement = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:canonical_tire", replacement)));
+   assertTrue(applyReplacement.success(), "replacing the same canonical tire key's part entry must apply cleanly");
+   assertEquals(0.9, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "replacing the part entry for the SAME canonical key must be observed as the new resolved value, not the stale prior override");
+
+   var applyRemoval = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(), java.util.Map.of()));
+   assertTrue(applyRemoval.success(), "removing the tire's part entry entirely must itself apply cleanly");
+   assertEquals(vehicleLateralGrip, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "removing the part entry entirely must restore the exact vehicle-level fallback, not the removed override or a stale cache");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void nonUnitVehicleLateralGripMultiplierFallsThroughUnchangedWhenNoPartOverrideExists() {
+  double vehicleLateralGrip = 0.6;
+  double resolved = PhysicsBridge.tirePartLateralGripMultiplier("packid:no_override_tire", vehicleLateralGrip);
+  assertEquals(0.6, resolved, 0, "with no part override, the resolved value must equal the configured vehicle baseline exactly");
+  double ratio = resolved / vehicleLateralGrip; // the exact stepGround composition
+  assertEquals(1.0, ratio, 0, "a configured, non-unit vehicle lateralGripMultiplier with no part override must compose to the exact no-op ratio 1.0");
+ }
+
+ @Test void nonUnitVehicleLateralGripMultiplierIsReplacedOutrightByAPartOverrideInTheComposedRatio() {
+  try {
+   var part = new Overrides.Tuning(); part.lateralGripMultiplier = 0.9;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:overridden_tire", part));
+   double vehicleLateralGrip = 0.6;
+   double resolved = PhysicsBridge.tirePartLateralGripMultiplier("examplepack:overridden_tire", vehicleLateralGrip);
+   assertEquals(0.9, resolved, 0, "a part override must replace the vehicle's own non-unit baseline outright, not multiply/divide against it");
+   double ratio = resolved / vehicleLateralGrip; // the exact stepGround composition
+   assertEquals(1.5, ratio, 1e-12, "the composed ratio must be part/vehicle=1.5, which stepGround then multiplies back against the shared lateralGripMultiplier parameter");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  @Test void enginePartDriveForceFallsThroughWhenThePartEntryExistsButDoesNotSetDriveForce() {
   try {
    var part = new Overrides.Tuning(); part.friction = 0.9; // sets a different field, not driveForce

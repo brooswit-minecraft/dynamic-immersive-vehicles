@@ -351,6 +351,33 @@ public final class PhysicsBridge {
   return (partOverride != null && partOverride.rollingResistance != null) ? partOverride.rollingResistance : vehicleRollingResistance;
  }
  /**
+  * MINECRAFT-552 (installed-tire lateral-grip overrides): the lateral-grip counterpart to
+  * {@link #tirePartFriction} above, same exact deliberate vehicle/part precedence and "replace,
+  * not stack/multiply" semantics - an explicit part-level {@code lateralGripMultiplier} override,
+  * if THIS SPECIFIC installed tire part has one, REPLACES the vehicle's own resolved {@code
+  * lateralGripMultiplier} for that one wheel's contact outright; otherwise the vehicle's already-
+  * resolved value is used completely unchanged, so an installation with no {@code parts}
+  * lateralGripMultiplier entries at all behaves byte-identically to before this ticket. {@code
+  * partKey} is resolved fresh from {@code stepGround}'s own wheel loop every tick (never cached
+  * at vehicle-construction time), the same {@code packID+":"+systemName} key shape {@link
+  * #tirePartFriction}/{@link #tirePartRollingResistance} use. {@code
+  * Overrides.effectivePartOverride} (unlike {@code resolvedPart}) returns {@code null} - never
+  * the flat documented fallback - for a field the part says nothing about, which is exactly the
+  * signal needed to tell "no override" apart from "override explicitly set it".
+  *
+  * <p>Affects ONLY the lateral (sideways slip) semi-axis of that one wheel's own friction
+  * ellipse - the longitudinal (drive/brake) semi-axis is untouched, same lateral-only scope the
+  * vehicle-level field already documents (see {@code TireForces.frictionAnisotropic}). Callers
+  * must apply this ONLY to a wheel that actually has ground contact this tick (same {@code
+  * stepGround} {@code HitResult.Type.MISS} continue {@link #tirePartFriction}'s own doc
+  * describes) - a phantom/spare/airborne tire's configured override can never contribute any
+  * grip change, matching this ticket's explicit "no phantom/airborne contribution" requirement.
+  */
+ static double tirePartLateralGripMultiplier(String partKey, double vehicleLateralGripMultiplier) {
+  var partOverride = Overrides.effectivePartOverride(partKey);
+  return (partOverride != null && partOverride.lateralGripMultiplier != null) ? partOverride.lateralGripMultiplier : vehicleLateralGripMultiplier;
+ }
+ /**
   * Which {@code Overrides.Tuning} fields a currently-active {@code Body}/{@code BuoyantBody}
   * already re-reads fresh from its own live {@code tuning} object every tick/call, rather than
   * caching into a separate field at construction time (ticket 53518/MINECRAFT-505) - confirmed
@@ -2654,9 +2681,16 @@ public final class PhysicsBridge {
     String tireKey = h.wheel().definition.packID+":"+h.wheel().definition.systemName;
     double tireGripRatio = tirePartFriction(tireKey, tuning.friction)/tuning.friction;
     double tireRollingResistance = tirePartRollingResistance(tireKey, tuning.rollingResistance);
+    // MINECRAFT-552: this wheel's own installed tire-part lateral-grip ratio, same "divide back
+    // out against the vehicle baseline" shape tireGripRatio uses immediately above (never the
+    // raw-resolved-value shape tireRollingResistance uses, since lateralGripMultiplier - like
+    // friction - IS a separate baseline parameter solveFriction multiplies per-contact INSIDE the
+    // solver; see FrictionContact.lateralGripOverrideRatio's own doc). tuning.lateralGripMultiplier
+    // is always > 0 (Tuning.validate()'s own bound), so this division never degenerates.
+    double tireLateralGripRatio = tirePartLateralGripMultiplier(tireKey, tuning.lateralGripMultiplier)/tuning.lateralGripMultiplier;
     return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier()*tireRollingResistance,wheelBrakeMagnitude,h.driveShareRatio());
+     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier()*tireRollingResistance,wheelBrakeMagnitude,h.driveShareRatio(),tireLateralGripRatio);
    }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,

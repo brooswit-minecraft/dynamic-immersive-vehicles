@@ -883,13 +883,24 @@ Alongside `vehicles`, the config accepts two more top-level maps:
 - `parts`, keyed `partPackID:partSystemName` (the part definition's own
   identity, same shape as a vehicle's `packID:systemName`) - for tuning a
   part independently of any one vehicle it happens to be installed on.
-  Only `driveForce` is currently supported: an installed, running engine
-  part's own `driveForce`, if its part entry sets one, completely replaces
-  (not multiplies) the vehicle's own resolved `driveForce` for that
-  engine. Setting any other field on a `parts` entry - directly, or
-  inherited through `extends` - fails config load/reload loudly (the same
-  as an out-of-range value) rather than being silently accepted and
-  ignored; every other field has no part-level consumer yet.
+  Four fields are currently supported, each completely REPLACING (never
+  multiplying) the vehicle's own resolved value for that one installed
+  part, independently of each other:
+  - `driveForce` - an installed, running engine part's own drive force.
+  - `friction` (MINECRAFT-529) - an installed tire/ground-device part's
+    own overall grip, applied to that one contacted wheel only.
+  - `rollingResistance` (MINECRAFT-534) - that same tire's own rolling
+    drag, independent of `friction`.
+  - `lateralGripMultiplier` (MINECRAFT-552) - that same tire's own
+    LATERAL-only friction-ellipse semi-axis (`normal*friction*
+    lateralGripMultiplier` in `TireForces.frictionAnisotropic`); the
+    longitudinal (drive/brake) semi-axis is untouched by it, same scope
+    as the vehicle-level field of the same name.
+
+  Setting any other field on a `parts` entry - directly, or inherited
+  through `extends` - fails config load/reload loudly (the same as an
+  out-of-range value) rather than being silently accepted and ignored;
+  every other field has no part-level consumer yet.
 - `templates`, an arbitrary-named map of reusable tuning fragments. Any
   `vehicles` or `parts` entry (or another template) can set `"extends":
   "<template name>"` to inherit every field it leaves unset from that
@@ -907,7 +918,8 @@ Alongside `vehicles`, the config accepts two more top-level maps:
     "examplepack:sporty_car": { "extends": "sporty-base", "massKg": 1250.0 }
   },
   "parts": {
-    "examplepack:high_output_engine": { "driveForce": 9500.0 }
+    "examplepack:high_output_engine": { "driveForce": 9500.0 },
+    "examplepack:slick_tire": { "friction": 1.4, "lateralGripMultiplier": 0.5 }
   }
 }
 ```
