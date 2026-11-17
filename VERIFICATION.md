@@ -2695,8 +2695,8 @@ cannot be driven by a plain unit test without a live runtime):
   gravel times 3.0x draggy tire = 6.0x, neither one silently overriding
   the other); and changing only `rollingResistanceMultiplier` leaves
   achieved lateral (grip) force completely unaffected, proving the two
-  compositions (grip ratio, rolling-resistance ratio) are genuinely
-  independent.
+  compositions (the grip ratio, and the no-division rolling-resistance
+  value/multiplier composition) are genuinely independent.
 
 Not covered by a plain unit test (same pre-existing, already-disclosed
 limitation every other MISS/ground-contact-dependent behavior in this
