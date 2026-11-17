@@ -79,6 +79,14 @@ public final class TuningCommandProbe {
  // probe's own wrapping entity to actually appear (by identity, not merely "any entity") is the
  // real fix. Bounded the same way.
  private static final int MAX_SETTLE_TICKS = 100;
+ // Bounded retry for CLEANUP (review finding, Wroosbit comment 54502, finding 2): each owned
+ // resource's own action is attempted independently every pass (see cleanup()) and only cleared
+ // on actual success, so a persistently-failing resource is retried rather than silently skipped
+ // - but retried forever would tick this probe indefinitely. Bounded the same way AWAIT_CHUNK/
+ // SETTLE already are; giving up still logs every remaining unresolved resource for manual
+ // cleanup rather than claiming a false ALL_DONE.
+ private static final int MAX_CLEANUP_ATTEMPTS = 20;
+ private static int cleanupAttempts = 0;
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED || phase == Phase.DONE) return;
@@ -183,25 +191,36 @@ public final class TuningCommandProbe {
     +" class="+minecraftEntity.getClass().getName()+" sameUUID="+vehicle.uniqueUUID.equals(minecraftEntity.getUUID()));
   String key = PACK_ID+":"+SYSTEM_NAME;
   Path configPath = FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json");
-  // Review finding carried into this hardening: a failed snapshot read must never be treated as
-  // "the file didn't exist" - that would delete (or fail to restore) a real pre-existing file
-  // this probe itself never backed up. Abort to CLEANUP WITHOUT writing anything in that case;
-  // ownership.configWasWritten stays false, so cleanup correctly leaves the file untouched.
+  // Review finding (self-review, comment 54501): Files.exists()==false conflates a CONFIRMED
+  // absence with an INDETERMINATE read failure (permission denied, I/O error, etc) - treating
+  // the latter as "did not exist" risked overwriting, then later deleting, a real pre-existing
+  // file this probe never actually backed up. A single read, distinguishing NoSuchFileException
+  // (confirmed absent - safe to proceed) from every other IOException (unreliable - abort without
+  // writing anything), is the correct snapshot.
   try {
-   ownership.configExistedBefore = Files.exists(configPath);
-   ownership.originalConfigContent = ownership.configExistedBefore ? Files.readString(configPath) : null;
+   ownership.originalConfigContent = Files.readString(configPath);
+   ownership.configExistedBefore = true;
+  } catch (java.nio.file.NoSuchFileException notFound) {
+   ownership.configExistedBefore = false;
+   ownership.originalConfigContent = null;
   } catch (IOException ex) {
-   LOGGER.error("[DIV tuningCommandProbe] COMPLETE - FAILED: could not snapshot the existing operator config file before writing - preserving it untouched rather than risk losing it: "+configPath, ex);
+   LOGGER.error("[DIV tuningCommandProbe] COMPLETE - FAILED: could not reliably snapshot the existing operator config file before writing (not a confirmed absence) - preserving it untouched rather than risk losing it: "+configPath, ex);
    phase = Phase.CLEANUP;
    return;
   }
+  // Review finding (Wroosbit, comment 54502, finding 1): the old code set this only AFTER
+  // Files.writeString returned, so a write that threw partway through (a real partial/truncated
+  // write) left it false and cleanup never attempted to restore the now-corrupted file at all.
+  // Armed here instead, right after the snapshot above is confirmed reliable and BEFORE the
+  // first potentially destructive write - a partial write failure below is still followed by a
+  // real restoration attempt in cleanup().
+  ownership.configNeedsRestore = true;
   try {
    // Seed a real explicit operator override through the SAME public file-based reload path
    // every other probe in this package uses (see GroundSurfaceHotReloadProbe's own doc) - not
    // a test-only seam, which Overrides.setForTest is (package-private to io.github.
    // brooswitminecraft.div, deliberately inaccessible from this experimental sub-package).
    Files.writeString(configPath, "{\"templates\":{},\"vehicles\":{\""+key+"\":{\"driveForce\":4321.0}},\"parts\":{}}");
-   ownership.configWasWritten = true;
    var reloadResult = Overrides.reload();
    if (!reloadResult.success()) {
     LOGGER.error("[DIV tuningCommandProbe] COMPLETE - FAILED: seeding the operator override via Overrides.reload() itself failed: "+reloadResult.message());
@@ -242,55 +261,71 @@ public final class TuningCommandProbe {
 
  /** Reached from every terminal path (success, any AWAIT_CHUNK/SETTLE timeout, any EXECUTE
   * failure, or an unexpected exception from any phase) - restores/removes exactly the resources
-  * {@link #ownership} recorded THIS run as actually owning, and nothing else. Idempotent:
-  * {@link TuningCommandProbeOwnership#markCleanedUp} makes every subsequent {@code should*}
-  * query false, so even a second call (should one ever happen) would act as a safe no-op. */
+  * {@link #ownership} recorded THIS run as actually owning, and nothing else. Review finding
+  * (Wroosbit, comment 54502, finding 2): each resource's own action is now wrapped in {@link
+  * TuningCommandProbeOwnership#attemptCleanup} independently - a failure in one can never block
+  * or skip any other - and that resource's ownership flag is cleared ONLY once its own action
+  * actually succeeds, so a failing resource is correctly retried on a later call (this method is
+  * re-entered every tick via maybeRun while {@code phase} stays CLEANUP) rather than either
+  * blocking everything else or being silently treated as done. Bounded by {@link
+  * #MAX_CLEANUP_ATTEMPTS} so a persistently-failing resource does not tick forever - giving up
+  * still logs exactly which resource(s) remain unresolved for manual cleanup. */
  private static void cleanup(ServerLevel level) {
-  if (ownership.isCleanedUp()) { phase = Phase.DONE; return; }
-  boolean configRestoredCleanly = true;
-  if (ownership.shouldRestoreConfig()) {
-   Path configPath = FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json");
-   try {
-    if (ownership.configExistedBefore) Files.writeString(configPath, ownership.originalConfigContent);
-    else Files.deleteIfExists(configPath);
-    Overrides.reload();
-    String restoredContent = ownership.configExistedBefore ? Files.readString(configPath) : null;
-    boolean restoredCleanly = ownership.configExistedBefore
-      ? ownership.originalConfigContent.equals(restoredContent)
-      : !Files.exists(configPath);
-    if (restoredCleanly) {
-     LOGGER.info("[DIV tuningCommandProbe] config restoration CONFIRMED byte-identical to the pre-probe original ("+(ownership.configExistedBefore?"restored":"deleted, as it did not exist before")+").");
-    } else {
-     LOGGER.error("[DIV tuningCommandProbe] config restoration MISMATCH - the file does not read back as byte-identical to the pre-probe original. Manual check needed: "+configPath);
-     configRestoredCleanly = false;
-    }
-   } catch (IOException ex) {
-    LOGGER.error("[DIV tuningCommandProbe] failed to restore the original operator config file - manual check needed: "+configPath, ex);
-    configRestoredCleanly = false;
-   }
+  Path configPath = FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json");
+  var configEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRestoreConfig(), () -> {
+   if (ownership.configExistedBefore) Files.writeString(configPath, ownership.originalConfigContent);
+   else Files.deleteIfExists(configPath);
+   Overrides.reload();
+   String restoredContent = ownership.configExistedBefore ? Files.readString(configPath) : null;
+   boolean restoredCleanly = ownership.configExistedBefore
+     ? ownership.originalConfigContent.equals(restoredContent)
+     : !Files.exists(configPath);
+   if (!restoredCleanly) throw new IOException("restored content does not read back byte-identical to the pre-probe original: "+configPath);
+  });
+  if (configEx == null) {
+   if (ownership.shouldRestoreConfig()) LOGGER.info("[DIV tuningCommandProbe] config restoration CONFIRMED byte-identical to the pre-probe original ("+(ownership.configExistedBefore?"restored":"deleted, as it did not exist before")+").");
+   ownership.configNeedsRestore = false;
+  } else {
+   LOGGER.error("[DIV tuningCommandProbe] failed to restore the original operator config file - manual check needed: "+configPath, configEx);
   }
-  if (ownership.shouldRemoveVehicle() && vehicle != null) {
-   vehicle.remove();
-  }
+
+  var vehicleEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRemoveVehicle(), () -> { if (vehicle != null) vehicle.remove(); });
+  if (vehicleEx == null) ownership.vehicleSpawned = false;
+  else LOGGER.error("[DIV tuningCommandProbe] failed to remove this probe's own spawned vehicle - manual check needed", vehicleEx);
+
   // Review finding carried into this hardening: an earlier version unconditionally cleared the
   // force-load here, even when the chunk had already been force-loaded by someone else before
   // this probe ran - that silently dropped another owner's own ticket. Only unforced when THIS
   // probe is the one that actually requested it.
-  if (ownership.shouldUnforceChunk()) {
-   level.setChunkForced(0, 0, false);
-  }
+  var chunkEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldUnforceChunk(), () -> level.setChunkForced(0, 0, false));
+  if (chunkEx == null) ownership.chunkForcedByUs = false;
+  else LOGGER.error("[DIV tuningCommandProbe] failed to unforce chunk (0,0) - manual check needed", chunkEx);
+
   // Review finding carried into this hardening: inserted pack config entries were never restored
   // at all - left behind indefinitely regardless of outcome. Removed now, but only the entries
   // THIS run actually inserted (putIfAbsent found absent beforehand).
-  if (ownership.shouldRemovePackSpeedFactor()) {
-   minecrafttransportsimulator.systems.ConfigSystem.settings.general.packSpeedFactors.value.remove(PACK_ID);
+  var speedFactorEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRemovePackSpeedFactor(),
+    () -> minecrafttransportsimulator.systems.ConfigSystem.settings.general.packSpeedFactors.value.remove(PACK_ID));
+  if (speedFactorEx == null) ownership.packSpeedFactorAddedByUs = false;
+  else LOGGER.error("[DIV tuningCommandProbe] failed to remove the divtest packSpeedFactors entry - manual check needed", speedFactorEx);
+
+  var vehicleScaleEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRemovePackVehicleScale(),
+    () -> minecrafttransportsimulator.systems.ConfigSystem.settings.general.packVehicleScales.value.remove(PACK_ID));
+  if (vehicleScaleEx == null) ownership.packVehicleScaleAddedByUs = false;
+  else LOGGER.error("[DIV tuningCommandProbe] failed to remove the divtest packVehicleScales entry - manual check needed", vehicleScaleEx);
+
+  if (ownership.allCleared()) {
+   phase = Phase.DONE;
+   LOGGER.info("[DIV tuningCommandProbe] CLEANUP complete - ALL_DONE.");
+   return;
   }
-  if (ownership.shouldRemovePackVehicleScale()) {
-   minecrafttransportsimulator.systems.ConfigSystem.settings.general.packVehicleScales.value.remove(PACK_ID);
+  if (++cleanupAttempts >= MAX_CLEANUP_ATTEMPTS) {
+   phase = Phase.DONE;
+   LOGGER.error("[DIV tuningCommandProbe] CLEANUP FAILED after "+MAX_CLEANUP_ATTEMPTS+" attempts - giving up, NOT ALL_DONE - manual check needed for whichever resource(s) logged a failure above on the most recent attempt"
+     +" (configNeedsRestore="+ownership.configNeedsRestore+" vehicleSpawned="+ownership.vehicleSpawned+" chunkForcedByUs="+ownership.chunkForcedByUs
+     +" packSpeedFactorAddedByUs="+ownership.packSpeedFactorAddedByUs+" packVehicleScaleAddedByUs="+ownership.packVehicleScaleAddedByUs+").");
   }
-  ownership.markCleanedUp();
-  phase = Phase.DONE;
-  LOGGER.info("[DIV tuningCommandProbe] CLEANUP "+(configRestoredCleanly?"complete - ALL_DONE":"FAILED for config restore, see above - manual check needed")+".");
+  // else: stay in CLEANUP - maybeRun calls this again next tick, retrying only what is still owned.
  }
 
  private static EntityVehicleF_Physics buildAndSpawn(AWrapperWorld world) {

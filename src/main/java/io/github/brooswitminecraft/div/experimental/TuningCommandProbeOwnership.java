@@ -7,14 +7,24 @@ import java.util.function.Function;
  * accepting the first unrelated entity visible in the level, and (b) track exactly which
  * resources THIS probe run itself created, so cleanup restores/removes only those - never a
  * pre-existing forced chunk, pack config entry, or operator config file this probe merely found
- * already in place - and is safe to invoke more than once ({@link #markCleanedUp()} makes every
- * {@code should*} query false afterward, regardless of the underlying ownership flags).
+ * already in place.
+ *
+ * <p>Review findings (Wroosbit, comment 54502 / self-review, comment 54501) on this ticket's own
+ * first revision: ownership for each resource is now a plain boolean that means "still needs
+ * cleanup" - cleared only once {@link #attemptCleanup} actually completes that resource's own
+ * action without throwing, never all-at-once after a single cleanup pass. A resource whose
+ * action throws stays owned (so a LATER cleanup pass retries exactly that resource - "repeat
+ * invocation" is therefore not merely safe but the actual retry mechanism), and - because {@link
+ * #attemptCleanup} catches per-action, not around the whole sequence - one resource's failure
+ * can never prevent or skip any other resource's own cleanup attempt in the same pass.
  *
  * <p>Deliberately no Minecraft/MTS dependency (same "extract the pure decision, leave the live-
  * world glue in the probe itself" convention as {@code DriveRateLimiter}/{@code AngleMath}
  * elsewhere in this package) - a live {@code TuningCommandProbe} run itself still cannot be unit
  * tested (constructing a real {@code EntityVehicleF_Physics}/Sable body remains infeasible, same
- * gap this class's own doc elsewhere names), but every decision this class makes is.
+ * gap this class's own doc elsewhere names), but every decision this class makes is, including
+ * the actual cleanup ORCHESTRATION (via {@link #attemptCleanup} with injected fake actions), not
+ * merely its post-hoc boolean bookkeeping.
  */
 final class TuningCommandProbeOwnership {
  boolean chunkForcedByUs;
@@ -23,20 +33,54 @@ final class TuningCommandProbeOwnership {
  boolean vehicleSpawned;
  boolean configExistedBefore;
  String originalConfigContent;
- boolean configWasWritten;
- private boolean cleanedUp;
+ /** Armed BEFORE the config file is ever written (once its pre-probe snapshot has been read
+  * reliably - see {@code TuningCommandProbe.execute}'s own doc), not after the write returns -
+  * review finding (Wroosbit, comment 54502, finding 1): the old field was set only once {@code
+  * Files.writeString} returned, so a write that threw partway through (a real partial/truncated
+  * write) left this {@code false} and cleanup never attempted to restore the now-corrupted file
+  * at all. Cleared only once {@link #attemptCleanup} confirms the restore/delete itself actually
+  * succeeded. */
+ boolean configNeedsRestore;
 
- boolean shouldUnforceChunk() { return !cleanedUp && chunkForcedByUs; }
- boolean shouldRemovePackSpeedFactor() { return !cleanedUp && packSpeedFactorAddedByUs; }
- boolean shouldRemovePackVehicleScale() { return !cleanedUp && packVehicleScaleAddedByUs; }
- boolean shouldRemoveVehicle() { return !cleanedUp && vehicleSpawned; }
- boolean shouldRestoreConfig() { return !cleanedUp && configWasWritten; }
- boolean isCleanedUp() { return cleanedUp; }
- /** Idempotency guard - every {@code should*} query above returns {@code false} once this has
-  * been called, regardless of how many times it is called again or what the underlying ownership
-  * flags still say, so a caller that (for whatever reason) reaches cleanup more than once never
-  * double-acts (double-unforcing a chunk, double-removing an already-removed vehicle, etc). */
- void markCleanedUp() { cleanedUp = true; }
+ boolean shouldUnforceChunk() { return chunkForcedByUs; }
+ boolean shouldRemovePackSpeedFactor() { return packSpeedFactorAddedByUs; }
+ boolean shouldRemovePackVehicleScale() { return packVehicleScaleAddedByUs; }
+ boolean shouldRemoveVehicle() { return vehicleSpawned; }
+ boolean shouldRestoreConfig() { return configNeedsRestore; }
+ /** True once every owned resource has actually been cleared (restored/removed), independent of
+  * which order they finished in or how many attempts it took. */
+ boolean allCleared() {
+  return !chunkForcedByUs && !packSpeedFactorAddedByUs && !packVehicleScaleAddedByUs
+    && !vehicleSpawned && !configNeedsRestore;
+ }
+
+ /** A single resource's own cleanup action - may throw any checked or unchecked exception; the
+  * caller never needs to know which. */
+ interface CleanupAction { void run() throws Exception; }
+
+ /**
+  * Runs {@code action} only if {@code owned} is true, catching EVERY exception it throws - never
+  * propagating one, so a failure cleaning up one resource can never block or skip any other
+  * resource's own cleanup attempt in the same pass (review finding, comment 54502, finding 2:
+  * the old code ran all four actions inline with no per-action isolation, so an uncaught
+  * exception from an earlier one aborted the whole method before any later one ever ran).
+  *
+  * @return {@code null} when there was nothing owned to do, or {@code action} completed without
+  * throwing - the caller should clear this resource's own ownership flag in either case. Returns
+  * the caught exception when {@code action} was actually attempted and failed - the caller MUST
+  * leave ownership exactly as it was, so a later cleanup pass retries this same resource (and,
+  * since every other resource's own flag is handled by its own independent call, does not
+  * re-attempt anything that already succeeded).
+  */
+ static Exception attemptCleanup(boolean owned, CleanupAction action) {
+  if (!owned) return null;
+  try {
+   action.run();
+   return null;
+  } catch (Exception ex) {
+   return ex;
+  }
+ }
 
  /**
   * Scans {@code candidates} in order and returns the first one whose {@code unwrap} result is
