@@ -9660,3 +9660,28 @@ coverage added (lightweight fakes, not a duplicate algorithm), documentation tri
 actual invariant. No native run performed or requested. Per 54662's own closing instruction, an
 updated isolated lifecycle packet follows in the next entry - prepared only, no launch until the
 parent explicitly releases a further run.
+
+## Updated isolated lifecycle packet prepared (NOT executed) per 54662
+
+Packet `M545-packet-435937b` prepared against the current commit (`435937b`, the
+orchestration/race-guard/comment-trim fix), using the SAME proven `launch-wrapper.sh`/
+`preflight.sh`/`runtime-manifest.sh` (the locale-fixed, 9-check version), same fixed seed
+(`level-seed=545547`), same `level-name=world`. Regenerated `build/moddev/runServer.sh`/
+`serverRunClasspath.txt`/`serverRunVmArgs.txt`/`serverRunProgramArgs.txt` under the exclusive
+lock; confirmed `runServer.sh`'s own `cd` argument points at this packet's own rundir.
+`runtime-byte-manifest.sha256` (100 entries) computed with the locale-pinned function. Isolated
+`config`/`eula.txt`/`server.properties` copied with `level-seed=545547` set only there (exactly
+one line differs via `diff`); isolated config confirmed byte-identical to the original, never-
+mutated reference run's own baseline - no DIV config drift. Shared `run/world/level.dat`/
+`level.dat_old` confirmed unchanged against the same retained baseline.
+
+Dry-ran the full 9-check `preflight.sh` directly against this real packet - all 9 checks
+`OK`/`PASS`, exit 0. Confirmed `rundir/world` does not exist - NOT executed, no java process
+launched under this packet's own tag. Retained worlds (the original reference run, both prior
+authorized-run packets) are untouched - this packet's own preparation never reads or writes
+anything under another packet's directory.
+
+### Disposition
+
+Updated packet ready, per 54662's own instruction - prepared only. NO launch until the
+coordinator/parent explicitly releases a further reviewed run. Native hold remains CLOSED.
