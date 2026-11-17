@@ -274,6 +274,99 @@ class OverridesTest {
   }
  }
 
+ // MINECRAFT-554: rotorAngularDampingCoefficientPitch/Roll/Yaw - optional per-axis overrides of
+ // rotorAngularDampingCoefficient above, same [0, MAX_ANGULAR_DAMPING_COEFFICIENT] bound, same
+ // "no FALLBACK entry, inherits the sibling resolved field instead" shape
+ // suspensionDampingRatioFront/Rear/Compression/Rebound already establish.
+
+ @Test void rotorAngularDampingCoefficientPerAxisOutOfRangeFailsValidation() {
+  var negativePitch = new Overrides.Tuning(); negativePitch.rotorAngularDampingCoefficientPitch = -0.1;
+  assertThrows(IllegalArgumentException.class, negativePitch::validate);
+  var tooLargeRoll = new Overrides.Tuning(); tooLargeRoll.rotorAngularDampingCoefficientRoll = RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT + 0.01;
+  assertThrows(IllegalArgumentException.class, tooLargeRoll::validate);
+  var nonFiniteYaw = new Overrides.Tuning(); nonFiniteYaw.rotorAngularDampingCoefficientYaw = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nonFiniteYaw::validate);
+  var zeroPitch = new Overrides.Tuning(); zeroPitch.rotorAngularDampingCoefficientPitch = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zeroPitch::validate);
+  var atCapRoll = new Overrides.Tuning(); atCapRoll.rotorAngularDampingCoefficientRoll = RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT; // the cap itself is allowed
+  assertDoesNotThrow(atCapRoll::validate);
+  var inRangeYaw = new Overrides.Tuning(); inRangeYaw.rotorAngularDampingCoefficientYaw = 5.0;
+  assertDoesNotThrow(inRangeYaw::validate);
+ }
+
+ @Test void rotorAngularDampingCoefficientPerAxisStaysNullWhenUnconfigured() {
+  // Unlike rotorAngularDampingCoefficient itself (which falls back to 0.0), the per-axis
+  // overrides have no FALLBACK entry at all - Overrides.resolved() leaves them null so
+  // PhysicsBridge.stepRotor knows to inherit the vehicle's own resolved rotorAngularDampingCoefficient
+  // instead of a second, independently-defaulted value.
+  var r = Overrides.resolved("packid:not_configured");
+  assertNull(r.rotorAngularDampingCoefficientPitch);
+  assertNull(r.rotorAngularDampingCoefficientRoll);
+  assertNull(r.rotorAngularDampingCoefficientYaw);
+  assertNull(Overrides.defaultTuning().rotorAngularDampingCoefficientPitch);
+  assertNull(Overrides.defaultTuning().rotorAngularDampingCoefficientRoll);
+  assertNull(Overrides.defaultTuning().rotorAngularDampingCoefficientYaw);
+ }
+
+ @Test void rotorAngularDampingCoefficientPerAxisParticipatesInTheFullPrecedenceChainIndependently() {
+  try {
+   // Mixed-axis case (ticket requirement): only pitch and yaw configured, roll left unset -
+   // each axis resolves independently, roll stays null (inherits the base scalar downstream).
+   var override = new Overrides.Tuning();
+   override.rotorAngularDampingCoefficient = 4.5;
+   override.rotorAngularDampingCoefficientPitch = 1.0; override.rotorAngularDampingCoefficientYaw = 7.0;
+   Overrides.setForTest(java.util.Map.of("packid:mixed_axis_rotor", override));
+   var resolved = Overrides.resolved("packid:mixed_axis_rotor");
+   assertEquals(1.0, resolved.rotorAngularDampingCoefficientPitch, "an explicit per-axis override must take precedence");
+   assertNull(resolved.rotorAngularDampingCoefficientRoll, "an unset axis must stay null, not fall back to a second hardcoded default");
+   assertEquals(7.0, resolved.rotorAngularDampingCoefficientYaw);
+   assertEquals(4.5, resolved.rotorAngularDampingCoefficient, "the base scalar itself is unaffected by the per-axis overrides");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAngularDampingCoefficientPerAxisInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.rotorAngularDampingCoefficientRoll = 2.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "per-axis-damping-base"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("per-axis-damping-base", template), java.util.Map.of("packid:inherited_axis_damping", child), java.util.Map.of());
+   assertEquals(2.0, Overrides.resolved("packid:inherited_axis_damping").rotorAngularDampingCoefficientRoll,
+     "a field the child never set must inherit the template's value, same as every other tuning field");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAngularDampingCoefficientPerAxisIsRejectedOnAPartOverride() {
+  var pitchPart = new Overrides.Tuning(); pitchPart.rotorAngularDampingCoefficientPitch = 1.5;
+  assertThrows(IllegalArgumentException.class, pitchPart::validateSupportedForPart,
+    "this is a vehicle-only concept - a rotorcraft part has no own angular-damping consumer");
+  var rollPart = new Overrides.Tuning(); rollPart.rotorAngularDampingCoefficientRoll = 1.5;
+  assertThrows(IllegalArgumentException.class, rollPart::validateSupportedForPart);
+  var yawPart = new Overrides.Tuning(); yawPart.rotorAngularDampingCoefficientYaw = 1.5;
+  assertThrows(IllegalArgumentException.class, yawPart::validateSupportedForPart);
+ }
+
+ @Test void validThenInvalidPerAxisRotorAngularDampingReloadAppliesThenRetainsThePriorGoodOverride() {
+  try {
+   var goodHelicopter = new Overrides.Tuning(); goodHelicopter.rotorAngularDampingCoefficientYaw = 3.0;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_axis_helicopter", goodHelicopter), java.util.Map.of()));
+   assertTrue(goodResult.success(), "a valid rotorAngularDampingCoefficientYaw reload must apply cleanly");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_axis_helicopter").rotorAngularDampingCoefficientYaw);
+
+   var invalidHelicopter = new Overrides.Tuning(); invalidHelicopter.rotorAngularDampingCoefficientYaw = -1.0; // out of range
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_axis_helicopter", invalidHelicopter), java.util.Map.of()));
+   assertFalse(badResult.success(), "a negative rotorAngularDampingCoefficientYaw reload must be rejected, not silently applied");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_axis_helicopter").rotorAngularDampingCoefficientYaw,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid value or a silent null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  // MINECRAFT-542: fixedWingAngularDampingCoefficient - bounded, optional, fixed-wing-only
  // angular-rate damping torque, reusing M537's dissipative-drag formula/no-reversal clamp but a
  // wholly separate field from rotorAngularDampingCoefficient above (deliberately never shared).

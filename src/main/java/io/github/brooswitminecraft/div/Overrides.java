@@ -234,6 +234,35 @@ public final class Overrides {
   // velocity, never the pilot's cyclic/yaw input, so it cannot be mistaken for (or substitute for)
   // auto-level, a hover autopilot, or cyclic response filtering.
   public Double rotorAngularDampingCoefficient;
+  // MINECRAFT-554: optional, per-axis override of rotorAngularDampingCoefficient immediately
+  // above - pitch (rotation about the body's own right/lateral axis), roll (about forward/
+  // longitudinal), yaw (about up/vertical), the SAME right/forward/up axis grouping
+  // PhysicsBridge.rotorAngularDampingTorque's own per-axis assembly already uses (MINECRAFT-537)
+  // and PhysicsBridge.stepRotor's own pitchTorque/rollTorque/yawTorque cyclic/yaw control-torque
+  // assembly already uses - deliberately a DIFFERENT concept from the MINECRAFT-522/541 per-axis
+  // CONTROL-authority fields (cyclicLimitDegrees/cyclicAuthorityScale/aileron-elevator-rudder-
+  // AuthorityScale): those scale the pilot's own cyclic/yaw input, these only ever oppose the
+  // body's OWN existing angular velocity, same "cannot substitute for the pilot's control
+  // authority" contract rotorAngularDampingCoefficient itself already documents. No FALLBACK
+  // entry (same "inherit, don't re-default" shape suspensionDampingRatioFront/Rear/Compression/
+  // Rebound already use) - null on any one axis means that axis simply inherits the vehicle's own
+  // already-resolved rotorAngularDampingCoefficient (NOT a separate hardcoded 0.0), so a vehicle
+  // that never sets any of these three fields is byte-identical to before this ticket on every
+  // axis, and a vehicle that sets only one axis still gets the exact pre-ticket (uniform)
+  // coefficient, unchanged, on the other two. Setting all three equal to
+  // rotorAngularDampingCoefficient's own resolved value reproduces the EXACT existing uniform
+  // damping behavior, vehicle-wide - the required default/equal-value equivalence. Same
+  // [0, RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT] bound as rotorAngularDampingCoefficient
+  // itself (validate() below) - a usability/sanity ceiling, not a load-bearing safety bound,
+  // same reasoning rotorAngularDampingCoefficient's own doc gives (RotorForces.
+  // angularDampingTorque's own no-reversal clamp is unconditionally safe for any finite,
+  // non-negative coefficient on any axis). Re-read live every tick by PhysicsBridge.stepRotor,
+  // same as rotorAngularDampingCoefficient - see PhysicsBridge.applyLiveSafeFields. Vehicle-only,
+  // like rotorAngularDampingCoefficient - rejected at part-override level below (no part-level
+  // consumer yet).
+  public Double rotorAngularDampingCoefficientPitch;
+  public Double rotorAngularDampingCoefficientRoll;
+  public Double rotorAngularDampingCoefficientYaw;
   // MINECRAFT-543: optional, rotorcraft-only bounded quadratic (aerodynamic) drag opposing the
   // body's OWN actual linear (translational) velocity - see RotorForces.translationalDragForce's
   // own doc for the full model and the no-reversal/no-free-force contract, and
@@ -558,6 +587,13 @@ public final class Overrides {
    // angularDampingTorque's own no-reversal clamp is unconditionally safe for any finite,
    // non-negative coefficient).
    if (rotorAngularDampingCoefficient != null && !(Double.isFinite(rotorAngularDampingCoefficient) && rotorAngularDampingCoefficient >= 0 && rotorAngularDampingCoefficient <= io.github.brooswitminecraft.div.RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT)) throw new IllegalArgumentException("invalid vehicle tuning");
+   // MINECRAFT-554: same inclusive-zero-through-MAX_ANGULAR_DAMPING_COEFFICIENT bound as
+   // rotorAngularDampingCoefficient immediately above, for each of the three per-axis overrides
+   // independently - each axis is validated on its own regardless of whether the other axes or
+   // the base scalar are set.
+   if (rotorAngularDampingCoefficientPitch != null && !(Double.isFinite(rotorAngularDampingCoefficientPitch) && rotorAngularDampingCoefficientPitch >= 0 && rotorAngularDampingCoefficientPitch <= io.github.brooswitminecraft.div.RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (rotorAngularDampingCoefficientRoll != null && !(Double.isFinite(rotorAngularDampingCoefficientRoll) && rotorAngularDampingCoefficientRoll >= 0 && rotorAngularDampingCoefficientRoll <= io.github.brooswitminecraft.div.RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT)) throw new IllegalArgumentException("invalid vehicle tuning");
+   if (rotorAngularDampingCoefficientYaw != null && !(Double.isFinite(rotorAngularDampingCoefficientYaw) && rotorAngularDampingCoefficientYaw >= 0 && rotorAngularDampingCoefficientYaw <= io.github.brooswitminecraft.div.RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT)) throw new IllegalArgumentException("invalid vehicle tuning");
    // MINECRAFT-543: inclusive 0 (the FALLBACK/off value, same reasoning rotorAngularDampingCoefficient's
    // own inclusive-zero bound immediately above uses) through RotorForces.MAX_AIR_DRAG_COEFFICIENT -
    // see that constant's own doc for why this cap is a usability/sanity ceiling rather than a
@@ -803,6 +839,9 @@ public final class Overrides {
    if (cyclicAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'cyclicAuthorityScale' (no part-level consumer yet)");
    if (yawAuthorityScale != null) throw new IllegalArgumentException("part overrides do not support 'yawAuthorityScale' (no part-level consumer yet)");
    if (rotorAngularDampingCoefficient != null) throw new IllegalArgumentException("part overrides do not support 'rotorAngularDampingCoefficient' (vehicle-only concept - no part-level consumer yet)");
+   if (rotorAngularDampingCoefficientPitch != null) throw new IllegalArgumentException("part overrides do not support 'rotorAngularDampingCoefficientPitch' (vehicle-only concept - no part-level consumer yet)");
+   if (rotorAngularDampingCoefficientRoll != null) throw new IllegalArgumentException("part overrides do not support 'rotorAngularDampingCoefficientRoll' (vehicle-only concept - no part-level consumer yet)");
+   if (rotorAngularDampingCoefficientYaw != null) throw new IllegalArgumentException("part overrides do not support 'rotorAngularDampingCoefficientYaw' (vehicle-only concept - no part-level consumer yet)");
    if (rotorAirDragCoefficient != null) throw new IllegalArgumentException("part overrides do not support 'rotorAirDragCoefficient' (vehicle-only concept - no part-level consumer yet)");
    if (brakeBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'brakeBiasFront' (vehicle-only concept - a part has no own axle position)");
    if (driveBiasFront != null) throw new IllegalArgumentException("part overrides do not support 'driveBiasFront' (vehicle-only concept - a part has no own axle position)");
@@ -914,6 +953,9 @@ public final class Overrides {
   c.aileronAuthorityScale=t.aileronAuthorityScale; c.elevatorAuthorityScale=t.elevatorAuthorityScale; c.rudderAuthorityScale=t.rudderAuthorityScale;
   c.cyclicLimitDegrees=t.cyclicLimitDegrees; c.cyclicAuthorityScale=t.cyclicAuthorityScale; c.yawAuthorityScale=t.yawAuthorityScale;
   c.rotorAngularDampingCoefficient=t.rotorAngularDampingCoefficient;
+  c.rotorAngularDampingCoefficientPitch=t.rotorAngularDampingCoefficientPitch;
+  c.rotorAngularDampingCoefficientRoll=t.rotorAngularDampingCoefficientRoll;
+  c.rotorAngularDampingCoefficientYaw=t.rotorAngularDampingCoefficientYaw;
   c.rotorAirDragCoefficient=t.rotorAirDragCoefficient;
   c.brakeBiasFront=t.brakeBiasFront;
   c.driveBiasFront=t.driveBiasFront;
@@ -972,6 +1014,9 @@ public final class Overrides {
   m.cyclicAuthorityScale = child.cyclicAuthorityScale!=null?child.cyclicAuthorityScale:parent.cyclicAuthorityScale;
   m.yawAuthorityScale = child.yawAuthorityScale!=null?child.yawAuthorityScale:parent.yawAuthorityScale;
   m.rotorAngularDampingCoefficient = child.rotorAngularDampingCoefficient!=null?child.rotorAngularDampingCoefficient:parent.rotorAngularDampingCoefficient;
+  m.rotorAngularDampingCoefficientPitch = child.rotorAngularDampingCoefficientPitch!=null?child.rotorAngularDampingCoefficientPitch:parent.rotorAngularDampingCoefficientPitch;
+  m.rotorAngularDampingCoefficientRoll = child.rotorAngularDampingCoefficientRoll!=null?child.rotorAngularDampingCoefficientRoll:parent.rotorAngularDampingCoefficientRoll;
+  m.rotorAngularDampingCoefficientYaw = child.rotorAngularDampingCoefficientYaw!=null?child.rotorAngularDampingCoefficientYaw:parent.rotorAngularDampingCoefficientYaw;
   m.rotorAirDragCoefficient = child.rotorAirDragCoefficient!=null?child.rotorAirDragCoefficient:parent.rotorAirDragCoefficient;
   m.brakeBiasFront = child.brakeBiasFront!=null?child.brakeBiasFront:parent.brakeBiasFront;
   m.driveBiasFront = child.driveBiasFront!=null?child.driveBiasFront:parent.driveBiasFront;
@@ -1192,6 +1237,14 @@ public final class Overrides {
   result.cyclicAuthorityScale = firstNonNull(override!=null?override.cyclicAuthorityScale:null, packMetadata!=null?packMetadata.cyclicAuthorityScale:null, ivAdapted!=null?ivAdapted.cyclicAuthorityScale:null, physicallyDerived!=null?physicallyDerived.cyclicAuthorityScale:null, FALLBACK.cyclicAuthorityScale);
   result.yawAuthorityScale = firstNonNull(override!=null?override.yawAuthorityScale:null, packMetadata!=null?packMetadata.yawAuthorityScale:null, ivAdapted!=null?ivAdapted.yawAuthorityScale:null, physicallyDerived!=null?physicallyDerived.yawAuthorityScale:null, FALLBACK.yawAuthorityScale);
   result.rotorAngularDampingCoefficient = firstNonNull(override!=null?override.rotorAngularDampingCoefficient:null, packMetadata!=null?packMetadata.rotorAngularDampingCoefficient:null, ivAdapted!=null?ivAdapted.rotorAngularDampingCoefficient:null, physicallyDerived!=null?physicallyDerived.rotorAngularDampingCoefficient:null, FALLBACK.rotorAngularDampingCoefficient);
+  // MINECRAFT-554: no FALLBACK entry (mirrors suspensionDampingRatioCompression/Rebound above) -
+  // stays null (no per-axis override configured) unless some level actually sets it, which is
+  // exactly the signal PhysicsBridge.stepRotor needs to inherit this SAME result's own
+  // just-resolved rotorAngularDampingCoefficient immediately above, instead of a second,
+  // independently-defaulted value.
+  result.rotorAngularDampingCoefficientPitch = firstNonNull(override!=null?override.rotorAngularDampingCoefficientPitch:null, packMetadata!=null?packMetadata.rotorAngularDampingCoefficientPitch:null, ivAdapted!=null?ivAdapted.rotorAngularDampingCoefficientPitch:null, physicallyDerived!=null?physicallyDerived.rotorAngularDampingCoefficientPitch:null);
+  result.rotorAngularDampingCoefficientRoll = firstNonNull(override!=null?override.rotorAngularDampingCoefficientRoll:null, packMetadata!=null?packMetadata.rotorAngularDampingCoefficientRoll:null, ivAdapted!=null?ivAdapted.rotorAngularDampingCoefficientRoll:null, physicallyDerived!=null?physicallyDerived.rotorAngularDampingCoefficientRoll:null);
+  result.rotorAngularDampingCoefficientYaw = firstNonNull(override!=null?override.rotorAngularDampingCoefficientYaw:null, packMetadata!=null?packMetadata.rotorAngularDampingCoefficientYaw:null, ivAdapted!=null?ivAdapted.rotorAngularDampingCoefficientYaw:null, physicallyDerived!=null?physicallyDerived.rotorAngularDampingCoefficientYaw:null);
   result.rotorAirDragCoefficient = firstNonNull(override!=null?override.rotorAirDragCoefficient:null, packMetadata!=null?packMetadata.rotorAirDragCoefficient:null, ivAdapted!=null?ivAdapted.rotorAirDragCoefficient:null, physicallyDerived!=null?physicallyDerived.rotorAirDragCoefficient:null, FALLBACK.rotorAirDragCoefficient);
   // No FALLBACK entry (mirrors selfRight*/enabled/massKg above) - stays null unless some level
   // actually sets it, which is exactly the "no bias configured" signal BrakeBiasDistribution
