@@ -5508,3 +5508,124 @@ genuinely unknown; nothing in this round attributes a mechanism to it or
 to anything else.
 
 **Two-trial grant is now fully consumed.**
+
+## Fix-phase mechanism investigation (54403) - candidate identified, concrete blocker found
+
+John's comment 54403 authorized a new fix phase: identify a falsifiable
+mechanism and the smallest production correction, develop a patch and a
+regression that fails on prior code and passes after, with source
+analysis/implementation/serialized (JVM-only) regression validation
+authorized now - no native run until mechanism evidence + diff +
+regression receipt are returned. This section reports exactly that - a
+concrete, quantified mechanism candidate, and why the fix itself cannot
+yet be implemented.
+
+### Mechanism investigated and ruled out: no joint-stiffness knob exists
+
+Checked Sable's own public API (`GenericConstraintConfiguration`, the
+actual class DIV's `createHitch` constructs) for any exposed solver
+stiffness/ERP/max-corrective-velocity parameter DIV could tune per joint:
+none exists. The record has exactly five fields -
+`pos1/pos2/orientation1/orientation2/lockedAxes` - with `lockedAxes`
+being a hard, binary per-axis lock, no softness. Also confirmed `pos1`/
+`pos2` (what `createHitch` passes as `hitchOffset`/`hookupOffset`) are
+PURE body-local geometry (`HitchJoint.anchorLocalOffset`), with zero
+dependency on either body's live pose - so a "stale cached pose" theory
+(the `UNVERIFIED_AGE`/`lastPoseUpdateGameTime` work from earlier this
+session) does NOT feed into the actual joint configuration at all, only
+into diagnostic logging. This rules out both a joint-stiffness workaround
+and a stale-pose-anchor bug as the mechanism - confirmed by reading the
+real API, not assumed.
+
+### Mechanism candidate: Sable's own box-inertia fallback ignores shape entirely
+
+Read `BoxPhysicsObject`'s actual mass/inertia path (decompiled directly
+from the PINNED jar, `sable-neoforge-1.21.1-2.0.5.jar` - the real
+dependency this build resolves, not a possibly-different local checkout).
+Confirmed: the legacy scalar-mass constructor
+(`BoxPhysicsObject(Pose3dc, Vector3dc halfExtents, double mass)` - the
+ONLY constructor this jar exposes) produces an inertia tensor of
+`Matrix3d().scale(mass / 6.0)` - i.e. a single scalar divided by 6,
+IDENTICAL on all three axes, with **zero dependency on `halfExtents`** -
+confirmed directly from the class's own mass-data implementation, not
+inferred.
+
+Computed the ACTUAL error for this exact fixture's own hull (mass=400kg,
+half-extents (0.6, 0.3, 1.0), from `run/config/dynamic-immersive-
+vehicles.json` and `BuoyantHitchProbe`'s own `HALF_EXTENT_X/HALF_HEIGHT_Y/
+HALF_EXTENT_Z` constants) against the correct solid-box inertia formula
+(`I_xx = m/3*(hy²+hz²)`, etc., for half-extents hx,hy,hz):
+
+| axis | Sable's fallback (mass/6) | correct solid-box value | ratio |
+|---|---|---|---|
+| X (pitch) | 66.67 kg·m² | 145.33 kg·m² | fallback is **2.18x too small** |
+| Y (yaw)   | 66.67 kg·m² | 181.33 kg·m² | fallback is **2.72x too small** |
+| Z (roll)  | 66.67 kg·m² | 60.00 kg·m²  | fallback is ~11% too LARGE (roughly correct) |
+
+This hull (long and flat, like a canoe) should resist pitch/yaw rotation
+roughly 2.2x-2.7x MORE than Sable's own fallback gives it credit for.
+Mechanistically, this is consistent with every observed symptom in this
+investigation: (1) `towed` accumulates an extreme, unrealistic angular
+velocity (observed ~88 rad/s on one axis) while free-floating unjointed
+during `TOWING_UNAVAILABLE` - an under-inertia body responds to ANY
+asymmetric torque (buoyancy/drag, already logged in detail this session)
+with an outsized angular acceleration; (2) when `TOWING_REPLACEMENT`
+creates a position-locking joint against that already-fast-spinning
+body, the position-correction impulse couples into angular velocity via
+the lever arm (the anchor offset is NOT at the body's center), and an
+under-inertia body again responds with an outsized change for a given
+corrective impulse - consistent with the observed violent linear/angular
+snap (260+ blocks/s) rather than a smooth settle. This is a candidate
+mechanism, not a proven one - no read-back of Rapier's own internal
+per-substep response exists to confirm it quantitatively; it is reported
+as the best-supported falsifiable candidate found, not an established
+fact.
+
+**Note:** this same legacy constructor call
+(`new BoxPhysicsObject(pose, half, mass)`) is used identically by BOTH
+`BuoyantBody` (this ticket's own class) AND the pre-existing
+`PhysicsBridge.Body` (ground/flight/rotor) - this is a latent,
+codebase-wide characteristic, not something MINECRAFT-545 introduced,
+and not unique to float-only hulls. It only manifests catastrophically
+here because a position-locking joint's sudden correction is a uniquely
+demanding test of inertia accuracy that ordinary driving/floating never
+exercises.
+
+### The concrete blocker: no API exists, in the PINNED Sable version, to supply a correct inertia tensor
+
+Checked for a way to give DIV's own code control over the inertia tensor
+without touching Sable's own source: `BoxPhysicsObject` (in a DIFFERENT,
+newer-looking local checkout under
+`MINECRAFT-449/sable-local/common/src/main/java/...`) DOES have a second
+constructor accepting a `BoxMassProperties` record (mass + local center
+of mass + a caller-supplied inertia tensor, matrix validated symmetric-
+positive-definite). **This is NOT what's actually pinned and used by
+this project.** Decompiled the REAL resolved dependency
+(`sable-neoforge-1.21.1-2.0.5.jar`, confirmed via `build.gradle`'s own
+pin and the resolved file in `~/.gradle/caches/modules-2/...`) directly
+with `javap`: that jar's own `BoxPhysicsObject` has exactly ONE
+constructor, the legacy scalar-mass one - no `BoxMassProperties` class
+exists in it at all. Only two Sable versions are present in this
+machine's Gradle cache at all (`1.2.2`, `2.0.5` - the pinned one); no
+newer version is available locally to even consider as an upgrade
+target, and this investigation does not have authorization to fetch or
+pin a new third-party dependency version on its own.
+
+**Concrete blocker, stated plainly: DIV's own code has no available,
+supported way to give the ACTUALLY PINNED Sable dependency a
+shape-aware inertia tensor.** The only constructor Sable 2.0.5 exposes
+unconditionally computes the flawed `mass/6` fallback for every box body
+in this mod, with no override. A correction at this specific mechanism
+therefore cannot be made inside DIV's own source without either (a)
+bumping the pinned Sable dependency to a version that exposes
+`BoxMassProperties` (a cross-cutting dependency change, outside what one
+mod-side commit can respobsibly decide alone, and unverified whether
+such a published version even exists upstream from here), or (b) some
+other DIV-side compensating mechanism, which risks falling into the
+explicitly forbidden "arbitrary damping/reset" category John's own
+instruction already ruled out.
+
+**No patch or regression is implemented in this entry - reporting the
+mechanism evidence and this specific blocker for review, per 54403's own
+instruction to report "concrete mechanism/patch/regression or exact
+blocker."**
