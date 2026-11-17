@@ -957,6 +957,32 @@ class OverridesTest {
     "with no operator override, pack DIV metadata must still be used over staying null");
  }
 
+ @Test void gearRatioAwareHasNoFallbackAndStaysNullWhenNeverConfigured() {
+  // Same "stays null, not a default value" shape as axleDriveForceSharing/ackermannSteering
+  // above - PhysicsBridge.gearForceScale's own caller treats null/false as "disabled 1.0 no-op".
+  assertNull(Overrides.resolved("packid:not_configured").gearRatioAware);
+  assertNull(Overrides.defaultTuning().gearRatioAware);
+ }
+
+ @Test void gearRatioAwareParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.gearRatioAware = true;
+   Overrides.setForTest(java.util.Map.of("packid:gear_ratio_aware_vehicle", override));
+   assertEquals(true, Overrides.resolved("packid:gear_ratio_aware_vehicle").gearRatioAware,
+     "an explicit operator override must be used instead of staying null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+  var packMetadata = new Overrides.Tuning(); packMetadata.gearRatioAware = true;
+  assertEquals(true, Overrides.resolved("packid:not_configured", packMetadata, null, null).gearRatioAware,
+    "with no operator override, pack DIV metadata must still be used over staying null");
+ }
+
+ @Test void gearRatioAwareIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.gearRatioAware = true;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
  @Test void ackermannSteeringIsRejectedOnAPartOverride() {
   var part = new Overrides.Tuning(); part.ackermannSteering = true;
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);

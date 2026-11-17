@@ -66,6 +66,8 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   // must go through this same live-mutation path too.
   fresh.suspensionDampingRatioFront = 1.2; fresh.suspensionDampingRatioRear = 0.9;
   fresh.suspensionSpringMultiplierFront = 1.8; fresh.suspensionSpringMultiplierRear = 0.75;
+  // MINECRAFT-553: gearRatioAware must go through this same live-mutation path too.
+  fresh.gearRatioAware = true;
   List<String> applied = new ArrayList<>();
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertEquals(0.5, target.suspensionTravel); assertEquals(1.5, target.friction); assertEquals(9000.0, target.driveForce);
@@ -90,8 +92,9 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   assertEquals(2.5, target.longitudinalWaterDragMultiplier); assertEquals(0.4, target.lateralWaterDragMultiplier); assertEquals(3.0, target.verticalWaterDragMultiplier);
   assertEquals(1.2, target.suspensionDampingRatioFront); assertEquals(0.9, target.suspensionDampingRatioRear);
   assertEquals(1.8, target.suspensionSpringMultiplierFront); assertEquals(0.75, target.suspensionSpringMultiplierRear);
+  assertEquals(true, target.gearRatioAware);
   assertEquals(Set.of("suspensionTravel","friction","driveForce","brakeForce","maxSteerDegrees","marineSteerDegrees","lateralGripMultiplier","waterDrag","propellerForce","angularWaterDrag","antiRollStiffness","stallAngleDegrees","liftSlope","controlSurfaceSlope","aileronAuthorityScale","elevatorAuthorityScale","rudderAuthorityScale","brakeBiasFront","driveBiasFront",
-      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","rotorAngularDampingCoefficientPitch","rotorAngularDampingCoefficientRoll","rotorAngularDampingCoefficientYaw","fixedWingAngularDampingCoefficient","rotorAirDragCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing","ackermannSteering",
+      "cyclicLimitDegrees","cyclicAuthorityScale","yawAuthorityScale","suspensionDampingRatio","parasiticDragMultiplier","oswaldEfficiency","rotorAngularDampingCoefficient","rotorAngularDampingCoefficientPitch","rotorAngularDampingCoefficientRoll","rotorAngularDampingCoefficientYaw","fixedWingAngularDampingCoefficient","rotorAirDragCoefficient","toeFrontDegrees","toeRearDegrees","axleDriveForceSharing","ackermannSteering","gearRatioAware",
       "longitudinalWaterDragMultiplier","lateralWaterDragMultiplier","verticalWaterDragMultiplier",
       "suspensionDampingRatioFront","suspensionDampingRatioRear","suspensionSpringMultiplierFront","suspensionSpringMultiplierRear"),
     new TreeSet<>(applied));
@@ -230,6 +233,21 @@ class PhysicsBridgeLiveOverrideApplicationTest {
   PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
   assertNull(target.ackermannSteering, "must revert to unconfigured (null, uniform steer angle) once the override is removed");
   assertTrue(applied.contains("ackermannSteering"), "the revert-to-unconfigured must itself be reported as an applied live change");
+ }
+
+ @Test void removingAGearRatioAwareOverrideLiveAppliesBackDownToOffDefault() {
+  // MINECRAFT-553: same "revert to documented default on removal" requirement as
+  // axleDriveForceSharing/ackermannSteering above - an operator who previously opted in and then
+  // removes that config entry entirely must see the live vehicle actually fall back to the
+  // pre-ticket uniform-across-forward-gears drive force on the next reload (null/false), not get
+  // stuck opted in.
+  var target = Overrides.defaultTuning();
+  target.gearRatioAware = true;
+  var fresh = Overrides.defaultTuning(); // no override at all -> stays null, same as unconfigured
+  List<String> applied = new ArrayList<>();
+  PhysicsBridge.applyLiveSafeFields(target, fresh, applied);
+  assertNull(target.gearRatioAware, "must revert to unconfigured (null, every forward gear produces the same drive-force magnitude) once the override is removed");
+  assertTrue(applied.contains("gearRatioAware"), "the revert-to-unconfigured must itself be reported as an applied live change");
  }
 
  @Test void removingADirectionalWaterDragMultiplierOverrideLiveAppliesBackDownToItsDocumentedDefault() {

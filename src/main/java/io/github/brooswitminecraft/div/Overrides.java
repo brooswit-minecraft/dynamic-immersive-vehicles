@@ -449,6 +449,17 @@ public final class Overrides {
   // read live every tick by PhysicsBridge.stepGround, same as axleDriveForceSharing - see
   // PhysicsBridge.applyLiveSafeFields.
   public Boolean ackermannSteering;
+  // MINECRAFT-553: opt-in gear-aware ground drive force - see PhysicsBridge.gearForceScale's own
+  // doc for the full native gearRatios/reference-gear reasoning. null/false (the documented
+  // default) is a byte-identical no-op: unset reproduces the exact pre-ticket behavior where
+  // every forward gear produces the identical drive-force magnitude (only the gear's sign ever
+  // changed anything), same "unset means untouched" shape axleDriveForceSharing/ackermannSteering
+  // already use, not merely a conservative default value. true opts a vehicle INTO scaling drive
+  // force by its current gear's own native ratio magnitude relative to its first forward gear's
+  // ratio (so first gear is always unchanged), bounded to PhysicsBridge.MIN_GEAR_FORCE_SCALE/
+  // MAX_GEAR_FORCE_SCALE. Re-read live every tick by PhysicsBridge.stepGround, same as
+  // ackermannSteering - see PhysicsBridge.applyLiveSafeFields.
+  public Boolean gearRatioAware;
   /** Validates only fields this entry actually SET - an omitted (null) field is exactly as
    * valid as a present one; it just means "no operator override at this precedence level",
    * never "zero" or "the documented fallback value" implicitly. */
@@ -857,6 +868,7 @@ public final class Overrides {
    if (toeRearDegrees != null) throw new IllegalArgumentException("part overrides do not support 'toeRearDegrees' (vehicle-only concept - a part has no own axle position)");
    if (axleDriveForceSharing != null) throw new IllegalArgumentException("part overrides do not support 'axleDriveForceSharing' (vehicle-only concept - a part has no own axle position)");
    if (ackermannSteering != null) throw new IllegalArgumentException("part overrides do not support 'ackermannSteering' (vehicle-only concept - a part has no own axle position)");
+   if (gearRatioAware != null) throw new IllegalArgumentException("part overrides do not support 'gearRatioAware' (vehicle-only concept for this ticket - no part-level consumer yet)");
   }
  }
  /** Documented fallback for every field, used only once every higher precedence level (operator
@@ -976,6 +988,7 @@ public final class Overrides {
   c.toeRearDegrees=t.toeRearDegrees;
   c.axleDriveForceSharing=t.axleDriveForceSharing;
   c.ackermannSteering=t.ackermannSteering;
+  c.gearRatioAware=t.gearRatioAware;
   return c;
  }
  /** Every field of {@code child} that is {@code null} falls through to {@code parent}'s own
@@ -1038,6 +1051,7 @@ public final class Overrides {
   m.toeRearDegrees = child.toeRearDegrees!=null?child.toeRearDegrees:parent.toeRearDegrees;
   m.axleDriveForceSharing = child.axleDriveForceSharing!=null?child.axleDriveForceSharing:parent.axleDriveForceSharing;
   m.ackermannSteering = child.ackermannSteering!=null?child.ackermannSteering:parent.ackermannSteering;
+  m.gearRatioAware = child.gearRatioAware!=null?child.gearRatioAware:parent.gearRatioAware;
   return m;
  }
  /**
@@ -1287,6 +1301,7 @@ public final class Overrides {
   // (treated as "off", see AxleDriveForceSharing's own doc) unless some level actually sets it.
   result.axleDriveForceSharing = firstNonNullBoolean(override!=null?override.axleDriveForceSharing:null, packMetadata!=null?packMetadata.axleDriveForceSharing:null, ivAdapted!=null?ivAdapted.axleDriveForceSharing:null, physicallyDerived!=null?physicallyDerived.axleDriveForceSharing:null);
   result.ackermannSteering = firstNonNullBoolean(override!=null?override.ackermannSteering:null, packMetadata!=null?packMetadata.ackermannSteering:null, ivAdapted!=null?ivAdapted.ackermannSteering:null, physicallyDerived!=null?physicallyDerived.ackermannSteering:null);
+  result.gearRatioAware = firstNonNullBoolean(override!=null?override.gearRatioAware:null, packMetadata!=null?packMetadata.gearRatioAware:null, ivAdapted!=null?ivAdapted.gearRatioAware:null, physicallyDerived!=null?physicallyDerived.gearRatioAware:null);
   // Review finding (54547): validating packMetadata/ivAdapted/physicallyDerived individually
   // above (and override, already validated at config-load time by apply()'s own loop) only
   // proves each SOURCE is internally consistent on its own - it does not prove the actual
