@@ -6738,3 +6738,103 @@ instrumentation commit, or native run is made - the proposal above is
 descriptive only, pending direction. PR #39's own reconciliation-with-
 main authorization (54458) is acknowledged; not acted on in this entry
 since no specific merge need has been identified.
+
+## Event-level correlation (not just source review): refutes seed/terrain, finds real position match and a same-tick coincidence (54458/54464)
+
+Per 54458/54464: verify event-level premises (not just method source), get real
+operands/positions, distinguish the one non-crash success from the deterministic
+fixedseed545547 failures. Read-only; no run; no world mutation. Correlated by
+wall-clock-adjacent lines in the already-retained logs, not by assuming
+`level.getGameTime()` equals the probe's own `TOWING_UNAVAILABLE tick=N` counter
+(an error I made and caught myself before reporting it: an initial grep against
+gameTime=40-65 was the WRONG window entirely - that range belongs to an earlier
+phase of the run, not tick=53-60 of TOWING_UNAVAILABLE, which actually sits at
+real gameTime≈259-263. Found the correct mapping by matching line numbers/
+timestamps adjacent to the probe's own `TOWING_UNAVAILABLE tick=N` lines, not by
+number-matching the two different counters.)
+
+### Diagnostic-absence confirmed at the EVENT level, not just structurally
+
+Per 54464's point (1): source alone can't establish the call/float/diagnostics-
+enabled/capture premises. Checked directly: in Trial 1 and Trial 2, zero
+`buoyantForcesDiagnostic` lines exist for `towed` (v=51da4a15.../3c3a0d44...) in the
+real log region spanning `TOWING_UNAVAILABLE tick=1` through `tick=60`
+(confirmed by line-adjacency, not gameTime-number-matching). The FIRST such line
+for `towed` in either trial appears at `gameTime=264` - the exact same tick as
+`TOWING_REPLACEMENT`'s own pre-connect snapshot and the fresh joint's creation -
+with BOTH floats already at `submergedFraction=1.0`. `GroundContactDiagnostics.ENABLED`
+is confirmed on throughout (the `rotationalDrag=INACTIVE_THIS_TICK` line, which
+fires unconditionally when diagnostics are enabled regardless of submersion,
+appears for `towed` every tick immediately after this point). This is now an
+event-level confirmation, not an inference from source structure alone.
+
+### Real position data found; the seed/terrain hypothesis is REFUTED, not merely unconfirmed
+
+`TOWING_REPLACEMENT pre-connect` logs `towed`'s real `v.position` (MTS's own
+cached field, written every tick from `pose.position()` at `BuoyantBody.step`'s
+tail - not velocity-integrated) directly. Found this line already exists for
+all three runs - previously missed, not absent:
+
+- Trial 1 (crash): `towed=[X:17608.9561840256, Y:105.68233978949212, Z:17605.682513091262]`
+- Trial 2 (crash): same values, to every logged digit
+- Original non-crash reference run: same values, to every logged digit
+
+**`towed`'s actual position is byte-identical across all three runs at this
+exact transition**, not merely its velocity through tick 59 as previously
+established. Combined with 54459's own finding that the deterministic pool is
+identical between these worlds, this directly REFUTES (not just "unconfirmed")
+the prior entry's "the water surface itself differing between different-seeded
+worlds" explanation: the same real column is being queried against an already-
+confirmed-identical water surface in all three runs. Retracting that explanation
+outright, not merely re-labeling it unconfirmed.
+
+### What's actually different: velocity alone, one tick earlier, mechanism still unidentified
+
+The real, re-confirmed difference remains exactly where it was first localized:
+at `TOWING_UNAVAILABLE tick=60` itself, in `towed`'s logged velocity only - the
+non-crash run already shows a buoyancy-consistent kick (`linearVelocity=
+(0.1976,-4.881,-2.441)`, Y-decrement breaks from -0.55) while both crash trials
+show unmodified free fall continuing (`(0.07543,-5.039,-2.021)`, Y-decrement
+still exactly -0.55). One tick later, at the `TOWING_REPLACEMENT` pre-connect
+snapshot, position has already converged back to byte-identical across all
+three runs (per above) - consistent with the small (1/20s) time gap, not with a
+different trajectory. **The actual cause of the velocity-only divergence at
+tick=60, given now-confirmed-identical position and terrain at that moment, is
+not identified by this entry.** Restating this as the real open question,
+replacing the retracted seed/terrain explanation - not offering a new
+unverified guess in its place.
+
+### New operand-level fact: same-tick coincidence between water re-entry and the fresh joint
+
+In both crash trials, `towed`'s own first post-free-fall buoyant impulse
+(`gameTime=264`, both floats `submergedFraction=1.0`) lands in the exact same
+tick as `TOWING_REPLACEMENT`'s pre-connect snapshot and `towing2`'s joint
+creation/connection (confirmed by log-line adjacency, same tick). Stated
+precisely as a same-tick coincidence between two real, logged events - not
+claimed as a proven causal mechanism for the crash.
+
+### Remaining gap, stated precisely
+
+Per 54464's point (2): the per-float query actually used is `point =
+pose.position() + q.transform(localOffset - center)`, `waterSurface =
+waterSurfaceAt(point.x, point.z, point.y + radius + 1)`, `fraction =
+submergedFraction(point.y - radius, point.y + radius, waterSurface)` - read
+directly from `BuoyantForces.apply` (lines 62-68). The real position match
+found above is `v.position` (entity origin), not `pose.position()` plus the
+per-float arm - and no logged orientation quaternion exists at `tick=60` itself
+to reconstruct the exact per-float point/margin at that tick precisely. So
+while the ENTITY's real position is now confirmed identical across runs, the
+exact float-level margin to the water surface at tick=60 itself is still not
+measured - only the adjacent tick's (gameTime=264) real per-float worldArm/
+fraction values are available, and those already postdate the transition.
+
+### Disposition
+
+Trial 1 and Trial 2 remain fully consistent with each other (every cited value
+matches to the logged digit), as expected for a fixed, matched seed. The
+original non-crash run's own success is now understood differently than
+before: not a different terrain/position, but a one-tick-earlier velocity
+divergence whose own cause is unidentified. No DIV-fixable bug is established
+in this entry. No production change, instrumentation commit, or native run is
+made. Native gate remains CLOSED. PR #39 reconciliation-with-main authorization
+(54458) is acknowledged, not acted on - no specific merge need identified yet.
