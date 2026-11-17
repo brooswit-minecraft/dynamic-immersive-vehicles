@@ -7090,3 +7090,84 @@ Diff + two new pure test classes, committed. No native run performed. No
 gameplay/fixture PHYSICS/timing/pass-fail change - the probe's own new lines
 are read-only logging, same as its many existing diagnostic lines. Native
 gate remains CLOSED. No causal claim made or acceptance criteria weakened.
+
+## Second round of corrections per independent review 54494
+
+Per 54494's independent review of 5b29cac - each specific gap found, and fix:
+
+1. **"query logging is NOT bounded to fixture/body/window"** - `apply`'s own
+   detailed lines were still gated solely by the global `GroundContactDiagnostics`
+   flag; `DiagnosticWindow` only drove the probe's SEPARATE expected-body
+   marker. Added `DiagnosticContext` (new, `src/main/.../DiagnosticContext.java`):
+   a small static holder - `arm(bodyIds, startGameTime, endGameTime)`/
+   `disarm()`, with a PURE `matches(bodyId, gameTime)` (no static state,
+   directly testable) and a diagnostic-only `isActiveFor` accessor.
+   `BuoyantForces.apply`'s invocation marker and per-float line are now both
+   gated by `GroundContactDiagnostics.ENABLED && contextActive` - genuinely
+   bounded to the armed body/window, not merely the blanket flag. The probe
+   (`BuoyantHitchProbe`) arms it ONE TICK BEFORE the intended window starts
+   (`ticksInPhase == SHORT_PHASE_TICKS - 6`, i.e. 54) with an explicit,
+   continuous `gameTime` range (not either phase's own relative counter) -
+   so it is armed before the NEXT tick's own entity-ticking force hook runs
+   (confirmed ordering: Sable's native step → entity ticking/force hook →
+   `ServerTickEvent.Post`, where this probe code itself runs, always AFTER
+   the SAME tick's own force hook) - then re-arms with `towing2` added at
+   `TOWING_REPLACEMENT`'s own transition tick, before towing2's own first
+   force hook (which can't happen before the NEXT Minecraft tick, since it
+   was only just spawned in this same block). The probe's existing separate
+   expected-body marker is retained unchanged, as instructed.
+2. **"`visitedCount` currently reports 25 even at early water return"** -
+   confirmed real: the prior `WaterScanResult` always reported the scan's
+   MAXIMUM capacity, computed from bounds alone, regardless of where (or
+   whether) a match actually occurred. Fixed by extracting the loop itself
+   behind a pure `FluidHeightLookup` callback seam
+   (`scanForWater(int fromYFloor, FluidHeightLookup)`) that counts the REAL
+   number of lookups performed before returning - early return preserved
+   exactly, `iterations` now reflects the true per-call count. The old
+   bounds-only function is kept, renamed `maxPossibleIterations` to say
+   plainly what it actually is (the capacity, not the real count) - per
+   54494's own "record actual iterations or rename maximum capacity
+   accurately." The production `scanForWater(ServerLevel, ...)` overload now
+   just supplies the one real `getFluidState` call as that lookup - still a
+   single query per visited Y, unchanged behavior.
+3. **"Restore explicit floorX/floorZ and full-precision individual...
+   components (JOML formatted strings lose boundary precision)"** - both
+   fixed: `queryFloorX`/`queryFloorZ` restored as explicit fields (dropped
+   in the prior round's rewrite); `pose.position()`/`q`/`point` are now
+   logged as individual `String.valueOf(double)` components
+   (`consumedPosePositionX/Y/Z`, `consumedPoseOrientationX/Y/Z/W`,
+   `pointX/Y/Z`) rather than via JOML's own `toString()`, which truncates to
+   limited significant digits/scientific notation - the exact lossy
+   formatting this whole investigation has already had to route around
+   repeatedly when reading OTHER log lines.
+4. **"Existing predicate/arithmetic tests do not establish actual apply
+   gating, reset-spanning window or original-query count/result
+   preservation... correct 54491 coverage claims"** - retracting 54491's
+   implicit claim that the existing tests covered gating/window/query-count
+   preservation; they covered only the window PREDICATE and the bounds
+   ARITHMETIC in isolation, not whether `apply` actually consults either, or
+   whether early-return/iteration-counting behaves correctly. Added, this
+   round: `DiagnosticContextTest` (5 tests - matches-in-range, outside-
+   range-either-side, body-not-in-set, nothing-armed, re-arm-replaces-the-
+   window exactly as the phase-reset re-arm above relies on) and extended
+   `BuoyantForcesWaterScanBoundsTest` with 4 new callback-seam tests
+   (early-match stops at `iterations=1`; a late match at the 10th lookup
+   reports `iterations=10`, not 25; no-match visits the full
+   `maxPossibleIterations` and reports `NEGATIVE_INFINITY`; the lookup is
+   never called outside `[bottomY, fromYFloor]`, enforced by a fake lookup
+   that throws if it is). All pure, no `ServerLevel`.
+
+Test receipt: `gradle test --tests io.github.brooswitminecraft.div.DiagnosticWindowTest --tests io.github.brooswitminecraft.div.DiagnosticContextTest --tests io.github.brooswitminecraft.div.BuoyantForcesWaterScanBoundsTest` under the existing exclusive slot - BUILD SUCCESSFUL; XML results: `DiagnosticWindowTest` tests="4" failures="0" errors="0"; `DiagnosticContextTest` tests="5" failures="0" errors="0"; `BuoyantForcesWaterScanBoundsTest` tests="7" failures="0" errors="0" (16 total this round, 23 cumulative with the first round's 7).
+
+Disclosed limit, unchanged from the prior round: `DiagnosticContext`'s own
+arm/disarm static-state wiring into the probe, and `scanForWater`'s real
+`getFluidState` call, are still not exercised by these pure suites - that
+needs a real `ServerLevel`/dedicated server, outside this round's "no
+native run" constraint. Named explicitly, not assumed covered.
+
+### Disposition
+
+Diff + 2 new/extended pure test classes, committed. No native run performed.
+No gameplay/fixture physics/timing/pass-fail change - the probe's own new
+lines remain read-only logging/context-arming, not a behavior change.
+Native gate remains CLOSED. No causal claim made or acceptance weakened.

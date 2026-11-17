@@ -533,6 +533,18 @@ public final class BuoyantHitchProbe {
   LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE tick=" + ticksInPhase
     + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
     + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
+  // MINECRAFT-545/547 (John's comment 54494): arm the shared DiagnosticContext here, one tick
+  // BEFORE the intended window starts (ticksInPhase==SHORT_PHASE_TICKS-6, i.e. 54), so it is
+  // already armed by the time the NEXT Minecraft tick's own entity-ticking force hook (which runs
+  // BEFORE this ServerTickEvent.Post-based method, on each tick) reaches ticksInPhase==55. The
+  // window is an explicit, continuous gameTime range (not either phase's own relative tick
+  // counter) with generous forward margin so it safely spans the TOWING_UNAVAILABLE→
+  // TOWING_REPLACEMENT phase reset below - the actual restriction still comes from the body-ID
+  // set, not from this margin being tight.
+  if (ticksInPhase == SHORT_PHASE_TICKS - 6) {
+   long now = towed.world.getTime();
+   io.github.brooswitminecraft.div.DiagnosticContext.arm(java.util.Set.of(towed.uniqueUUID), now + 1, now + 15);
+  }
   // MINECRAFT-545/547 (John's comment 54486): an "expected-body-this-tick" marker, logged OUTSIDE
   // BuoyantForces.apply (this fixture already knows its own body IDs/window; apply() itself must
   // not special-case any fixture) - restricted to towed and this phase's own final 6 ticks (55-60)
@@ -589,6 +601,15 @@ public final class BuoyantHitchProbe {
    var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
    towing2.connectTrailer(connection, false);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position);
+   // MINECRAFT-545/547 (John's comment 54494): re-arm the shared DiagnosticContext to include the
+   // newly-created towing2 - its own first force hook runs on the NEXT Minecraft tick (it was
+   // only just spawned, this same probe-processing block, so it has not been ticked yet), so this
+   // re-arm still lands BEFORE that body's own first intended force hook, same as the original
+   // arm above did for towed.
+   {
+    long now = towed.world.getTime();
+    io.github.brooswitminecraft.div.DiagnosticContext.arm(java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), now, now + 15);
+   }
    // MINECRAFT-545/547 (John's comment 54486): the same expected-body marker as
    // TOWING_UNAVAILABLE's own tail, extended to cover this phase's intended transition tick (its
    // own ticksInPhase==1, not TOWING_UNAVAILABLE's nonexistent "tick 61") for both towed and the
