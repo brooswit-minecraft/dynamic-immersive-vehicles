@@ -1,0 +1,74 @@
+name: TEMP release.yml validation (delete before merge)
+
+# Disposable, review-requested validation (MINECRAFT-550): release.yml is
+# workflow_dispatch-only and GitHub refuses to dispatch a workflow_dispatch
+# workflow that only exists on a non-default branch, so it cannot be exercised
+# for real pre-merge. This copies release.yml's exact resolve/sanitize/
+# checksum/upload logic (skipping the slow full `gradle build` - a dummy jar
+# is enough to exercise naming and archive layout) behind a pull_request
+# trigger instead, with a REF literal that contains a slash, and verifies the
+# downloaded artifact's checksum against its own extracted layout. This file
+# must never reach main - delete it in the same disposable PR.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Resolve the checked-out commit and a safe artifact label
+        id: resolved
+        env:
+          REF: minecraft-550/simplify-ci-regression-release
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          safe_ref="$(printf '%s' "$REF" | tr -c 'A-Za-z0-9._-' '-')"
+          echo "safe_ref=$safe_ref" >> "$GITHUB_OUTPUT"
+          echo "REF under test: $REF"
+          echo "safe_ref: $safe_ref"
+
+      - name: Build a dummy jar standing in for the real `gradle build` output
+        run: |
+          mkdir -p build/libs
+          echo "dummy release artifact for MINECRAFT-550 validation" > build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar
+
+      - name: Record the resolved commit and artifact checksum
+        run: |
+          echo "${{ steps.resolved.outputs.sha }}" > build/RELEASE_COMMIT.txt
+          cd build
+          sha256sum libs/*.jar > artifact-checksums.txt
+          cat artifact-checksums.txt
+
+      - name: Upload release artifact
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: dynamic-immersive-vehicles-release-${{ steps.resolved.outputs.safe_ref }}-${{ steps.resolved.outputs.sha }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            build/libs/*.jar
+            build/artifact-checksums.txt
+            build/RELEASE_COMMIT.txt
+
+      - name: Show the artifact name actually used (proves no '/' survived)
+        run: |
+          echo "Uploaded as: dynamic-immersive-vehicles-release-${{ steps.resolved.outputs.safe_ref }}-${{ steps.resolved.outputs.sha }}"
+
+      - name: Download the artifact into a clean directory, exactly as a consumer would
+        uses: actions/download-artifact@v7
+        with:
+          name: dynamic-immersive-vehicles-release-${{ steps.resolved.outputs.safe_ref }}-${{ steps.resolved.outputs.sha }}
+          path: downloaded
+
+      - name: Verify the checksum manifest against the downloaded layout
+        run: |
+          echo "=== downloaded layout ==="
+          find downloaded -type f
+          cd downloaded
+          sha256sum -c artifact-checksums.txt
