@@ -1501,6 +1501,18 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, tooLow::validate);
  }
 
+ @Test void partEntrySettingNonFiniteLateralGripMultiplierStillFailsPlainValidation() {
+  // Self-review finding: the ticket explicitly requires non-finite coverage, not just finite
+  // out-of-range values - validate()'s own lateralGripMultiplier check is
+  // Double.isFinite(...) && >0 && <=1, so NaN and either infinity must all fail loudly too.
+  var nan = new Overrides.Tuning(); nan.lateralGripMultiplier = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nan::validate, "a NaN lateralGripMultiplier must fail validate()");
+  var positiveInfinity = new Overrides.Tuning(); positiveInfinity.lateralGripMultiplier = Double.POSITIVE_INFINITY;
+  assertThrows(IllegalArgumentException.class, positiveInfinity::validate, "a positive-infinity lateralGripMultiplier must fail validate()");
+  var negativeInfinity = new Overrides.Tuning(); negativeInfinity.lateralGripMultiplier = Double.NEGATIVE_INFINITY;
+  assertThrows(IllegalArgumentException.class, negativeInfinity::validate, "a negative-infinity lateralGripMultiplier must fail validate()");
+ }
+
  @Test void partLateralGripMultiplierOverrideInheritsThroughAnExtendsTemplate() {
   try {
    var template = new Overrides.Tuning(); template.lateralGripMultiplier = 0.55;
@@ -1581,6 +1593,24 @@ class OverridesTest {
    assertFalse(badResult2.success(), "an out-of-range part lateralGripMultiplier (1.5) reload must also be rejected");
    assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
      "a second rejected reload must still retain the same prior good part lateralGripMultiplier override");
+
+   // Self-review finding: the ticket explicitly requires non-finite reload coverage too, not
+   // just finite out-of-range values - Tuning.validate()'s own lateralGripMultiplier check uses
+   // Double.isFinite(...) (see that bound's own doc), so both NaN and an infinity must also be
+   // rejected while retaining the same prior good override.
+   var nanTire = new Overrides.Tuning(); nanTire.lateralGripMultiplier = Double.NaN;
+   var badResult3 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", nanTire)));
+   assertFalse(badResult3.success(), "a NaN part lateralGripMultiplier reload must be rejected, not silently applied");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "a NaN-rejected reload must still retain the same prior good part lateralGripMultiplier override");
+
+   var infiniteTire = new Overrides.Tuning(); infiniteTire.lateralGripMultiplier = Double.POSITIVE_INFINITY;
+   var badResult4 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", infiniteTire)));
+   assertFalse(badResult4.success(), "a positive-infinity part lateralGripMultiplier reload must be rejected, not silently applied");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "an infinity-rejected reload must still retain the same prior good part lateralGripMultiplier override");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }
