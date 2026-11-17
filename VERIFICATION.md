@@ -6199,3 +6199,122 @@ sharpened mechanism back for direction - specifically whether this
 closes the mechanism-identification question (even without a DIV-side
 fix being currently possible) or whether further investigation is
 wanted.
+
+## Retraction of overclaims; localization sharpened to TOWING_REPLACEMENT specifically (54425)
+
+John's comment 54425: the DETACH-reattach chronology (previous entry) is
+useful LOCALIZATION, not mechanism closure - chronology alone does not
+prove the 550Hz spring is the cause, that "all energy is native," that
+there is no DIV-fixable bug, or that DIV's own impulses are exempt from
+actual accounting ("modest" is not accounting evidence). **All four
+overclaims are retracted here explicitly.** What follows is read-only
+work addressing the concrete gaps named, no code change, no new run.
+
+### Retracted claims, restated honestly
+
+- "This is the same mechanism... correcting the real gap... in one
+  step" - RETRACTED as a proof. The timing is consistent with that
+  explanation; consistency is not proof. No native-internal read-back
+  of the actual per-substep impulse during this specific solve exists -
+  this remains an open, unmeasured quantity, not inferred as confirmed.
+- "All energy injection happens entirely inside the native joint solve"
+  - RETRACTED as stated; see the quantified check below, which supports
+  but does not single-handedly prove this.
+- "Still not a DIV-fixable production bug" - RETRACTED as a conclusion.
+  No DIV-fixable bug has been FOUND, which is different from none
+  existing.
+- Calling DIV's own per-float impulses "modest" and treating that as
+  sufficient - RETRACTED; replaced with an actual quantified comparison
+  below.
+
+### Quantified DIV-impulse accounting over the actual bracket (not "modest")
+
+Summed `towed`'s own logged per-float `appliedImpulse`/`worldArm` (world
+frame, as logged) over `gameTime` 201-203 (Trial 1's log, the bracket
+immediately preceding the jump): SUM linear impulse ≈
+`(-0.15, 474.76, -0.39)` kg·m/s (consistent with buoyancy, dominantly
+vertical). SUM lever-arm angular impulse (`Σ worldArm × appliedImpulse`)
+≈ `(-28.1, -0.19, -90.07)` kg·m²/s.
+
+Compared this against the angular impulse REQUIRED to produce the
+observed `Δω` (from `(0.119, 0.063, -0.032)` at gameTime=203 to
+`(-73.00, -13.84, 87.99)` at gameTime=204, i.e. `Δω ≈ (-73.12, -13.90,
+88.02)` rad/s), via `L = I·Δω` using the solid-box inertia tensor
+(`I ≈ (145.33, 181.33, 60.0)` kg·m² - the CHOSEN model, not proven to
+match whatever Rapier's own `ColliderBuilder::mass()` actually computed
+internally; the best available estimate, stated as such):
+`L_required ≈ (-10625, -2521, 5281)` kg·m²/s.
+
+**DIV's own logged impulses account for roughly 0.008%-1.7% of the
+required angular impulse on each axis** (|-28.1/-10625|≈0.26% on X,
+|-0.19/-2521|≈0.008% on Y, |-90.07/5281|≈1.7% on Z) - two to four orders
+of magnitude too small. This is a real, quantified finding (not "modest"
+by assertion): DIV's own force/impulse accounting cannot explain this
+specific jump, on any axis, by a wide margin. It does NOT by itself
+prove the native joint spring IS the explanation - only that DIV's own
+measured contribution is not.
+
+### Duplicate/stale native constraint - checked via source, not assumed
+
+Read `HitchRegistry.reconcile`/`release` directly: `reconcile` ALWAYS
+calls `release(trailer)` (which calls `.remove()` on any existing
+`PhysicsConstraintHandle`) BEFORE constructing a new one via `create.get()`
+- synchronously, same method, no gap - and a `null` result from `create`
+is treated as a failed creation (throws), never silently leaving a
+stale/duplicate entry. The observed fresh `createHitchDiagnostic` firing
+at the `DETACH`-reattach confirms the registry's own bookkeeping was
+already clean at that point (consistent with `disconnectTrailer` having
+triggered a `reconcile(trailer, null, ...)` call earlier, which only
+releases, never creates) - **no duplicate or stale Java-side constraint
+registration found.** Native-side double-registration beneath this
+(e.g. if `.remove()`'s own native call were itself buggy) was NOT
+independently verified - stated as unchecked, not ruled out.
+
+### Comparison against the SAME phase in the earlier SUCCESSFUL isolated run - the actual discriminating result
+
+Compared the exact same `DETACH`-reattach bracket (`TOWING_UNAVAILABLE
+pre-remove()`/`post-remove()`) against the ORIGINAL, retained
+NON-CRASHING isolated run (`M545-isolated-rundir-20261116T224049Z`),
+not an unmatched post-failure sample as 54425 cautioned against:
+
+```
+non-crash run: towing.angularVelocity=(-41.40,-12.50,-3.443) towed.angularVelocity=(-73.00,-13.84,87.99)
+Trial 1 (crash): towing.angularVelocity=(-41.40,-12.50,-3.44)  towed.angularVelocity=(-73.00,-13.84,87.99)
+```
+
+**Identical (to logged/displayed precision) between the crash and the
+non-crash run.** This means the `DETACH`-reattach jump, whatever
+produces it, is NOT the differentiator between outcomes - it happens
+the same way regardless of what ultimately crashes. Combined with the
+earlier-established comparison (54379/54382: `TOWING_UNAVAILABLE` ticks
+1-59 are also identical between runs; the FIRST measured divergence is
+at tick=60, which is the SAME tick `TOWING_REPLACEMENT`'s own setup
+(spawning `towing2`, re-attaching to IT specifically) begins) - **the
+actual crash/non-crash divergence is localized to `TOWING_REPLACEMENT`'s
+own reconnect, against a freshly-spawned vehicle with no prior stepping
+history, NOT to `DETACH`'s reconnect against the already-established,
+already-stepped original `towing`.** This is the one concrete,
+falsifiable localization this entry can actually support.
+
+### Precision/provenance caveats, restated (not dropped)
+
+- All pose/orientation values cited above come from log lines printed
+  at reduced precision (position to 3 decimals, orientation to 3
+  decimals, velocities in scientific notation to 4 significant figures)
+  - exact anchor-world separation at either reconnect was NOT
+  recomputed to full precision in this entry; the inertia tensor used
+  for the required-impulse estimate is the CHOSEN solid-box model, not
+  a measured or native-confirmed value.
+- The pinned-tag native source read in prior entries remains only
+  textually matched to the version string, not independently proven
+  identical to the actual running `.so` binary (restated per 54422's
+  own caveat, not re-verified this round).
+
+### Proposed next step (not executed - discriminating, bounded)
+
+Compare `TOWING_REPLACEMENT`'s own pre-connect bracket specifically
+(`towing2`'s freshly-spawned position/velocity vs. `towed`'s own state
+at that moment) between a crash run and the non-crash run, the same way
+this entry just did for `DETACH`'s reconnect - since the divergence is
+now localized there, not at `DETACH`. Proposed, not executed, pending
+direction.
