@@ -59,13 +59,41 @@ final class BuoyantForces {
   double volumePerFloat = floats.isEmpty() ? 0 : hullVolume / floats.size();
   boolean awake = false;
   double totalFraction = 0;
+  // MINECRAFT-545/547 (John's comment 54469/54483): invocation/enumeration marker, gated behind
+  // the SAME existing opt-in GroundContactDiagnostics flag as every other diagnostic line in this
+  // method - not unconditional/general-production logging. Fires once per apply() call regardless
+  // of float count, so a reader can distinguish "apply never invoked this tick for this body" (no
+  // line at all) from "invoked with zero floats" (line present, floatCount=0) from "invoked,
+  // floats present, but every one skipped" (this line present with floatCount>0, no per-float
+  // non-skip line below) - a missing per-float line alone is not proof of which case occurred.
+  if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+    "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
+      + " applyInvoked=true floatCount=" + floats.size()
+      + " poseRefreshGameTime=" + PhysicsBridge.debugLastPoseUpdateGameTime(v));
   for (var flt : floats) {
    double radius = Math.max(.1, flt.getHeight() / 2);
    Vector3d anchor = new Vector3d(flt.localOffset.x, flt.localOffset.y, flt.localOffset.z).sub(center);
    Vector3d arm = q.transform(new Vector3d(anchor));
    Vector3d point = new Vector3d(pose.position()).add(arm);
+   int queryFloorX = Mth.floor(point.x), queryFloorZ = Mth.floor(point.z), queryFromYFloor = Mth.floor(point.y + radius + 1);
    double waterSurface = waterSurfaceAt(level, point.x, point.z, point.y + radius + 1);
    double fraction = Buoyancy.submergedFraction(point.y - radius, point.y + radius, waterSurface);
+   // MINECRAFT-545/547 (John's comment 54469/54483) - diagnostic-only, same opt-in flag, fired
+   // BEFORE the skip below so it covers every float every tick (not just the ones that go on to
+   // apply a force): the exact per-float query inputs/outputs, reusing the SAME waterSurface/
+   // fraction values already computed above - no second fluid query is performed for this line.
+   // waterSurfaceResult distinguishes NO_WATER_FOUND_IN_RANGE (waterSurfaceAt's own documented
+   // NEGATIVE_INFINITY sentinel - no water tag found in its 24-block downward scan) from a real
+   // found height where the float's own bottom (point.y-radius) still sits above it - two
+   // mechanistically different "not submerged" causes this line can now tell apart.
+   if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+     "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
+       + " floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
+       + " radius=" + radius + " center=" + center + " point=" + point
+       + " queryFloorX=" + queryFloorX + " queryFloorZ=" + queryFloorZ + " queryFromYFloor=" + queryFromYFloor
+       + " searchBottomY=" + (queryFromYFloor - 24)
+       + " waterSurfaceResult=" + (waterSurface == Double.NEGATIVE_INFINITY ? "NO_WATER_FOUND_IN_RANGE" : String.valueOf(waterSurface))
+       + " fraction=" + fraction + " skip=" + (fraction <= 0));
    flt.contactThisTick = fraction > 0;
    totalFraction += fraction;
    if (fraction <= 0) continue;

@@ -6921,3 +6921,73 @@ commit, or native run is made - this entry is the bounded packet specification
 itself, pending direction on whether/when to implement and run it. Preserving
 all existing constraints: native gate CLOSED, worlds/evidence/fixture
 untouched, sole owner, existing slot only, no external outreach.
+
+## Implementing the authorized bounded diagnostic logging (54483)
+
+Per 54483: implement ONLY the bounded observational logging under the existing
+exclusive Gradle slot; no native run authorized by this approval. Implemented
+in `BuoyantForces.apply` (diff committed, see below):
+
+- An invocation/enumeration marker, gated behind the SAME existing opt-in
+  `GroundContactDiagnostics.ENABLED` flag as every other diagnostic line here
+  (not unconditional/general-production logging) - fires once per `apply()`
+  call with `floatCount` and `PhysicsBridge.debugLastPoseUpdateGameTime(v)`
+  (an existing diagnostic-only accessor, already present for exactly this
+  purpose - no new field/parameter plumbing needed). This directly
+  distinguishes "apply never invoked this tick" (no line) / "invoked, zero
+  floats" (line, floatCount=0) / "invoked, floats present, all skipped" (this
+  line present, no per-float non-skip line follows) - per 54483's own point
+  that a missing line alone is not proof of which case occurred.
+- A per-float line moved BEFORE the existing `fraction <= 0` skip (so it
+  covers every float every tick, not just non-skipped ones), reusing the
+  SAME already-computed `waterSurface`/`fraction` local variables - no second
+  `waterSurfaceAt`/`getFluidState` call is made for this line, preserving the
+  original query order/count exactly as required. Logs the real per-float
+  geometry (`localOffset`, `radius`, `center`, the computed world `point`,
+  the exact `floor(x)`/`floor(z)/floor(fromY)` integer coordinates
+  `waterSurfaceAt` itself starts its scan from, the scan's lower bound) and
+  the result as `waterSurfaceResult=NO_WATER_FOUND_IN_RANGE` (the documented
+  `NEGATIVE_INFINITY` sentinel) or the real found height - distinguishing
+  water-absent from water-present-but-unsubmerged, per 54483.
+- Used `level.getGameTime()` directly (no hardcoded gameTime range anywhere in
+  the diff) - per 54483's correction that TOWING_UNAVAILABLE's own tick
+  counter resets at 60 into TOWING_REPLACEMENT's own tick=1, so no fixed
+  "tick 61" or hardcoded historical "259-265" window exists in the code; the
+  relevant window is identified AFTER a future run, by matching against the
+  probe's own phase-transition log lines, whatever real gameTime those land
+  at for that run.
+
+No gameplay/fixture/physics change: both new lines are read-only logging
+statements, placed so they do not alter control flow, computed values, or
+query count/order. Compiled cleanly: `gradle compileJava` under the existing
+exclusive `/tmp/div-gradle-slot.lock` slot, no native run.
+
+### Regression test: not delivered - genuine infeasibility, not an oversight
+
+Checked this codebase's own existing test suite for a pattern to extend: no
+test anywhere in `src/test` constructs or fakes a `ServerLevel` (confirmed by
+search) - `BuoyantForces.apply`'s own direct dependency on
+`level.getFluidState(...)` has no existing seam for this. Mockito (or any
+mocking library) is not a project dependency (checked `build.gradle`
+directly), and `ServerLevel` is a large, mostly-concrete Minecraft class not
+practically fakeable by hand-rolled subclassing within this scope. A real
+regression run would need either a new test-only mocking dependency (a
+build.gradle change beyond this bounded logging change) or a real dedicated
+server/world (which would itself be a native run, not authorized by 54483).
+
+Rather than fabricate a test that doesn't genuinely exercise this code, or
+silently skip the requirement, reporting this limitation directly: the
+logging diff's correctness (single query preserved, no control-flow change)
+is verified by direct code inspection (the new lines read the SAME local
+`waterSurface`/`fraction` variables already computed above them, no new call
+sites added) and by a clean compile, not by an executed test. Asking for
+direction: whether adding Mockito as a test-only dependency is in scope for a
+future round, or whether code-inspection + compile is accepted as sufficient
+for this specific change.
+
+### Disposition
+
+Diff only - no native run performed or requested. Native gate remains CLOSED.
+No gameplay/fixture/physics behavior changed. No causal claim made or
+acceptance criteria weakened. Preserving old worlds/evidence, sole branch/
+owner, existing lock only, no external outreach/security/Zippy.
