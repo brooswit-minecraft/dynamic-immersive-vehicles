@@ -5869,3 +5869,76 @@ completed successfully in this environment.
 No native/Minecraft dedicated-server run was performed. Native gate
 remains closed pending the coordinator's own review of this evidence and
 an isolated packet, per 54411.
+
+## Mechanism FALSIFIED by direct native-source trace (54413) - the inertia fix is inert
+
+John's comment 54413 independently traced the ACTUAL pinned native
+`createBox` implementation and found the premise behind `b1264a7`/`a29c8d9`
+is wrong. Traced it myself too, fetching the exact pinned Sable source
+(`gh api repos/ryanhcode/sable/contents/.../boxes.rs?ref=<tag
+mc1.21.1-2.0.5-neoforge's own commit, 6966d292...>` - the REAL pinned
+tag, resolved via `gh api .../git/refs/tags/mc1.21.1-2.0.5-neoforge`, not
+guessed). **Confirmed, independently, exactly what 54413 reported:**
+
+```rust
+// Java_..._Rapier3D_createBox (sable_rapier/src/boxes.rs, pinned tag)
+let collider = ColliderBuilder::new(SharedShape::cuboid(
+    half_extent_x as Real, half_extent_y as Real, half_extent_z as Real,
+)).mass(mass as Real).friction(0.45).build();
+```
+
+`createBox` receives raw `mass`/`half_extent_x/y/z`/`pose` as plain JNI
+scalar parameters - **no inertia tensor, and no call to Java's
+`getMassTracker()`, anywhere in this function.** Rapier's own
+`ColliderBuilder::mass(mass)` on a `SharedShape::cuboid(...)` makes
+Rapier compute ITS OWN internal mass properties (including inertia)
+directly from the collider's real shape and the given scalar mass - a
+built-in Rapier mechanism, entirely independent of Sable's Java-side
+`MassData`/`BoxMassData`/`getMassTracker()` fallback.
+
+**This means: the native rigid body already gets a shape-aware inertia
+tensor, computed by Rapier itself, regardless of what Sable's Java
+`getMassTracker()` returns for a `BoxPhysicsObject` created this way.**
+`ShapeAwareBoxPhysicsObject`'s override changes what a JAVA caller
+reading `getMassTracker()` observes - and nothing else. It is NEVER
+consulted by `createBox`, so it has **NO EFFECT on the actual native
+simulation.** The `mass/6` fallback this fix targeted was never the
+native body's real inertia in the first place - it was Java-side
+metadata, orthogonal to the native value. Also confirmed, per 54413: the
+package-private `setMassPropertiesFrom(MassData)` (the ONE place
+`MassData`/`getMassTracker()` output actually gets uploaded to native)
+is called from `onStatsChanged(ServerSubLevel)`, not from box creation -
+a path `BuoyantBody`'s own construction never triggers.
+
+**The candidate mechanism identified in 54405/06/b1264a7/a29c8d9 is
+RETRACTED - falsified by direct trace of the actual pinned native
+source, not merely unproven.** The fix changes zero native behavior; the
+Java-level unit tests added (`BoxInertiaTest`, `ShapeAwareBoxPhysicsObjectTest`)
+are real and correctly demonstrate the JAVA override works as Java
+code - they do NOT, and never did, demonstrate anything about native
+behavior. That distinction - Java metadata vs. actual native mass
+properties - is exactly what 54413 named, and is now confirmed directly.
+
+Per 54413's own instruction ("preserve patch/evidence"), the existing
+commits (`b1264a7`, `a29c8d9`) are NOT reverted or deleted - they remain
+as retained evidence of this falsified attempt, same as every other
+retained artifact in this investigation. `BuoyantBody` still constructs
+`ShapeAwareBoxPhysicsObject` - this is now known to be harmless (the
+override is simply never consulted) but is NOT a fix, and must not be
+represented as one going forward.
+
+**No real mechanism for the ordinary-reconnect crash has been
+established.** The candidates investigated and their current status:
+joint stiffness/ERP knob - none exists (54405/06); stale-pose anchor -
+ruled out, pos1/pos2 are pure static body-local geometry (54405/06);
+shape-ignorant Java-side inertia fallback - FALSIFIED as a native-
+behavior explanation (this entry). Remaining, not yet investigated:
+frame-conversion correctness in `connectionRotationVehicleLocal`/the
+joint's `orientation1`/`orientation2` (though `lockedAxes` for an
+ordinary connection locks no angular axis, which may make this moot -
+not yet re-checked against this specific finding), and force/impulse
+accounting/ordering in the actual per-tick sequencing. No further
+production change is proposed in this entry - reporting the trace result
+and the now-fully-open mechanism search back for direction, per 54413's
+own request to "report actual trace/regression and next supported
+correction or precise API blocker."
