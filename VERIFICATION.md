@@ -5251,3 +5251,97 @@ outcome.
 **This is a plan returned for parent authorization - no directory has
 been created, no gradle task run, no world generated, and no launch
 performed for this section.**
+
+## Both trial gate packets prepared (54388) - setup/prep executed, NO launch performed
+
+John's comment 54388: parent conditionally authorized the two-trial fixed-
+seed design and explicitly authorized SETUP/PATH-FIX/PREP work now - but
+"DO NOT launch either until coordinator independently verifies" each gate
+packet, and "no implicit release from this comment." Accordingly,
+everything below was actually executed; **no Minecraft/java process was
+launched for either trial** - only directory/config preparation, the
+exclusive-lock-serialized `gradle prepareServerRun createServerLaunchScript`
+calls needed to produce and verify each trial's own launcher, and the
+construction (never invocation) of each trial's own wrapper.
+
+### Fixed seed and destinations
+
+`level-seed=545547`, identical in both trials.
+- Trial 1: `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-trial1-seed545547/rundir`
+- Trial 2: `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-trial2-seed545547/rundir`
+
+### Verified for BOTH trials (live, not assumed)
+
+- `realpath` distinct from `run/`, from each other, and from the
+  already-retained `M545-isolated-rundir-20261116T224049Z`.
+- Per-file `stat -c '%d:%i'` on all 8 copied config files: every pair
+  DISTINCT from the original `run/config` - no symlink/hardlink
+  aliasing, for both trials independently.
+- Trial 1's and Trial 2's own `eula.txt`/`server.properties` are
+  distinct inodes from each other too (not accidentally sharing a file).
+- Both trials' copied config files hash BYTE-IDENTICAL to the original
+  `run/config` (confirmed via `isolated-input-manifest.sha256` in each
+  trial's own directory). Both trials' `server.properties` hash
+  IDENTICAL to each other (`bc96ed40c64df9e2498b5110cc68df9bfd8147eddaace2f3782b79f473f8205e`)
+  - confirming the seed substitution is the only difference from the
+    original and is identical between trials.
+- No `world/` directory exists yet in either trial's `rundir`.
+- Worktree drift check: `git status` clean at commit `fa1c803`;
+  compiled classes re-hashed and matched the already-recorded
+  `compiled-instrumentation.sha256` with zero drift before any gradle
+  task ran.
+- `gradle prepareServerRun createServerLaunchScript` run ONCE per trial,
+  sequentially, under `/tmp/div-gradle-slot.lock` (claimed/released as
+  `M545-trial1-prep` then `M545-trial2-prep`, logged in
+  `/tmp/div-gradle-slot.owner`) - config-generation only, no JVM launch.
+- For EACH trial, independently read the regenerated
+  `build/moddev/runServer.sh`'s own literal `cd '...'` argument and
+  confirmed byte-for-byte it equals THAT trial's own `rundir` (not the
+  other trial's, not `run/`, not the original isolated run's) - BEFORE
+  archiving a copy into that trial's own evidence directory.
+- Each trial's own archived `runServer.sh`/`serverRunClasspath.txt`/
+  `serverRunVmArgs.txt`/`serverRunProgramArgs.txt`, with
+  `generated-launch-artifacts.sha256` recorded in that trial's own
+  directory. The classpath/VM-args/program-args hashes are IDENTICAL
+  across both trials AND identical to the original single-trial run's
+  own recorded hashes (`317bc204...`/`1a25f7e5...`/`451a116b...`) -
+  only `runServer.sh`'s own `cd` target differs by trial, exactly as
+  expected (scenario/logging bytes unchanged, confirmed not merely
+  assumed).
+- VM args confirmed to contain ONLY this probe's own two flags in both
+  trials' archived copies; no reference to the shared `run/` path or to
+  the other trial's name in either trial's own archived files (grepped,
+  zero matches).
+- Each trial's own `launch-wrapper.sh` constructed (self-contained
+  exclusive-lock claim/release, never releases while its own java
+  descendant lives, real terminal-pattern detection, bounded startup/
+  no-progress handling - identical to the already-proven single-run
+  design) with `ISO_DIR`/`OWNER_TAG` set to that trial's own values
+  (`M545-isolated-trial1`/`M545-isolated-trial2`) - syntax-checked
+  (`bash -n`), never invoked.
+
+### The one remaining precondition, stated loudly in both wrappers themselves
+
+Because `build/moddev/runServer.sh` (and its companion args files) are a
+SINGLE shared set of files in the worktree, Trial 2's prep necessarily
+OVERWROTE what Trial 1's prep had generated (the live file currently
+reflects Trial 2's `cd` target, confirmed via `grep -o 'trial[12]'`).
+Each trial's own `launch-wrapper.sh` carries an explicit header
+precondition: immediately before THAT specific trial is ever launched,
+`gradle prepareServerRun createServerLaunchScript` must be re-run with
+that trial's own `DIV_ISOLATED_RUN_DIR`, and the regenerated `cd` target
+must be independently re-read and re-confirmed - the archived copies in
+each trial's own directory are evidence of what was verified DURING PREP,
+not a substitute for re-verifying the LIVE file immediately before that
+trial's own launch.
+
+### Disposition
+
+**No launch performed for either trial.** Exactly two launches remain
+authorized in total (per 54388), to happen sequentially, only after the
+coordinator independently reviews this packet and explicitly releases
+each trial - no implicit release is taken from either 54388 or this
+entry. All prior evidence (original `run/`, `M545-isolated-rundir-
+20261116T224049Z`, `M545-authrun-probe2-...`) remains completely
+untouched. No destructive cleanup, no peer signals, no lock/permission
+changes, no new worker.
