@@ -7545,3 +7545,101 @@ release decision is not this entry's to make. All original worlds/evidence,
 including the currently-shared `run/world`, confirmed byte-identical to
 their own prior baseline and untouched by this entire packet-preparation
 exercise.
+
+## EXACTLY ONE authorized bounded diagnostic run executed per 54527
+
+Per 54527: the coordinator released the one-run hold under the parent's
+explicit conditional authority, after an independent final verification
+(08:41:17-18 UTC, exclusive lock acquired read-only then released, all
+checks PASS). Instructed: re-acquire the slot and revalidate everything
+inside that ownership to close the check-to-launch gap, then execute
+EXACTLY ONE bounded run via the reviewed `M545-packet-738b091/launch-
+wrapper.sh` - no improvisation on mismatch, no rerun/substitute regardless
+of outcome. Diagnostic evidence only, not causal-fix acceptance.
+
+### Pre-launch revalidation (own lock acquisition, then released)
+
+Owner-file receipt: `M545-prelaunch-revalidate`, `RESULT=REVALIDATE_PASS`,
+claimed and released within the same second (`08:42:42Z`). All checks
+passed, zero mismatch:
+- HEAD = `6589b1cfea39f2c8000e7bb2de3f80f6eec06ce7` (matches expected)
+- Live `build/moddev/{runServer.sh,serverRunClasspath.txt,
+  serverRunVmArgs.txt,serverRunProgramArgs.txt}` byte-match the packet's
+  own archived copies (all 4, individually re-hashed and compared)
+- Wrapper SHA `fa70ecac6a2b65700e977364467c3a21bee3970ad7bd5dfd64049404e311d57d`
+  matches expected (unchanged)
+- All 10 isolated input hashes still match the packet's own manifest;
+  `level-seed=545547` confirmed present in the isolated copy
+- Fresh world absent from the packet's own `rundir` (0 entries) before launch
+- The original 8-config/2-leveldat baseline still matches (shared `run/`
+  untouched since the last check)
+
+### Launch
+
+Executed `M545-packet-738b091/launch-wrapper.sh` (unmodified, same wrapper
+reviewed throughout this packet's preparation) targeting its own `rundir`.
+Owner-file receipt: `M545-packet-738b091`, claimed `08:42:55Z`, released
+`08:44:15Z`, `rc=0` (the wrapper's own exit code reflects its own orderly
+completion, not the probe's pass/fail - see outcome below). Orderly
+shutdown confirmed in the log: `Stopping server` /
+`ThreadedAnvilChunkStorage: All dimensions are saved`.
+
+### Measured outcome
+
+```
+[DIV buoyantHitchProbe] FAILED - left bounded area tag=towingReplacement/towing2
+  phase=TOWING_REPLACEMENT tick=7 horizontal=212.31392326731333
+  vertical=50.96779650747102
+  position=[X:17512.840965724627, Y:54.03220349252898, Z:17798.043006134918]
+```
+
+The SAME failure CATEGORY as Trial 1/Trial 2 ("left bounded area",
+`TOWING_REPLACEMENT`) reproduces again under the same `level-seed=545547`
+- but NOT byte-identical to either: Trial 1 failed at `tick=8` with
+`horizontal=65.44565659568023 vertical=50.060278582992964`; this run failed
+one tick earlier (`tick=7`) with a much larger horizontal excursion
+(`212.31...`). Stated plainly: this run and Trial 1/Trial 2 are NOT
+perfectly reproducible byte-for-byte against each other, despite the same
+seed - real source changes landed between Trial 1/2's own commit and this
+run's HEAD (the `ShapeAwareBoxPhysicsObject` substitution, `b1264a7`,
+confirmed to postdate both trials; plus this entire investigation's own
+diagnostic-logging additions). This does NOT, by itself, prove either
+change affected the outcome - multiple confounding changes landed in the
+same window; not disentangled by this one run alone.
+
+### Window/expected-marker coverage
+
+8 `expectedBodyThisTick=true` lines fired (the new `DiagnosticContext`-
+backed marker from this investigation's own instrumentation), confirming
+the armed window was active and covering real ticks during this run;
+exactly 1 `diagnosticContextDisarmed=true` line, firing at the `FAILED`
+terminal state as designed. 1137 `buoyantForcesDiagnostic` lines total; 24
+lines carry the new `waterSurfaceResult=`/`scanFound=` per-float detail
+added in this investigation's second correction round - available for
+future reading, not analyzed further in this entry (diagnostic evidence
+only, not a causal claim).
+
+### After-run original-state guard
+
+Re-compared, read-only, after the run completed: the original 8-config/2-
+leveldat baseline (shared `run/` directory) STILL matches exactly - zero
+difference before vs. after this run. Trial 1/Trial 2's own retained
+`rundir`s were not touched (confirmed via their own log files'
+unchanged modification times). The new world this run produced is
+retained, unconditionally, under
+`M545-packet-738b091/rundir/world/` (~10MB) - the wrapper's own stated
+policy, honored, no delete branch exists for it.
+
+### Disposition
+
+Exactly one bounded diagnostic run executed and completed, as authorized -
+no rerun, no substitute, regardless of this outcome. This is diagnostic
+evidence only: it does NOT establish a causal fix, does NOT change
+acceptance criteria, and does NOT by itself explain why the magnitude/tick
+differs from Trial 1/2 (multiple confounding source changes exist between
+them, not isolated here). Known observational/Java-metadata constructor
+differences (the `ShapeAwareBoxPhysicsObject` substitution) remain
+explicit and separate from this run's own measured outcome - not
+conflated. Native gate: this one authorized run is now COMPLETE; no
+further native execution is authorized by this entry. No peer signals,
+permission, or dependency changes made. No deployment/Zippy action.
