@@ -729,12 +729,13 @@ public final class Overrides {
   /**
    * Review finding (ticket 53518/MINECRAFT-505, self-review 53556/PR comment 6854012663):
    * "narrow the accepted part schema/docs to only supported attributes" - a {@code parts} entry
-   * may ONLY set {@code driveForce}, {@code friction}, or (MINECRAFT-534) {@code
-   * rollingResistance} (plus {@code extends}, which is structural, not itself a tuning field)
-   * today, since those are the three fields
+   * may ONLY set {@code driveForce}, {@code friction}, (MINECRAFT-534) {@code rollingResistance},
+   * or (MINECRAFT-552) {@code lateralGripMultiplier} (plus {@code extends}, which is structural,
+   * not itself a tuning field) today, since those are the four fields
    * {@link io.github.brooswitminecraft.div.PhysicsBridge#enginePartDriveForce}/{@link
    * io.github.brooswitminecraft.div.PhysicsBridge#tirePartFriction}/{@link
-   * io.github.brooswitminecraft.div.PhysicsBridge#tirePartRollingResistance} actually consume.
+   * io.github.brooswitminecraft.div.PhysicsBridge#tirePartRollingResistance}/{@link
+   * io.github.brooswitminecraft.div.PhysicsBridge#tirePartLateralGripMultiplier} actually consume.
    * {@code friction} was added by MINECRAFT-529 (installed tire-specific grip overrides) - an
    * installed ground-device/tire part's own {@code friction} REPLACES (never multiplies) the
    * vehicle's resolved {@code friction} for that one wheel's contact only, same "complete
@@ -742,17 +743,22 @@ public final class Overrides {
    * parts; see {@code PhysicsBridge.tirePartFriction}'s own doc for the full composition.
    * {@code rollingResistance} was added by MINECRAFT-534 (installed-tire rolling-resistance
    * overrides), same replace-not-multiply precedence - see {@code
-   * PhysicsBridge.tirePartRollingResistance}'s own doc. Every
-   * other field - {@code brakeForce}/{@code maxSteerDegrees}/{@code lateralGripMultiplier}/
-   * {@code waterDrag}/{@code propellerForce}/{@code massKg}/{@code hullFillFactor}/{@code
-   * upperMassFraction}/every {@code selfRight*}/{@code enabled} - has no part-level consumer, so
-   * a part entry that sets one would silently do nothing; this fails loudly at load/reload
-   * instead, the same as an out-of-range value already does, rather than accepting a config an
-   * operator would reasonably expect to have an effect. Called on the MERGED (post-{@code
-   * extends}) entry, same as {@link #validate} already is for every {@code parts} entry in
-   * {@link Overrides#readAndValidate} - a part inheriting an unsupported field from a template is
-   * exactly as rejected as setting it directly; a part that inherits {@code friction} from a
-   * template is, since MINECRAFT-529, exactly as ACCEPTED as setting it directly.
+   * PhysicsBridge.tirePartRollingResistance}'s own doc. {@code lateralGripMultiplier} was added by
+   * MINECRAFT-552 (installed-tire lateral-grip overrides), same exact replace-not-multiply
+   * precedence applied to ONLY this one contacted tire's lateral friction-ellipse semi-axis - see
+   * {@code PhysicsBridge.tirePartLateralGripMultiplier}'s own doc; the longitudinal semi-axis
+   * (drive/brake authority) is untouched by this field, same as the vehicle-level field's own
+   * documented lateral-only scope. Every other field - {@code brakeForce}/{@code
+   * maxSteerDegrees}/{@code waterDrag}/{@code propellerForce}/{@code massKg}/{@code
+   * hullFillFactor}/{@code upperMassFraction}/every {@code selfRight*}/{@code enabled} - has no
+   * part-level consumer, so a part entry that sets one would silently do nothing; this fails
+   * loudly at load/reload instead, the same as an out-of-range value already does, rather than
+   * accepting a config an operator would reasonably expect to have an effect. Called on the
+   * MERGED (post-{@code extends}) entry, same as {@link #validate} already is for every {@code
+   * parts} entry in {@link Overrides#readAndValidate} - a part inheriting an unsupported field
+   * from a template is exactly as rejected as setting it directly; a part that inherits {@code
+   * friction}/{@code rollingResistance}/{@code lateralGripMultiplier} from a template is exactly
+   * as ACCEPTED as setting it directly.
    */
   void validateSupportedForPart() {
    if (enabled != null) throw new IllegalArgumentException("part overrides do not support 'enabled' (vehicle-only concept)");
@@ -779,7 +785,10 @@ public final class Overrides {
      || selfRightFadeStartDegrees != null || selfRightFadeEndDegrees != null)
     throw new IllegalArgumentException("part overrides do not support selfRight* fields (no part-level consumer yet)");
    if (upperMassFraction != null) throw new IllegalArgumentException("part overrides do not support 'upperMassFraction' (no part-level consumer yet)");
-   if (lateralGripMultiplier != null) throw new IllegalArgumentException("part overrides do not support 'lateralGripMultiplier' (no part-level consumer yet)");
+   // MINECRAFT-552: lateralGripMultiplier is now a supported part-level field (installed-tire
+   // lateral-grip overrides) - see PhysicsBridge.tirePartLateralGripMultiplier. Bounds are still
+   // exactly validate()'s own existing lateralGripMultiplier>0 && lateralGripMultiplier<=1 check
+   // above, no new/different bound was introduced.
    if (antiRollStiffness != null) throw new IllegalArgumentException("part overrides do not support 'antiRollStiffness' (no part-level consumer yet)");
    if (stallAngleDegrees != null) throw new IllegalArgumentException("part overrides do not support 'stallAngleDegrees' (no part-level consumer yet)");
    if (liftSlope != null) throw new IllegalArgumentException("part overrides do not support 'liftSlope' (no part-level consumer yet)");

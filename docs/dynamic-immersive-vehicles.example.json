@@ -97,6 +97,10 @@
   "parts": {
     "examplepack:high_output_engine": {
       "driveForce": 9500.0
+    },
+    "examplepack:slick_tire": {
+      "friction": 1.4,
+      "lateralGripMultiplier": 0.5
     }
   }
 }
