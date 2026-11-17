@@ -5195,3 +5195,45 @@ John's coordination comment asked for). In-game acceptance (a real
 vehicle with `gearRatioAware` configured, observed distinct per-gear feel)
 is out of this ticket's own engineering-test scope, same as every sibling
 M5xx ticket's own disclosed boundary.
+
+## Review correction: zero current-gear-ratio magnitude (MINECRAFT-553, 2026-11-17)
+
+Self-review and Wroosbit's substantive review (Jira comments 54626/54627,
+PR #53 comment 6951157080) both independently found the same real defect
+at the reviewed head (`ead609e`): `gearForceScale`'s guard only rejected
+`currentGearRatioMagnitude < 0`, so a literal `0` (exactly what
+`gearRatioMagnitudeAt` returns for a null/missing `gearRatios` list entry
+- a malformed or incompletely-defined datapack engine, NOT a genuine
+physical ratio) fell through to `raw=0/reference` and was clamped to
+`MIN_GEAR_FORCE_SCALE` (0.2) - silently applying 20% drive force for
+missing/malformed current-gear data instead of the documented safe `1.0`
+no-op, violating this ticket's own malformed-input/default-preservation
+acceptance requirement.
+
+**Fix:** changed the guard to `currentGearRatioMagnitude <= 0` (mirrors
+the existing `referenceGearRatioMagnitude <= 0` guard exactly). Updated
+`gearForceScale`'s and `gearRatioMagnitudeAt`'s own doc comments to state
+the corrected contract explicitly (non-positive, including exactly `0`,
+falls back to `1.0` for EITHER magnitude, not just the reference).
+
+**New regression evidence:** `GearForceScaleTest` gained
+`zeroCurrentGearRatioMagnitudeFallsBackToTheUnscaledNoOpRatherThanTheMinimumClamp`
+(asserts `gearForceScale(0.0, 3.5, true)==1.0`, with an explicit
+`assertNotEquals(MIN_GEAR_FORCE_SCALE, ...)` regression guard against
+exactly this defect recurring) and
+`productionCompositionWithMissingCurrentGearRatioDataPreservesUnscaledDriveForce`
+(the real `enginePartDriveForce(...)*gearForceScale(...)` composition
+with `currentGearRatioMagnitude=0.0`, asserting the exact unscaled
+`8000.0` - the production-wiring coverage the review asked for).
+`nonPositiveOrNonFiniteCurrentMagnitudeFallsBackToTheUnscaledNoOp` (renamed
+from `negativeOrNonFiniteCurrentMagnitudeFallsBackToTheUnscaledNoOp`, same
+cases retained).
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock`, held for the whole Gradle lifetime).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline test --console=plain`
+against this branch at the corrected head - `BUILD SUCCESSFUL`. The real
+JUnit XML reports total **1002 tests**, 0 skipped, 0 failures, 0 errors
+across the whole suite (12 from `GearForceScaleTest`, up from 10 - the
+two new regression cases above - plus every pre-existing test run
+unchanged alongside them, confirming no regression from the fix itself).

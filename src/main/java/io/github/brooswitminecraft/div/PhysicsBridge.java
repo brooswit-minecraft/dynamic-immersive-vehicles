@@ -332,7 +332,13 @@ public final class PhysicsBridge {
   *
   * <p><b>Safety/bounds:</b> a non-finite or non-positive {@code referenceGearRatioMagnitude} (a
   * malformed or single-forward-gear datapack definition) falls back to {@code 1.0} rather than
-  * dividing by an invalid/degenerate reference. The resulting ratio is clamped to {@code
+  * dividing by an invalid/degenerate reference. A non-finite or non-positive (including exactly
+  * {@code 0} - {@link #gearRatioMagnitudeAt}'s own fallback for a null/missing list entry) {@code
+  * currentGearRatioMagnitude} ALSO falls back to {@code 1.0} - this is the documented malformed-
+  * ratio safety contract: missing/invalid CURRENT-gear data must preserve the vehicle's default
+  * (unscaled) drive force, never silently apply {@code MIN_GEAR_FORCE_SCALE} as if a genuinely
+  * tiny but valid ratio had been configured. The resulting ratio (when both magnitudes are valid)
+  * is clamped to {@code
   * [MIN_GEAR_FORCE_SCALE, MAX_GEAR_FORCE_SCALE]} so a pathological datapack gear-ratio table
   * (e.g. an extreme outlier ratio) can never make the combined wheel/tire force this scales
   * unboundedly large or collapse it to effectively zero while still "in gear" - this is the only
@@ -347,7 +353,7 @@ public final class PhysicsBridge {
  static double gearForceScale(double currentGearRatioMagnitude, double referenceGearRatioMagnitude, boolean enabled) {
   if (!enabled) return 1.0;
   if (!Double.isFinite(referenceGearRatioMagnitude) || referenceGearRatioMagnitude <= 0) return 1.0;
-  if (!Double.isFinite(currentGearRatioMagnitude) || currentGearRatioMagnitude < 0) return 1.0;
+  if (!Double.isFinite(currentGearRatioMagnitude) || currentGearRatioMagnitude <= 0) return 1.0;
   double raw = currentGearRatioMagnitude / referenceGearRatioMagnitude;
   return Math.max(MIN_GEAR_FORCE_SCALE, Math.min(MAX_GEAR_FORCE_SCALE, raw));
  }
@@ -362,9 +368,10 @@ public final class PhysicsBridge {
   * the private {@code gearRatioVar} field itself through any reflection/variable-map workaround.
   * Defensively clamps the index into the list's actual bounds (a datapack is untrusted input)
   * and returns {@code 0} for a null/empty list - {@link #gearForceScale} already treats a
-  * non-positive reference or a negative/non-finite current magnitude as "fall back to the
-  * unscaled 1.0 no-op", so a malformed table degrades to today's exact behavior rather than
-  * throwing or producing {@code NaN}.
+  * non-positive (including exactly {@code 0}, e.g. this method's own null-entry fallback) or
+  * non-finite reference OR current magnitude as "fall back to the unscaled 1.0 no-op", so a
+  * malformed table degrades to today's exact behavior rather than throwing, producing {@code
+  * NaN}, or silently clamping missing data to {@code MIN_GEAR_FORCE_SCALE}.
   */
  private static double gearRatioMagnitudeAt(PartEngine engine, int gear) {
   var gearRatios = engine.definition.engine==null ? null : engine.definition.engine.gearRatios;

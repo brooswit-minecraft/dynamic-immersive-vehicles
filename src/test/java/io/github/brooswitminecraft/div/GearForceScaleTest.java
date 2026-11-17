@@ -48,11 +48,24 @@ class GearForceScaleTest {
   assertEquals(1.0, PhysicsBridge.gearForceScale(2.0, Double.NaN, true));
   assertEquals(1.0, PhysicsBridge.gearForceScale(2.0, Double.POSITIVE_INFINITY, true));
  }
- @Test void negativeOrNonFiniteCurrentMagnitudeFallsBackToTheUnscaledNoOp() {
+ @Test void nonPositiveOrNonFiniteCurrentMagnitudeFallsBackToTheUnscaledNoOp() {
   assertEquals(1.0, PhysicsBridge.gearForceScale(-1.0, 3.5, true), "a magnitude is never negative - degenerate input");
   assertEquals(1.0, PhysicsBridge.gearForceScale(Double.NaN, 3.5, true));
   assertEquals(1.0, PhysicsBridge.gearForceScale(Double.POSITIVE_INFINITY, 3.5, true), 0.0,
     "a non-finite current magnitude falls back to the safe no-op rather than an unbounded/NaN scale");
+ }
+ @Test void zeroCurrentGearRatioMagnitudeFallsBackToTheUnscaledNoOpRatherThanTheMinimumClamp() {
+  // Review correction (Jira comments 54626/54627/6951157080 on PR #53): gearRatioMagnitudeAt
+  // returns 0 for a null/missing gearRatios list entry (a malformed or incompletely-defined
+  // datapack engine, NOT a genuine physical ratio), and the ORIGINAL guard here only rejected
+  // currentGearRatioMagnitude < 0, so a literal 0 fell through to raw=0/reference and got
+  // clamped to MIN_GEAR_FORCE_SCALE (0.2) - silently applying 20% force for missing data instead
+  // of preserving the documented safe default. 0 must be treated exactly like NaN/negative/
+  // Infinity: fall back to the unscaled 1.0 no-op, never to any clamped scale.
+  assertEquals(1.0, PhysicsBridge.gearForceScale(0.0, 3.5, true), 0.0,
+    "a zero current magnitude (missing/malformed gear data) must preserve default drive force, not silently apply the 0.2x minimum clamp");
+  assertNotEquals(PhysicsBridge.MIN_GEAR_FORCE_SCALE, PhysicsBridge.gearForceScale(0.0, 3.5, true),
+    "regression guard: must not regress to returning the minimum clamp for missing current-ratio data");
  }
  @Test void singleForwardGearVehicleIsAlwaysANoOpEvenWhenEnabled() {
   // A vehicle with only one forward gear has reference == current always - a real-world case
@@ -83,5 +96,16 @@ class GearForceScaleTest {
   assertEquals(8000.0, disabledForce, 1e-9, "disabled must reproduce today's exact unscaled drive force regardless of gear");
   assertTrue(secondGearForce < firstGearForce, "a higher gear's smaller ratio magnitude must produce strictly less combined drive force than first gear");
   assertTrue(secondGearForce > 0, "drive force must stay strictly positive (bounded, never collapsed to zero) for a real in-gear ratio");
+ }
+ @Test void productionCompositionWithMissingCurrentGearRatioDataPreservesUnscaledDriveForce() {
+  // Same real production composition as productionCompositionScalesTheRealResolvedDriveForce
+  // ProportionallyByGear above, but for the exact malformed/missing-data shape
+  // gearRatioMagnitudeAt actually produces (0.0, e.g. a null gearRatios entry) - must reproduce
+  // the unscaled drive force exactly, never the 0.2x minimum clamp a missing entry is NOT the
+  // same thing as a genuinely tiny configured ratio.
+  double vehicleDriveForce = PhysicsBridge.enginePartDriveForce("packid:not_configured", 8000.0);
+  double missingCurrentRatioForce = vehicleDriveForce * PhysicsBridge.gearForceScale(0.0, 3.5, true);
+  assertEquals(8000.0, missingCurrentRatioForce, 1e-9,
+    "missing/malformed current-gear ratio data must preserve today's exact unscaled drive force");
  }
 }
