@@ -9733,3 +9733,34 @@ Comment-only production change, functional test change, both explained with dire
 bytecode evidence rather than an unverified equivalence claim. Old packet preserved untouched.
 No further terminology/refactor churn after this commit, per 54669's own explicit instruction.
 No native run performed. A new packet follows, not yet reviewed or released.
+
+## New packet prepared per 54669 (M545-packet-df4b0c2) - not reviewed, not released
+
+Fresh, separately-named packet prepared against commit `df4b0c2` (the terminology/test-coverage
+fix with class-diff evidence, previous entry). Same proven `launch-wrapper.sh`/`preflight.sh`/
+locale-fixed `runtime-manifest.sh`, same fixed seed (`level-seed=545547`), same
+`level-name=world`. Regenerated `build/moddev/runServer.sh`/`serverRunClasspath.txt`/
+`serverRunVmArgs.txt`/`serverRunProgramArgs.txt` under the exclusive lock; confirmed
+`runServer.sh`'s own `cd` argument points at this packet's own rundir.
+`runtime-byte-manifest.sha256` (100 entries) computed fresh against the new compiled bytes.
+Isolated `config`/`eula.txt`/`server.properties` copied with `level-seed=545547` set only there
+(exactly one line differs); isolated config confirmed byte-identical to the original, never-
+mutated reference run's own baseline. Shared `run/world/level.dat`/`level.dat_old` confirmed
+unchanged against the same retained baseline.
+
+Dry-ran the full 9-check `preflight.sh` directly against this real packet - all 9 checks
+`OK`/`PASS`, exit 0. Confirmed `rundir/world` does not exist - NOT executed.
+
+Confirmed `M545-packet-435937b` (the now-stale prior packet) was NOT touched during this
+preparation: its own `runtime-byte-manifest.sha256` file mtime is unchanged from its own
+original preparation; no new files were added to it beyond the one legitimate dry-run receipt
+already captured in the prior entry, before the drift occurred.
+
+### Disposition
+
+Separate, uniquely-named packet `M545-packet-df4b0c2` ready, reflecting the current reviewed
+source/test state. NOT reviewed or released - no launch until the coordinator explicitly
+reviews and releases this specific packet, per 54669's own instruction. The prior packet
+(`M545-packet-435937b`) remains preserved, unmodified, and not used for any launch. No further
+terminology/refactor churn pending that review, per 54669's own closing instruction. No native
+run performed. Native hold remains CLOSED.
