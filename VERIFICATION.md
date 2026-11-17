@@ -10168,3 +10168,119 @@ narrower scope. This remains a PROPOSAL only, still not wired into `BuoyantForce
 its own open gap (no bounded way to reproduce the off-center torque coupling without moment-of-
 inertia access) is now stated plainly rather than implied solved. No native run performed or
 requested.
+
+## Source audit of the pinned Sable API per 54688: a genuinely supported inertia/effective-mass
+path EXISTS, correcting this investigation's own "missing inertia" assumption
+
+John's 54688 confirmed the mass/exactness corrections and asked for a direct audit of the
+pinned `RigidBodyHandle`/native wrapper source and body-creation path - not just existing
+comments - distinguishing ABSENT public API from merely UNUSED public API. Extracted and
+decompiled the exact pinned jar (`sable-neoforge-1.21.1-2.0.5.jar`, hash
+`c8710f85bc780bbf523e6726ceaaf76dd0b8c61479db497b382c6bb34317e7ab`, confirmed matching the real
+build classpath) directly - `RigidBodyHandle`, `BoxPhysicsObject`, `MassData`, `ForceTotal`,
+`PhysicsPipelineBody`.
+
+### RigidBodyHandle itself: no mass/inertia access at all
+
+`dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle` (package `handle`) exposes:
+`applyImpulseAtPoint(position, force)`, `applyLinearAndAngularImpulse(impulse, torque[,
+wakeUp])`, `applyLinearImpulse`/`applyAngularImpulse`/`applyTorqueImpulse` (all delegating to
+`applyLinearAndAngularImpulse`), `getLinearVelocity`/`getAngularVelocity`,
+`addLinearAndAngularVelocity`, `teleport`, `isValid`, `applyForcesAndReset(ForceTotal)`. NONE of
+these read mass or inertia. This confirms `RigidBodyHandle` itself genuinely has no such API -
+the ABSENCE is real for this specific type.
+
+### `PhysicsPipelineBody.getMassTracker()`: a REAL, PUBLIC, REQUIRED interface method - already
+used by DIV, just not for this purpose
+
+`dev.ryanhcode.sable.api.physics.PhysicsPipelineBody` (the interface `BoxPhysicsObject`
+implements, and the one `BuoyantBody`'s own `box` field is typed as holding) REQUIRES
+`MassData getMassTracker()` as part of its own contract - not an obscure side method.
+`dev.ryanhcode.sable.api.physics.mass.MassData` is a public interface:
+```java
+public interface MassData {
+    double getMass();
+    double getInverseMass();
+    Matrix3dc getInertiaTensor();
+    Matrix3dc getInverseInertiaTensor();
+    @Nullable Vector3dc getCenterOfMass();
+    default boolean isInvalid();
+    default double getInverseNormalMass(Vector3dc position, Vector3dc direction);
+}
+```
+DIV's OWN `ShapeAwareBoxPhysicsObject` (this ticket's own earlier work, `src/main/java/.../
+ShapeAwareBoxPhysicsObject.java`) ALREADY overrides `getMassTracker()` to return a real solid-box
+inertia tensor (`BoxInertia.solidBoxTensor(mass, halfExtents)`) - confirmed by direct re-read of
+that file. `box.getMassTracker()` is callable RIGHT NOW on the SAME `box` field `BuoyantBody`
+already holds. This directly corrects this investigation's own repeated "no moment of inertia is
+available" framing (echoed from the ALREADY-DOCUMENTED, pre-existing `angularDragRetention`
+review finding, comment 53679, and repeated by me in this entry's own earlier corrections) - the
+API is not ABSENT, it was UNUSED for this purpose. `getMassTracker()`'s own JAVA-SIDE return
+value is still confirmed (per this ticket's own earlier finding, comment 54413) NOT consumed by
+the native body-creation path (`createBox` gives Rapier only raw mass/half-extents; Rapier
+computes its own internal mass properties independently) - so this tensor is DIV's own accurate,
+independently-computed physical property of the real box shape, not necessarily byte-for-byte
+identical to whatever Rapier's own internal representation is, but a real, correct, FREELY
+AVAILABLE solid-box inertia tensor for the real configured shape/mass nonetheless.
+
+### `MassData.getInverseNormalMass` - the exact rigid-body effective-mass-at-a-point formula,
+already implemented, already callable
+
+```java
+default double getInverseNormalMass(Vector3dc position, Vector3dc direction) {
+    Vector3d comLocalPos = position.sub(this.getCenterOfMass(), new Vector3d());
+    Vector3d normalizedDirection = direction.normalize(new Vector3d());
+    Vector3d cross = comLocalPos.cross(normalizedDirection, new Vector3d());
+    return cross.dot(this.getInverseInertiaTensor().transform(cross, new Vector3d())) + this.getInverseMass();
+}
+```
+This is the STANDARD rigid-body "effective inverse mass along a direction at a point" formula
+(`1/m_eff = (r×n̂)·I⁻¹·(r×n̂) + 1/m`) used throughout real-time physics engines to compute exactly
+how much velocity CHANGE along a given direction results from a unit impulse applied at a given
+point - accounting for BOTH the translational AND rotational response TOGETHER, correctly
+coupled, with no separate inertia-tensor math needed by the caller. This is a DEFAULT method on
+the SAME `MassData` interface `box.getMassTracker()` already returns - pure JOML matrix
+arithmetic, synchronous, no native call, callable from ordinary Java right now with the
+EXISTING `box`/`center` fields `BuoyantBody` already has. This is the exact missing piece this
+investigation's own prior entries (including my own, before this audit) assumed did not exist.
+
+### Smallest sound, mechanism-preserving bound using this real capability (assessed, NOT wired)
+
+Per John's own request ("assess the smallest sound way to preserve the existing force/torque
+model, including whether an existing native solver path can integrate it safely"): the per-float
+drag impulse could be bounded using the EXACT effective mass at that float's own point, computed
+via `box.getMassTracker().getInverseNormalMass(pointPosition, dragDirection)`, rather than the
+earlier COM-only approximation (`force*DT/mass`) or the earlier retraction-pending scalar
+retention proposal. A bound of the form "cap the applied impulse magnitude so the resulting
+velocity change ALONG the drag direction, at this exact point, computed via the real effective
+mass, never exceeds the local velocity component being opposed" is PHYSICALLY DERIVED from the
+real rigid-body coupling (not an arbitrary clamp), uses only EXISTING, SUPPORTED, PUBLIC API
+(`MassData`/`getInverseNormalMass`, already present in the pinned jar, no dependency change, no
+reflection), and preserves the SAME off-center impulse mechanism currently in use (still calls
+`applyImpulseAtPoint`, still produces real torque via the real arm) - it bounds the MAGNITUDE,
+not the mechanism. This is assessed as sound and feasible; NOT yet implemented or wired - needs
+its own design/diff (exact direction convention, multi-float accumulation order, whether to use
+each float's own instantaneous `getInverseNormalMass` fresh each tick) before any production
+change, consistent with the standing "mechanism/diff reviewed before native validation"
+instruction.
+
+### Zero-mass domain note (54688's own correction)
+
+`directionalDragRetention`'s `(0,1]` range proof requires finite positive `mass` (division by
+`mass` in the corrected formula); `mass=0` is undefined (division by zero), not covered by the
+existing range-sweep test, which only exercises positive mass values. Noted explicitly here;
+`BoxPhysicsObject`'s own constructor already requires a real (non-zero, in practice always
+positive per `BuoyantBody`'s own `Math.max(50, v.getMass())` floor) mass, so this is a
+documented domain restriction, not a live bug - no test or doc change made beyond this note,
+since the sweep already only used realistic positive masses.
+
+### Disposition
+
+Audit complete: `RigidBodyHandle` genuinely has no mass/inertia API (confirmed absent); `MassData`
+(via `box.getMassTracker()`, already overridden by DIV's own `ShapeAwareBoxPhysicsObject`) DOES
+expose a real inertia tensor and the exact effective-mass-at-a-point formula
+(`getInverseNormalMass`) - previously treated as an unavailable capability, now confirmed
+available and unused for this purpose. A smallest-sound, mechanism-preserving bound using this
+real capability is assessed as feasible, not yet designed/wired - the next step, if pursued,
+needs its own explicit design before any production diff. No reflection, no dependency upgrade,
+no native-private bypass. No native run performed or requested.
