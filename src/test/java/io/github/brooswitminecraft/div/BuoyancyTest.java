@@ -63,44 +63,95 @@ class BuoyancyTest {
   assertEquals(0, Buoyancy.directionalDragForce(5, 3, 0, 400, 1.0), 1e-9);
   assertEquals(0, Buoyancy.directionalDragForce(5, 0, 1, 400, 1.0), 1e-9);
  }
- // MINECRAFT-545/547 (John's comment 54677: "seek a small production-used numerical regression
- // demonstrating any discrete drag overshoot"). Pins the EXACT numeric incident the authorized
- // M545-packet-df4b0c2 run's own retained log captured (gameTime=205 and 206, towed float 1 -
- // waterDrag=400 and mass=400kg are this fixture's own real configured values, DT=0.05s is
- // PhysicsBridge's own real constant) - using ONLY the real production directionalDragForce
- // function, not a reimplementation, applied here as a single-step explicit-Euler impulse
- // exactly like BuoyantForces.apply's own `handle.applyImpulseAtPoint(..., force.mul(DT))` call.
- // Overshoot = the single-step impulse-induced velocity change at this float's own point EXCEEDS
- // the local velocity component it was meant to cancel - not just reduce it, but overshoot past
- // zero and come out the other side, consistent with BuoyantForces' own already-documented review
- // finding (comment 53679) that an inertia-converted impulse CAN overshoot/reverse for a light
- // enough body and large enough coefficient - here demonstrated for the LINEAR per-float drag
- // term specifically (the angular/rotational dedicated term, separately gated by
- // tuning.angularWaterDrag, was confirmed OFF for this run and is not what this test exercises).
- @Test void directionalDragOvershootsAtTheExactReconnectDivergenceIncident() {
+ // MINECRAFT-545/547 (John's comments 54677/54680: "seek a small production-used numerical
+ // regression demonstrating any discrete drag overshoot" / "J/m is a COM translational
+ // increment, NOT full point-velocity change for an off-center impulse"). Pins the EXACT numeric
+ // incident the authorized M545-packet-df4b0c2 run's own retained log captured (gameTime=205 and
+ // 206, towed float 1 - waterDrag=400 and mass=400kg are this fixture's own real configured
+ // values, DT=0.05s is PhysicsBridge's own real constant) - using ONLY the real production
+ // directionalDragForce function, not a reimplementation.
+ // SCOPE, STATED EXPLICITLY (54680's own correction): `force*dt/mass` below is the body's own
+ // COM TRANSLATIONAL velocity increment for this single float's own impulse - NOT the actual
+ // velocity change AT that float's off-center point, which also requires the rotational response
+ // (moment of inertia, unavailable via RigidBodyHandle - the same missing-inertia limitation
+ // documented and worked around in angularDragRetention's own doc) and the OTHER float's own
+ // simultaneous impulse. This assertion characterizes ONE scalar fact about the explicit drag
+ // formula under these real numbers - that the COM-frame velocity correction it alone would
+ // produce already exceeds the local velocity it is computed FROM - not a proven complete rigid-
+ // body event, and not proof this is the first onset of divergence (growth was already present
+ // one step earlier - see the second half of this test, and do not read its own lower margin as
+ // "stable").
+ @Test void directionalDragComOnlyVelocityIncrementExceedsLocalVelocityAtTheDivergingStep() {
   double dt = 0.05, mass = 400, waterDrag = 400;
-  // gameTime=206 (the step that actually diverged): towed float 1's own real local point-
-  // velocity magnitude, computed from this run's own retained entry velocity/angular velocity
-  // and worldArm (angular x arm + linearVelocity), submerged fraction 1.0 - see VERIFICATION.md
-  // for the full cross-product derivation. Treating the full local-velocity magnitude as a
-  // single axis with axisMultiplier=1.0 is exact here (every axis multiplier for this fixture's
-  // hulls is the Overrides.FALLBACK default of 1.0, making the formula direction-independent).
-  double explodingStepLocalSpeed = 43.90;
-  double explodingStepForce = Buoyancy.directionalDragForce(explodingStepLocalSpeed, explodingStepLocalSpeed, 1.0, waterDrag, 1.0);
-  double explodingStepVelocityChange = explodingStepForce * dt / mass;
-  assertTrue(Math.abs(explodingStepVelocityChange) > explodingStepLocalSpeed,
-    "the exploding step's own single-step impulse must overshoot past zero, not merely reduce the local velocity");
+  // gameTime=206 (the step during which the fixture's own observed divergence occurred): towed
+  // float 1's own real local point-velocity magnitude, computed from this run's own retained
+  // entry velocity/angular velocity and worldArm (angular x arm + linearVelocity), submerged
+  // fraction 1.0 - see VERIFICATION.md for the full cross-product derivation. Treating the full
+  // local-velocity magnitude as a single axis with axisMultiplier=1.0 is exact here (every axis
+  // multiplier for this fixture's hulls is the Overrides.FALLBACK default of 1.0, making the
+  // formula direction-independent).
+  double divergingStepLocalSpeed = 43.90;
+  double divergingStepForce = Buoyancy.directionalDragForce(divergingStepLocalSpeed, divergingStepLocalSpeed, 1.0, waterDrag, 1.0);
+  double divergingStepComVelocityIncrement = divergingStepForce * dt / mass;
+  assertTrue(Math.abs(divergingStepComVelocityIncrement) > divergingStepLocalSpeed,
+    "this single float's own COM-frame velocity increment (force*dt/mass) must exceed the local point-velocity it was computed from");
 
-  // gameTime=205 (the immediately preceding step, which did NOT yet diverge): same formula, same
-  // real coefficients, this earlier step's own smaller local-velocity magnitude and submerged
-  // fraction (0.739...) - included as the direct contrast: the SAME formula does NOT overshoot
-  // here, so overshoot is a property of the velocity magnitude reached, not an unconditional bug
-  // in the formula itself.
-  double stableStepLocalSpeed = 16.66, stableStepFraction = 0.7391548872657683;
-  double stableStepForce = Buoyancy.directionalDragForce(stableStepLocalSpeed, stableStepLocalSpeed, stableStepFraction, waterDrag, 1.0);
-  double stableStepVelocityChange = stableStepForce * dt / mass;
-  assertTrue(Math.abs(stableStepVelocityChange) < stableStepLocalSpeed,
-    "the immediately preceding, non-diverging step must NOT overshoot - the contrast confirms this is magnitude-dependent, not an unconditional defect");
+  // gameTime=205 (the immediately preceding step): same formula, same real coefficients, this
+  // earlier step's own smaller local-velocity magnitude and submerged fraction (0.739...).
+  // CORRECTED (54680): do NOT call this step "stable" - the body's own angular velocity was
+  // ALREADY growing between the entry readings at this step and the next (confirmed separately
+  // in VERIFICATION.md's own per-tick table), so this earlier moment is not categorically safe,
+  // only BELOW this one particular COM-only threshold at this one instant. The only claim this
+  // half of the test supports is the narrower one below.
+  double earlierStepLocalSpeed = 16.66, earlierStepFraction = 0.7391548872657683;
+  double earlierStepForce = Buoyancy.directionalDragForce(earlierStepLocalSpeed, earlierStepLocalSpeed, earlierStepFraction, waterDrag, 1.0);
+  double earlierStepComVelocityIncrement = earlierStepForce * dt / mass;
+  assertTrue(Math.abs(earlierStepComVelocityIncrement) < earlierStepLocalSpeed,
+    "this earlier step's own COM-frame velocity increment does not exceed its own local point-velocity - narrower than 'stable', just below this one threshold at this one instant");
+ }
+ // MINECRAFT-545/547 (John's comment 54680): the production-relevant dissipativity criterion -
+ // classical explicit-Euler linear stability (margin < 2.0), linearizing the quadratic drag
+ // around the current speed, same real values as the test above.
+ @Test void explicitDragStabilityMarginExceedsTwoAtTheDivergingStepButNotTheEarlierOne() {
+  double dt = 0.05, mass = 400, waterDrag = 400;
+  double divergingMargin = Buoyancy.explicitDragStabilityMargin(43.90, 1.0, waterDrag, 1.0, dt, mass);
+  double earlierMargin = Buoyancy.explicitDragStabilityMargin(16.66, 0.7391548872657683, waterDrag, 1.0, dt, mass);
+  assertTrue(divergingMargin >= 2.0, "margin=" + divergingMargin + " must be at/past the explicit-stability threshold at the diverging step");
+  assertTrue(earlierMargin < 2.0, "margin=" + earlierMargin + " must be under the threshold at the earlier step");
+  assertFalse(Buoyancy.isExplicitDragStepStable(43.90, 1.0, waterDrag, 1.0, dt, mass));
+  assertTrue(Buoyancy.isExplicitDragStepStable(16.66, 0.7391548872657683, waterDrag, 1.0, dt, mass));
+ }
+ @Test void explicitDragStabilityMarginIsZeroWhenDragIsConfiguredOff() {
+  assertEquals(0, Buoyancy.explicitDragStabilityMargin(50, 1.0, 0, 1.0, 0.05, 400));
+  assertTrue(Buoyancy.isExplicitDragStepStable(50, 1.0, 0, 1.0, 0.05, 400));
+ }
+ // MINECRAFT-545/547 (John's comment 54680: "assess a bounded stable integration option
+ // compatible with existing APIs"). directionalDragRetention is a PROPOSED alternative to the
+ // current explicit impulse, mirroring angularDragRetention's own already-reviewed proof
+ // structure exactly - these tests mirror angularDragRetention's own tests below, one-for-one.
+ @Test void directionalDragRetentionIsOneWhenNotSubmergedOrNotMovingOrZeroCoefficient() {
+  assertEquals(1.0, Buoyancy.directionalDragRetention(10, 0, 400, 1.0, 0.05));
+  assertEquals(1.0, Buoyancy.directionalDragRetention(0, 1, 400, 1.0, 0.05));
+  assertEquals(1.0, Buoyancy.directionalDragRetention(50, 1, 0, 1.0, 0.05));
+ }
+ @Test void directionalDragRetentionIsAlwaysInZeroToOneRangeAcrossWideInputsIncludingThisIncidentsOwnExtremeSpeed() {
+  for (double coefficient : new double[]{0, 1, 400, 100000}) {
+   for (double speed : new double[]{0, 1e-3, 1, 16.66, 43.90, 1e6}) {
+    for (double fraction : new double[]{0, 0.3, 0.7391548872657683, 1}) {
+     double retention = Buoyancy.directionalDragRetention(speed, fraction, coefficient, 1.0, 0.05);
+     assertTrue(retention > 0 && retention <= 1.0,
+       "retention=" + retention + " out of (0,1] for coefficient=" + coefficient + " speed=" + speed + " fraction=" + fraction);
+    }
+   }
+  }
+ }
+ @Test void directionalDragRetentionNeverOvershootsEvenAtTheExactDivergingStepsOwnExtremeSpeed() {
+  // The exact gameTime=206/float1 incident this ticket's own investigation found overshooting
+  // under the CURRENT explicit-impulse approach (see the test above) - applied through this
+  // proposed retention-based alternative instead, it must still land in (0,1], never reversing
+  // or amplifying the local velocity, with no moment of inertia needed anywhere.
+  double retention = Buoyancy.directionalDragRetention(43.90, 1.0, 400, 1.0, 0.05);
+  assertTrue(retention > 0 && retention <= 1.0, "retention=" + retention + " must stay in (0,1], never reversing or amplifying velocity");
  }
  // MINECRAFT-518 review (comment 53679): the retention fraction returned here must always be in
  // (0,1] regardless of how large angularSpeed/submergedFraction/angularDragCoefficient/dt are -

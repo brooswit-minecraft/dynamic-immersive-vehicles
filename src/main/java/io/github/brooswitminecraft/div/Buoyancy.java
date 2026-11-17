@@ -44,6 +44,55 @@ public final class Buoyancy {
   return -submergedFraction * dragCoefficient * axisMultiplier * speed * axisVelocityComponent;
  }
  /**
+  * MINECRAFT-545/547 (John's comment 54680): a production-relevant dissipativity criterion for
+  * the explicit per-float drag impulse {@code BuoyantForces.apply} currently applies
+  * ({@code directionalDragForce(...).mul(DT)} via {@code applyImpulseAtPoint}) - NOT a claim
+  * about the full rigid-body response (that needs the body's own moment of inertia and the
+  * coupling between floats, which this pure function does not have access to; see
+  * {@code BuoyantForcesOvershootTest}'s own explicit COM-only scope note). This is the classical
+  * explicit-Euler linear-stability bound, applied by linearizing the quadratic drag
+  * {@code F=-fraction*coefficient*axisMultiplier*speed*v} around the CURRENT {@code speed}
+  * (treated as locally fixed for one step, the same approximation
+  * {@link #angularDragRetention}'s own closed-form solution already makes for the rotational
+  * term): the effective per-step damping rate is {@code k_eff=fraction*coefficient*
+  * axisMultiplier*speed}, and a single explicit step with mass {@code mass} is linearly stable
+  * (does not overshoot past zero and grow) exactly when {@code k_eff*dt/mass < 2} - the same
+  * textbook bound used for any explicit integration of {@code dv/dt=-k*v}. Returns that
+  * dimensionless margin directly (not merely a boolean) so a caller can see HOW far past (or
+  * under) the threshold a given step actually is, not only whether it crossed it.
+  */
+ public static double explicitDragStabilityMargin(double speed, double submergedFraction, double dragCoefficient, double axisMultiplier, double dt, double mass) {
+  return submergedFraction * dragCoefficient * axisMultiplier * speed * dt / mass;
+ }
+ /** True only if {@link #explicitDragStabilityMargin} stays under the classical explicit-Euler
+  * linear-stability bound of {@code 2.0} - see that method's own doc for the derivation and its
+  * explicit COM-only, single-float scope. */
+ public static boolean isExplicitDragStepStable(double speed, double submergedFraction, double dragCoefficient, double axisMultiplier, double dt, double mass) {
+  return explicitDragStabilityMargin(speed, submergedFraction, dragCoefficient, axisMultiplier, dt, mass) < 2.0;
+ }
+ /**
+  * MINECRAFT-545/547 (John's comment 54680: "assess a bounded stable integration option
+  * compatible with existing APIs"). PROPOSED alternative to the current explicit per-float drag
+  * IMPULSE - NOT yet wired into {@code BuoyantForces.apply}; this is a candidate for mechanism/
+  * diff review, mirroring {@link #angularDragRetention}'s own already-reviewed closed-form
+  * pattern exactly, applied to the per-axis LINEAR directional drag term instead of the
+  * rotational one. Same derivation: the exact analytic solution of
+  * {@code dv/dt = -fraction*coefficient*axisMultiplier*speed*v} (linearizing {@code speed} as
+  * locally fixed for one step, same assumption {@link #angularDragRetention} already makes) is
+  * {@code v(t+dt) = v(t) / (1 + fraction*coefficient*axisMultiplier*speed*dt)} - a MULTIPLICATIVE
+  * velocity scale, never an impulse, mathematically guaranteed to lie in {@code (0,1]} for any
+  * nonnegative inputs (denominator always {@code >= 1}), so a caller multiplying the CURRENT
+  * per-axis velocity component by this fraction can never overshoot past zero, reverse its sign,
+  * or add energy, for ANY configured coefficient/speed/dt - not just within some additionally-
+  * clamped "safe" range, and with no moment of inertia needed (unlike the current impulse
+  * approach, which this ticket's own investigation found silently assumes the COM-only response
+  * is the full point response - see VERIFICATION.md). A zero coefficient still returns exactly
+  * {@code 1} (no change), reproducing the exact current behavior whenever drag is configured
+  * off, same as {@link #angularDragRetention}'s own zero-coefficient case. */
+ public static double directionalDragRetention(double speed, double submergedFraction, double dragCoefficient, double axisMultiplier, double dt) {
+  return 1.0 / (1.0 + submergedFraction * dragCoefficient * axisMultiplier * speed * dt);
+ }
+ /**
   * Per-tick retention fraction (always in (0,1]) for rotational water drag - the rotational
   * analogue of {@link #drag} for roll/pitch/yaw, applied as a direct decay on angular velocity
   * itself, never an explicit torque/impulse. MINECRAFT-518: today a floating hull gets a righting

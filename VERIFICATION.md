@@ -10013,3 +10013,97 @@ Two wrong claims retracted with their correct replacements. A concrete, numerica
 (not hand-waved) overshoot demonstrated using only real captured/configured values and the real
 production drag formula, with a passing regression test pinned to this exact incident. No
 native run performed or requested. Native hold remains CLOSED.
+
+## Corrections per 54680: proper scope for the overshoot claim, a rigorous dissipativity
+criterion, and a bounded-stable alternative proposal (not yet wired)
+
+John's 54680 found the prior entry's own overshoot test overstated what it actually measures,
+and asked for a more production-relevant criterion plus an assessed (not necessarily wired)
+stable-integration alternative, reusing existing supported APIs rather than ad hoc damping.
+
+### Scope correction: COM-only, not the full point-velocity response
+
+The prior test's own assertion compared `force*DT/mass` (a COM-frame translational velocity
+increment) directly against the float's own local POINT velocity, implicitly treating the two
+as the same quantity. They are not: `handle.applyImpulseAtPoint` applies an impulse that
+produces BOTH a COM translational response (`J/mass`) AND a rotational response
+(`I⁻¹·(arm×J)`, which needs the body's own moment of inertia - unavailable via
+`RigidBodyHandle`, the same missing-inertia limitation `angularDragRetention`'s own doc already
+documents and works around) - the actual velocity change AT the float's own point is the SUM of
+both, further coupled with the OTHER float's own simultaneous impulse. The test (renamed
+`directionalDragComOnlyVelocityIncrementExceedsLocalVelocityAtTheDivergingStep`) now states this
+scope explicitly: it demonstrates that the COM-frame increment ALONE already exceeds the local
+velocity it was computed from - a real, verified scalar fact about the explicit drag formula
+under these real numbers - not a proven complete rigid-body event, and not identified as the
+first onset of divergence.
+
+### Correction: the earlier step was not "stable," only below one particular threshold
+
+The prior entry called gameTime=205 "stable"/"non-diverging." Per John's own correction: angular
+velocity was ALREADY growing at that step (confirmed in the earlier per-tick table: `|angularVelocity|`
+23.63 at tick2's entry rising to 82.83 by tick3's entry, before gameTime=206's own explosion) -
+so "stable" mischaracterized the trajectory. Corrected to the narrower, accurate claim: this
+earlier step's own COM-only velocity increment does not exceed its own local velocity AT THAT
+ONE INSTANT - a fact about that one threshold at that one step, not a claim the trajectory was
+safe.
+
+### A production-relevant dissipativity criterion
+
+Added `Buoyancy.explicitDragStabilityMargin(speed, submergedFraction, dragCoefficient,
+axisMultiplier, dt, mass)` - the classical explicit-Euler linear-stability bound, linearizing the
+quadratic drag `F=-fraction*coefficient*axisMultiplier*speed*v` around the current `speed`
+(the same locally-fixed-speed approximation `angularDragRetention`'s own closed-form solution
+already makes for the rotational term): effective per-step damping rate
+`k_eff=fraction*coefficient*axisMultiplier*speed`, stable exactly when `k_eff*dt/mass < 2` (the
+standard bound for explicit integration of `dv/dt=-k*v`). Returns the margin itself, not just a
+boolean, so a caller can see how far past (or under) the threshold a step actually is.
+`isExplicitDragStepStable` wraps the `< 2.0` check. Same explicit COM-only, single-float scope
+disclosed as above - this is NOT a full rigid-body stability criterion.
+
+Applied to the real incident: at gameTime=206 (the diverging step), margin ≈ `1.0*400*43.90*0.05/400
+= 2.195` - at/past the threshold. At gameTime=205, margin ≈ `0.739*400*16.66*0.05/400 ≈ 0.616` -
+under the threshold. Both figures are consistent with (not independent proof beyond) the COM-only
+velocity-increment comparison already reported.
+
+### A bounded-stable alternative, assessed but NOT wired into production
+
+Per John's own explicit instruction ("assess a bounded stable integration option compatible with
+existing APIs... Any proposed production change must be mechanism/diff reviewed before native
+validation"), added `Buoyancy.directionalDragRetention(speed, submergedFraction, dragCoefficient,
+axisMultiplier, dt)` as a PROPOSAL only - not called from `BuoyantForces.apply`, no behavior
+change. Mirrors `angularDragRetention`'s own already-reviewed closed-form pattern exactly,
+applied to the per-axis LINEAR drag term instead of the rotational one: the exact analytic
+solution of `dv/dt = -fraction*coefficient*axisMultiplier*speed*v` is
+`v(t+dt) = v(t) / (1 + fraction*coefficient*axisMultiplier*speed*dt)` - a multiplicative velocity
+SCALE, never an impulse, mathematically guaranteed to lie in `(0,1]` for any nonnegative inputs
+(denominator always `>= 1`), so applying it can never overshoot past zero, reverse velocity, or
+add energy, for ANY configured coefficient/speed/dt - not just within some additionally-clamped
+range, and with no moment of inertia needed anywhere (sidestepping the exact missing-inertia
+problem the COM-only approximation above has). Verified in the new test suite that this
+proposed function stays in `(0,1]` even at the exact diverging step's own extreme speed (43.90)
+and across a wide input sweep including this incident's own real coefficient/fraction values.
+
+This remains a PROPOSAL, not a fix: wiring it into `BuoyantForces.apply` (replacing the current
+`applyImpulseAtPoint`-based impulse with a direct velocity-scale call, analogous to how
+`angularDragRetention` is already consumed) would be a real behavior change to buoyancy/drag for
+every float-only hull, not only this scenario - needs its own explicit mechanism/diff review
+before any native validation, per John's own standing instruction. Not implemented this entry.
+
+### Tests added (all compiled/passing under the exclusive lock,
+`MINECRAFT-545-dissipativity-20261117T182420Z`, `RESULT=PASS`)
+
+- `directionalDragComOnlyVelocityIncrementExceedsLocalVelocityAtTheDivergingStep` (renamed,
+  rescoped from the prior `directionalDragOvershootsAtTheExactReconnectDivergenceIncident`).
+- `explicitDragStabilityMarginExceedsTwoAtTheDivergingStepButNotTheEarlierOne`,
+  `explicitDragStabilityMarginIsZeroWhenDragIsConfiguredOff`.
+- `directionalDragRetentionIsOneWhenNotSubmergedOrNotMovingOrZeroCoefficient`,
+  `directionalDragRetentionIsAlwaysInZeroToOneRangeAcrossWideInputsIncludingThisIncidentsOwnExtremeSpeed`,
+  `directionalDragRetentionNeverOvershootsEvenAtTheExactDivergingStepsOwnExtremeSpeed`.
+
+### Disposition
+
+Prior overclaim corrected to its actual (COM-only, single scalar fact) scope. A more rigorous,
+production-relevant dissipativity criterion added and verified against the real incident. A
+bounded-stable alternative proposed, implemented as a pure function, and tested - explicitly NOT
+wired into production pending its own mechanism/diff review. No arbitrary damping/caps/fixture
+weakening. No native run performed or requested.
