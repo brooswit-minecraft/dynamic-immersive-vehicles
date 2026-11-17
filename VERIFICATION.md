@@ -7962,3 +7962,75 @@ entry. No new hypothesis substituted without equivalent verification. No
 DIV-fixable bug established. No native run performed, proposed, or
 needed for this specific next step. Native gate: one-run grant remains
 CONSUMED.
+
+## Executed the pinned MTS caller trace per 54549 - a real, cited code path found, but does not by itself resolve the gap
+
+Per 54549: execute the trace now, not propose it again. Used the already-
+resolved MTS jar (hash `1d2f7512604636265703b29fdf13d7f8ef2323694b6435f4392973da6e78d251`,
+re-confirmed via `sha256sum` directly against the live Gradle cache path)
+and its already-decompiled source at
+`/tmp/mts_inspect/decompiled/minecrafttransportsimulator/entities/
+components/AEntityG_Towable.java` (same decompile this investigation
+produced earlier via `cfr`).
+
+### A real, cited MTS-native behavior found
+
+`AEntityG_Towable.update()` (lines 97-107 of the decompiled source):
+
+```java
+public void update() {
+    ...
+    if (this.towedByConnection != null && !this.towedByConnection.towingEntity.isValid) {
+        this.towedByConnection.towingVehicle.disconnectTrailer(
+            this.towedByConnection.towingVehicle.towingConnections.indexOf(this.towedByConnection));
+    }
+```
+
+This is MTS's OWN per-tick update - entirely independent of DIV's own
+`active()`/`moveVehicle` gating. It checks: if this entity is still
+`towedByConnection`-linked AND the connection's own cached
+`towingEntity.isValid` is false (exactly the state after `towing.remove()`
+is called, since Minecraft entity removal sets `isValid=false`) - it
+calls `disconnectTrailer` on the (now-invalid) towing vehicle's own side.
+If this succeeds, `towed.towedByConnection` would become `null` as a
+result - entirely inside MTS's own code, not DIV's.
+
+### This does NOT, by itself, explain the zero-step-entry gap - checked directly
+
+If `towedByConnection` becomes `null`, DIV's own `active()` computes
+`towed=false` on the next check. `deferToNativeHitch`'s own first operand
+is `towed` - with `towed=false`, the whole expression is `false`
+regardless of the other three arguments, so `decide()` returns `ACTIVATE`
+directly (the defer branch is skipped, not entered) - this path still
+leads to `BuoyantBody.step()` running, not being skipped. So even if this
+real MTS-native auto-disconnect fires here, it does NOT by itself produce
+the observed zero-step-entry gap - checked directly against the same
+predicate already re-read this session, not assumed.
+
+### Whether this actually fires in this run is NOT confirmed - a real, disclosed gap
+
+Searched the retained log directly: the only `towedByConnection` line at
+all is from `DETACH PASS` (before `TOWING_UNAVAILABLE` even begins,
+confirming it was null THERE). No log line anywhere reports
+`towed.towedByConnection`'s own state during `TOWING_UNAVAILABLE`'s 60
+ticks in either this run or Trial 1/2 - this specific field was simply
+never logged during that window by anything retained. Whether MTS's own
+auto-disconnect above actually fires in this specific run cannot be
+confirmed or ruled out from existing logs - stated as a genuine
+measurement gap, not inferred either way.
+
+### Disposition
+
+A real, cited, jar-hash-verified MTS-native code path is now on record -
+a genuine behavior worth knowing regardless of this specific mystery
+(trailers can be silently disconnected by MTS's own update() when their
+towing vehicle becomes invalid, bypassing DIV entirely) - but checked and
+confirmed NOT to explain the zero-step-entry gap by itself, and its own
+actual firing in this run is unconfirmed by any retained log. The
+zero-step-entry mechanism remains unexplained. Smallest next testable
+discrepancy, NOT executed: log `towed.towedByConnection`'s own
+null-or-not state once, at the SAME existing diagnostic point already
+used for TOWING_UNAVAILABLE's per-tick velocity line - a single boolean,
+answering directly whether this MTS-native path is what's firing, without
+needing the water-geometry window extension proposed earlier. No native
+run performed in this entry. Native gate: one-run grant remains CONSUMED.
