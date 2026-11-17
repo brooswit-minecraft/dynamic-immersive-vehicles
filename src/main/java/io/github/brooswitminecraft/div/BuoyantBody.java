@@ -109,8 +109,19 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
  // box.updatePose() last actually ran, set immediately below it. Diagnostic bookkeeping only
  // (a plain field write every tick); does not change what step() computes or applies.
  long debugLastPoseUpdateGameTime = -1;
+ // MINECRAFT-545/547 (John's comment 54595/54596): the timestamp above alone cannot distinguish
+ // "stepped once this tick" from "stepped twice in the same tick" - two calls within the same
+ // tick would write the identical gameTime both times. This is a REAL invocation count,
+ // incremented unconditionally once per step() call, independent of gameTime - the actual
+ // observable an "exactly-once per tick" invariant needs. Diagnostic bookkeeping only (a plain
+ // counter increment); does not change what step() computes or applies.
+ long debugStepInvocationCount = 0;
 
  public void step(EntityVehicleF_Physics v) {
+  // MINECRAFT-545/547 (John's comment 54600): incremented FIRST, before updatePose() - a true
+  // entry count, matching this field's own documented intent, not a "pose successfully updated"
+  // count that would silently mislabel what's being measured if updatePose() ever failed/threw.
+  debugStepInvocationCount++;
   box.updatePose();
   debugLastPoseUpdateGameTime = level.getGameTime();
   Pose3d pose = new Pose3d(box.getPose());

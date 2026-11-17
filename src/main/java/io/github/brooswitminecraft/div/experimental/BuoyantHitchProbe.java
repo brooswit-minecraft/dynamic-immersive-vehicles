@@ -160,6 +160,13 @@ public final class BuoyantHitchProbe {
  private static minecrafttransportsimulator.entities.instances.PartGroundDevice towed3HookupPart;
  private static double partPairSpawnX, partPairSpawnZ, partPairSpawnSurfaceY;
  private static boolean configured = false, chunkGridUnforced = false, diagnosticContextDisarmed = false;
+ // MINECRAFT-545/547 (John's comment 54599/54600): baseline step-invocation count captured at
+ // TOWING_UNAVAILABLE's own tick=1, right after towing.remove() - compared against the SAME
+ // count at TOWING_REPLACEMENT's own pre-connect snapshot, via the real production-used
+ // LifecycleInvariants.starvedAcrossSpan helper, wiring that pure check into this actual
+ // fixture rather than leaving it tested only in isolation. Diagnostic-only: this is a new LOG
+ // line reporting the result, not a change to this fixture's own existing pass/fail criteria.
+ private static long towedStepInvocationCountAtRemoval = -1;
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -537,6 +544,10 @@ public final class BuoyantHitchProbe {
      + " towing.isValid=" + towing.isValid
      + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
      + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
+   // MINECRAFT-545/547 (John's comment 54599/54600): capture the real baseline HERE, immediately
+   // after towing.remove() returns - the exact start of the span LifecycleInvariants.
+   // starvedAcrossSpan checks against the pre-connect snapshot later in TOWING_REPLACEMENT.
+   towedStepInvocationCountAtRemoval = PhysicsBridge.debugStepInvocationCount(towed);
   }
   if (!boundedOrFail("towingUnavailable/towed", towed)) return;
   // MINECRAFT-545/547 diagnostic (John's comment 54237/54247's "next bounded diagnostic" and
@@ -547,6 +558,18 @@ public final class BuoyantHitchProbe {
   LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE tick=" + ticksInPhase
     + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
     + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
+  // MINECRAFT-545/547 (John's comment 54599): direct, supported-API connection/validity
+  // observation and the real step-invocation count, every tick of this window - no reflection,
+  // no new mechanism; towed.towedByConnection is the SAME public field DIV's own
+  // PhysicsBridge.active() already reads, and debugStepInvocationCount is the new diagnostic
+  // counter added alongside the existing debugLastPoseUpdateGameTime marker. This is the exact
+  // observable an "exactly-once per tick, surviving towing removal" invariant needs - logged
+  // unconditionally here (not gated behind GroundContactDiagnostics), since it costs one plain
+  // field read per tick and this diagnostic fixture already logs every tick of this window.
+  LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE tick=" + ticksInPhase
+    + " towed.towedByConnectionNonNull=" + (towed.towedByConnection != null)
+    + " towed.stepInvocationCount=" + PhysicsBridge.debugStepInvocationCount(towed)
+    + " towed.lastPoseUpdateGameTime=" + PhysicsBridge.debugLastPoseUpdateGameTime(towed));
   // MINECRAFT-545/547 (John's comment 54494): arm the shared DiagnosticContext here, one tick
   // BEFORE the intended window starts (ticksInPhase==SHORT_PHASE_TICKS-6, i.e. 54), so it is
   // already armed by the time the NEXT Minecraft tick's own entity-ticking force hook (which runs
@@ -613,6 +636,25 @@ public final class BuoyantHitchProbe {
    io.github.brooswitminecraft.div.DiagnosticContext.arm(java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), level.getGameTime(), level.getGameTime() + 15);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT pre-connect towing2=" + towing2.position + " towing2.motion=" + towing2.motion
      + " towed=" + towed.position + " towed.motion=" + towed.motion + " towedHookupAnchor=" + towedHookupAnchor);
+   // MINECRAFT-545/547 (John's comment 54599): same direct connection/invocation-count
+   // observation as TOWING_UNAVAILABLE's own per-tick line, at this exact boundary - a reader can
+   // diff this count against the one logged at TOWING_UNAVAILABLE's own tick=1 to get the real,
+   // counted number of step() invocations across the entire removal-to-reconnect window directly,
+   // without needing to infer it from the (coarser) gameTime timestamp alone.
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT pre-connect towed.towedByConnectionNonNull="
+     + (towed.towedByConnection != null) + " towed.stepInvocationCount=" + PhysicsBridge.debugStepInvocationCount(towed)
+     + " towed.lastPoseUpdateGameTime=" + PhysicsBridge.debugLastPoseUpdateGameTime(towed));
+   // MINECRAFT-545/547 (John's comment 54599/54600): the real production-used invariant check,
+   // wired into this actual fixture (not left tested only in isolation) - compares the baseline
+   // captured right after towing.remove() against this exact pre-connect snapshot, via the real
+   // LifecycleInvariants.starvedAcrossSpan helper. Diagnostic-only: reports the result in a new
+   // log line, does not change this fixture's own existing pass/fail criteria or physics.
+   long towedStepInvocationCountNow = PhysicsBridge.debugStepInvocationCount(towed);
+   boolean towedStarvedAcrossRemovalSpan = towedStepInvocationCountAtRemoval >= 0
+     && io.github.brooswitminecraft.div.LifecycleInvariants.starvedAcrossSpan(towedStepInvocationCountAtRemoval, towedStepInvocationCountNow);
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT lifecycleInvariantCheck towed.stepInvocationCountAtRemoval="
+     + towedStepInvocationCountAtRemoval + " towed.stepInvocationCountNow=" + towedStepInvocationCountNow
+     + " starvedAcrossRemovalSpan=" + towedStarvedAcrossRemovalSpan);
    // MINECRAFT-545/547 diagnostic (John's comment 54237: trace actual pose/velocity BEFORE
    // connectTrailer is called, not just inside createHitch's own log line, which runs AFTER).
    // Real native state, same handle BuoyantBody.step reads every tick - not v.motion (linear-

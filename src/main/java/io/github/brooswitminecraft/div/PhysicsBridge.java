@@ -1184,6 +1184,18 @@ public final class PhysicsBridge {
   if (body instanceof BuoyantBody bb) return bb.debugLastPoseUpdateGameTime;
   return -1;
  }
+ /** Diagnostic/test-only companion to {@link #debugLastPoseUpdateGameTime} (John's comment
+  * 54595/54596): the real COUNT of times this body's own {@code step()} has actually been
+  * invoked - distinct from the gameTime marker above, which cannot tell "stepped once this tick"
+  * apart from "stepped twice in the same tick" (both would write the identical gameTime). Returns
+  * {@code 0} if there is no active body right now, or it has never run {@code step()} yet. Never
+  * called from any production code path. */
+ public static long debugStepInvocationCount(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.debugStepInvocationCount;
+  if (body instanceof BuoyantBody bb) return bb.debugStepInvocationCount;
+  return 0;
+ }
  /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
   * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL
   * anchor-world position at ANY bracket by rotating a connection's own authored local offset by
@@ -2090,8 +2102,15 @@ public final class PhysicsBridge {
   // box.updatePose() last actually ran, set immediately below it. Diagnostic bookkeeping only
   // (a plain field write every tick); does not change what step() computes or applies.
   long debugLastPoseUpdateGameTime = -1;
+  // MINECRAFT-545/547 (John's comment 54595/54596): see BuoyantBody's own identical field doc -
+  // a real invocation count, independent of gameTime, for an "exactly-once per tick" invariant
+  // the timestamp alone cannot support. Diagnostic bookkeeping only.
+  long debugStepInvocationCount = 0;
 
   public void step(EntityVehicleF_Physics v) {
+   // MINECRAFT-545/547 (John's comment 54600): incremented first - see BuoyantBody's own
+   // identical fix/doc - a true entry count, not a post-updatePose count.
+   debugStepInvocationCount++;
    box.updatePose();
    debugLastPoseUpdateGameTime = level.getGameTime();
    Pose3d pose=new Pose3d(box.getPose());

@@ -8576,3 +8576,72 @@ place. No DIV fix implemented (per 54595's own conditional: only
 justified once a real failing-before regression exists, which itself
 requires the missing harness). No native run performed. Native gate: one-
 run grant remains CONSUMED; this entry does not request another.
+
+## Corrected and wired the diagnostic implementation per 54600
+
+Per 54600's own read of the just-begun diff: four concrete corrections,
+all addressed before treating anything as a lifecycle regression.
+
+### (1) Retracted: the "already measured" counter claim
+
+`debugStepInvocationCount` is NEW in this change - no previously-captured
+log ever contained it. The prior draft's own test comment wrongly implied
+its `203, 203` sample values were drawn from this investigation's actual
+retained measurement; they were synthetic/illustrative. The REAL, already-
+measured number remains the separate `lastPoseUpdateGameTime` field
+(frozen at `203` across the full removal-to-reconnect span, already
+documented earlier this entry) - the test now says so explicitly and no
+longer conflates the two.
+
+### (2) Fixed: aggregate delta is not sufficient for "exactly-once"
+
+`advancedExactlyBy`'s own aggregate check (`after-before == expectedTicks`)
+cannot distinguish a perfect per-tick sequence from a starved tick
+followed by a duplicated one (`0` then `+2` sums to the same `2` as two
+`1`s). Added `exactlyOncePerTick(long[] counts)` - checks every
+CONSECUTIVE pair in a real per-tick sample sequence, not just the two
+endpoints. A new test (`exactlyOncePerTickFalseForStarvationThenDuplicate
+EvenThoughAggregateMatches`) demonstrates the exact failure the old check
+alone would miss, confirming the new check catches it while the old one
+still (correctly, if insufficiently) passes.
+
+### (3) Fixed: wired into the actual fixture, not left isolated
+
+Added `towedStepInvocationCountAtRemoval` (captured immediately after
+`towing.remove()` returns, in `TOWING_UNAVAILABLE`'s own existing post-
+remove block) and a new `lifecycleInvariantCheck` log line at
+`TOWING_REPLACEMENT`'s own pre-connect snapshot, calling the real
+`LifecycleInvariants.starvedAcrossSpan` directly against these two real
+captured counts - a genuine production-used wiring into the retained
+fixture, not a standalone pure class tested only in isolation. Diagnostic-
+only: a new LOG line reporting the check's own result; no change to this
+fixture's existing pass/fail criteria or physics.
+
+### (4) Fixed: counter now measures true entry, not post-updatePose success
+
+Moved the `debugStepInvocationCount++` increment to the TOP of `step()`
+in both `BuoyantBody` and `PhysicsBridge.Body`, before `box.updatePose()`
+- a true invocation-entry count matching the field's own documented
+intent, not a "pose successfully updated" count that would silently
+mislabel what's measured if `updatePose()` ever failed.
+
+### Verification
+
+Compiled cleanly (`M545-lifecycle-compile3`, `RESULT=COMPLETE rc=0`).
+`LifecycleInvariantsTest`: 9/9 passing (`M545-lifecycle-test2`,
+`RESULT=COMPLETE rc=0`). Re-ran all four pure suites together
+(`DiagnosticWindowTest`/`DiagnosticContextTest`/
+`BuoyantForcesWaterScanBoundsTest`/`LifecycleInvariantsTest`,
+`M545-regression-check`, `RESULT=COMPLETE rc=0`) - no regression, 23
+tests total across this investigation's own pure suites.
+
+### Disposition
+
+Diagnostic instrumentation corrected and wired into the real, retained
+fixture, per all four of 54600's own corrections. No gameplay/fixture
+physics change - every addition is a counter/log line or a pure helper
+call, none altering control flow or applied forces. No DIV compatibility
+fix implemented (54595's own condition for that - a justified, failing-
+before regression against the real dispatch chain - still requires the
+native-run-adjacent harness not yet authorized). No native run performed.
+Native gate: one-run grant remains CONSUMED.
