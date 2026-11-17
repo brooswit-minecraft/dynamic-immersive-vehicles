@@ -8345,3 +8345,68 @@ change, patch, or fix is proposed in this entry - per 54565/54568's own
 explicit caution against treating a source-level finding as proof of
 runtime causation or a native-solver fix without further confirmation.
 Native gate: one-run grant remains CONSUMED.
+
+## Completing remaining checks per 54576; correcting confidence label to conditional
+
+Per 54576's own independent hierarchy check (same jar hash) - no
+`remove()` override anywhere in `towed`'s own class chain
+(`C_Renderable`/`E_Interactable`/`G_Towable`/`VehicleC_Colliding`/
+`D_Moving`/`E_Powered`/`F_Physics`) calls `disconnectTrailer` or touches
+`towingConnections` directly; `WrapperWorld`/`AWrapperWorld` have no
+`removeEntity` override either, confirming `EntityManager.removeEntity`
+(already read) is genuinely what runs. Two remaining caveats to close:
+
+### Installed-part removal and DIV's own mixins - checked, confirmed clear
+
+Decompiled `APart` (same jar) - no `remove()` override, no reference to
+`towedByConnection`/`towingConnections`/`disconnectTrailer` anywhere in
+that class. Checked DIV's own mixins directly (`grep` across
+`src/main/java/io/github/brooswitminecraft/div/mixin/*.java`) - the only
+match for "remove" is an unrelated accessor name
+(`PartPropellerAccessor.java`); no DIV mixin injects into any entity-
+removal path. Both caveats close clear: neither installed-part cleanup
+nor any DIV-side hook touches this mechanism.
+
+### Correcting the confidence label: conditional, source-supported - not proven for this exact run
+
+Per 54576's own caution: the retained runtime logs do not carry an
+explicit connection/list snapshot (e.g., a direct log of
+`towed.towedByConnection`'s own value, or confirmation `towing` was truly
+absent from `allNormalTickableEntities` at the exact tick) for THIS
+specific execution. The mechanism found across this sub-trace (`54565`/
+`54568`/this entry) is **source-level, fully confirmed via the pinned
+jar's own decompiled bytecode, and consistent with every retained log
+observation** - but it is a CONDITIONAL, source-supported starvation
+hypothesis, not a proven full explanation of the `TOWING_REPLACEMENT`
+crash itself. Retracting any stronger framing from the immediately prior
+entry - that entry's own closing language ("fully resolved", "matches
+exactly") overstated the confidence level by treating consistency with
+retained logs as equivalent to a direct runtime measurement, which it is
+not.
+
+### Minimal regression/compatibility seam - proposed, not implemented
+
+Per 54576's instruction to formulate (not build) a minimal, production-
+used seam: DIV already has an existing, diagnostic-only observable well-
+suited to detecting exactly this starvation symptom without any new
+mechanism -
+`PhysicsBridge.debugLastPoseUpdateGameTime(v)` (already used throughout
+this investigation). If this MTS-level starvation is real, this value
+would stay FROZEN (not advance) for a towed vehicle across consecutive
+ticks despite the vehicle remaining registered/`alive`, while
+`level.getGameTime()` keeps advancing - a direct, already-available
+signal, requiring no new code. A future, NOT-executed regression could
+assert exactly this relationship for the fixture's own `TOWING_UNAVAILABLE`
+window, using data this investigation already has retained (comparing
+`debugLastPoseUpdateGameTime` against `level.getGameTime()` across the
+window) rather than needing a new native run. Not implemented as a test
+in this entry - described as the minimal seam, per the explicit "no
+guessed fix" instruction.
+
+### Disposition
+
+All remaining indirect-cleanup checks from 54576 are now closed. The
+starvation mechanism remains a well-supported, source-confirmed
+CANDIDATE explanation - correctly labeled conditional, not proven, for
+this exact execution. No DIV fix proposed or implemented. No native run
+performed. Native gate: one-run grant remains CONSUMED.
