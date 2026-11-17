@@ -8101,3 +8101,79 @@ performed. No new measurement proposed without first locating the actual
 driver - continuing the caller trace is the honest next step, not
 executed further in this already-large entry given budget. Native gate:
 one-run grant remains CONSUMED.
+
+## Exhaustive doTick-caller search per 54561 - no alternate recursive driver found anywhere in the jar; the contradiction deepens
+
+Per 54561: identical gate values do not rule out a COMBINED mechanism
+(constant gate + a disappearing alternate driver) - locate ALL `doTick`
+callers and `towingConnections` traversals across the FULL pinned jar,
+not just the one class already read.
+
+### Exhaustive search performed
+
+Extracted the FULL `minecrafttransportsimulator/*` and `mcinterface1211/*`
+packages from the same pinned jar (hash
+`1d2f7512604636265703b29fdf13d7f8ef2323694b6435f4392973da6e78d251`) - 678
+total `.class` files - and searched every one, as raw bytes
+(`grep -rlas`), for the literal string `doTick`. Exactly THREE classes
+reference it at all:
+- `EntityManager.class` - the two already-examined main-loop `forEach`
+  call sites (both gated by `blockMainUpdateCall()`), and `doTick`'s own
+  definition (`public static void doTick(AEntityA_Base entity)`, which
+  itself just calls `entity.update()` + `doPostUpdateLogic()` - confirmed
+  by decompiling its body directly, lines 288-299).
+- `AEntityG_Towable.class` - the method definition site only (its own
+  `blockMainUpdateCall()`/class membership, not a NEW caller).
+- `AEntityF_Multipart.class` - `EntityManager.doTick(part)` (line 476) -
+  ticks a vehicle's own installed PARTS, not a towed VEHICLE. Not the
+  driver being searched for.
+
+**No alternate `doTick` call exists anywhere in the pinned jar that would
+recursively drive a towed VEHICLE's own `update()` from its towing
+vehicle's side.** This directly contradicts 54561's own suggested
+"alternate recursive driver" hypothesis - there isn't one findable by this
+method, in this jar.
+
+### Checked the real Minecraft-level entity tick too - confirmed it does not call `update()` either
+
+Decompiled `mcinterface1211.BuilderEntityExisting` (the actual Minecraft
+`Entity` subclass wrapping an MTS vehicle - confirmed by its own
+`baseTick()` override, lines 76-123). It syncs position
+(`this.setPos(this.entity.position...)`), checks world-border/validity,
+and calls `this.discard()` if `!this.entity.isValid` - but NEVER calls
+`.update()` anywhere in its own body. Minecraft's own automatic per-entity
+tick (which runs `baseTick()` unconditionally, independent of MTS's own
+`EntityManager` dispatch entirely) does not drive MTS's `update()` either.
+
+### The contradiction is now sharper, not resolved
+
+Per the exhaustively-confirmed source: `update()` (hence `moveVehicle`,
+hence DIV's own `BuoyantBody.step()`) is ONLY ever reachable via
+`EntityManager.doTick`, itself ONLY ever called from the two
+`blockMainUpdateCall()`-gated main-loop `forEach` blocks. Since
+`blockMainUpdateCall() = towedByConnection != null` is confirmed `true`
+continuously from the moment `towed` is first attached onward, this
+reading implies `update()` should NEVER run for `towed` for the ENTIRE
+remainder of the probe, including `ATTACH`/`DETACH` - directly
+contradicting the extensively-confirmed step-entry/`buoyantForcesDiagnostic`
+lines that DO fire throughout that period. This is now a genuine
+contradiction in my own understanding of when this gate actually applies
+- not resolved by anything found in this entry. Possible explanations NOT
+yet checked: whether server-side vehicle entities are added to
+`allNormalTickableEntities` at all (vs. some other list/path not yet
+examined), or whether `blockMainUpdateCall()`'s own override is more
+specific in a subclass not yet read (`EntityVehicleF_Physics` itself,
+which was not decompiled in this entry). Stated as unresolved, not
+guessed past.
+
+### Disposition
+
+Exhaustive, cited, jar-hash-verified search performed - ruling out the
+specific "alternate `doTick` recursion" hypothesis outright. The actual
+mechanism remains unestablished; my own prior assumption about this
+gate's applicability may itself be incomplete. Smallest next step, NOT
+executed: decompile `EntityVehicleF_Physics` itself (not yet read) to
+check for an overridden `blockMainUpdateCall()` or a separate tick path
+specific to that class, and confirm which tickable list a server-side
+vehicle entity actually belongs to. No native run performed. Native gate:
+one-run grant remains CONSUMED.
