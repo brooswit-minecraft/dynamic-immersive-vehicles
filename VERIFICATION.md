@@ -11127,3 +11127,61 @@ for this commit, isolation command-line mechanism, fixture-bounds-unchanged conf
 f32-aware tolerance guidance, lock/timeout/shutdown protocol confirmation, baseline hashes). No
 production activation, no native run performed or requested - native hold remains CLOSED
 pending a new explicit coordinator release.
+
+## Per 54725: a flag-enabled packet prepared (reusing the exact reviewed 95bc8ed runtime,
+## no recompile), still NOT launched - a specific release remains required
+
+John's comment 54725 (coordinator-relayed): independently verified `M545-packet-95bc8ed`'s own
+manifests/hashes/fixture-unchanged claim and confirmed the candidate flag was, correctly,
+ABSENT from that packet's own frozen VM-args (matching its own `PACKET-NOTES.md`, which stated
+this was documented-but-not-yet-exercised). Authorized preparing a NEW, uniquely-named packet
+with the flag ACTUALLY baked into packet-local VM-args before hashing, reusing the exact already
+-reviewed `95bc8ed` runtime (no recompile), while explicitly withholding launch authorization
+pending a further, specific release for that new packet.
+
+Prepared `M545-packet-95bc8ed-flagon` (no source/fixture changes - pure packet/infrastructure
+work):
+- Confirmed the live `build/moddev` arg-text files were STILL byte-identical to
+  `95bc8ed`'s own reviewed hashes before doing anything - reused that exact compiled runtime
+  (same jars/classes), with NO `gradle` invocation of any kind, avoiding the shared
+  `/tmp/div-gradle-slot.lock` entirely (another ticket, M510, may hold it - never attempted to
+  acquire it for this work).
+- **Caught a real bug while preparing**: the shared `serverRunVmArgs.txt` has no trailing
+  newline - a naive `>>` append of the flag would have silently MERGED it onto the end of the
+  prior line (`...serverLegacyClasspath.txt-Ddiv.sequentialDragBound=true`), corrupting the
+  java `@file` argument list into one malformed line instead of two valid ones. Caught via
+  inspection of the result before hashing, fixed with an explicit leading newline, and verified
+  via a byte-for-byte diff confirming every PRIOR line stayed exactly intact and the flag landed
+  as its own genuinely separate final line.
+- Made `runServer.sh` and all three arg-text files PACKET-LOCAL copies (classpath/program-args
+  byte-identical in content to the shared ones, confirmed via hash; VM-args carries the flag;
+  `runServer.sh` rewritten to reference only this packet's own local files/rundir) - the shared
+  `build/moddev` files were never touched.
+- Retargeted this packet's own `preflight.sh` checks 1-2 to validate these packet-local files
+  (the actual paths/bytes that would actually be invoked), not the shared ones - checks 3-9
+  (isolated rundir/world/seed/config/shared-baseline) unchanged, since those remain genuinely
+  shared/isolated resources unrelated to the flag.
+- Added two NEW preflight checks (10/11): fails closed unless the flag is literally present in
+  this packet's own VM-args file, AND fails closed if the SHARED VM-args file ever acquires that
+  same flag - confirming isolation by an active check, not merely asserting it.
+- Confirmed, again, zero drift in the shared `run/` baseline (config/world hashes identical to
+  `95bc8ed`'s own) and zero fixture drift (same `df4b0c2`-vs-HEAD empty diff as before).
+- Ran `preflight.sh` directly (NOT via `launch-wrapper.sh`) as a dry run: all 11 checks passed,
+  including both new ones - log retained under this packet's own `receipts/`.
+- `launch-wrapper.sh` copied with its own `PACKET_DIR`/`OWNER_TAG`/`RUN_SH` (now pointing at the
+  packet-local launcher) updated - protocol otherwise unchanged (same lock-through-exit, same
+  preflight-before-exec, same orderly-stop timeout). **Never invoked.**
+
+Per 54725's own explicit instruction ("DO NOT launch until that specific packet review/release
+is posted"): this packet is prepared and ready for independent readback, but launch remains
+withheld. No prior approval in this investigation authorizes running it - a further, specific
+release naming this packet is required first.
+
+### Disposition
+
+A new, flag-enabled packet prepared, reusing the exact already-reviewed runtime with zero
+recompilation and zero Gradle-lock contention; one real bug (a silent line-merge from a missing
+trailing newline) caught and fixed before any hash was frozen; preflight extended with two new
+checks that actively confirm (not merely assert) the flag's isolation to this packet alone. No
+source or fixture changes. No native run performed - launch remains explicitly withheld pending
+a further, specific coordinator release naming this packet.
