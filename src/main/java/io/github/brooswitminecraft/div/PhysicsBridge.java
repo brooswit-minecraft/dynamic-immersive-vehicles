@@ -1259,50 +1259,104 @@ public final class PhysicsBridge {
     ? new DebugExecutedStepSnapshot(body, body.lastExecutedStepper == null ? null : body.lastExecutedStepper.name(), body.executedStepCount, body.tuning())
     : null;
  }
- /** MINECRAFT-545/547 (John's comment 54656, evidence-based diagnosis): true only if a towed
-  * vehicle's own {@code towedByConnection} should be forcibly released because its towing
-  * vehicle is no longer valid - the EXACT condition {@code AEntityG_Towable.update()}'s own
-  * auto-disconnect check already uses ({@code if (towedByConnection!=null &&
-  * !towedByConnection.towingVehicle.isValid) disconnectTrailer(...)}, confirmed via decompile).
-  * That check can never fire for an orphaned towed vehicle: {@code
-  * AEntityG_Towable.blockMainUpdateCall()} returns {@code true} while {@code towedByConnection}
-  * stays non-null, so the towed vehicle's own {@code update()} - the ONLY place that check lives
-  * - never runs again once its towing vehicle is removed (not merely disconnected). This is a
-  * circular dependency a towed vehicle can never break on its own; it requires an observer
-  * OUTSIDE that blocked dispatch path. {@link #cleanup} already is exactly that: an independent,
-  * world-tick-driven sweep ({@code ServerTickEvent.Post}) over every DIV-registered body,
-  * confirmed this session to keep running even for a body MTS's own per-vehicle dispatch has
-  * stopped reaching (the real native run's own {@code registryBodyIdentity} stayed the same
-  * live instance throughout - the registry entry was never the problem, only MTS's own dispatch
-  * reaching it). Pure boolean seam, no entity/connection types, so this is testable without any
-  * live MTS object. */
- static boolean shouldReleaseOrphanedTowingConnection(boolean towedByConnectionNonNull, boolean towingVehicleIsValid) {
-  return towedByConnectionNonNull && !towingVehicleIsValid;
+ /** MINECRAFT-545/547 (John's comments 54656/54659, CORRECTED - 54659 found two real errors in
+  * the first version of this fix, both confirmed via a fresh byte-matched decompile of the
+  * pinned jar, not trusted from an earlier paraphrase): true only if a towed vehicle's own
+  * {@code towedByConnection} should be forcibly released because its ANCHOR entity is no longer
+  * valid - the EXACT condition {@code AEntityG_Towable.update()}'s own auto-disconnect check
+  * actually uses: {@code if (towedByConnection!=null && !towedByConnection.towingEntity.isValid)}
+  * - {@code towingEntity}, NOT {@code towingVehicle}. These differ whenever the connection is
+  * anchored to an INSTALLED PART rather than the vehicle itself (MINECRAFT-530's own installed-
+  * part case) - {@code towingEntity} is the real anchor (vehicle OR part); {@code towingVehicle}
+  * is always resolved to the containing vehicle regardless. Checking the vehicle's own validity
+  * would be WRONG whenever a part's own validity can differ from its vehicle's (the ordinary
+  * hull-to-hull probe scenario happens to have {@code towingEntity == towingVehicle}, which is
+  * exactly why the first version's bug was invisible there). That check can never fire for an
+  * orphaned towed vehicle: {@code AEntityG_Towable.blockMainUpdateCall()} returns {@code true}
+  * while {@code towedByConnection} stays non-null, so the towed vehicle's own {@code update()} -
+  * the ONLY place that check lives - never runs again once its anchor is removed (not merely
+  * disconnected). This is a circular dependency a towed vehicle can never break on its own; it
+  * requires an observer OUTSIDE that blocked dispatch path. {@link #cleanup} already is exactly
+  * that: an independent, world-tick-driven sweep ({@code ServerTickEvent.Post}) over every DIV-
+  * registered body, confirmed this session to keep running even for a body MTS's own per-vehicle
+  * dispatch has stopped reaching (the real native run's own {@code registryBodyIdentity} stayed
+  * the same live instance throughout - the registry entry was never the problem, only MTS's own
+  * dispatch reaching it). Pure boolean seam, no entity/connection types, so this is testable
+  * without any live MTS object. */
+ static boolean shouldReleaseOrphanedTowingConnection(boolean towedByConnectionNonNull, boolean towingEntityIsValid) {
+  return towedByConnectionNonNull && !towingEntityIsValid;
+ }
+ /** MINECRAFT-545/547 (John's comment 54659, "stale index" hazard): true only if {@code index}
+  * (from {@code towingVehicle.towingConnections.indexOf(connection)}) is safe to pass to the
+  * real {@code disconnectTrailer(int)} - {@code List.remove(int)} throws
+  * {@code IndexOutOfBoundsException} for a negative index, and {@code indexOf} returns
+  * {@code -1} when the connection is not actually present in the parent's own list. A pure
+  * boundary check, same reasoning as {@link #shouldReleaseOrphanedTowingConnection} - testable
+  * without any live MTS object. */
+ static boolean canSafelyDisconnectAtIndex(int index) {
+  return index >= 0;
  }
  public static void cleanup() {
-  // MINECRAFT-545/547 (John's comment 54656): restores exactly-once dispatch for a towed
-  // vehicle orphaned by its towing vehicle's removal (not disconnection) - see
-  // shouldReleaseOrphanedTowingConnection's own doc for why this must live here, in cleanup()'s
-  // own already-reliable independent sweep, rather than relying on the towed vehicle's own
-  // (permanently blocked, in this exact case) update(). Setting towedByConnection=null directly
-  // mirrors AEntityG_Towable.update()'s own auto-disconnect effect from the TOWED side (the only
-  // side that matters here, since towing is already invalid/removed and nothing ever reads its
-  // own towingConnections list again) - not a reimplementation of disconnectTrailer, the same
-  // single-field effect disconnectTrailer itself produces on this side. The instant this field
-  // goes null, blockMainUpdateCall() returns false and MTS's OWN ordinary main-loop dispatch
-  // resumes ticking this vehicle normally on its very next tick - no new DIV-side physics-
-  // driving mechanism, no change to ordinary detach/reconnect (untouched: towingVehicle.isValid
-  // stays true for any live, still-towing vehicle) or the already-active fallback (unrelated
-  // deferToNativeHitch/unsafeBuoyantAngularLock logic never checks towingVehicle.isValid at all).
+  // MINECRAFT-545/547 (John's comments 54656/54659): restores exactly-once dispatch for a towed
+  // vehicle orphaned by its anchor entity's removal (not disconnection). CORRECTED (54659): the
+  // first version of this fix directly nulled v.towedByConnection, claiming equivalence to
+  // disconnectTrailer's own effect - that claim was never actually verified and was WRONG.
+  // disconnectTrailer(int) does far more (confirmed via fresh decompile):
+  //   - removes the entry from the PARENT's own towingConnections list (by index)
+  //   - adds it to disconnectedTowingConnections OR frees BOTH sides' connectionGroupsIndexesInUse
+  //     (branching on hitchConnectionGroup.isSnap/hookupConnectionGroup.isSnap)
+  //   - resets both vehicles' own variables (resetAllVariables)
+  //   - sets the CHILD's parkingBrakeVar to 1.0 (engages parking brake on detach)
+  //   - sends a PacketEntityTowingChange to all clients
+  // A direct field null skips every one of these - not demonstrated equivalent, and in
+  // particular the client packet and connectionGroupsIndexesInUse release matter for anything
+  // else that later reads that state. This version calls the REAL disconnectTrailer, exactly
+  // mirroring AEntityG_Towable.update()'s own call
+  // (towedByConnection.towingVehicle.disconnectTrailer(towingVehicle.towingConnections.indexOf(towedByConnection)))
+  // - the SAME target, SAME index computation, SAME method; only the call SITE moves, from the
+  // towed vehicle's own blocked update() to this already-reliable independent sweep. Calling
+  // disconnectTrailer on an already-invalid/removed towing entity is not a new risk this
+  // introduces - MTS's OWN update() already does exactly that in the ordinary (non-starved) case
+  // (the towing entity who just went invalid is the one update() calls disconnectTrailer ON).
+  // Stale index handled explicitly (54659's own flagged hazard): List.remove(int) throws
+  // IndexOutOfBoundsException for a negative/out-of-range index; indexOf returns -1 if the
+  // connection is for some reason not actually present in towingVehicle's own list - guarded
+  // below, falling back to a direct null (restores exactly-once dispatch even though the fuller
+  // bookkeeping cannot run without a valid index to invoke it with).
+  // Reentrancy (54659's own explicit ask): BodyRegistry.forEachActive is a direct Map.forEach,
+  // which throws ConcurrentModificationException on structural modification during iteration.
+  // disconnectTrailer/resetAllVariables/the client packet are pure MTS-internal state mutation -
+  // no DIV mixin hooks fire synchronously from within that call chain (DIV's only mixins are on
+  // moveVehicle()/sound, confirmed via grep) - but to avoid relying on that alone, this collects
+  // every orphaned vehicle FIRST (read-only, during forEachActive), then performs every actual
+  // disconnect AFTER forEachActive has fully returned - the registry is never mutated (and could
+  // not trigger a nested forEachActive conflict) while forEachActive's own iteration is live.
+  var orphaned = new java.util.ArrayList<EntityVehicleF_Physics>();
   registry.forEachActive((v, b) -> {
-   if (shouldReleaseOrphanedTowingConnection(v.towedByConnection != null,
-       v.towedByConnection == null || v.towedByConnection.towingVehicle.isValid)) {
-    if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
-      "[DIV lifecycleDiagnostic] cleanup releasing orphaned towedByConnection v=" + v.uniqueUUID
-        + " removedTowingVehicle=" + v.towedByConnection.towingVehicle.uniqueUUID);
-    v.towedByConnection = null;
+   if (v.towedByConnection != null
+       && shouldReleaseOrphanedTowingConnection(true, v.towedByConnection.towingEntity.isValid)) {
+    orphaned.add(v);
    }
   });
+  for (var v : orphaned) {
+   var connection = v.towedByConnection;
+   if (connection == null) continue; // defensive only - nothing else clears this between the two phases above
+   var towing = connection.towingVehicle;
+   int index = towing.towingConnections.indexOf(connection);
+   if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+     "[DIV lifecycleDiagnostic] cleanup releasing orphaned towedByConnection v=" + v.uniqueUUID
+       + " removedTowingEntity=" + connection.towingEntity.uniqueUUID + " indexInParentList=" + index);
+   if (canSafelyDisconnectAtIndex(index)) {
+    towing.disconnectTrailer(index);
+   } else {
+    // Connection not actually present in towing's own list - the real disconnectTrailer cannot
+    // be safely invoked (List.remove(-1) throws). At minimum restore exactly-once dispatch by
+    // clearing the child's own stale pointer directly; the fuller bookkeeping (parent list entry
+    // already absent, connectionGroupsIndexesInUse, client packet, parking brake) cannot run
+    // without a valid index - this is a reduced, not equivalent, recovery for this one edge case.
+    v.towedByConnection = null;
+   }
+  }
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
   registry.removeIf((v, b) -> !v.isValid, (v, b) -> {

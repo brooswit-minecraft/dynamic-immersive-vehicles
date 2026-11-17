@@ -194,19 +194,33 @@ class PhysicsBridgeClassificationTest {
   assertFalse(registry.isActive(entity));
  }
 
- @Test void releasesAnOrphanedConnectionOnlyWhenTowingVehicleIsInvalid() {
-  // MINECRAFT-545/547 (John's comment 54656): the exact condition that must fire for
-  // cleanup()'s own orphan-release sweep to actually release a stale towedByConnection - a
-  // towing vehicle that is still valid (ordinary, still-towing case) must NEVER be released.
+ @Test void releasesAnOrphanedConnectionOnlyWhenTowingEntityIsInvalid() {
+  // MINECRAFT-545/547 (John's comments 54656/54659): the exact condition that must fire for
+  // cleanup()'s own orphan-release sweep to actually release a stale towedByConnection -
+  // CORRECTED (54659): this is towingEntity's own validity (the real anchor - vehicle OR
+  // installed part), NOT towingVehicle's. A still-valid anchor (ordinary, still-towing case)
+  // must NEVER be released.
   assertTrue(PhysicsBridge.shouldReleaseOrphanedTowingConnection(true, false));
   assertFalse(PhysicsBridge.shouldReleaseOrphanedTowingConnection(true, true));
  }
 
  @Test void neverReleasesWhenThereIsNoConnectionAtAll() {
   // An untowed vehicle (towedByConnection == null) has nothing to release regardless of the
-  // second flag's value - this must stay false, not merely "false because towingVehicleIsValid
+  // second flag's value - this must stay false, not merely "false because towingEntityIsValid
   // happened to be true."
   assertFalse(PhysicsBridge.shouldReleaseOrphanedTowingConnection(false, false));
   assertFalse(PhysicsBridge.shouldReleaseOrphanedTowingConnection(false, true));
+ }
+
+ @Test void canOnlySafelyDisconnectAtANonNegativeIndex() {
+  // MINECRAFT-545/547 (John's comment 54659): the exact boundary cleanup()'s own real-
+  // disconnectTrailer call site branches on - List.remove(int) throws for a negative index,
+  // and indexOf returns -1 when the connection is not actually present in the parent's own
+  // towingConnections list (the one case this fix falls back to a direct child-pointer null
+  // instead of the real method, since the real method cannot be safely invoked without a valid
+  // index).
+  assertFalse(PhysicsBridge.canSafelyDisconnectAtIndex(-1));
+  assertTrue(PhysicsBridge.canSafelyDisconnectAtIndex(0));
+  assertTrue(PhysicsBridge.canSafelyDisconnectAtIndex(3));
  }
 }

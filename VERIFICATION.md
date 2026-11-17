@@ -9474,3 +9474,121 @@ starvation (and whether that, in turn, is sufficient to prevent the
 original tick=7/8 crash - still a separate, unconfirmed question) remain
 open until a future authorized run. "Erosion hold" referenced in 54655/
 54656 is unrelated to this ticket's own scope and is left untouched.
+
+## Corrections per 54659: real disconnectTrailer semantics, correct condition, stale-index safety
+
+John's independent readback of commit `55f8bb5` found, via a FRESH decompile of the exact
+pinned jar (hash `1d2f7512604636265703b29fdf13d7f8ef2323694b6435f4392973da6e78d251`,
+re-verified against the live `.gradle` cache copy before trusting it), two real errors in that
+commit's own claims - not merely style, actual incorrect behavior and an unverified
+equivalence claim. Re-decompiled `AEntityG_Towable.class`/`TowingConnection.class` directly
+myself to confirm every point below byte-for-byte, rather than trust the prior paraphrase.
+
+### Error 1 - wrong condition field
+
+The prior fix checked `towedByConnection.towingVehicle.isValid`. The REAL
+`AEntityG_Towable.update()` auto-disconnect check is:
+```java
+if (this.towedByConnection != null && !this.towedByConnection.towingEntity.isValid) {
+    this.towedByConnection.towingVehicle.disconnectTrailer(
+      this.towedByConnection.towingVehicle.towingConnections.indexOf(this.towedByConnection));
+}
+```
+- checks `towingEntity`, NOT `towingVehicle`. `TowingConnection.towingEntity` is the REAL anchor
+(`AEntityE_Interactable<?>` - either the vehicle itself or an installed PART on it);
+`towingVehicle` is always resolved to the containing vehicle regardless (confirmed via
+`TowingConnection`'s own constructor/`initConnection`: `towingVehicle = hitchEntity instanceof
+APart ? ((APart)hitchEntity).vehicleOn : (EntityVehicleF_Physics)hitchEntity`). These are the
+SAME object only when the connection is anchored directly to the vehicle (exactly the probe's
+own scenario, which is why the bug was invisible there) - for an installed-part anchor
+(MINECRAFT-530's own case), a part's own validity can differ from its vehicle's, and checking
+the vehicle instead of the real anchor would be wrong in that case.
+
+### Error 2 - unverified equivalence claim; disconnectTrailer does far more than a field null
+
+The prior fix directly set `v.towedByConnection = null`, claiming this was "the exact same
+single-field effect disconnectTrailer itself produces." That claim was never actually verified
+against the real method body, and was wrong. The real `disconnectTrailer(int)`:
+```java
+public void disconnectTrailer(int connectionIndex) {
+    TowingConnection connection = this.towingConnections.remove(connectionIndex);
+    connection.towedVehicle.towedByConnection = null;
+    if (connection.hitchConnectionGroup.isSnap || connection.hookupConnectionGroup.isSnap) {
+        this.disconnectedTowingConnections.add(connection);
+    } else {
+        connection.towingEntity.connectionGroupsIndexesInUse.remove(connection.hitchGroupIndex);
+        connection.towedEntity.connectionGroupsIndexesInUse.remove(connection.hookupGroupIndex);
+    }
+    this.resetAllVariables();
+    connection.towedVehicle.resetAllVariables();
+    connection.towedVehicle.parkingBrakeVar.setTo(1.0, false);
+    if (!this.world.isClient()) {
+        InterfaceManager.packetInterface.sendToAllClients(new PacketEntityTowingChange(this, connectionIndex));
+    } ...
+}
+```
+Removes the PARENT's own list entry; branches into EITHER the snap-disconnect bookkeeping list
+OR freeing BOTH sides' `connectionGroupsIndexesInUse`; resets BOTH vehicles' variables; sets the
+CHILD's `parkingBrakeVar` to `1.0` (engages parking brake on detach); sends a
+`PacketEntityTowingChange` to all clients. A direct field null skips every one of these.
+
+### Fix (corrected)
+
+Rewrote `PhysicsBridge.cleanup()`'s new sweep to call the REAL `disconnectTrailer`, exactly
+mirroring `update()`'s own call - same target (`towing = connection.towingVehicle`), same index
+computation (`towing.towingConnections.indexOf(connection)`), same method - only the CALL SITE
+moves (to `cleanup()`'s own already-reliable independent sweep, since `update()`'s own call site
+is permanently blocked for an orphaned towed vehicle). Calling `disconnectTrailer` on an
+already-invalid/removed towing entity is not a new risk - MTS's own `update()` already does
+exactly that in the ordinary (ungated) case, since the entity that just went invalid is the one
+`update()` calls `disconnectTrailer` ON.
+
+**Stale index** (54659's own flagged hazard): `List.remove(int)` throws
+`IndexOutOfBoundsException` for a negative index; `indexOf` returns `-1` if the connection is
+not actually present in `towingVehicle`'s own list. New pure boundary check
+`canSafelyDisconnectAtIndex(int)` guards this - on a negative index, falls back to a direct
+`towedByConnection = null` (restores exactly-once dispatch even though the fuller bookkeeping
+cannot run without a valid index; explicitly documented as a REDUCED, not equivalent, recovery
+for this one edge case, not claimed otherwise this time).
+
+**Reentrancy** (54659's own explicit ask): `BodyRegistry.forEachActive` is a direct
+`Map.forEach`, which throws `ConcurrentModificationException` on structural modification during
+iteration. Confirmed via grep that no DIV mixin hooks fire synchronously from
+`disconnectTrailer`/`resetAllVariables`/the client packet's own call chain (DIV's only mixins
+are on `moveVehicle()`/sound) - but rather than rely on that alone, the sweep now collects every
+orphaned vehicle FIRST (read-only, during `forEachActive`), then performs every actual
+`disconnectTrailer`/fallback call AFTER `forEachActive` has fully returned - the registry is
+never touched while its own iteration is live, regardless of what `disconnectTrailer`'s call
+chain does.
+
+### Test coverage added (54659: "not predicate-only truth table")
+
+Renamed the existing boolean-condition test for accuracy
+(`releasesAnOrphanedConnectionOnlyWhenTowingEntityIsInvalid`, was "...TowingVehicle..."). Added
+`canOnlySafelyDisconnectAtANonNegativeIndex` covering the exact `-1`/`0`/positive boundary the
+production code now branches on. A full production-orchestration test (constructing real
+`TowingConnection`/`EntityVehicleF_Physics` objects and exercising the actual `cleanup()` call
+path) remains impractical without a live `ServerLevel` - confirmed earlier this investigation
+(`neoForge.unitTest` gives real MTS classes on the test classpath for bare-object construction,
+but not a live ticking dispatch chain) - so coverage stays at the pure-boundary level, same
+style as `deferToNativeHitch`/`unsafeBuoyantAngularLock`, not a reimplementation of the full
+call path. The retained native lifecycle fixture (`BuoyantHitchProbe`) remains the path to an
+eventual independently-reviewed, real-orchestration validation.
+
+### Verification performed (no native run)
+
+Full compile+test under the exclusive `/tmp/div-gradle-slot.lock`
+(`MINECRAFT-545-fix-real-disconnect-20261117T164549Z`, `RESULT=PASS`) - confirms
+`connection.towingEntity.uniqueUUID`/`.connectionGroupsIndexesInUse` etc. are all real,
+accessible fields on the actual decompiled types, not assumed. Fresh decompile of
+`TowingConnection.class`/`AEntityG_Towable.class` performed directly this entry (not reused from
+an earlier session's paraphrase) to confirm every claim above byte-for-byte against the pinned
+jar hash.
+
+### Disposition
+
+Both concrete errors from 54659 fixed: correct condition field, real `disconnectTrailer` call
+(full bookkeeping preserved) instead of an unverified partial reimplementation, explicit
+stale-index guard, and a two-phase collect-then-disconnect pattern removing any reentrancy risk
+against `forEachActive`'s own iteration. No native run performed or requested - this corrected
+fix remains native-unvalidated, same as before.
