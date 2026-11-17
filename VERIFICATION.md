@@ -4904,3 +4904,44 @@ one. Retained exact-head local evidence stands in its place: the
 immersive-vehicles-0.1.0-SNAPSHOT.jar` (sha256 `d395ff539c62981b337a254
 28612e49008373f9e0f1d44a07f6fa06e393d85dc`) recorded above, at the exact
 approved/merged head (confirmed identical by the empty `git diff --stat`).
+
+## Post-merge (MINECRAFT-544, 2026-11-16)
+
+Independent review (Jira comment 54440, after a required correction -
+comment 54430/54431 - that was fully resolved) approved exact head
+`3f3729c6fd4c388b3a046d2e2e06d8906ce3e738`. As sole merge owner, verified
+that 40-character sha matched the PR's own `headRefOid` (this repo tracks
+decisive review via the append-only `[review] APPROVED ... @ <sha>` line
+rather than a native GitHub PR review object - confirmed by every sibling
+ticket this sprint using the same convention), then merged PR #38 into
+`main` at merge commit `dac7565449d8e1d6c5853869b537758f8e2ec72e` - a
+clean merge (`git diff --stat 3f3729c dac7565` is empty: the merged tree
+is byte-identical to the reviewed/approved head). No branch-protection
+bypass or settings change; this repo has no required status checks.
+
+Post-merge hosted CI on this merge commit (run `44008143305`, triggered by
+the push) failed in 3 seconds across all five jobs, each annotated "The
+job was not started because recent account payments have failed or your
+spending limit needs to be increased" - the same pre-existing,
+already-disclosed zero-runner-inventory billing blockage every recent DIV
+ticket on this repo has hit. `.github/workflows/` contains only `ci.yml`
+(triggered on `pull_request`/`push: [main]`, no tag/`workflow_dispatch`
+trigger) - no `release.yml` or tag-based release workflow exists in this
+repo beyond that billing-blocked CI, and this change (an additive
+`Overrides`/`Buoyancy`/`BuoyantForces`/`PhysicsBridge` schema and
+production-math change, no version bump) does not warrant inventing one.
+
+Combined verification performed directly against the merged `main` head
+(this checkout, `dac7565`, pulled fresh via `git fetch`+`merge --ff-only`):
+local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline clean build` -
+`BUILD SUCCESSFUL`. The real JUnit XML reports total **895 tests**, 0
+skipped, 0 failures, 0 errors across the whole suite at this exact merged
+head. `build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar` (sha256
+`babd427a8c7fd2c7d07a3d1c9990b872374a301a2e6a47d796d8fdc3ddf8464e`) was
+produced - a fresh build artifact (gradle's own `clean` ran first), not
+byte-comparable to the PR-branch jar's own prior sha, but the real JUnit
+pass/fail/skip counts are the actual completion evidence, matching the
+PR-branch build's own 895/0/0/0 exactly.
