@@ -6613,3 +6613,128 @@ constructed pool, that is a property of the FIXTURE's own bounded-area
 behavior during free-float, not necessarily a DIV production defect) -
 stated as a hypothesis requiring the position check above, not asserted.
 No production change or native run proposed.
+
+## Retracting overclaims; confirming diagnostic-gating/water-query semantics; missing position measurement (54458)
+
+John's comment 54458: retract "actual origin," "can only be the water
+surface," "byte-identical trajectory," and the gravity-only conclusion
+drawn from rounded samples/absent lines - verify diagnostic skip
+conditions, `waterSurfaceAt` semantics, and look for any existing
+position-bearing log before attributing anything; the prior pool check
+covered a different, much-earlier event, not this bracket. Read-only,
+no world mutation/load/rerun, per instruction.
+
+### Retracted claims
+
+- "The actual origin" / "can only be the water surface" - RETRACTED as
+  conclusions. What follows narrows ONE candidate mechanism with real
+  source confirmation, but does not prove it is the explanation.
+- "Byte-identical trajectory" - RETRACTED as stated. Only the LOGGED
+  VELOCITY SAMPLES match to displayed/rounded precision through tick 59
+  - this says nothing exact about position, which integrates those
+  samples and compounds any rounding/uncertainty they already carry.
+- The gravity-only conclusion drawn purely from "absent diagnostic
+  lines" - re-examined below with the actual gating code, not re-
+  asserted from the same inference.
+
+### Diagnostic skip condition, confirmed via the actual code (not re-asserted)
+
+Re-read `BuoyantForces.apply`'s per-float loop directly: the diagnostic
+log line is inside `if (GroundContactDiagnostics.ENABLED) { ... }`,
+itself reached only after `if (fraction <= 0) continue;` already skipped
+the rest of the loop body for that float. **There is no OTHER gating
+condition on this specific log line** - its absence for a given float/
+tick is equivalent to `fraction <= 0` for that float that tick, exactly,
+confirmed by reading the method's own control flow, not inferred from
+the log's mere absence. This specific concern is resolved: the absence
+pattern observed in both runs genuinely does mean "not submerged this
+tick," for this exact diagnostic line.
+
+### `waterSurfaceAt`'s real semantics, confirmed via the actual code
+
+```java
+private static double waterSurfaceAt(ServerLevel level, double x, double z, double fromY) {
+  // scans DOWNWARD from fromY (= float's own top + 1), up to 24 blocks,
+  // for the first REAL water fluid block at that (x,z) column via
+  // level.getFluidState(pos).is(FluidTags.WATER); returns that block's
+  // actual fluid height, or NEGATIVE_INFINITY if none found in range.
+}
+```
+This queries LIVE WORLD BLOCK/FLUID DATA at the float's actual world
+column - not a DIV-side model. The probe's own `buildPlatform` places
+REAL water blocks into the world at fixed coordinates/Y-range at spawn
+time; this function would return a value from THOSE blocks if the float
+is still within that built footprint, or from whatever NATURAL terrain
+exists at that column if it has drifted outside it (or simply
+`NEGATIVE_INFINITY` if no water at all is within 24 blocks down -
+including straight-up airborne with nothing below). This is consistent
+with, but does not prove, the seed/terrain-dependent hypothesis from the
+prior entry - confirmed as a real mechanism BY WHICH such a dependency
+COULD manifest, not confirmation that it DID at tick 60.
+
+### The missing measurement: `towed`'s actual position at ticks 59/60 is not available
+
+Searched every retained log for a position-bearing line anywhere near
+this bracket in either run: `TOWING_UNAVAILABLE`'s own per-tick line
+logs only `linearVelocity`/`angularVelocity`, never position; no other
+diagnostic (`lifecycleDiagnostic`, `buoyantForcesDiagnostic`, etc.) logs
+`towed`'s pose/position during this specific free-float window either
+(`buoyantForcesDiagnostic` only fires when already submerged, i.e.
+exactly the ticks where it would be most useful for confirming the
+float's own query point are the ticks with NO such line). **No existing
+log line gives `towed`'s real position at tick 59 or 60 in either
+run.** Reading the actual saved world region/NBT files directly (to
+look up real block/fluid state at a reconstructed query point) was not
+attempted - genuinely impractical in this environment without
+Minecraft-aware tooling to parse the region/chunk format, and would in
+any case need a real position first. Integrating the logged velocity
+samples to ESTIMATE a position was considered and explicitly rejected
+as a substitute here, per 54458's own caution: such an estimate carries
+accumulated numerical uncertainty and depends on exact integration-order/
+phase conventions this entry has not derived or verified - it is not
+treated as a measurement.
+
+### Separating "explains the one non-crash run's own anomaly" from "resolves the ordinary-reconnect crash"
+
+Stated explicitly, since conflating these would be yet another
+overclaim: EVEN IF a future, properly-instrumented run confirmed `towed`
+genuinely left the deterministic pool/platform footprint by tick 60 in
+the ORIGINAL non-crash run specifically (explaining why THAT one run
+differed), this would NOT by itself explain or resolve the underlying
+`TOWING_REPLACEMENT` reconnect crash itself, which both fixed-seed
+trials (`Trial 1`/`Trial 2`, by design sharing the SAME environment as
+each other) and every other retained crash run already reproduce
+identically regardless. The reconnect-correction mechanism traced
+earlier (a brand-new joint's hardcoded-stiff first solve against
+whatever gap/velocity exists at that moment) remains the operative
+candidate for the CRASH ITSELF - this entry's own finding is about why
+ONE specific historical run differed from that otherwise-consistent
+pattern, a narrower question.
+
+### Proposed minimal instrumentation (not executed)
+
+Since the actual historic position state is unavailable and cannot be
+reconstructed reliably from existing data, the discriminating next step
+is a MINIMAL logging addition (not a behavior change): log `towed`'s
+own `pose.position()` (already computed in `BuoyantBody.step()`, not a
+new native read) alongside the existing per-tick velocity line in
+`TOWING_UNAVAILABLE`'s own tick loop - at minimum for ticks 55-61.
+**Discriminating prediction, stated in advance:** if a future matched
+run's own tick=60 position differs meaningfully in X/Z from the pool
+center (`CHUNK_X*16+8, CHUNK_Z*16+8`) by more than `POOL_RADIUS=14`
+blocks, or in Y outside `[PLATFORM_Y, PLATFORM_Y+WATER_DEPTH+6]` =
+`[100, 111]`, that would support the seed/terrain-dependent footprint-
+exit hypothesis; if it stays within those bounds while still showing
+`fraction<=0`, that hypothesis is falsified for this bracket and
+`waterSurfaceAt`'s own behavior at an IN-footprint column would need
+separate explanation. No such run is proposed or requested here - this
+is a design for whenever further instrumentation/validation is
+authorized, not an immediate ask.
+
+### Disposition
+
+No DIV-fixable bug is established in this entry. No production change,
+instrumentation commit, or native run is made - the proposal above is
+descriptive only, pending direction. PR #39's own reconciliation-with-
+main authorization (54458) is acknowledged; not acted on in this entry
+since no specific merge need has been identified.
