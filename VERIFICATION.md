@@ -8177,3 +8177,68 @@ check for an overridden `blockMainUpdateCall()` or a separate tick path
 specific to that class, and confirm which tickable list a server-side
 vehicle entity actually belongs to. No native run performed. Native gate:
 one-run grant remains CONSUMED.
+
+## Retracting "rules out outright"; continued the chain per 54564; genuine capacity limit disclosed
+
+Per 54564: a raw-byte string search for the literal `doTick` does NOT
+rule out direct `update()`/`moveVehicle()` calls, virtual overrides, or
+other mixin paths that never reference that literal string. Retracting
+"rules out the alternate recursive driver outright" - that search only
+ruled out ONE specific shape of alternate path (another `doTick` call
+site), not every possible path. Overclaimed the search's own scope.
+
+### Continued the chain - two new concrete facts, same jar hash
+
+Decompiled (same jar, hash `1d2f7512604636265703b29fdf13d7f8ef2323694b6435f4392973da6e78d251`)
+`EntityVehicleF_Physics`, `AEntityB_Existing`, `AEntityE_Interactable`,
+`AEntityD_Definable`, and `AEntityVehicleD_Moving` - saved under
+`/tmp/mts_time_check/decompiled4/`.
+
+- No class in `towed`'s own hierarchy (`EntityVehicleF_Physics` up through
+  `AEntityB_Existing`/`AEntityE_Interactable`/`AEntityD_Definable`)
+  overrides `blockMainUpdateCall()`, and each `update()` override in that
+  chain does nothing but call `super.update()` - no bypass found there.
+- `AEntityVehicleD_Moving.update()` (lines 153-201) is where
+  `performGroundOperations()`/`moveVehicle()` are ACTUALLY called from -
+  confirmed directly in this decompile: `moveVehicle()` has no caller
+  anywhere else in this hierarchy. So the full chain
+  `moveVehicle → update → doTick → EntityManager's gated forEach` is now
+  confirmed with no bypass ANYWHERE within this entity's own class
+  hierarchy - narrower and more solid than the previous entry's raw-byte
+  search alone established.
+- Confirmed exactly where `towedByConnection` becomes non-null:
+  `AEntityG_Towable.connectTrailer` (line 450) -
+  `connection.towedVehicle.towedByConnection = connection` - set once, at
+  `ATTACH`, and not cleared by anything found in this investigation
+  through the end of `TOWING_UNAVAILABLE`.
+
+### The contradiction still stands - not resolved, and a genuine capacity limit reached
+
+With the ENTITY'S OWN full call chain now confirmed to have no bypass,
+and `blockMainUpdateCall()`'s own single condition confirmed constant
+from `ATTACH` onward, the contradiction with the extensively-logged
+step-entry evidence during `ATTACH`/`DETACH` remains completely
+unresolved. The one location not yet examined: the actual SERVER-side
+entry point that invokes `EntityManager`'s own per-tick dispatch itself
+(e.g. `WrapperWorld`'s own tick handler, or a server-specific
+`EntityManager` subclass) - whether IT always reaches the SAME gated
+`forEach` already read, or has its own separate/different dispatch logic
+for server-side ticking specifically, has not been checked.
+
+Stating plainly, not to be mistaken for a tool blocker: continuing this
+specific decompile chain indefinitely within this single already very
+large entry risks exhausting this session's own remaining capacity
+without ever delivering a complete, reportable state. This is a real
+constraint on THIS entry's own continued depth, not a claim that the
+pinned source is inaccessible - every file needed so far has been
+reachable and decompiled successfully. Flagging this honestly rather than
+either stopping silently or claiming a resolution that was not reached.
+
+### Disposition
+
+No DIV-fixable bug established. No native run performed, proposed, or
+needed for anything in this entry. The exact mechanism remains unresolved;
+the next unexamined location is named precisely (`WrapperWorld`'s own
+server tick entry point / the server-side `EntityManager` subclass) for
+whoever continues this specific trace. Native gate: one-run grant remains
+CONSUMED.
