@@ -558,6 +558,12 @@ public final class PhysicsBridge {
   // rotorAngularDampingTorque, same "no separate cached field" shape as cyclicLimitDegrees/
   // cyclicAuthorityScale/yawAuthorityScale immediately above.
   if (!java.util.Objects.equals(target.rotorAngularDampingCoefficient, fresh.rotorAngularDampingCoefficient)) { target.rotorAngularDampingCoefficient = fresh.rotorAngularDampingCoefficient; appliedOut.add("rotorAngularDampingCoefficient"); }
+  // MINECRAFT-554: stepRotor reads tuning.rotorAngularDampingCoefficientPitch/Roll/Yaw fresh
+  // every tick too, same "no separate cached field" shape as rotorAngularDampingCoefficient
+  // immediately above.
+  if (!java.util.Objects.equals(target.rotorAngularDampingCoefficientPitch, fresh.rotorAngularDampingCoefficientPitch)) { target.rotorAngularDampingCoefficientPitch = fresh.rotorAngularDampingCoefficientPitch; appliedOut.add("rotorAngularDampingCoefficientPitch"); }
+  if (!java.util.Objects.equals(target.rotorAngularDampingCoefficientRoll, fresh.rotorAngularDampingCoefficientRoll)) { target.rotorAngularDampingCoefficientRoll = fresh.rotorAngularDampingCoefficientRoll; appliedOut.add("rotorAngularDampingCoefficientRoll"); }
+  if (!java.util.Objects.equals(target.rotorAngularDampingCoefficientYaw, fresh.rotorAngularDampingCoefficientYaw)) { target.rotorAngularDampingCoefficientYaw = fresh.rotorAngularDampingCoefficientYaw; appliedOut.add("rotorAngularDampingCoefficientYaw"); }
   // MINECRAFT-543: stepRotor reads tuning.rotorAirDragCoefficient fresh every tick via
   // RotorForces.translationalDragForce, same "no separate cached field" shape as
   // rotorAngularDampingCoefficient immediately above.
@@ -1603,9 +1609,30 @@ public final class PhysicsBridge {
   */
  static Vector3d rotorAngularDampingTorque(Vector3d angularVelocity, Vector3d forward, Vector3d right, Vector3d up,
      Vector3d inertiaBody, double dampingCoefficient, double dt) {
-  double torqueRight = RotorForces.angularDampingTorque(angularVelocity.dot(right), inertiaBody.x, dampingCoefficient, dt);
-  double torqueUp = RotorForces.angularDampingTorque(angularVelocity.dot(up), inertiaBody.y, dampingCoefficient, dt);
-  double torqueForward = RotorForces.angularDampingTorque(angularVelocity.dot(forward), inertiaBody.z, dampingCoefficient, dt);
+  return rotorAngularDampingTorque(angularVelocity, forward, right, up, inertiaBody, dampingCoefficient, dampingCoefficient, dampingCoefficient, dt);
+ }
+ /**
+  * MINECRAFT-554: {@link #rotorAngularDampingTorque(Vector3d,Vector3d,Vector3d,Vector3d,Vector3d,double,double)}
+  * with the single {@code dampingCoefficient} split into three independent per-axis coefficients -
+  * {@code pitchCoefficient} for the {@code right} axis (same pairing {@code Body.stepRotor}'s own
+  * {@code pitchTorque} already uses, {@code inertiaBody.x}), {@code rollCoefficient} for
+  * {@code forward} (same pairing {@code Body.stepRotor}'s own {@code rollTorque} already uses,
+  * {@code inertiaBody.z}), {@code yawCoefficient} for {@code up} (same pairing {@code
+  * Body.stepRotor}'s own {@code yawTorque} already uses, {@code inertiaBody.y}). The single-
+  * coefficient overload above now simply delegates here with the same value three times, so every
+  * existing caller (including {@code Body.stepFlight}'s wholly separate {@code
+  * fixedWingAngularDampingCoefficient} use) is completely unaffected - this reuses, rather than
+  * duplicates, the exact per-axis {@link RotorForces#angularDampingTorque} call and assembly
+  * {@link #rotorAngularDampingTorque(Vector3d,Vector3d,Vector3d,Vector3d,Vector3d,double,double)}
+  * already established (MINECRAFT-537), just with three independently-resolved coefficients
+  * instead of one shared value - passing the same coefficient for all three reproduces that exact
+  * prior uniform behavior, byte-identical.
+  */
+ static Vector3d rotorAngularDampingTorque(Vector3d angularVelocity, Vector3d forward, Vector3d right, Vector3d up,
+     Vector3d inertiaBody, double pitchCoefficient, double rollCoefficient, double yawCoefficient, double dt) {
+  double torqueRight = RotorForces.angularDampingTorque(angularVelocity.dot(right), inertiaBody.x, pitchCoefficient, dt);
+  double torqueUp = RotorForces.angularDampingTorque(angularVelocity.dot(up), inertiaBody.y, yawCoefficient, dt);
+  double torqueForward = RotorForces.angularDampingTorque(angularVelocity.dot(forward), inertiaBody.z, rollCoefficient, dt);
   return new Vector3d(right).mul(torqueRight).fma(torqueUp, up).fma(torqueForward, forward);
  }
  private static final class Body implements VehicleBody {
@@ -3310,8 +3337,17 @@ public final class PhysicsBridge {
    // unconfigured, and RotorForces.angularDampingTorque returns exactly 0 for a non-positive
    // coefficient, so an unconfigured rotorcraft's torque - and therefore handle.applyTorqueImpulse
    // below - is byte-identical to before this ticket.
+   // MINECRAFT-554: tuning.rotorAngularDampingCoefficientPitch/Roll/Yaw are each read live off
+   // this tick's tuning object too (see applyLiveSafeFields), independently falling back to this
+   // SAME tuning.rotorAngularDampingCoefficient when that axis's own override is unset - Overrides
+   // never fills these three from a separate FALLBACK, so an unconfigured rotorcraft (or one that
+   // only sets the base scalar) gets the exact same uniform coefficient on every axis as before
+   // this ticket, byte-identical.
    Vector3d angularVelocity=handle.getAngularVelocity(new Vector3d());
-   torque.add(rotorAngularDampingTorque(angularVelocity,forward,right,up,inertiaBody,tuning.rotorAngularDampingCoefficient,DT));
+   double pitchDampingCoefficient=tuning.rotorAngularDampingCoefficientPitch!=null?tuning.rotorAngularDampingCoefficientPitch:tuning.rotorAngularDampingCoefficient;
+   double rollDampingCoefficient=tuning.rotorAngularDampingCoefficientRoll!=null?tuning.rotorAngularDampingCoefficientRoll:tuning.rotorAngularDampingCoefficient;
+   double yawDampingCoefficient=tuning.rotorAngularDampingCoefficientYaw!=null?tuning.rotorAngularDampingCoefficientYaw:tuning.rotorAngularDampingCoefficient;
+   torque.add(rotorAngularDampingTorque(angularVelocity,forward,right,up,inertiaBody,pitchDampingCoefficient,rollDampingCoefficient,yawDampingCoefficient,DT));
    handle.applyTorqueImpulse(torque.mul(DT));
    applyTowingCompensation(v);
    return true;
