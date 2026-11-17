@@ -6318,3 +6318,86 @@ at that moment) between a crash run and the non-crash run, the same way
 this entry just did for `DETACH`'s reconnect - since the divergence is
 now localized there, not at `DETACH`. Proposed, not executed, pending
 direction.
+
+## Correcting the impulse-magnitude calculation; TOWING_REPLACEMENT pre-connect comparison (54434)
+
+John's comment 54434 approved continuing the proposed comparison (no new
+run) and corrected the prior entry's own impulse-magnitude calculation.
+Both addressed here, read-only, no code change.
+
+### Correction to 54425/c0c81d8's own quantified check
+
+54434: multiplying WORLD-frame `Δω` component-wise by a BODY-axis
+diagonal inertia tensor is NOT valid angular-momentum accounting for a
+rotated body - the correct relation is `ΔL = I_world(after)·ω(after) -
+I_world(before)·ω(before)` with `I_world = R·I_body·R^T`, needing a
+reliable same-event orientation (or the result must be labeled
+illustrative-only); even `I_world·Δω` still assumes near-fixed
+orientation across the bracket. Also: the summed bracket (`gameTime`
+201-203) included impulses from BEFORE the actual re-attach's own
+`createHitch` sample (203, logged as "before this tick's own step()"),
+so it is not cleanly scoped to the same event; `appliedImpulse` is the
+COMMANDED Java-side impulse, not a measurement of what the native
+solver actually applied; and the inertia itself is the CHOSEN model,
+not measured. **The prior entry's specific "0.26%/0.008%/1.7%" figures
+and the framing "DIV's own measured contribution is two to four orders
+of magnitude too small... a real finding" are RETRACTED as a physical
+bound.** What remains true, restated without the invalid arithmetic: the
+logged per-float linear impulses in that bracket are on the order of
+hundreds of kg·m/s, dominantly vertical (buoyancy) - whether that is
+"enough" to produce the observed angular velocity change cannot be
+determined from this data without a frame-correct calculation this
+entry does not attempt to redo; stated as unresolved, not as a bound in
+either direction.
+
+### TOWING_REPLACEMENT pre-connect comparison: crash vs. the ORIGINAL successful isolated run
+
+Compared, line-for-line, the bracket from `TOWING_UNAVAILABLE tick=59`
+through `TOWING_REPLACEMENT tick=1`, between Trial 1 (crash) and the
+retained non-crashing isolated run:
+
+| sample | non-crash run | Trial 1 (crash) |
+|---|---|---|
+| tick=59 | `towed.angularVelocity=(-6.341,-0.0303,-0.1173)` | IDENTICAL |
+| tick=60 | `towed.angularVelocity=(-5.812,-0.6604,-0.2379)` | `(-6.341,-0.0303,-0.1173)` - **DIFFERENT** |
+| pre-connect `towing2` pos/motion | `[17607.838,105.682,17609.410]`/`(0,0,0)` | IDENTICAL |
+| pre-connect `towed` pos/motion (MTS, logged) | `[17608.956,105.682,17605.683]`/`(-6.0e-4,-0.047,-0.006)` | IDENTICAL (both runs, byte-for-byte) |
+| pre-connectTrailer `towed` REAL native `angularVelocity` | `(-5.812,-0.6604,-0.2379)` | `(-6.341,-0.0303,-0.1173)` - **DIFFERENT, matches that run's own tick=60** |
+
+**Both IDs/connection order:** `towing2` is spawned identically in both
+runs (confirmed via its own pre-connect position/motion matching
+exactly) and connected via the SAME `TowingConnection`/`connectTrailer`
+call sequence in both - no difference in setup order found.
+
+**Distinguishing fresh `towing2` creation from `towed`'s own already-
+diverged state, as 54434 asked:** `towing2`'s own pre-connect state is
+IDENTICAL between runs - the newly-created body itself is not where the
+divergence originates. `towed`'s own REAL native angular velocity (read
+via `pre-connectTrailer`'s own direct handle read, not the MTS-cached
+`motion` field, which stays byte-identical in both runs at this exact
+log line despite the real native value already differing - a real,
+measured staleness in `v.motion` worth noting on its own) is ALREADY
+different between the two runs at `pre-connectTrailer`, matching each
+run's own `tick=60` value exactly. **The divergence is confirmed present
+in `towed`'s own state BEFORE `towing2` is connected at all - it is not
+an artifact of the fresh-body connection, and precedes it.**
+
+**First observed divergence remains `tick=60` of `TOWING_UNAVAILABLE`
+itself** (ticks 1-59 confirmed identical in the earlier comparison;
+every tick in this window is logged, not sampled, so this is a
+per-tick-resolution result) - restated per 54434's own caution: this is
+the first OBSERVED divergence, not necessarily the true origin. What
+happens within tick 60 at the native substep level remains completely
+unmeasured (no substep-level accessor exists, as established repeatedly
+in this investigation) - stated as the actual missing measurement, not
+assumed resolved by locating the tick.
+
+### Disposition
+
+No DIV-fixable bug is established. No production change or new run
+proposed. The one concrete, falsifiable fact this entry adds: the
+crash/non-crash divergence is confirmed to live in `towed`'s own state
+during `TOWING_UNAVAILABLE`'s final tick, independent of `towing2`'s
+creation - narrowing "where to look" without yet explaining "why." The
+actual mechanism inside that one tick remains unmeasured. Reporting
+back for direction.
