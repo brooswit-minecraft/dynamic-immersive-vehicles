@@ -317,4 +317,82 @@ class BuoyancyTest {
  @Test void zeroDesiredVelocityYieldsZeroDrive() {
   assertEquals(0, Buoyancy.signedPropellerDrive(0, 1));
  }
+
+ // MINECRAFT-545/547 (John's comment 54691): the energy-based dissipativity check and its
+ // derived max-dissipative-impulse bound - John's own formula
+ // (dKE = J*s + 0.5*k*J^2) exercised directly, not reimplemented differently in tests.
+
+ @Test void anImpulseAtExactlyTheMaxDissipativeBoundIsEnergyNeutralNotPositive() {
+  // The boundary itself must be <= 0 (energy-neutral, the documented tradeoff - not a safety
+  // margin below it), never > 0, for a range of realistic s/k values including this incident's
+  // own real numbers (k derived from this incident's own mass=400 as a simple 1/mass stand-in
+  // for a direction with no rotational coupling, i.e. the COM-only special case).
+  for (double s : new double[]{1, 16.66, 43.90, 1000}) {
+   for (double k : new double[]{1.0 / 400, 1.0 / 50, 1.0, 0.01}) {
+    double bound = Buoyancy.maxDissipativeImpulseMagnitude(s, k);
+    double opposingImpulse = -Math.signum(s) * bound;
+    double energyChange = Buoyancy.impulseEnergyChange(opposingImpulse, s, k);
+    assertTrue(energyChange <= 1e-6, "energyChange=" + energyChange + " must be <=0 (within fp tolerance) at the documented boundary for s=" + s + " k=" + k);
+   }
+  }
+ }
+
+ @Test void anImpulseWellBelowTheMaxDissipativeBoundIsStrictlyDissipative() {
+  double s = 43.90, k = 1.0 / 400; // this incident's own real COM-only numbers
+  double bound = Buoyancy.maxDissipativeImpulseMagnitude(s, k);
+  double smallOpposingImpulse = -Math.signum(s) * bound * 0.1;
+  assertTrue(Buoyancy.isImpulseDissipative(smallOpposingImpulse, s, k));
+  assertTrue(Buoyancy.impulseEnergyChange(smallOpposingImpulse, s, k) < 0, "a real fraction of the bound must strictly REMOVE energy, not merely stay at zero");
+ }
+
+ @Test void anImpulsePastTheMaxDissipativeBoundAddsEnergy() {
+  // The exact converse - confirms the bound is not merely "a number," it is the real threshold
+  // past which the SAME formula reports energy being ADDED, not removed.
+  double s = 43.90, k = 1.0 / 400;
+  double bound = Buoyancy.maxDissipativeImpulseMagnitude(s, k);
+  double tooLargeOpposingImpulse = -Math.signum(s) * bound * 1.5;
+  assertFalse(Buoyancy.isImpulseDissipative(tooLargeOpposingImpulse, s, k));
+  assertTrue(Buoyancy.impulseEnergyChange(tooLargeOpposingImpulse, s, k) > 0);
+ }
+
+ @Test void multipleFloatsImpulsesComputedFromTheSameSnapshotAndSummedStayJointlyDissipativeWhenEachIsIndividuallyBounded() {
+  // MINECRAFT-545/547 (John's comment 54691's own point: "A per-point bound based on stale
+  // velocities is not a multi-float energy proof"). This test exercises the SPECIFIC case this
+  // fix's own scope note names as sound: if the native impulse call ACCUMULATES rather than
+  // applies immediately (the RapierPhysicsPipeline's own method is named applyForce/
+  // applyForceAndTorque, not applyImpulse - suggestive, NOT proven, per VERIFICATION.md), then
+  // two floats' own impulses, each computed against the SAME pre-tick velocity snapshot and
+  // each individually bounded at maxDissipativeImpulseMagnitude, sum to a combined impulse that
+  // is ALSO jointly dissipative against that same snapshot - because energyChange is linear in
+  // s and quadratic in J for a FIXED k; this test checks the sum numerically for two floats with
+  // different k (different effective mass at their own different points), not asserting a
+  // general proof for every possible pair.
+  double s = 43.90; // same snapshot point-velocity component used by both floats in this check
+  double float1K = 1.0 / 400, float2K = 1.0 / 300; // different effective mass at each float's own point
+  double float1Bound = Buoyancy.maxDissipativeImpulseMagnitude(s, float1K);
+  double float2Bound = Buoyancy.maxDissipativeImpulseMagnitude(s, float2K);
+  double float1Impulse = -Math.signum(s) * float1Bound * 0.5;
+  double float2Impulse = -Math.signum(s) * float2Bound * 0.5;
+  assertTrue(Buoyancy.isImpulseDissipative(float1Impulse, s, float1K));
+  assertTrue(Buoyancy.isImpulseDissipative(float2Impulse, s, float2K));
+  double combinedEnergyChange = Buoyancy.impulseEnergyChange(float1Impulse, s, float1K) + Buoyancy.impulseEnergyChange(float2Impulse, s, float2K);
+  assertTrue(combinedEnergyChange <= 0, "two independently-bounded floats, each checked against the SAME snapshot, must sum to a non-positive combined energy change");
+ }
+
+ @Test void maxDissipativeImpulseMagnitudeIsZeroForNonPositiveOrNonFiniteEffectiveMass() {
+  // No positive bound is well-defined without a positive effective mass to divide by -
+  // including the non-finite (NaN/Infinite) case explicitly, not merely zero/negative.
+  assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(50, 0));
+  assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(50, -1));
+  assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(50, Double.NaN));
+  assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(50, Double.NEGATIVE_INFINITY));
+ }
+
+ @Test void zeroPreImpulseVelocityHasNoDissipativeImpulseBudget() {
+  // At rest along this direction (s=0), ANY nonzero impulse only adds energy (0.5*k*J^2 > 0 for
+  // J!=0) - the bound correctly collapses to 0, not some positive "free" allowance.
+  assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(0, 1.0 / 400));
+  assertFalse(Buoyancy.isImpulseDissipative(1.0, 0, 1.0 / 400));
+  assertTrue(Buoyancy.isImpulseDissipative(0, 0, 1.0 / 400));
+ }
 }

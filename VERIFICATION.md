@@ -10284,3 +10284,88 @@ available and unused for this purpose. A smallest-sound, mechanism-preserving bo
 real capability is assessed as feasible, not yet designed/wired - the next step, if pursued,
 needs its own explicit design before any production diff. No reflection, no dependency upgrade,
 no native-private bypass. No native run performed or requested.
+
+## Energy-based dissipativity bound implemented per 54691, with native synchronicity flagged
+as unverified
+
+John's 54691 confirmed the audit was useful but not yet validated against native response or a
+complete multi-float design, and asked for: the energy-based dissipativity formula specifically
+(`dKE = J*s + 0.5*k*J^2`), establishing whether native impulse calls synchronously update
+velocity getters, and finite code/test evidence covering off-center impulses, multiple floats,
+invalid/nonfinite inputs, and incident-scale velocities - still entirely unwired from production.
+
+### Native synchronicity: a suggestive naming finding, explicitly NOT proof
+
+Extracted and decompiled the REAL pipeline implementation (not just the abstract `PhysicsPipeline`
+interface) - `dev.ryanhcode.sable.physics.impl.rapier.RapierPhysicsPipeline`, bundled inside the
+pinned jar's own nested `META-INF/jarjar/...sable_rapier-1.21.1-2.0.5.jar`. Its own
+`applyImpulse(body, position, force)` and `applyLinearAndAngularImpulse(body, force, torque,
+wakeUp)` call the native methods `Rapier3D.applyForce(...)` and
+`Rapier3D.applyForceAndTorque(...)` respectively - named "force," not "impulse," on the native
+side. `getLinearVelocity`/`getAngularVelocity` call `Rapier3D.getLinearVelocity`/
+`getAngularVelocity` directly (a real native call each time, not a cached Java-side value).
+
+This naming is SUGGESTIVE that Rapier's own native side may accumulate an applied force to be
+integrated at the NEXT `step()` call (the conventional distinction real physics engines make
+between an immediate-impulse and an accumulated-force API) rather than applying it synchronously
+before the next velocity read - which would mean multiple floats' own impulses, computed from
+the same stale velocity snapshot and applied sequentially within one `BuoyantForces.apply()`
+call, are effectively summed and integrated TOGETHER at the next step, not applied one-after-
+another against progressively-changing state. **This is NOT proven** - it is inferred from a
+Java-side method NAME calling a native function, with no access to Rapier's own source, and is
+stated here explicitly as an UNVERIFIED native assumption, not resolved by this entry. Java-side
+metadata (including this naming observation) does not prove native behavior.
+
+### Energy-based dissipativity formula implemented
+
+Added to `Buoyancy.java`: `impulseEnergyChange(impulseMagnitude, preImpulsePointVelocityAlong
+Direction, inverseEffectiveMass)` - exactly John's own formula, `J*s + 0.5*k*J^2`;
+`isImpulseDissipative` (the `<= 0` check); `maxDissipativeImpulseMagnitude(s, k)` - the non-
+trivial root of that quadratic for an impulse opposing `s`, `2*|s|/k`, returning `0` when `k` is
+not a positive finite value (covers zero, negative, NaN, and infinite `k` explicitly, not just
+the zero/negative case). Designed to be used WITH the real per-point effective mass from
+`MassData.getInverseNormalMass` (the audit's own finding, previous entry) rather than a COM-only
+approximation - `k` is documented as the caller's responsibility to supply correctly per point/
+direction, with explicit scope notes on local-vs-world frame consistency (the caller must ensure
+the inertia tensor's own frame matches whatever frame `arm`/`direction` are expressed in) and on
+the multi-float/synchronicity assumption above.
+
+### Tests added (all compiled/passing under the exclusive lock,
+`MINECRAFT-545-energy-bound-20261117T185804Z`, `RESULT=PASS`)
+
+- `anImpulseAtExactlyTheMaxDissipativeBoundIsEnergyNeutralNotPositive` - the boundary itself
+  stays `<=0` (energy-neutral, not a safety margin) across a sweep of `s`/`k` including this
+  incident's own real numbers.
+- `anImpulseWellBelowTheMaxDissipativeBoundIsStrictlyDissipative` /
+  `anImpulsePastTheMaxDissipativeBoundAddsEnergy` - the direct contrast on either side of the
+  bound, at incident-scale velocity (43.90).
+- `multipleFloatsImpulsesComputedFromTheSameSnapshotAndSummedStayJointlyDissipativeWhenEachIsIndividuallyBounded` -
+  the specific multi-float case the "accumulate, not apply-immediately" assumption makes sound:
+  two floats with DIFFERENT effective mass at their own points, each independently bounded
+  against the SAME snapshot, summed and confirmed jointly non-positive.
+- `maxDissipativeImpulseMagnitudeIsZeroForNonPositiveOrNonFiniteEffectiveMass` - zero, negative,
+  NaN, and negative-infinite `k` all explicitly covered, not just the zero/negative case.
+- `zeroPreImpulseVelocityHasNoDissipativeImpulseBudget` - at rest along a direction, the bound
+  correctly collapses to zero rather than some positive "free" allowance.
+
+### What remains explicitly open
+
+- Native synchronicity (accumulate-vs-immediate) is a naming-based inference, not verified
+  against Rapier's own source or a native run.
+- Coordinate-frame consistency (local tensor vs. local arm/direction, or a correctly-rotated
+  tensor) is documented as the CALLER's own responsibility, not yet exercised by a test using a
+  rotated/asymmetric box specifically - the existing tests use scalar `s`/`k` values directly,
+  not a full vector/matrix worked example.
+- Whether the Java-side `BoxInertia.solidBoxTensor` numerically matches Rapier's own internal
+  mass-property representation remains unverified (per the prior entry's own point) - this
+  entry's formula is agnostic to that question; it takes `inverseEffectiveMass` as a parameter,
+  whatever its own provenance.
+- Not wired into `BuoyantForces.apply`; still a reviewable design, not a production diff.
+
+### Disposition
+
+Energy-based formula implemented exactly as specified, tested against incident-scale values,
+multiple floats, and invalid/nonfinite inputs. The native-synchronicity question is reported as
+a real, named, but UNVERIFIED finding (method naming only) rather than assumed resolved. No
+reflection, no dependency upgrade, no native-private bypass, no production wiring. No native run
+performed or requested.

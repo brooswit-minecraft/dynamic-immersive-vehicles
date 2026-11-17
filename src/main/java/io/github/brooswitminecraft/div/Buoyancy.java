@@ -203,4 +203,51 @@ public final class Buoyancy {
  public static double signedPropellerDrive(double desiredLinearVelocity, double throttle) {
   return Math.signum(desiredLinearVelocity) * throttle;
  }
+ /**
+  * MINECRAFT-545/547 (John's comment 54691): the energy-based dissipativity check for an
+  * impulse applied along a unit direction {@code n} at a point whose PRE-IMPULSE point-velocity
+  * component along {@code n} is {@code preImpulsePointVelocityAlongDirection} - for impulse
+  * magnitude {@code impulseMagnitude} (signed: positive means applied in the {@code +n}
+  * direction) and {@code inverseEffectiveMass} the directional inverse effective mass AT THAT
+  * POINT (from {@code MassData.getInverseNormalMass(position, n)} - the real translation+
+  * rotation-coupled effective mass, not a COM-only approximation), the resulting kinetic-energy
+  * CHANGE is {@code impulseMagnitude*preImpulsePointVelocityAlongDirection +
+  * 0.5*inverseEffectiveMass*impulseMagnitude^2} - the standard rigid-body work-energy impulse
+  * formula. Dissipative (non-energy-adding) exactly when this is {@code <= 0}.
+  * <p>SCOPE, stated explicitly: this is a SINGLE impulse against a SINGLE PRE-IMPULSE velocity
+  * snapshot - it does not by itself account for MULTIPLE sequential impulses (e.g. one per
+  * float) each potentially changing the body's own velocity before the next is applied, unless
+  * the native impulse-application call is confirmed to defer actual integration until the next
+  * physics step (accumulate-then-integrate), in which case multiple impulses computed from the
+  * SAME snapshot and simply SUMMED are equivalent to one combined impulse against that same
+  * snapshot - see VERIFICATION.md for why the pinned {@code RapierPhysicsPipeline}'s own native
+  * call is named {@code applyForce}/{@code applyForceAndTorque} (suggesting, but NOT proven,
+  * that semantics), not {@code applyImpulse}. This remains an UNVERIFIED native assumption,
+  * stated as such, not resolved by this pure function. */
+ public static double impulseEnergyChange(double impulseMagnitude, double preImpulsePointVelocityAlongDirection, double inverseEffectiveMass) {
+  return impulseMagnitude * preImpulsePointVelocityAlongDirection + 0.5 * inverseEffectiveMass * impulseMagnitude * impulseMagnitude;
+ }
+ /** True only if {@link #impulseEnergyChange} is {@code <= 0} for these exact values - the
+  * direct dissipativity check, not merely a sign-reversal/zero-crossing heuristic. */
+ public static boolean isImpulseDissipative(double impulseMagnitude, double preImpulsePointVelocityAlongDirection, double inverseEffectiveMass) {
+  return impulseEnergyChange(impulseMagnitude, preImpulsePointVelocityAlongDirection, inverseEffectiveMass) <= 0;
+ }
+ /**
+  * The largest-MAGNITUDE impulse, applied OPPOSING {@code preImpulsePointVelocityAlongDirection}
+  * (i.e. with sign {@code -Math.signum(preImpulsePointVelocityAlongDirection)}), that stays
+  * energy-dissipative per {@link #impulseEnergyChange} - the non-trivial root of that quadratic
+  * in impulse magnitude, {@code 2*|s|/k} (derived by substituting the opposing-sign impulse into
+  * the energy formula and solving for the non-zero root). A caller bounding a real impulse
+  * against this value gets a PHYSICALLY DERIVED, not arbitrary, non-overshoot bound - stated
+  * with its own numerical/model tradeoff: this bound alone permits EXACTLY zero net energy
+  * change at the boundary, not a safety margin below it, and (per this method's own class-level
+  * scope note above) does not by itself prove multi-impulse/multi-float safety without the
+  * native synchronicity assumption stated there. {@code inverseEffectiveMass <= 0} (no positive
+  * effective mass - including the non-finite/NaN case, since any comparison against a NaN is
+  * false) returns {@code 0} - no positive bound is well-defined without a positive effective
+  * mass to divide by. */
+ public static double maxDissipativeImpulseMagnitude(double preImpulsePointVelocityAlongDirection, double inverseEffectiveMass) {
+  if (!(inverseEffectiveMass > 0)) return 0;
+  return 2 * Math.abs(preImpulsePointVelocityAlongDirection) / inverseEffectiveMass;
+ }
 }
