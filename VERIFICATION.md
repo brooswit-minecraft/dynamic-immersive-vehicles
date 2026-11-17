@@ -7493,3 +7493,55 @@ review. Original worlds/evidence (trial1/trial2/the non-crash reference
 run) untouched throughout - only read from. The shared `run/` directory's
 own `server.properties` was read but never modified; only the NEW isolated
 copy under the packet's own `rundir/` was edited.
+
+## Original baseline-manifest located and read-only-verified per 54522
+
+Per 54522's independent confirmation that all 10 isolated input hashes, all
+252 runtime/class hashes, and the live launcher/args all verify correctly
+against the packet - the one remaining item: "exact original shared config/
+world baseline-manifest paths and current comparison receipt (prior
+records mention 8 config/2 leveldat, not located in packet/trial top-level)."
+
+Located: `baseline-original-run-config.sha256` (8 config file hashes) and
+`baseline-original-run-world-level-dat.sha256` (2 hashes - `level.dat` and
+`level.dat_old`), already retained from this investigation's own earlier
+work, in the ORIGINAL non-crash run's own evidence directory
+(`M545-isolated-rundir-20261116T224049Z/`) - not at this new packet's own
+top level, exactly as 54522 noted. A real, pre-existing retained manifest
+exists; no limit to disclose here.
+
+Compared, read-only, no mutation of anything original:
+
+- This new packet's own 8 config-file hashes (already in its
+  `isolated-input-manifest.sha256`) against that retained
+  `baseline-original-run-config.sha256`: `diff` reports ZERO differences -
+  byte-identical, confirmed directly, not assumed.
+- The CURRENTLY-SHARED `run/world/level.dat`/`level.dat_old` (the live
+  worktree's own shared world, still present) against that SAME retained
+  baseline's own 2 hashes: BYTE-IDENTICAL on both files
+  (`3f08872f...`/`b1c30de5...`) - confirms the shared `run/world` has NOT
+  been mutated by anything (this investigation's own work, or any other
+  concurrent ticket's use of this shared worktree) since that baseline was
+  captured. A genuine guard check, performed read-only via `sha256sum`
+  only - no world was loaded, started, or touched.
+- Copied the retained config baseline and a fresh read-only hash of the
+  current shared `level.dat`/`level.dat_old` into the packet directory
+  itself (`baseline-original-run-config.sha256`,
+  `current-shared-run-world-level-dat.sha256`) so this comparison's own
+  receipt travels with the rest of the packet.
+
+Per 54522's own closing instruction: keeping the dependency/class-chronology
+correction (the prior entry) and the Java-metadata constructor difference
+(a real, separate, already-documented source change) explicit and distinct
+from each other - neither is restated as, or conflated with, a single
+"identical physics artifact" claim.
+
+### Disposition
+
+No native run performed. No build/rehearsal needed beyond what's already
+done. Native gate remains CLOSED - per 54522, the parent must explicitly
+release the single bounded run after this final baseline readback; that
+release decision is not this entry's to make. All original worlds/evidence,
+including the currently-shared `run/world`, confirmed byte-identical to
+their own prior baseline and untouched by this entire packet-preparation
+exercise.
