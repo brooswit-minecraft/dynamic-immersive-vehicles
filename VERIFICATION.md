@@ -5345,3 +5345,44 @@ entry. All prior evidence (original `run/`, `M545-isolated-rundir-
 20261116T224049Z`, `M545-authrun-probe2-...`) remains completely
 untouched. No destructive cleanup, no peer signals, no lock/permission
 changes, no new worker.
+
+## Trial 1's LIVE launch set prepared and left in place for independent readback (54389)
+
+John's comment 54389 independently confirmed the prior packet but caught
+exactly the gap already flagged in it: both wrappers invoke the SAME
+shared `build/moddev/runServer.sh`, and that live file still reflected
+Trial 2's `cd` target. Before Trial 1 can be released, the actual LIVE
+launch set for Trial 1 had to be regenerated under the lock and LEFT
+there (not launched) for independent readback - done here.
+
+- Re-ran `gradle prepareServerRun createServerLaunchScript` with Trial
+  1's own `DIV_ISOLATED_RUN_DIR`/`DIV_BUOYANT_HITCH_PROBE=true` under
+  the lock (`M545-trial1-livegen`, logged in
+  `/tmp/div-gradle-slot.owner`). The LIVE `build/moddev/runServer.sh`
+  now `cd`s into Trial 1's own directory - confirmed by direct read,
+  left in that state, not launched.
+- Lock file identity re-confirmed: `664 2051 9214683` - matches John's
+  own independently-read value exactly.
+- Fresh runtime-jar/compiled-instrumentation BYTE manifest (not just the
+  launch-text file hashes) regenerated NOW, right before this readback:
+  `live-readback-effective-classpath-hashes.sha256` (244 entries - every
+  jar on the classpath plus every file under the two
+  `build/classes`/`build/resources` directory entries) - diffed against
+  the ORIGINAL single-trial run's own full set and confirmed
+  BYTE-IDENTICAL. This means the actual mod/engine/native jars and
+  compiled `.class` files, not merely the generated launch-text files,
+  are confirmed unchanged.
+- Original-baseline comparisons re-verified FRESH (not re-cited from
+  memory): `run/config`'s 8 files and `run/world/level.dat`/
+  `level.dat_old` both still match their first-recorded baseline hashes
+  exactly, right now.
+- Canonical/non-aliasing re-checked fresh for Trial 1 specifically:
+  `realpath` distinct from `run/` and Trial 2; per-file `dev:inode` for
+  `config/sable-server.toml`/`eula.txt`/`server.properties` all
+  DISTINCT from the original; no `world/` yet in Trial 1's `rundir`.
+
+**Still no launch performed.** The live launch set is left exactly as
+regenerated above, ready for independent review; Trial 1 will only be
+started after explicit release, and per 54389, Trial 2 gets its own
+separate readback/release only after Trial 1's own outcome/exit/slot
+release.
