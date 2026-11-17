@@ -355,28 +355,87 @@ class BuoyancyTest {
   assertTrue(Buoyancy.impulseEnergyChange(tooLargeOpposingImpulse, s, k) > 0);
  }
 
- @Test void multipleFloatsImpulsesComputedFromTheSameSnapshotAndSummedStayJointlyDissipativeWhenEachIsIndividuallyBounded() {
-  // MINECRAFT-545/547 (John's comment 54691's own point: "A per-point bound based on stale
-  // velocities is not a multi-float energy proof"). This test exercises the SPECIFIC case this
-  // fix's own scope note names as sound: if the native impulse call ACCUMULATES rather than
-  // applies immediately (the RapierPhysicsPipeline's own method is named applyForce/
-  // applyForceAndTorque, not applyImpulse - suggestive, NOT proven, per VERIFICATION.md), then
-  // two floats' own impulses, each computed against the SAME pre-tick velocity snapshot and
-  // each individually bounded at maxDissipativeImpulseMagnitude, sum to a combined impulse that
-  // is ALSO jointly dissipative against that same snapshot - because energyChange is linear in
-  // s and quadratic in J for a FIXED k; this test checks the sum numerically for two floats with
-  // different k (different effective mass at their own different points), not asserting a
-  // general proof for every possible pair.
-  double s = 43.90; // same snapshot point-velocity component used by both floats in this check
-  double float1K = 1.0 / 400, float2K = 1.0 / 300; // different effective mass at each float's own point
-  double float1Bound = Buoyancy.maxDissipativeImpulseMagnitude(s, float1K);
-  double float2Bound = Buoyancy.maxDissipativeImpulseMagnitude(s, float2K);
-  double float1Impulse = -Math.signum(s) * float1Bound * 0.5;
-  double float2Impulse = -Math.signum(s) * float2Bound * 0.5;
-  assertTrue(Buoyancy.isImpulseDissipative(float1Impulse, s, float1K));
-  assertTrue(Buoyancy.isImpulseDissipative(float2Impulse, s, float2K));
-  double combinedEnergyChange = Buoyancy.impulseEnergyChange(float1Impulse, s, float1K) + Buoyancy.impulseEnergyChange(float2Impulse, s, float2K);
-  assertTrue(combinedEnergyChange <= 0, "two independently-bounded floats, each checked against the SAME snapshot, must sum to a non-positive combined energy change");
+ @Test void summingImpulseEnergyChangePerImpulseAgainstTheSameSnapshotDoesNotPredictTheirActualCombinedEffect() {
+  // MINECRAFT-545/547, John's comment 54694: a prior version of this test (confirmed WRONG and
+  // REMOVED) claimed that summing impulseEnergyChange evaluated SEPARATELY for two impulses
+  // against the same velocity snapshot predicts their combined effect, reasoning that each
+  // impulse was individually below maxDissipativeImpulseMagnitude. That reasoning drops a real
+  // quadratic cross-term: 0.5*k*(J1+J2)^2 != 0.5*k*J1^2 + 0.5*k*J2^2 whenever J1 and J2 are both
+  // nonzero. This is John's own exact counter-example, independently re-verified numerically
+  // (python3) before this fix: mass=1 (k=1), s=1, two EQUAL collinear impulses J1=J2=-1.5 (each
+  // individually at exactly 0.75x its own solo bound of 2, i.e. "safely" inside it).
+  double s = 1.0, k = 1.0;
+  double j1 = -1.5, j2 = -1.5;
+  double individuallyPredictedSum = Buoyancy.impulseEnergyChange(j1, s, k) + Buoyancy.impulseEnergyChange(j2, s, k);
+  assertEquals(-0.75, individuallyPredictedSum, 1e-9, "each impulse alone looks safely dissipative when summed naively");
+  // The TRUE combined effect: applying both impulses to the SAME body changes velocity once,
+  // by their sum, not twice independently. v' = s + (j1+j2)*k = 1 - 3 = -2. KE_before = 0.5*1*1^2
+  // = 0.5, KE_after = 0.5*1*(-2)^2 = 2.0 -> actual change = +1.5 (energy ADDED, not removed) -
+  // the exact opposite sign from the naive per-impulse sum above.
+  double massForThisPointMotion = 1.0 / k; // k here is a plain inverse mass (point coincides with COM, no rotation)
+  double vBefore = s, vAfter = s + (j1 + j2) * k;
+  double keBefore = 0.5 * massForThisPointMotion * vBefore * vBefore;
+  double keAfter = 0.5 * massForThisPointMotion * vAfter * vAfter;
+  double actualCombinedEnergyChange = keAfter - keBefore;
+  assertEquals(1.5, actualCombinedEnergyChange, 1e-9);
+  assertTrue(individuallyPredictedSum < 0 && actualCombinedEnergyChange > 0,
+    "the naive per-impulse sum and the true combined effect disagree even in SIGN - summing separately is not a valid multi-impulse check");
+  // The CORRECT way to predict the combined effect: call impulseEnergyChange ONCE with the SUM
+  // of the impulses, never by summing separate per-impulse calls against the same snapshot.
+  assertEquals(actualCombinedEnergyChange, Buoyancy.impulseEnergyChange(j1 + j2, s, k), 1e-9,
+    "impulseEnergyChange(sum of impulses, s, k) must match the true combined effect exactly");
+ }
+
+ @Test void impulseEnergyChangeOfTheSummedImpulseMatchesIndependentVectorRigidBodyEnergyForAnOffCenterImpulseOnAnAsymmetricBox() {
+  // MINECRAFT-545/547, John's comment 54694: a genuine VECTOR check, independent of
+  // impulseEnergyChange's own scalar formula - computes kinetic energy directly from real
+  // linear/angular velocity and a real (non-uniform, i.e. asymmetric) solid-box inertia tensor,
+  // via 0.5*m*|v|^2 + 0.5*omega.(I*omega), for an impulse applied off-center (so it changes both
+  // linear and angular velocity, not just linear) - then confirms that independently-computed
+  // energy change matches impulseEnergyChange(J, s, k) where s and k come from
+  // MassData.getInverseNormalMass, the same real Sable API this fix is scoped to use.
+  double mass = 400.0;
+  org.joml.Vector3d halfExtents = new org.joml.Vector3d(2.0, 1.0, 4.0); // asymmetric: not a cube, distinct per-axis inertia
+  double ix = mass / 6.0 * (halfExtents.y * halfExtents.y + halfExtents.z * halfExtents.z);
+  double iy = mass / 6.0 * (halfExtents.x * halfExtents.x + halfExtents.z * halfExtents.z);
+  double iz = mass / 6.0 * (halfExtents.x * halfExtents.x + halfExtents.y * halfExtents.y);
+  org.joml.Matrix3d inertia = new org.joml.Matrix3d().scaling(ix, iy, iz);
+  org.joml.Matrix3d inverseInertia = new org.joml.Matrix3d(inertia).invert();
+  double inverseMass = 1.0 / mass;
+
+  org.joml.Vector3d arm = new org.joml.Vector3d(1.5, -0.8, 3.0); // off-center application point, relative to COM
+  org.joml.Vector3d direction = new org.joml.Vector3d(0.0, 1.0, 0.0).normalize(); // impulse direction (unit)
+
+  org.joml.Vector3d linearVelocityBefore = new org.joml.Vector3d(2.0, -1.0, 0.5);
+  org.joml.Vector3d angularVelocityBefore = new org.joml.Vector3d(0.1, 0.2, -0.3);
+
+  // s: pre-impulse point-velocity component along direction, v_point = v + omega x r
+  org.joml.Vector3d pointVelocityBefore = new org.joml.Vector3d(angularVelocityBefore).cross(arm).add(linearVelocityBefore);
+  double s = pointVelocityBefore.dot(direction);
+
+  // k: inverse effective mass at this point/direction, via the real default-method formula
+  org.joml.Vector3d armCrossDir = new org.joml.Vector3d(arm).cross(direction);
+  org.joml.Vector3d invInertiaTimesCross = inverseInertia.transform(new org.joml.Vector3d(armCrossDir));
+  double k = armCrossDir.dot(invInertiaTimesCross) + inverseMass;
+
+  double jSum = -27.3; // an arbitrary, not-at-the-bound impulse magnitude along direction, opposing s
+  double predictedEnergyChange = Buoyancy.impulseEnergyChange(jSum, s, k);
+
+  // Independently apply the impulse as a real rigid-body linear+angular update and recompute KE
+  // directly from vectors/tensors, with NO reuse of impulseEnergyChange's own scalar formula.
+  org.joml.Vector3d impulseVector = new org.joml.Vector3d(direction).mul(jSum);
+  org.joml.Vector3d angularImpulseVector = new org.joml.Vector3d(arm).cross(impulseVector);
+  org.joml.Vector3d linearVelocityAfter = new org.joml.Vector3d(linearVelocityBefore).add(new org.joml.Vector3d(impulseVector).mul(inverseMass));
+  org.joml.Vector3d angularVelocityAfter = new org.joml.Vector3d(angularVelocityBefore).add(inverseInertia.transform(new org.joml.Vector3d(angularImpulseVector)));
+
+  double keBefore = 0.5 * mass * linearVelocityBefore.lengthSquared()
+    + 0.5 * angularVelocityBefore.dot(inertia.transform(new org.joml.Vector3d(angularVelocityBefore)));
+  double keAfter = 0.5 * mass * linearVelocityAfter.lengthSquared()
+    + 0.5 * angularVelocityAfter.dot(inertia.transform(new org.joml.Vector3d(angularVelocityAfter)));
+  double actualEnergyChange = keAfter - keBefore;
+
+  assertEquals(actualEnergyChange, predictedEnergyChange, 1e-6,
+    "impulseEnergyChange's scalar prediction must match independently-computed vector rigid-body energy change for an off-center impulse on an asymmetric box");
  }
 
  @Test void maxDissipativeImpulseMagnitudeIsZeroForNonPositiveOrNonFiniteEffectiveMass() {

@@ -10369,3 +10369,90 @@ multiple floats, and invalid/nonfinite inputs. The native-synchronicity question
 a real, named, but UNVERIFIED finding (method naming only) rather than assumed resolved. No
 reflection, no dependency upgrade, no native-private bypass, no production wiring. No native run
 performed or requested.
+
+## Corrections per 54694: confirmed multi-float math error retracted, bound-reversal
+## mislabeling fixed, vector energy test added, finite-input guards added
+
+John's comment 54694 found a confirmed, concrete mathematical error in the just-committed
+(`b711516`) multi-float energy test. The test claimed that summing `impulseEnergyChange`
+evaluated SEPARATELY for two impulses against the same velocity snapshot predicts their actual
+COMBINED energy effect, reasoning that each impulse individually stayed below its own
+`maxDissipativeImpulseMagnitude`. That reasoning drops a real quadratic cross-term:
+`0.5*k*(J1+J2)^2 != 0.5*k*J1^2 + 0.5*k*J2^2` whenever both impulses are nonzero. John's own exact
+counter-example (independently re-verified numerically via `python3` before any fix was made):
+mass=1 (k=1), s=1, two equal collinear impulses J1=J2=-1.5. Individually, each gives
+`impulseEnergyChange(-1.5, 1, 1) = -0.375` (sum of the two = -0.75, "safely" below the individual
+bound of 2 each). The TRUE combined effect - applying both impulses to the same body changes
+velocity ONCE, by their sum, not twice independently - is `v' = s + (J1+J2)*k = 1 - 3 = -2`,
+`KE_before = 0.5`, `KE_after = 2.0`, `actual change = +1.5`: energy ADDED, not removed, the
+opposite sign from the naive per-impulse sum. This exactly matches
+`impulseEnergyChange(J1+J2=-3, s=1, k=1) = +1.5` - confirming the correct approach is calling the
+SAME formula ONCE with the SUM of the impulses, never by summing separate per-impulse calls
+against the same snapshot. John stated, and this is confirmed by the algebra itself, that this
+error is INDEPENDENT of whether the native impulse call applies immediately or accumulates until
+the next step - it is a pure additivity mistake, not resolved by any native-synchronicity
+assumption.
+
+John also separately noted the "energy-neutral bound" `2*|s|/k` was mislabeled in prior doc
+comments as a "non-overshoot" bound. It is not: at exactly that bound, the point-velocity
+component along the impulse direction REVERSES SIGN with the SAME magnitude
+(`v' = s + J*k = s - 2s = -s`, confirmed algebraically by substituting the opposing-sign impulse
+magnitude into `v' = s + J*k`). The bound guarantees zero net kinetic-energy change, not that
+velocity stays put or stays smaller in magnitude.
+
+Fixes applied, this cycle:
+- `Buoyancy.java`: rewrote `impulseEnergyChange`'s own javadoc SCOPE paragraph to state the
+  dropped-cross-term finding precisely and remove the old, wrong "accumulate-then-integrate"
+  multi-impulse safety claim - there is no multi-impulse safety claim in this file beyond
+  single-impulse-at-a-time scope.
+- `Buoyancy.java`: rewrote `maxDissipativeImpulseMagnitude`'s own javadoc to state the bound
+  causes a velocity REVERSAL (not "non-overshoot"), and to state explicitly that this bound does
+  not by itself bound multiple impulses' combined effect.
+- `Buoyancy.java`: `maxDissipativeImpulseMagnitude` now also guards non-finite
+  `preImpulsePointVelocityAlongDirection` (previously only `inverseEffectiveMass <= 0` was
+  guarded - a non-finite `s` with an otherwise-valid `k` previously propagated NaN/Infinity
+  straight through `Math.abs(...)` instead of returning the conservative `0`).
+- `BuoyancyTest.java`: REMOVED the confirmed-wrong test
+  (`multipleFloatsImpulsesComputedFromTheSameSnapshotAndSummedStayJointlyDissipativeWhenEachIsIndividuallyBounded`)
+  and replaced it with
+  `summingImpulseEnergyChangePerImpulseAgainstTheSameSnapshotDoesNotPredictTheirActualCombinedEffect`,
+  which pins John's exact counter-example as a correctness regression: it asserts the naive
+  per-impulse sum (-0.75) and the true combined effect (+1.5) disagree even in SIGN, and that the
+  correct single-call-with-the-sum approach (`impulseEnergyChange(J1+J2, s, k)`) matches the true
+  combined effect exactly.
+- `BuoyancyTest.java`: added a genuine VECTOR rigid-body energy test,
+  `impulseEnergyChangeOfTheSummedImpulseMatchesIndependentVectorRigidBodyEnergyForAnOffCenterImpulseOnAnAsymmetricBox`,
+  which independently computes kinetic energy from real linear/angular velocity and a real
+  non-uniform (asymmetric, non-cube) solid-box inertia tensor (`0.5*m*|v|^2 + 0.5*omega.(I*omega)`
+  via actual JOML `Vector3d`/`Matrix3d` arithmetic), for an impulse applied off-center at an
+  arbitrary point/direction - with NO reuse of `impulseEnergyChange`'s own scalar formula to
+  compute the independent side of the comparison - confirming the scalar formula's prediction
+  matches the true vector effect for this off-center/asymmetric/rotation-coupled case.
+
+Further native-source resolution (per 54694's "a method name is no evidence of semantics"):
+decompiled `Rapier3D.class` directly (extracted from the nested jarjar bundle inside the pinned
+Sable jar, `sable-neoforge-1.21.1-2.0.5.jar`). Confirmed `applyForce`, `applyForceAndTorque`,
+`getLinearVelocity`, `getAngularVelocity`, and the other native-facing methods are ALL declared
+`static native` with ZERO Java-side implementation body - pure JNI stubs backed entirely by a
+compiled native binary resource (`sable_rapier_binaries.zip.l4z`). This confirms there is NO
+further Java-side evidence available beyond the method naming already found in prior comments -
+this is the genuine ceiling of what is knowable without either an actual instrumented native run
+or access to Rapier's own native (Rust/C) source, neither available or authorized in this
+investigation. The native-synchronicity question (immediate vs. deferred/accumulated impulse
+application) remains explicitly UNRESOLVED and is reported as such, not assumed.
+
+Compiled and tested under the exclusive Gradle lock
+(`/tmp/div-gradle-slot.lock`/`/tmp/div-gradle-slot.owner`, label
+`M545-54694-fix-<timestamp>`): `BuoyancyTest`, `PhysicsBridgeClassificationTest`,
+`LifecycleInvariantsTest` all green. `BuoyancyTest` itself: 46 tests, 0 failures, 0 errors, 0
+skipped (per the retained JUnit XML `tests="46" skipped="0" failures="0" errors="0"`).
+
+### Disposition
+
+Confirmed multi-float additivity error retracted with a pinned regression reproducing John's
+exact counter-example; bound mislabeling corrected; finite-input guard completed for both
+formula inputs; a genuine independent vector rigid-body energy test added, covering an
+off-center impulse on an asymmetric box; native-evidence resolution taken to its real ceiling
+(direct `Rapier3D` JNI-stub decompilation). No arbitrary damping/caps/fixture-bound-weakening, no
+reflection, no dependency upgrade, no native-private bypass, no production wiring. No native run
+performed or requested - native hold remains CLOSED pending a new explicit coordinator release.

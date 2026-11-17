@@ -215,15 +215,17 @@ public final class Buoyancy {
   * 0.5*inverseEffectiveMass*impulseMagnitude^2} - the standard rigid-body work-energy impulse
   * formula. Dissipative (non-energy-adding) exactly when this is {@code <= 0}.
   * <p>SCOPE, stated explicitly: this is a SINGLE impulse against a SINGLE PRE-IMPULSE velocity
-  * snapshot - it does not by itself account for MULTIPLE sequential impulses (e.g. one per
-  * float) each potentially changing the body's own velocity before the next is applied, unless
-  * the native impulse-application call is confirmed to defer actual integration until the next
-  * physics step (accumulate-then-integrate), in which case multiple impulses computed from the
-  * SAME snapshot and simply SUMMED are equivalent to one combined impulse against that same
-  * snapshot - see VERIFICATION.md for why the pinned {@code RapierPhysicsPipeline}'s own native
-  * call is named {@code applyForce}/{@code applyForceAndTorque} (suggesting, but NOT proven,
-  * that semantics), not {@code applyImpulse}. This remains an UNVERIFIED native assumption,
-  * stated as such, not resolved by this pure function. */
+  * snapshot. CORRECTED (John's comment 54694 - a confirmed, concrete math error in an earlier
+  * version of this file's own multi-float test/claim, not merely a documentation gap): summing
+  * {@code impulseEnergyChange} evaluated SEPARATELY for two-or-more impulses against the SAME
+  * snapshot does NOT predict the actual combined energy change, REGARDLESS of whether the
+  * native side applies them immediately or defers/accumulates them - {@code
+  * 0.5*k*(J1+J2)^2 != 0.5*k*J1^2 + 0.5*k*J2^2} (the quadratic cross term {@code k*J1*J2} is
+  * real and is exactly what the "sum the helper per impulse" approach silently drops). The
+  * CORRECT combined prediction for two co-linear impulses against the same snapshot is this
+  * SAME function called ONCE with their SUM, {@code impulseEnergyChange(J1+J2, s, k)} - not the
+  * sum of two separate calls. There is NO multi-impulse safety claim in this file beyond that:
+  * bounding several individual impulses independently does not bound their combined effect. */
  public static double impulseEnergyChange(double impulseMagnitude, double preImpulsePointVelocityAlongDirection, double inverseEffectiveMass) {
   return impulseMagnitude * preImpulsePointVelocityAlongDirection + 0.5 * inverseEffectiveMass * impulseMagnitude * impulseMagnitude;
  }
@@ -237,17 +239,26 @@ public final class Buoyancy {
   * (i.e. with sign {@code -Math.signum(preImpulsePointVelocityAlongDirection)}), that stays
   * energy-dissipative per {@link #impulseEnergyChange} - the non-trivial root of that quadratic
   * in impulse magnitude, {@code 2*|s|/k} (derived by substituting the opposing-sign impulse into
-  * the energy formula and solving for the non-zero root). A caller bounding a real impulse
-  * against this value gets a PHYSICALLY DERIVED, not arbitrary, non-overshoot bound - stated
-  * with its own numerical/model tradeoff: this bound alone permits EXACTLY zero net energy
-  * change at the boundary, not a safety margin below it, and (per this method's own class-level
-  * scope note above) does not by itself prove multi-impulse/multi-float safety without the
-  * native synchronicity assumption stated there. {@code inverseEffectiveMass <= 0} (no positive
-  * effective mass - including the non-finite/NaN case, since any comparison against a NaN is
-  * false) returns {@code 0} - no positive bound is well-defined without a positive effective
-  * mass to divide by. */
+  * the energy formula and solving for the non-zero root).
+  * <p>CORRECTED (John's comment 54694): this is an ENERGY-neutral bound, NOT a no-reversal/non-
+  * overshoot bound - a prior version of this doc conflated the two. AT this exact bound, the
+  * velocity component along {@code n} REVERSES SIGN with the SAME magnitude ({@code s -> -s}) -
+  * confirmed algebraically: substituting {@code J=-sign(s)*2|s|/k} into {@code v'=s+J*k} gives
+  * {@code v'=-s}. This bound guarantees zero net KINETIC-ENERGY change, nothing about velocity
+  * DIRECTION or magnitude staying put - a real, stated numerical/model tradeoff, not an
+  * incidental detail. A caller bounding a real impulse against this value gets a PHYSICALLY
+  * DERIVED, not arbitrary, bound on ENERGY ADDITION specifically - stated with that exact scope,
+  * and (per {@link #impulseEnergyChange}'s own corrected scope note) does NOT by itself bound
+  * multiple impulses' own COMBINED effect; each must still be evaluated together via that same
+  * method, never summed separately.
+  * <p>{@code inverseEffectiveMass} or {@code preImpulsePointVelocityAlongDirection} not a
+  * positive-finite / finite value respectively (CORRECTED, 54694: an earlier version only
+  * guarded {@code inverseEffectiveMass}, not {@code preImpulsePointVelocityAlongDirection} - a
+  * non-finite {@code s} with a valid {@code k} previously propagated NaN/Infinity straight
+  * through, not a conservative {@code 0}) returns {@code 0} - no positive bound is well-defined
+  * without both a finite velocity component and a positive, finite effective mass to divide by. */
  public static double maxDissipativeImpulseMagnitude(double preImpulsePointVelocityAlongDirection, double inverseEffectiveMass) {
-  if (!(inverseEffectiveMass > 0)) return 0;
+  if (!(inverseEffectiveMass > 0) || !Double.isFinite(inverseEffectiveMass) || !Double.isFinite(preImpulsePointVelocityAlongDirection)) return 0;
   return 2 * Math.abs(preImpulsePointVelocityAlongDirection) / inverseEffectiveMass;
  }
 }
