@@ -175,10 +175,13 @@ public final class TuningCommandProbe {
   // other probe/pack/operator config already relied on.
   var packSpeedFactors = minecrafttransportsimulator.systems.ConfigSystem.settings.general.packSpeedFactors.value;
   var packVehicleScales = minecrafttransportsimulator.systems.ConfigSystem.settings.general.packVehicleScales.value;
-  ownership.packSpeedFactorAddedByUs = !packSpeedFactors.containsKey(PACK_ID);
-  ownership.packVehicleScaleAddedByUs = !packVehicleScales.containsKey(PACK_ID);
-  packSpeedFactors.putIfAbsent(PACK_ID, 1.0);
-  packVehicleScales.putIfAbsent(PACK_ID, 1.0);
+  // Review finding (self-review, comment 54515): a separate !containsKey(...) check before
+  // putIfAbsent(...) is a check-then-act race - another actor can populate either entry between
+  // the check and the insertion, so the check alone never actually proves THIS call is what
+  // inserted it. putIfAbsent's own return value (null means no prior mapping - THIS call is the
+  // one that just inserted it) is the only atomic, truthful signal of actual ownership.
+  ownership.packSpeedFactorAddedByUs = packSpeedFactors.putIfAbsent(PACK_ID, 1.0) == null;
+  ownership.packVehicleScaleAddedByUs = packVehicleScales.putIfAbsent(PACK_ID, 1.0) == null;
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
   vehicle = buildAndSpawn(world);
  }

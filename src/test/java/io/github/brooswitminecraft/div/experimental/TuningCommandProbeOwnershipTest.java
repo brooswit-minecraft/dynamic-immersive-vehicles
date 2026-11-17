@@ -221,6 +221,22 @@ class TuningCommandProbeOwnershipTest {
   assertFalse(ran[0]); assertFalse(ran[1]);
  }
 
+ @Test void putIfAbsentReturnValueIsTheOnlyTruthfulOwnershipSignalForPackEntries() {
+  // Review finding (self-review, comment 54515): a separate containsKey check performed before
+  // putIfAbsent is a check-then-act race - another actor can populate the entry between the two
+  // calls, so the check alone never actually proves THIS call is the one that inserted it.
+  // TuningCommandProbe.spawn() now derives ownership directly from putIfAbsent's own return
+  // value (null means no prior mapping existed - THIS call is what inserted it). Demonstrated
+  // here against a plain Map, since the production map's exact type is an MTS config object this
+  // probe cannot construct in a unit test - the contract exercised is identical.
+  var racedMap = new java.util.HashMap<String, Double>();
+  racedMap.put("divtest", 1.0); // simulates an entry some other actor already inserted
+  assertFalse(racedMap.putIfAbsent("divtest", 1.0) == null, "a pre-existing/raced entry must never be recorded as owned by this call");
+
+  var emptyMap = new java.util.HashMap<String, Double>();
+  assertTrue(emptyMap.putIfAbsent("divtest", 1.0) == null, "an entry actually inserted by this call must be recorded as owned");
+ }
+
  // ---- allCleared / partial setup ----
 
  @Test void allClearedIsFalseWhileAnyResourceIsStillOwned() {
