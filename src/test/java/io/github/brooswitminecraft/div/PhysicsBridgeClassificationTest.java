@@ -223,4 +223,94 @@ class PhysicsBridgeClassificationTest {
   assertTrue(PhysicsBridge.canSafelyDisconnectAtIndex(0));
   assertTrue(PhysicsBridge.canSafelyDisconnectAtIndex(3));
  }
+
+ /** MINECRAFT-545/547 (John's comment 54662: "extract only the small production-used
+  * orchestration seam... with lightweight callbacks/test fixtures - no duplicate test-only
+  * algorithm"). A minimal fake over the exact three mutable facts
+  * {@code PhysicsBridge.releaseOrphanedConnections} itself reads/writes through its
+  * {@code OrphanedConnectionOps<V>} seam - no entity/connection types, this IS the real
+  * orchestration cleanup() calls, exercised through fakes instead of live MTS objects. */
+ private static final class FakeOrphanCandidate {
+  boolean hasConnection;
+  boolean anchorValid;
+  int indexInParent;
+  int disconnectCalls = 0, fallbackCalls = 0;
+  FakeOrphanCandidate(boolean hasConnection, boolean anchorValid, int indexInParent) {
+   this.hasConnection = hasConnection; this.anchorValid = anchorValid; this.indexInParent = indexInParent;
+  }
+ }
+ private static PhysicsBridge.OrphanedConnectionOps<FakeOrphanCandidate> fakeOps() {
+  return new PhysicsBridge.OrphanedConnectionOps<FakeOrphanCandidate>() {
+   public boolean hasConnection(FakeOrphanCandidate v) { return v.hasConnection; }
+   public boolean anchorIsValid(FakeOrphanCandidate v) { return v.anchorValid; }
+   public int indexInParentList(FakeOrphanCandidate v) { return v.indexInParent; }
+   public void disconnectAtIndex(FakeOrphanCandidate v, int index) {
+    v.disconnectCalls++; v.hasConnection = false; // mirrors the real disconnectTrailer's own towedByConnection=null effect
+   }
+   public void fallbackClearConnection(FakeOrphanCandidate v) {
+    v.fallbackCalls++; v.hasConnection = false;
+   }
+  };
+ }
+
+ @Test void eligibleInvalidAnchorConnectionInvokesDisconnectExactlyOnceAtItsRealIndex() {
+  var v = new FakeOrphanCandidate(true, false, 2);
+  PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), fakeOps());
+  assertEquals(1, v.disconnectCalls);
+  assertEquals(0, v.fallbackCalls);
+ }
+
+ @Test void validOrMissingConnectionIsNeverTouched() {
+  var validConnection = new FakeOrphanCandidate(true, true, 0);
+  var noConnection = new FakeOrphanCandidate(false, false, 0);
+  PhysicsBridge.releaseOrphanedConnections(java.util.List.of(validConnection, noConnection), fakeOps());
+  assertEquals(0, validConnection.disconnectCalls);
+  assertEquals(0, noConnection.disconnectCalls);
+  assertEquals(0, validConnection.fallbackCalls);
+  assertEquals(0, noConnection.fallbackCalls);
+ }
+
+ @Test void repeatedSweepIsIdempotent() {
+  // The real disconnectAtIndex/fallbackClearConnection both clear hasConnection (mirroring
+  // disconnectTrailer's own towedByConnection=null effect) - a second sweep over the SAME
+  // candidate list must find nothing left eligible.
+  var v = new FakeOrphanCandidate(true, false, 0);
+  var ops = fakeOps();
+  PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
+  PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
+  assertEquals(1, v.disconnectCalls, "a second sweep must not disconnect an already-released vehicle again");
+ }
+
+ @Test void missingIndexNeverInvokesDisconnectAndUsesTheHonestlyReducedFallback() {
+  var v = new FakeOrphanCandidate(true, false, -1);
+  PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), fakeOps());
+  assertEquals(0, v.disconnectCalls, "disconnectAtIndex must never be called with a negative index");
+  assertEquals(1, v.fallbackCalls);
+ }
+
+ @Test void aCandidateWhoseAnchorBecomesValidBeforeDispatchIsNeverDisconnected() {
+  // MINECRAFT-545/547 (John's comment 54662's own race guard): a candidate collected as
+  // orphaned in phase 1 must be RE-CHECKED, fresh, immediately before phase 2 acts on it - an
+  // earlier candidate's own disconnect must never be trusted to leave a LATER candidate's own
+  // eligibility unchanged. Simulated here by directly flipping anchorValid to true between
+  // collection and dispatch (standing in for some other effect making the connection valid
+  // again by the time dispatch actually reaches it).
+  var v = new FakeOrphanCandidate(true, false, 0);
+  var ops = new PhysicsBridge.OrphanedConnectionOps<FakeOrphanCandidate>() {
+   boolean firstRead = true;
+   public boolean hasConnection(FakeOrphanCandidate c) { return c.hasConnection; }
+   public boolean anchorIsValid(FakeOrphanCandidate c) {
+    // False on the phase-1 collection read (so it's collected as a candidate), true on every
+    // subsequent read (so the phase-2 re-check must see it as no-longer-eligible).
+    if (firstRead) { firstRead = false; return false; }
+    return true;
+   }
+   public int indexInParentList(FakeOrphanCandidate c) { return c.indexInParent; }
+   public void disconnectAtIndex(FakeOrphanCandidate c, int index) { c.disconnectCalls++; }
+   public void fallbackClearConnection(FakeOrphanCandidate c) { c.fallbackCalls++; }
+  };
+  PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
+  assertEquals(0, v.disconnectCalls, "a connection that became valid again before dispatch must never be disconnected");
+  assertEquals(0, v.fallbackCalls);
+ }
 }

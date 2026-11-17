@@ -9592,3 +9592,71 @@ Both concrete errors from 54659 fixed: correct condition field, real `disconnect
 stale-index guard, and a two-phase collect-then-disconnect pattern removing any reentrancy risk
 against `forEachActive`'s own iteration. No native run performed or requested - this corrected
 fix remains native-unvalidated, same as before.
+
+## Real orchestration coverage and a race guard added per 54662
+
+John's 54662 confirmed the 54659 correction (ed6c184) as a meaningful fix, and asked for three
+more things, all addressed in this entry: real orchestration test coverage (not just predicate
+truth tables), a re-check guard against a real race between collection and dispatch, and trimmed
+documentation focused on the actual invariant rather than this investigation's own history.
+
+### Race guard: re-check before dispatch, not just before collection
+
+54662 found a real gap: the prior two-phase sweep (collect orphaned candidates, then dispatch)
+trusted its own phase-1 snapshot unconditionally in phase 2. If some effect between collection
+and dispatch changed a candidate's own connection - a replacement, a reconnect, or (for two
+vehicles sharing the same towing parent) an earlier candidate's own `disconnectTrailer` call
+shifting the parent's own list - the stale snapshot could cause a now-valid or already-changed
+connection to be disconnected anyway. Fixed by re-checking `hasConnection`/`anchorIsValid` FRESH,
+immediately before acting on each candidate in the dispatch phase, skipping it entirely if either
+no longer holds.
+
+### Real orchestration seam extracted, not duplicated
+
+Extracted `PhysicsBridge.releaseOrphanedConnections(Iterable<V>, OrphanedConnectionOps<V>)` - the
+REAL collect-then-dispatch-with-re-check orchestration `cleanup()`'s own sweep now calls, generic
+over `V` so a test can supply lightweight fakes instead of live MTS objects, per 54662's own
+explicit instruction ("no duplicate test-only algorithm"). `cleanup()` itself is now a thin
+adapter binding this generic orchestration to the real `BodyRegistry`/`EntityVehicleF_Physics`/
+`TowingConnection` types.
+
+Five new tests added to `PhysicsBridgeClassificationTest`, using a minimal fake candidate type
+(not duplicating the real algorithm, only standing in for its three mutable facts):
+- `eligibleInvalidAnchorConnectionInvokesDisconnectExactlyOnceAtItsRealIndex`
+- `validOrMissingConnectionIsNeverTouched`
+- `repeatedSweepIsIdempotent`
+- `missingIndexNeverInvokesDisconnectAndUsesTheHonestlyReducedFallback`
+- `aCandidateWhoseAnchorBecomesValidBeforeDispatchIsNeverDisconnected` (the new race-guard case
+  - directly exercises the fix above)
+
+A full test constructing REAL `TowingConnection`/`EntityVehicleF_Physics` objects remains
+impractical without a live `ServerLevel`, confirmed earlier this investigation; the generic
+orchestration above is the closest practical substitute, exercising the actual control flow
+rather than only its boolean preconditions.
+
+### Documentation trimmed to the actual invariant
+
+Per 54662's own explicit point ("focus comments on actual invariant, not conversational
+history"), trimmed the large narrative comment blocks in `PhysicsBridge.java` (repeated
+"CORRECTED (54659)"/"CORRECTED (54662)" framing, session-specific phrasing like "confirmed this
+session") down to the current invariant and behavior only - the corrections' own history stays in
+VERIFICATION.md, not repeated in-code. Also removed an unhedged claim ("the instant this field
+goes null... resumes ticking this vehicle normally on its very next tick") that stated an
+expected effect as an already-proven fact; this fix's actual effect on dispatch remains
+unconfirmed until a future native run, not asserted as settled.
+
+### Verification performed (no native run)
+
+Full compile+test under the exclusive lock twice - once for the orchestration extraction/race
+guard (`MINECRAFT-545-fix-orchestration2-20261117T170553Z`, `RESULT=PASS`, 29 classification
+tests/0 failures) and once after the comment trim
+(`MINECRAFT-545-trim-comments-20261117T170925Z`, `RESULT=PASS`) - confirms the trim introduced no
+behavior change.
+
+### Disposition
+
+All three asks from 54662 addressed: race guard implemented and tested, real orchestration
+coverage added (lightweight fakes, not a duplicate algorithm), documentation trimmed to the
+actual invariant. No native run performed or requested. Per 54662's own closing instruction, an
+updated isolated lifecycle packet follows in the next entry - prepared only, no launch until the
+parent explicitly releases a further run.
