@@ -5942,3 +5942,115 @@ production change is proposed in this entry - reporting the trace result
 and the now-fully-open mechanism search back for direction, per 54413's
 own request to "report actual trace/regression and next supported
 correction or precise API blocker."
+
+## Native joint source trace: hardcoded stiff softness, confirmed ordering, identity orientation for this fixture (54418)
+
+John's comment 54418: continue investigating joint frame/anchor conversions
+and force/impulse ORDERING using the pinned native source, select ONE
+concrete falsifiable discrepancy. Traced `joints.rs`/`lib.rs` directly at
+the same real pinned tag (`mc1.21.1-2.0.5-neoforge`, commit
+`6966d292...`) used in the prior retraction. No code change - read-only.
+
+### Finding 1: EVERY generic/fixed/rotary joint gets a hardcoded, very stiff softness - confirmed, not DIV-configurable
+
+`Java_..._Rapier3D_addGenericConstraint` (the real native function behind
+`GenericConstraintConfiguration`) builds:
+```rust
+let mut joint = GenericJointBuilder::new(locked_axes).softness(
+    SpringCoefficients::new(JOINT_SPRING_FREQUENCY, JOINT_SPRING_DAMPING_RATIO));
+```
+with `config.rs`'s own constants: `JOINT_SPRING_FREQUENCY: Real = 550.0`,
+`JOINT_SPRING_DAMPING_RATIO: Real = 4.0` - a 550Hz, overdamped
+(ratio>1) spring, IDENTICAL for `addGenericConstraint`/`addFixedConstraint`/
+`addRotaryConstraint` alike. Checked for a matching setter (as exist for
+other joint properties - `setConstraintMotor`/`setConstraintLimit`/
+`lockConstraintAxes`/`setConstraintFrame` all exist as separate native
+calls): **none exists for softness.** This corrects/sharpens the earlier
+54405/06 finding (which only checked the JAVA-side `GenericConstraintConfiguration`
+record for a stiffness field) with the actual native constants and
+confirmation no native setter exists either - DIV genuinely has no
+avenue to tune this, at either layer.
+
+### Finding 2: the per-tick anchor "center of mass" correction is a no-op for entity-to-entity joints - DIV's own offsets pass through unmodified
+
+`joints::tick()` runs EVERY tick for every joint and recomputes
+`local_anchor_1 = joint.pos_a - center_of_mass_1` (and the `_2`
+equivalent), where `center_of_mass_1` is looked up from
+`sable_data.level_colliders` - **a registry exclusively for
+terrain/block-level colliders** (confirmed: `ActiveLevelColliderInfo`,
+populated/removed in `lib.rs` alongside level-collider chunk sync, never
+touched by `createBox`'s own entity-rigid-body path). For a hitch joint
+between two vehicle bodies, this lookup NEVER matches, so
+`center_of_mass_1/2` always default to `DVec3::ZERO`, making this
+subtraction a no-op - DIV's own `hitchOffset`/`hookupOffset` (already
+computed body-local, offset from each body's own geometric center) pass
+through to the native anchor UNMODIFIED. Not a bug - confirms this layer
+is NOT silently corrupting the anchor DIV computes.
+
+### Finding 3: for THIS EXACT fixture, the joint's frame orientation is confirmed IDENTITY - re-checked per 54418's own caution, not assumed
+
+54418 cautioned that "no angular locks" does not itself make orientation
+irrelevant to the locked LINEAR axes (`local_frame1.rotation`/
+`local_frame2.rotation` define what "X/Y/Z" even means for the lock, not
+merely an angular-constraint detail). Re-checked `BuoyantHitchProbe`'s
+own actual connection setup rather than assuming: both
+`connectionGroup(true, HITCH_POS, null, false, false)` and
+`connectionGroup(false, HOOKUP_POS, null, false, false)` pass `rot=null`
+explicitly - so `connectionRotationVehicleLocal` resolves to
+`HitchJoint.localJointFrame(null)` = IDENTITY for both sides, confirmed
+via the existing `HitchJointTest`. (`HOOKUP_YAW_DEGREES=20` is the
+SPAWNED ENTITY's own world-facing at spawn, a completely separate value
+from the connection's own `rot` field - not the same thing.) So for this
+exact reproduction, `local_frame1.rotation`/`local_frame2.rotation` ARE
+both identity, and the locked X/Y/Z axes genuinely are each body's own
+raw local axes, unrotated - confirmed, not assumed. 54418's general
+caution remains correct for connections that DO author a `rot` (not this
+one) - stated as a scenario-specific finding, not a general exoneration.
+
+### Finding 4: tick-level force/impulse ordering, confirmed directly from the real `step()` JNI function
+
+```rust
+// Java_..._Rapier3D_step (the real per-tick physics step)
+rope::tick(scene);
+joints::tick(scene);       // <- refreshes EVERY joint's anchor/rotation from its static Java-fed data
+... 
+sim.pipeline.step(...)     // <- the actual solve, immediately after, same call
+```
+`joints::tick()` and `pipeline.step()` always run together, in that
+order, within the SAME native `step()` call - reconfirms (via the actual
+source, not re-derived from memory) the ordering already established
+earlier in this investigation. Combined with the already-established MTS
+Mixin facts (Sable's native step runs at the HEAD of `ServerLevel.tick()`,
+strictly BEFORE entity ticking, where `createHitch` runs): a joint
+created during tick N's entity ticking is invisible to THIS tick's own
+native step (already run); `joints::tick()` sees it for the first time at
+the START of tick N+1's own native `step()` call, and `pipeline.step()`
+solves it in the SAME call, immediately after - i.e., the brand-new
+joint's FIRST EVER SOLVE happens exactly one Minecraft tick after
+`createHitch`, with whatever position/velocity state both bodies have at
+that moment, using the hardcoded 550Hz/damping-4.0 spring (Finding 1)
+against that gap in one step.
+
+### What this does, and does not, establish
+
+This traces the MECHANISM a stiff joint uses to resolve a real position
+gap - a hardcoded, very stiff, non-configurable spring correcting
+whatever gap and relative velocity exist at the joint's first active
+tick, entirely within Rapier/Sable's own native code, outside DIV's
+control at either the Java config layer or the native API surface. It
+does NOT, by itself, identify a DIV-fixable bug - no incorrect anchor
+offset, no corrupted frame, no ordering gap was found; every piece
+checked passes through or behaves as its own documentation/source says
+it should. What remains the single most promising, still-open, DIV-
+controllable factor: WHY `towed` carries such an extreme angular velocity
+(repeatedly measured ~88 rad/s on one axis) by the moment of reconnect -
+reducing whatever drives that buildup (squarely inside DIV's own
+`BuoyantForces`/free-float force accounting, not native solver internals)
+is the one lever actually available, if that buildup is itself
+the result of a DIV-side defect rather than inherent to the fixture's own
+scenario. This has NOT been re-examined in this entry - flagged as the
+next concrete direction, not yet investigated to a conclusion.
+
+No production change proposed in this entry. Reporting the full trace
+back for direction, per 54418's own request to select and report one
+concrete, falsifiable discrepancy or the precise limit found.
