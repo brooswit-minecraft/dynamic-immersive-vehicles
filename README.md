@@ -670,6 +670,44 @@ vehicle-wide pair and the other axle are both safe. See
 [`AxleSuspensionDistribution`](src/main/java/io/github/brooswitminecraft/div/AxleSuspensionDistribution.java)
 for the implementation.
 
+`suspensionDampingRatioCompression`/`suspensionDampingRatioRebound`
+(MINECRAFT-551, optional, same `(0, 2.0]` bounds as `suspensionDampingRatio`
+above) split the single damping ratio into two independently-configurable
+coefficients, selected per tick by the SIGN of the actual suspension
+anchor's own signed velocity (never by compression depth alone): the anchor
+moving toward the ground - the suspension COMPRESSING further - uses
+`suspensionDampingRatioCompression`; the anchor moving away from the ground
+- REBOUNDING/extending - uses `suspensionDampingRatioRebound`. At exactly
+zero velocity the damping term is zero regardless of which one would be
+picked, so there is no third "at rest" case to configure. Leaving a
+direction unset makes it inherit whichever per-wheel ratio was already
+resolved for that wheel (its own `suspensionDampingRatioFront`/`Rear`
+override if set, else the vehicle-wide `suspensionDampingRatio`) - the same
+"inherit, don't re-default" shape `suspensionDampingRatioFront`/`Rear`
+themselves already use - so a vehicle that never sets either field is
+byte-identical to before this option existed, on every wheel, in both
+directions, and setting both to the same value reproduces the exact
+existing symmetric behavior at that value.
+Unlike `suspensionDampingRatioFront`/`Rear`, this pair is deliberately
+VEHICLE-WIDE: once set, a directional value applies to every wheel
+regardless of axle (a configured compression/rebound value always wins
+over an axle-specific `suspensionDampingRatioFront`/`Rear` for that
+direction - the axle override still matters only as the inherited fallback
+for whichever direction is left unset). A per-axle-AND-per-direction knob
+(four more fields) was deliberately left out of scope for this ticket. The
+same combined travel-aware stability guard checks a configured directional
+value against every axle's own effective spring multiplier (front, rear,
+and the vehicle-wide base), since once configured it is applied uniformly
+regardless of axle. The opt-in experimental effective-mass damping
+candidate (`-Ddiv.experimentalEffectiveMassDamping`) keeps its existing,
+unexpanded semantics: when active it still produces exactly one
+ratio-driven damper (from `suspensionDampingRatio`/axle overrides, same as
+before this ticket), used identically for both directions - the
+compression/rebound split only actually differentiates the damper on the
+default (candidate off) path. See
+[`TireForces.suspension`](src/main/java/io/github/brooswitminecraft/div/TireForces.java)'s
+5-arg overload for the implementation and sign convention.
+
 `toeFrontDegrees`/`toeRearDegrees` (optional, degrees, `-20` to `20`) set a
 static toe alignment angle for the geometric front/rear axle group
 respectively - same axle grouping as `brakeBiasFront`/`driveBiasFront`
@@ -895,7 +933,8 @@ re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
 `suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
 `verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `fixedWingAngularDampingCoefficient`, `toeFrontDegrees`,
 `toeRearDegrees`, `axleDriveForceSharing`, `suspensionSpringMultiplierFront`,
-`suspensionSpringMultiplierRear`, `suspensionDampingRatioFront`, `suspensionDampingRatioRear`.
+`suspensionSpringMultiplierRear`, `suspensionDampingRatioFront`, `suspensionDampingRatioRear`,
+`suspensionDampingRatioCompression`, `suspensionDampingRatioRebound`.
 Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise

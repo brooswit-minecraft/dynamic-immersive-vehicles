@@ -2084,4 +2084,183 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, frontOnlyUnstablePair::validate,
     "an unstable front-axle (multiplier,ratio) pair must be rejected even though the rear axle and the vehicle-wide base pair are both safe");
  }
+
+ // MINECRAFT-551: suspensionDampingRatioCompression/Rebound - vehicle-wide, direction-selected
+ // (by the suspension anchor's own signed velocity, see TireForces.suspension's 5-arg overload)
+ // overrides of suspensionDampingRatio. Same [strictly-positive, 2.0] bound as the base field, no
+ // FALLBACK entry (unset direction inherits the per-wheel value AxleSuspensionDistribution already
+ // resolved - see PhysicsBridge.directionalDampingRatio), checked against every axle's own
+ // effective spring multiplier since (unlike suspensionDampingRatioFront/Rear) these two are
+ // deliberately vehicle-wide once configured.
+
+ @Test void directionalDampingRatioFieldsOutOfRangeFailValidation() {
+  var zeroCompression = new Overrides.Tuning(); zeroCompression.suspensionDampingRatioCompression = 0.0;
+  assertThrows(IllegalArgumentException.class, zeroCompression::validate);
+  var negativeRebound = new Overrides.Tuning(); negativeRebound.suspensionDampingRatioRebound = -0.5;
+  assertThrows(IllegalArgumentException.class, negativeRebound::validate);
+  var tooLargeCompression = new Overrides.Tuning(); tooLargeCompression.suspensionDampingRatioCompression = 2.01;
+  assertThrows(IllegalArgumentException.class, tooLargeCompression::validate);
+  var nanRebound = new Overrides.Tuning(); nanRebound.suspensionDampingRatioRebound = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nanRebound::validate);
+  var validCompression = new Overrides.Tuning(); validCompression.suspensionDampingRatioCompression = 1.2;
+  assertDoesNotThrow(validCompression::validate);
+  var validReboundAtUpperBound = new Overrides.Tuning(); validReboundAtUpperBound.suspensionDampingRatioRebound = 2.0;
+  assertDoesNotThrow(validReboundAtUpperBound::validate);
+ }
+
+ @Test void unsetDirectionalFieldsHaveNoFallbackAndStayNullWhenNeverConfigured() {
+  assertNull(Overrides.resolved("packid:not_configured").suspensionDampingRatioCompression);
+  assertNull(Overrides.resolved("packid:not_configured").suspensionDampingRatioRebound);
+  assertNull(Overrides.defaultTuning().suspensionDampingRatioCompression);
+  assertNull(Overrides.defaultTuning().suspensionDampingRatioRebound);
+ }
+
+ @Test void directionalDampingRatioFieldsParticipateInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.suspensionDampingRatioCompression = 1.3; override.suspensionDampingRatioRebound = 0.4;
+   Overrides.setForTest(java.util.Map.of("packid:directional_tuned_vehicle", override));
+   var resolved = Overrides.resolved("packid:directional_tuned_vehicle");
+   assertEquals(1.3, resolved.suspensionDampingRatioCompression);
+   assertEquals(0.4, resolved.suspensionDampingRatioRebound);
+
+   var packMetadata = new Overrides.Tuning(); packMetadata.suspensionDampingRatioCompression = 1.1;
+   assertEquals(1.1, Overrides.resolved("packid:not_configured", packMetadata, null, null).suspensionDampingRatioCompression,
+     "pack metadata must win over the (nonexistent) fallback when no operator override exists");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void directionalDampingRatioFieldsAreRejectedOnAPartOverride() {
+  var compression = new Overrides.Tuning(); compression.suspensionDampingRatioCompression = 1.0;
+  assertThrows(IllegalArgumentException.class, compression::validateSupportedForPart);
+  var rebound = new Overrides.Tuning(); rebound.suspensionDampingRatioRebound = 1.0;
+  assertThrows(IllegalArgumentException.class, rebound::validateSupportedForPart);
+ }
+
+ @Test void directionalDampingRatioFieldsAreInheritedThroughExtends() {
+  try {
+   var template = new Overrides.Tuning();
+   template.suspensionDampingRatioCompression = 1.5; template.suspensionDampingRatioRebound = 0.3;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "directional-tuned-template";
+   Overrides.setForTest(java.util.Map.of("directional-tuned-template", template), java.util.Map.of("packid:inherits_directional_tuning", child), java.util.Map.of());
+   var resolved = Overrides.resolved("packid:inherits_directional_tuning");
+   assertEquals(1.5, resolved.suspensionDampingRatioCompression,
+     "a child entry leaving suspensionDampingRatioCompression unset must inherit its template's own value");
+   assertEquals(0.3, resolved.suspensionDampingRatioRebound);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void invalidReloadRetainsThePriorGoodDirectionalDampingFields() {
+  try {
+   var good = new Overrides.Tuning(); good.suspensionDampingRatioCompression = 1.2;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:directional_reload", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(1.2, Overrides.resolved("packid:directional_reload").suspensionDampingRatioCompression);
+
+   var invalid = new Overrides.Tuning(); invalid.suspensionDampingRatioCompression = -3.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:directional_reload", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload must be rejected, not silently applied");
+
+   assertEquals(1.2, Overrides.resolved("packid:directional_reload").suspensionDampingRatioCompression,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or null");
+
+   var removed = new Overrides.Tuning();
+   var removedResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:directional_reload", removed), java.util.Map.of()));
+   assertTrue(removedResult.success(), "removing the field entirely must itself be a valid reload");
+   assertNull(Overrides.resolved("packid:directional_reload").suspensionDampingRatioCompression,
+     "a reload that no longer sets the field must resolve back to null (inherit the per-wheel base), not retain the old value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void directionalDampingRatioAloneCanBeRejectedForDestabilizingAnyAxlesEffectiveSpringMultiplier() {
+  // suspensionDampingRatioCompression/Rebound are VEHICLE-WIDE once set - they must be checked
+  // against EVERY axle's own effective spring multiplier (front/rear/base), not only the
+  // vehicle-wide one, since once configured they apply to every wheel in that direction
+  // regardless of which axle that wheel belongs to.
+  var destabilizingAgainstFront = new Overrides.Tuning();
+  destabilizingAgainstFront.suspensionTravel = 0.2;
+  destabilizingAgainstFront.suspensionSpringMultiplierFront = 2.5; // only the front axle is stiff
+  destabilizingAgainstFront.suspensionDampingRatioCompression = 1.8; // unstable specifically against the front axle's multiplier
+  assertThrows(IllegalArgumentException.class, destabilizingAgainstFront::validate,
+    "a vehicle-wide suspensionDampingRatioCompression must be rejected when it destabilizes even just the FRONT axle's own effective spring multiplier");
+
+  var destabilizingAgainstRear = new Overrides.Tuning();
+  destabilizingAgainstRear.suspensionTravel = 0.2;
+  destabilizingAgainstRear.suspensionSpringMultiplierRear = 2.5;
+  destabilizingAgainstRear.suspensionDampingRatioRebound = 1.8;
+  assertThrows(IllegalArgumentException.class, destabilizingAgainstRear::validate,
+    "a vehicle-wide suspensionDampingRatioRebound must be rejected when it destabilizes even just the REAR axle's own effective spring multiplier");
+
+  // A safe directional ratio must remain accepted even with an axle-specific multiplier present.
+  var safe = new Overrides.Tuning();
+  safe.suspensionTravel = 0.2;
+  safe.suspensionSpringMultiplierFront = 1.0; safe.suspensionSpringMultiplierRear = 1.0;
+  safe.suspensionDampingRatioCompression = 0.9; safe.suspensionDampingRatioRebound = 1.1;
+  assertDoesNotThrow(safe::validate);
+ }
+
+ @Test void equalCompressionAndReboundValuesReproduceTheCorrespondingExistingSymmetricSetting() {
+  // Setting suspensionDampingRatioCompression==suspensionDampingRatioRebound (both to the same
+  // value as a plain suspensionDampingRatio) must resolve to the exact same effective per-wheel
+  // ratio as the existing symmetric field alone - the required default/equal-value equivalence.
+  double sharedValue = 1.1;
+  var symmetricOnly = new Overrides.Tuning(); symmetricOnly.suspensionDampingRatio = sharedValue;
+  double axleResolvedBase = AxleSuspensionDistribution.dampingRatios(new double[]{1.5,-1.5}, symmetricOnly.suspensionDampingRatio, null, null)[0];
+  assertEquals(sharedValue, axleResolvedBase, 0.0);
+
+  var directional = new Overrides.Tuning();
+  directional.suspensionDampingRatioCompression = sharedValue; directional.suspensionDampingRatioRebound = sharedValue;
+  assertDoesNotThrow(directional::validate);
+  // PhysicsBridge.directionalDampingRatio is the actual runtime resolution step - both
+  // directions, given the SAME axle-resolved base used above, must resolve to the shared value.
+  assertEquals(sharedValue, PhysicsBridge.directionalDampingRatio(directional.suspensionDampingRatioCompression, axleResolvedBase), 0.0);
+  assertEquals(sharedValue, PhysicsBridge.directionalDampingRatio(directional.suspensionDampingRatioRebound, axleResolvedBase), 0.0);
+ }
+
+ /**
+  * Review finding (comment 54547): {@code resolveFields} validated each of {@code packMetadata}/
+  * {@code ivAdapted}/{@code physicallyDerived} individually (and {@code override} was already
+  * validated at config-load time) but never validated the actual COMPOSED {@code result} it
+  * returns - a field-by-field precedence chain can pick a directional damping ratio from one
+  * source and an axle spring multiplier from a DIFFERENT source, each individually valid against
+  * only its own source's other fields, yet unstable together once resolved onto the same wheel.
+  * Reproduces the reviewer's own exact numbers: at travel 0.3, an operator-configured compression
+  * ratio of 1.8 is safe alone (bound ~2.2167 at the unconfigured multiplier 1.0), and a pack-
+  * metadata front spring multiplier of 4.0 is safe alone (bound ~0.948892900565 at the
+  * unconfigured fallback ratio 0.7) - but {@code resolved()} composing the two together puts
+  * ratio 1.8 against the front axle's OWN effective multiplier 4.0, whose bound is that same
+  * ~0.9489, so the composed tuple is actually unstable and must now be rejected.
+  */
+ @Test void resolvedMustRejectACrossPrecedenceCombinationOfADirectionalRatioAndAnAxleSpringMultiplierThatIsUnstableOnlyTogether() {
+  try {
+   var operatorOverride = new Overrides.Tuning();
+   operatorOverride.suspensionTravel = 0.3;
+   operatorOverride.suspensionDampingRatioCompression = 1.8; // safe alone at the unconfigured multiplier 1.0
+   assertDoesNotThrow(operatorOverride::validate, "test setup sanity: the operator's own override must be valid in isolation");
+
+   var packMetadata = new Overrides.Tuning();
+   packMetadata.suspensionSpringMultiplierFront = 4.0; // safe alone at the unconfigured fallback ratio 0.7
+   assertDoesNotThrow(packMetadata::validate, "test setup sanity: the pack metadata's own fields must be valid in isolation");
+
+   Overrides.setForTest(java.util.Map.of("packid:cross_precedence_unstable", operatorOverride));
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:cross_precedence_unstable", packMetadata, null, null),
+     "a directional ratio from one precedence source combined with an axle spring multiplier from ANOTHER must be rejected when the EFFECTIVE combination is unstable, even though each source passes validation alone");
+
+   // A safe cross-precedence combination must still resolve successfully - this is not a
+   // blanket rejection of composing fields from different sources.
+   var safePackMetadata = new Overrides.Tuning();
+   safePackMetadata.suspensionSpringMultiplierFront = 1.0;
+   var resolved = Overrides.resolved("packid:cross_precedence_unstable", safePackMetadata, null, null);
+   assertEquals(1.8, resolved.suspensionDampingRatioCompression, 0.0);
+   assertEquals(1.0, resolved.suspensionSpringMultiplierFront, 0.0);
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
 }

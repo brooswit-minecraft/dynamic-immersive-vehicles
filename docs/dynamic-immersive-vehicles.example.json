@@ -50,6 +50,10 @@
       "suspensionSpringMultiplierRear": 0.9,
       "suspensionDampingRatioRear": 0.75
     },
+    "examplepack:directional_damping_car": {
+      "suspensionDampingRatioCompression": 0.5,
+      "suspensionDampingRatioRebound": 1.3
+    },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
       "hullFillFactor": 0.5,
