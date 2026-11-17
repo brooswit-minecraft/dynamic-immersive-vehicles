@@ -71,26 +71,46 @@ public final class Buoyancy {
   return explicitDragStabilityMargin(speed, submergedFraction, dragCoefficient, axisMultiplier, dt, mass) < 2.0;
  }
  /**
-  * MINECRAFT-545/547 (John's comment 54680: "assess a bounded stable integration option
-  * compatible with existing APIs"). PROPOSED alternative to the current explicit per-float drag
-  * IMPULSE - NOT yet wired into {@code BuoyantForces.apply}; this is a candidate for mechanism/
-  * diff review, mirroring {@link #angularDragRetention}'s own already-reviewed closed-form
-  * pattern exactly, applied to the per-axis LINEAR directional drag term instead of the
-  * rotational one. Same derivation: the exact analytic solution of
-  * {@code dv/dt = -fraction*coefficient*axisMultiplier*speed*v} (linearizing {@code speed} as
-  * locally fixed for one step, same assumption {@link #angularDragRetention} already makes) is
-  * {@code v(t+dt) = v(t) / (1 + fraction*coefficient*axisMultiplier*speed*dt)} - a MULTIPLICATIVE
-  * velocity scale, never an impulse, mathematically guaranteed to lie in {@code (0,1]} for any
-  * nonnegative inputs (denominator always {@code >= 1}), so a caller multiplying the CURRENT
-  * per-axis velocity component by this fraction can never overshoot past zero, reverse its sign,
-  * or add energy, for ANY configured coefficient/speed/dt - not just within some additionally-
-  * clamped "safe" range, and with no moment of inertia needed (unlike the current impulse
-  * approach, which this ticket's own investigation found silently assumes the COM-only response
-  * is the full point response - see VERIFICATION.md). A zero coefficient still returns exactly
-  * {@code 1} (no change), reproducing the exact current behavior whenever drag is configured
-  * off, same as {@link #angularDragRetention}'s own zero-coefficient case. */
- public static double directionalDragRetention(double speed, double submergedFraction, double dragCoefficient, double axisMultiplier, double dt) {
-  return 1.0 / (1.0 + submergedFraction * dragCoefficient * axisMultiplier * speed * dt);
+  * MINECRAFT-545/547 (John's comments 54680/54684 - 54684 found two real errors in the first
+  * version of this proposal, both confirmed numerically before this fix). STILL a PROPOSAL, NOT
+  * wired into {@code BuoyantForces.apply} - a candidate for its own mechanism/diff review, not a
+  * production change.
+  * <p>CORRECTED (54684, error 1 - missing mass): the existing {@code directionalDragForce}
+  * returns a FORCE (N), not an already-mass-normalized velocity rate - translational
+  * {@code dv/dt = F/mass} requires dividing by {@code mass}, which the first version of this
+  * method omitted entirely, silently reusing the force coefficient as if it were already a rate
+  * constant. {@link #angularDragRetention} avoids this by design - its own
+  * {@code angularDragCoefficient} parameter is explicitly documented as "inertia-normalized...
+  * not a torque/Nm coefficient," so no separate normalization step is needed there; copying its
+  * formula SHAPE without also carrying that same normalization was not dimensionally valid.
+  * Confirmed numerically at this incident's own real values (mass=400, coefficient=400,
+  * speed=43.90, dt=0.05): the first version returned {@code 1/879 ~ 0.00114}; the mass-corrected
+  * version below returns {@code 1/3.195 ~ 0.313}, matching the real translational drag law.
+  * <p>CORRECTED (54684, error 2 - mislabeled "exact"): for a FIXED rate {@code k=
+  * fraction*coefficient*axisMultiplier*speed/mass} (the linearization this method already makes,
+  * treating {@code speed} as locally fixed for one step - the same assumption
+  * {@link #angularDragRetention} makes for ITS OWN, genuinely quadratic-in-the-evolving-variable
+  * ODE), the TRUE exact solution of {@code dv/dt=-k*v} is the EXPONENTIAL
+  * {@code v(t+dt)=v(t)*exp(-k*dt)} - not {@code v(t)/(1+k*dt)}, which is instead the BACKWARD
+  * (implicit) EULER discretization of that same linearized ODE. {@code angularDragRetention}'s
+  * own {@code 1/(1+...)} form is genuinely exact for ITS OWN ODE because that ODE is quadratic in
+  * the evolving variable itself ({@code domega/dt=-k*omega*|omega|}); this method's own ODE is
+  * linear in the evolving variable (speed is a separate, frozen parameter), so the same algebraic
+  * form here is backward Euler, not an exact solution - stated as such below, not claimed
+  * otherwise.
+  * <p>NOT CLAIMED (54684, error 3 - mechanism preservation): applying this as a direct
+  * multiplicative scale to a body's COM velocity is NOT a mechanism-preserving replacement for
+  * the current per-float off-center impulse, which produces BOTH a translational AND a
+  * rotational (torque, via each float's own {@code arm}) response together. A pure COM-velocity
+  * scale would remove or change that angular coupling; this method does not define how to
+  * reproduce it, and this file does not claim "complete rigid-body energy safety" from these
+  * values alone - only that THIS bounded scalar form, in isolation, cannot overshoot past zero or
+  * reverse sign. Reproducing the SAME off-center torque coupling in a provably bounded way would
+  * need the body's own moment of inertia, which {@code RigidBodyHandle} does not expose (the
+  * same missing-inertia limitation {@link #angularDragRetention}'s own doc already names) - a
+  * genuinely unresolved gap in the currently supported pinned API, not solved by this method. */
+ public static double directionalDragRetention(double speed, double submergedFraction, double dragCoefficient, double axisMultiplier, double dt, double mass) {
+  return 1.0 / (1.0 + submergedFraction * dragCoefficient * axisMultiplier * speed * dt / mass);
  }
  /**
   * Per-tick retention fraction (always in (0,1]) for rotational water drag - the rotational

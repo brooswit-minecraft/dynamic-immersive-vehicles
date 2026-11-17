@@ -125,22 +125,35 @@ class BuoyancyTest {
   assertEquals(0, Buoyancy.explicitDragStabilityMargin(50, 1.0, 0, 1.0, 0.05, 400));
   assertTrue(Buoyancy.isExplicitDragStepStable(50, 1.0, 0, 1.0, 0.05, 400));
  }
- // MINECRAFT-545/547 (John's comment 54680: "assess a bounded stable integration option
- // compatible with existing APIs"). directionalDragRetention is a PROPOSED alternative to the
- // current explicit impulse, mirroring angularDragRetention's own already-reviewed proof
- // structure exactly - these tests mirror angularDragRetention's own tests below, one-for-one.
+ // MINECRAFT-545/547 (John's comments 54680/54684). directionalDragRetention is a PROPOSED
+ // alternative to the current explicit impulse - CORRECTED (54684) to divide by mass (a force
+ // coefficient reused without mass-normalization was a real dimensional error, confirmed below)
+ // and no longer claimed "exact" (the 1/(1+..) form is backward Euler for this method's own
+ // linearized-speed ODE, not that ODE's true exact exponential solution - see the method's own
+ // doc). These tests mirror angularDragRetention's own tests below in STRUCTURE, not in claiming
+ // the same exactness or inertia-free completeness - this scalar form alone does not reproduce
+ // the off-center torque coupling the current per-float impulse produces (54684's own point 3).
  @Test void directionalDragRetentionIsOneWhenNotSubmergedOrNotMovingOrZeroCoefficient() {
-  assertEquals(1.0, Buoyancy.directionalDragRetention(10, 0, 400, 1.0, 0.05));
-  assertEquals(1.0, Buoyancy.directionalDragRetention(0, 1, 400, 1.0, 0.05));
-  assertEquals(1.0, Buoyancy.directionalDragRetention(50, 1, 0, 1.0, 0.05));
+  assertEquals(1.0, Buoyancy.directionalDragRetention(10, 0, 400, 1.0, 0.05, 400));
+  assertEquals(1.0, Buoyancy.directionalDragRetention(0, 1, 400, 1.0, 0.05, 400));
+  assertEquals(1.0, Buoyancy.directionalDragRetention(50, 1, 0, 1.0, 0.05, 400));
+ }
+ @Test void directionalDragRetentionMatchesTheMassConsistentValueAtTheExactIncidentNumbers() {
+  // MINECRAFT-545/547 (John's comment 54684): pins the EXACT correction - the first version of
+  // this method (missing mass) returned 1/879 at these real values; the mass-consistent version
+  // must return 1/3.195, confirmed independently by John's own review.
+  double retention = Buoyancy.directionalDragRetention(43.90, 1.0, 400, 1.0, 0.05, 400);
+  assertEquals(1.0 / 3.195, retention, 1e-3);
  }
  @Test void directionalDragRetentionIsAlwaysInZeroToOneRangeAcrossWideInputsIncludingThisIncidentsOwnExtremeSpeed() {
   for (double coefficient : new double[]{0, 1, 400, 100000}) {
    for (double speed : new double[]{0, 1e-3, 1, 16.66, 43.90, 1e6}) {
     for (double fraction : new double[]{0, 0.3, 0.7391548872657683, 1}) {
-     double retention = Buoyancy.directionalDragRetention(speed, fraction, coefficient, 1.0, 0.05);
-     assertTrue(retention > 0 && retention <= 1.0,
-       "retention=" + retention + " out of (0,1] for coefficient=" + coefficient + " speed=" + speed + " fraction=" + fraction);
+     for (double mass : new double[]{1, 50, 400, 1e6}) {
+      double retention = Buoyancy.directionalDragRetention(speed, fraction, coefficient, 1.0, 0.05, mass);
+      assertTrue(retention > 0 && retention <= 1.0,
+        "retention=" + retention + " out of (0,1] for coefficient=" + coefficient + " speed=" + speed + " fraction=" + fraction + " mass=" + mass);
+     }
     }
    }
   }
@@ -148,9 +161,11 @@ class BuoyancyTest {
  @Test void directionalDragRetentionNeverOvershootsEvenAtTheExactDivergingStepsOwnExtremeSpeed() {
   // The exact gameTime=206/float1 incident this ticket's own investigation found overshooting
   // under the CURRENT explicit-impulse approach (see the test above) - applied through this
-  // proposed retention-based alternative instead, it must still land in (0,1], never reversing
-  // or amplifying the local velocity, with no moment of inertia needed anywhere.
-  double retention = Buoyancy.directionalDragRetention(43.90, 1.0, 400, 1.0, 0.05);
+  // proposed retention-based alternative instead, THIS SCALAR VALUE still lands in (0,1], never
+  // reversing or amplifying the local velocity. NOT claimed: that this alone reproduces the
+  // current mechanism's own off-center torque coupling (54684's own point 3) - see the method's
+  // own doc for that still-unresolved gap.
+  double retention = Buoyancy.directionalDragRetention(43.90, 1.0, 400, 1.0, 0.05, 400);
   assertTrue(retention > 0 && retention <= 1.0, "retention=" + retention + " must stay in (0,1], never reversing or amplifying velocity");
  }
  // MINECRAFT-518 review (comment 53679): the retention fraction returned here must always be in

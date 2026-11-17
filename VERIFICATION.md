@@ -10107,3 +10107,64 @@ production-relevant dissipativity criterion added and verified against the real 
 bounded-stable alternative proposed, implemented as a pure function, and tested - explicitly NOT
 wired into production pending its own mechanism/diff review. No arbitrary damping/caps/fixture
 weakening. No native run performed or requested.
+
+## Corrections per 54684: mass-normalization bug, exact-vs-backward-Euler mislabeling, and the
+mechanism-preservation overclaim retracted
+
+John's 54684 found two concrete math errors in the proposed `directionalDragRetention` and one
+overclaim in its own tests, all before any wiring into production - exactly the review the
+proposal was submitted for.
+
+### Error 1 - missing mass normalization (confirmed numerically)
+
+`directionalDragForce` returns a FORCE (N); translational `dv/dt = F/mass` requires dividing by
+mass. The first version of `directionalDragRetention` omitted this entirely, reusing the force
+coefficient as a rate constant directly. `angularDragRetention` avoids this by design - its own
+`angularDragCoefficient` is explicitly documented as already inertia-normalized, so no separate
+division is needed there; copying its formula SHAPE without also carrying that normalization was
+not valid. Confirmed independently: at this incident's own real values (mass=400,
+coefficient=400, speed=43.90, dt=0.05), the first version returned `1/879 ≈ 0.00114`; re-derived
+by hand and confirmed exactly matches John's own cited figure. Fixed: added a `mass` parameter,
+dividing by it in the formula - now returns `1/3.195 ≈ 0.313` at the same values, also confirmed
+to match John's own cited "mass-consistent scalar rational model" figure exactly.
+
+### Error 2 - mislabeled "exact"
+
+For a FIXED rate `k` (this method's own locally-fixed-speed linearization), the TRUE exact
+solution of `dv/dt=-k*v` is the EXPONENTIAL `v(t+dt)=v(t)*exp(-k*dt)` - not `v(t)/(1+k*dt)`, which
+is instead the BACKWARD (implicit) EULER discretization of that same linear ODE.
+`angularDragRetention`'s own `1/(1+...)` form IS genuinely exact for ITS OWN ODE, because that
+ODE (`domega/dt=-k*omega*|omega|`) is quadratic in the evolving variable itself - this method's
+own ODE is linear in the evolving variable (speed is a separate, frozen parameter), so the same
+algebraic shape here is backward Euler, not an exact solution. Corrected the doc to state this
+precisely, without reusing "exact" for a form that is not exact for this method's own stated ODE.
+
+### Error 3 - mechanism-preservation overclaim retracted
+
+The prior tests implied this scalar retention was close to a complete, inertia-free safety
+proof. Retracted: a pure COM-velocity SCALE is not a mechanism-preserving replacement for the
+current per-float off-center IMPULSE, which produces both translational AND rotational (torque,
+via each float's own `arm`) response together - this method does not define how to reproduce
+that coupling in a bounded way, and reproducing it correctly would need the body's own moment of
+inertia, unavailable via `RigidBodyHandle` (the same missing-inertia limitation
+`angularDragRetention`'s own doc already names). Stated explicitly in both the method's own doc
+and the test comments: this is a genuinely unresolved gap in the currently supported pinned API,
+not solved by this proposal - the smallest scoped claim this proposal can honestly make is that
+the SCALAR VALUE itself stays bounded in `(0,1]`, nothing about the full rigid-body response.
+
+### Verification performed (no native run)
+
+Added `directionalDragRetentionMatchesTheMassConsistentValueAtTheExactIncidentNumbers`, pinning
+the corrected `1/3.195` value exactly (asserted to 1e-3 of John's own cited figure). Extended the
+existing range test to also sweep `mass` across several orders of magnitude, confirming the
+corrected formula still stays in `(0,1]` for all nonnegative inputs including mass. Full
+compile+test under the exclusive lock (`MINECRAFT-545-fix-mass-exact-20261117T183315Z`,
+`RESULT=PASS`).
+
+### Disposition
+
+Both confirmed math errors fixed; the mechanism-preservation claim retracted to its honest,
+narrower scope. This remains a PROPOSAL only, still not wired into `BuoyantForces.apply`, and
+its own open gap (no bounded way to reproduce the off-center torque coupling without moment-of-
+inertia access) is now stated plainly rather than implied solved. No native run performed or
+requested.
