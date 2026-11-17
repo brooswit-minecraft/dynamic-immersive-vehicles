@@ -7820,3 +7820,81 @@ native run performed, proposed, or needed to reach this specific boundary
 read-only re-analysis could still resolve. If finer resolution is ever
 wanted, that is a future instrumentation question (logging every ATTACH
 tick, not just every 20th) - not proposed or executed here.
+
+## Major correction per 54539: retracting "continuous step-entry" - confirmed exact-line verification
+
+Per 54539's own exact-line count: "ZERO BuoyantBody.step-entry rows in new
+log lines 2005-2071 (UNAVAILABLE 1-60), likewise none in trial1
+corresponding 2069-2135." Verified this myself, directly, by line range
+(not a file-wide count, which is the exact mistake 54539 caught): **TRUE**
+- zero `BuoyantBody.step entry` lines for `towed` exist within lines
+2005-2071. My prior entry's "207 lines, continuous across the whole run"
+was a real methodological error - I counted ALL step-entry lines
+anywhere in the file and wrongly treated that as proof of coverage within
+this specific phase, without checking the actual line range. Retracting
+"apply()/step() ran every tick including 258-263" outright - it is false
+for this specific window, confirmed by exact line numbers.
+
+### What actually happens at the boundary, confirmed by direct correlation
+
+The LAST `BuoyantBody.step entry` (and the last `BuoyantForces.apply`
+diagnostic lines, still showing real buoyancy: `submergedFraction=1.0`/
+`0.715`) for `towed` is at line 1998, `gameTime=203` - immediately BEFORE
+`towing.remove()` is called (`TOWING_UNAVAILABLE pre-remove()`, line 2002).
+After that removal, NO step-entry, NO `lifecycleDiagnostic`, NO
+`buoyantForcesDiagnostic`, and NO `debugGroundContact` line of any kind
+appears for `towed` anywhere in lines 2005-2071 (confirmed by direct
+`grep` against that exact range) - DIV's own Java-side code appears to
+stop touching `towed` entirely, in lockstep with `towing` being removed.
+
+### A plausible, source-grounded explanation - NOT yet confirmed by a logged decision value
+
+Read `PhysicsBridge.active()`/`decide()`/`deferToNativeHitch()` directly:
+`deferToNativeHitch(towed, alreadyActive, towingVehicleActive, unsafeLock)
+= towed && !towingVehicleActive && (!alreadyActive || unsafeLock)`. Once
+`towing` is removed, `towingHasHitchableBody` (hence `towingVehicleActive`)
+becomes false; `towed`'s own `alreadyActive` was true going in - so this
+condition is satisfied only if `unsafeLock` is true. If `active()` returns
+a `DEFER_TO_NATIVE` decision here, `VehicleMovementMixin.div$move`'s own
+`if (!PhysicsBridge.active(vehicle)) return;` would still skip calling
+`PhysicsBridge.step`/`BuoyantBody.step` - matching exactly what's observed
+- while Sable's OWN native physics step (injected at `ServerLevel.tick()`'s
+own HEAD, confirmed elsewhere in this investigation to run independently
+of this Java-side gating) continues to move the body regardless, matching
+the documented "unjointed trailer stays an unjointed, free-rolling Sable
+vehicle" contract this probe's own class doc already names.
+
+**This explanation is plausible and consistent with the source and the
+logs, but NOT confirmed by any actually-logged decision value** - searched
+directly for the literal text `DEFER_TO_NATIVE` anywhere in this run's log:
+zero occurrences. Either that specific enum value is never logged as text
+on this path, or a different mechanism is responsible - not distinguished
+here. Not asserting more than what's shown.
+
+### What this means for the water-reentry framing
+
+If DIV's own `BuoyantForces.apply()` genuinely never runs for `towed`
+during this entire window (strongly suggested, not yet fully proven), then
+EVERY prior entry's framing of "does `towed` re-enter water during
+`TOWING_UNAVAILABLE`" was never the right question for this phase at all -
+Java-side buoyancy is not being applied regardless of water presence,
+since the code path that would check it is not reached. Any eventual
+"coming to rest" (the tick~37-40 settling noted previously) would need a
+PURELY NATIVE explanation (Sable's own sleep/damping, or a native
+collision) - not a DIV/Java buoyancy mechanism. This reframes, but does
+not resolve, the open question from the prior entry.
+
+### Next justified read-only step, NOT executed
+
+Trace `active()`'s own full body (not yet fully read in this entry) to
+confirm whether `DEFER_TO_NATIVE` (or some other decision) is actually
+reached for `towed` once `towing` is removed, and whether that decision's
+own text is logged anywhere else (a different format than searched) or
+simply isn't logged at all on this path - a source-reading task, not a
+new run. No native execution proposed.
+
+### Disposition
+
+Retraction only - no new native run. No DIV-fixable bug established. No
+causal mechanism confirmed. Native gate: the one-run grant remains
+CONSUMED; nothing in this entry requests or implies another.
