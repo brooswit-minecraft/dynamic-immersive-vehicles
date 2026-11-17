@@ -6084,3 +6084,118 @@ unlike the external Rapier crate's own short hash, which WAS recoverable
 and confirmed matching) - that same provisional status applies here too;
 no fresh binary-string check was performed for this round's specific
 files. Stated plainly rather than re-asserted as settled.
+
+## Phase-aligned free-float accounting: the extreme angular velocity is NOT gradual buildup - it's a re-attach event (54422)
+
+John's comment 54422: continue with phase-aligned free-float force/
+angular-momentum accounting from the retained fixed-seed trial logs,
+explicitly warning not to conflate the post-reconnect ~88 rad/s value
+with pre-reconnect GROWTH - establish the EARLIEST measured growth
+interval. Using Trial 1's log (fixed seed, fully logging-matched,
+digit-identical to the crash reference per the earlier comparison).
+
+### Correction: there is no gradual buildup during free-float at all
+
+Traced `towed`'s own `BuoyantBody.step entry` angular velocity through
+the ENTIRE `DETACH` phase (60 samples, log lines 1576-2052, every tick):
+it stays SMALL throughout - magnitude never exceeding roughly 1.3 rad/s,
+oscillating mildly, with the LAST sample before `DETACH PASS`
+(16:37:36.591) at `(0.158, 0.064, -0.035)` rad/s. **This directly
+contradicts the "towed accumulates extreme angular velocity during
+free-float" framing used in the immediately preceding entries of this
+investigation - that framing was itself a mischaracterization, exactly
+what 54422 warned against.** There is no growth interval to find during
+free-float because there is no growth during free-float.
+
+### What actually happens: `DETACH`'s own re-attach creates a brand-new joint, which gets its first violent solve one tick later
+
+Re-read `BuoyantHitchProbe.detach()` directly (not re-derived from
+memory): at `DETACH PASS`, it does NOT just despawn/proceed - it calls
+`towing.connectTrailer(connection, false)` (line 462), creating a FRESH
+joint between the SAME `towing`/`towed` pair, which have independently
+drifted apart (small, real velocities) for the preceding 60 ticks. This
+is a genuine re-attach event, not previously named as such in this
+investigation's own framing of "free-float accumulation."
+
+Traced the exact tick sequence in Trial 1's log around this re-attach:
+
+- gameTime=203 (16:37:36.661): `towed`'s own `BuoyantBody.step entry`
+  shows `angularVelocity=(0.119, 0.063, -0.032)` - small, consistent with
+  the preceding 60 DETACH ticks. The SAME tick's `createHitchDiagnostic`
+  lines (16:37:36.660) show the re-attach's own `createHitch` call firing
+  for both `towing` and `towed`, each with a real, non-identity cached
+  orientation and real linear/angular velocity - i.e. the NEW joint is
+  created against two bodies with a real (if modest) relative position/
+  orientation offset from their 60 ticks of independent drift.
+- gameTime=204 (16:37:36.678, the probe's own `ServerTickEvent.Post`
+  listener, AFTER entity ticking for this tick): `towed.angularVelocity`
+  has jumped to `(-73.00, -13.84, 87.99)` - and `towing`, which had
+  near-zero angular velocity the tick before, now shows
+  `(-41.40, -12.50, -3.44)` too. **Both bodies jump from small to
+  extreme within exactly ONE Minecraft tick - the SAME tick immediately
+  following the re-attach's own `createHitch` call.**
+
+This lines up EXACTLY with the native joint-tick ordering already traced
+in the immediately preceding entry: `joints::tick()` (which feeds a
+newly-created joint's static anchor/rotation into Rapier's own joint
+data for the FIRST time) always runs immediately before `pipeline.step()`
+in the same native `step()` call, and a joint created during Java-side
+entity ticking (which happens AFTER that same tick's own native step
+already ran) gets its FIRST EVER SOLVE exactly one Minecraft tick later.
+Combined with the already-confirmed hardcoded 550Hz/damping-4 joint
+spring (which is NOT configurable by DIV at either the Java or native
+layer): **this is the SAME mechanism already identified for the later
+`TOWING_REPLACEMENT` reconnect, just occurring one phase earlier, at
+`DETACH`'s own re-attach - a brand-new joint's mandatory, hardcoded-stiff
+first solve correcting whatever real gap accumulated during 60 ticks of
+independent drift, in one step.** Not a gradual buildup; not a
+`BuoyantForces` torque/impulse bug (its own per-float impulses at
+gameTime=201/202/203, logged immediately above, are modest and mostly
+vertical/buoyancy - nothing in them explains a 400+x jump in angular
+speed); the energy injection happens entirely inside the native joint
+solve, using a stiffness DIV's own code cannot see or configure.
+
+### Addressing 54422's specific accounting requests, scoped to what's actually measurable
+
+- **Body/world frames:** `BuoyantForces`' own logged `worldArm`/
+  `appliedImpulse` are WORLD-frame (confirmed from source, pre-existing
+  finding); the jump itself happens entirely inside the native solve,
+  for which no Java-side force/frame accounting applies at all - there
+  is no DIV-computed impulse to inspect for this specific event.
+- **Application point relative to COM, dt scaling, repeated
+  application, float drag's dependence on angular point velocity:** all
+  apply to `BuoyantForces`' own per-float terms (already logged, already
+  modest at this bracket) - NOT to the actual jump, which originates
+  natively, not from any repeated or point-velocity-dependent Java force
+  application.
+- **Unobserved native/contact/gravity terms:** the native solver's own
+  internal per-substep impulse during this specific joint's first solve
+  remains completely unread (no accessor exists, as established
+  throughout this investigation) - this IS the actual missing
+  measurement for THIS event, not a general caveat. Gravity and contact
+  forces are not separately logged either, but are not needed to explain
+  this specific jump, which is a joint-solve event, not a force-
+  accumulation one.
+- **Sign-correct dissipative work/units, focused regression:** not
+  applicable to this specific finding - there is no DIV-side dissipative
+  term involved in a native joint's own first-solve correction. No new
+  JVM regression is proposed in this entry, since the discrepancy
+  identified is a native-solver event with no corresponding Java code to
+  regress-test.
+
+### What this does, and does not, establish
+
+**Mechanism for the pre-existing extreme angular/linear velocity: a
+re-attach event, not force accumulation, resolved via the same hardcoded
+stiff native joint spring already identified** - established with much
+higher confidence than any prior entry's "candidate," directly traced
+through two independent, consistent log brackets (this entry's `DETACH`
+re-attach, and the earlier `TOWING_REPLACEMENT` reconnect) sharing the
+same mechanism. **Still not a DIV-fixable production bug** - no incorrect
+DIV-side code was found; the stiffness causing the violent correction is
+native and non-configurable, exactly as already established. No
+production change or new run is proposed. Reporting this corrected,
+sharpened mechanism back for direction - specifically whether this
+closes the mechanism-identification question (even without a DIV-side
+fix being currently possible) or whether further investigation is
+wanted.
