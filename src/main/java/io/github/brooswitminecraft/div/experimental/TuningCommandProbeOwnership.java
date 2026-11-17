@@ -40,6 +40,15 @@ import java.util.function.Function;
  */
 final class TuningCommandProbeOwnership {
  boolean chunkForcedByUs;
+ /** Records ownership of the force-loaded chunk ONLY if the initial {@code setChunkForced(...,
+  * true)} call itself reported an actual change (review finding, self-review comment 54510) - a
+  * {@code false} result means this run did NOT actually establish the force-load (e.g. a
+  * concurrently racing owner got there first between the "already forced?" check and this call),
+  * so claiming ownership anyway would later let cleanup unforce a chunk this run never actually
+  * created. */
+ void recordChunkForced(boolean forceOperationChanged) {
+  if (forceOperationChanged) chunkForcedByUs = true;
+ }
  boolean packSpeedFactorAddedByUs;
  boolean packVehicleScaleAddedByUs;
  boolean vehicleSpawned;

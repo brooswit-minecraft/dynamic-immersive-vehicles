@@ -149,10 +149,13 @@ public final class TuningCommandProbe {
  private static void awaitChunk(ServerLevel level) {
   if (ticksInPhase == 0) {
    boolean alreadyForced = level.getForcedChunks().contains(ChunkPos.asLong(0, 0));
-   if (!alreadyForced) {
-    level.setChunkForced(0, 0, true);
-    ownership.chunkForcedByUs = true;
-   }
+   // Review finding (self-review, comment 54510): setChunkForced's own boolean result (whether
+   // it actually changed force-load state) was being ignored - a false result means this run did
+   // NOT actually establish the force-load (e.g. a concurrent racing owner got there first), so
+   // recording ownership anyway would later let cleanup unforce something this run never
+   // actually created. ownership.recordChunkForced only claims ownership when the operation
+   // itself reports an actual change.
+   if (!alreadyForced) ownership.recordChunkForced(level.setChunkForced(0, 0, true));
   }
   boolean ready = level.getChunkSource().getChunkNow(0, 0) != null;
   if (ready) { phase = Phase.SPAWN; ticksInPhase = 0; return; }

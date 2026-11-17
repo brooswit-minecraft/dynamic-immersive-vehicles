@@ -188,6 +188,22 @@ class TuningCommandProbeOwnershipTest {
   assertFalse(ownership.shouldRestoreConfig(), "restoration must be cleared once its own action succeeds");
  }
 
+ // ---- recordChunkForced: the exact seam TuningCommandProbe.awaitChunk() calls ----
+
+ @Test void recordChunkForcedClaimsOwnershipOnlyWhenTheOperationActuallyChangedState() {
+  // Review finding (self-review, comment 54510): a false result from setChunkForced(..., true)
+  // means this run did NOT actually establish the force-load - never claim ownership of it.
+  var ownership = new TuningCommandProbeOwnership();
+  ownership.recordChunkForced(false);
+  assertFalse(ownership.shouldUnforceChunk(), "a false (no-op) force result must never claim ownership");
+ }
+
+ @Test void recordChunkForcedClaimsOwnershipWhenTheOperationActuallyChangedState() {
+  var ownership = new TuningCommandProbeOwnership();
+  ownership.recordChunkForced(true);
+  assertTrue(ownership.shouldUnforceChunk(), "a true (actually changed) force result must claim ownership");
+ }
+
  // ---- pre-existing resource preservation ----
 
  @Test void doesNotUnforceAChunkItNeverForced() {
