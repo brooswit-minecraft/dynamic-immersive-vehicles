@@ -154,8 +154,8 @@ final class BuoyantForces {
   // it inherits maxSteerDegrees's own resolved value when left unconfigured (see
   // Overrides.resolveFields), so an amphibious vehicle's water-propeller thrust direction stays
   // byte-identical to before this ticket until an operator configures a separate marine limit.
-  double steer = (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE) * Math.toRadians(tuning.marineSteerDegrees);
-  Vector3d forward = q.transform(new Vector3d(Math.sin(steer), 0, Math.cos(steer)));
+  double steer = Buoyancy.propellerSteerAngleRadians(v.rudderInputVar.currentValue, EntityVehicleF_Physics.MAX_RUDDER_ANGLE, tuning.marineSteerDegrees);
+  Vector3d forward = q.transform(Buoyancy.propellerThrustDirection(steer));
   var propellers = nonRotorPropellers(v);
   // Buoyancy.isPropellerOperational is the exact pure predicate this selection applies - only
   // an operational propeller counts toward the shared thrust budget's denominator, so a

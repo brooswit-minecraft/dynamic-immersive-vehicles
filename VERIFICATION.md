@@ -3484,6 +3484,57 @@ coverage both present and passing together.
 (sha256 `862ea4025ffa259fc324aefad915fdbd4597b8226a280c474d88b8b5d1a1f6f7`)
 was produced.
 
+**Review correction (comments 54430/54431, added 2026-11-16/17).** Wroosbit's
+substantive review found a real acceptance-evidence gap: the new
+`marineSteerDegrees`-driven thrust-direction expression inside
+`BuoyantForces.apply` had no test exercising it or the resulting force
+vector directly - existing coverage proved only `Overrides` resolution/
+validation and `Buoyancy.propellerThrust`'s own scalar sign/magnitude,
+neither of which touches the actual steer-angle-to-direction math this
+ticket added.
+
+Fixed by extracting the exact expression `BuoyantForces.apply` already
+used (`(-rudderInput/MAX_RUDDER_ANGLE)*toRadians(marineSteerDegrees)`,
+and the body-local `(sin(steer),0,cos(steer))` unit direction it feeds)
+into two new pure functions on `Buoyancy` -
+`propellerSteerAngleRadians`/`propellerThrustDirection` - and wiring
+`BuoyantForces.apply` to call them instead of computing the same formula
+inline (byte-identical production behavior, now on a directly testable
+seam). New `BuoyancyTest` coverage, all against this real production
+path:
+- `propellerSteerAngleIsZeroWhenMarineSteerDegreesIsZeroRegardlessOfRudderInput`
+  - the omitted/zero-limit case, straight-ahead thrust regardless of
+  rudder.
+- `propellerSteerAngleAtFullRudderEqualsTheConfiguredMarineSteerDegreesExactly`
+  - the configured-limit case: the body-local angle exactly equals the
+  configured value, and the resulting direction vector is measurably
+  non-straight.
+- `propellerSteerAngleFlipsSignWithRudderDirection` - opposite rudder
+  deflection steers to opposite sides at the same configured limit.
+- `propellerThrustDirectionIsIndependentOfForwardOrReverseThrustSign` -
+  reverse thrust mirrors forward thrust exactly along the SAME configured
+  direction, never re-pointing it - the ticket's own "preserve reverse
+  pitch/thrust" requirement, now proven on the force vector itself.
+- `amphibianGroundWheelSteerAndWaterPropellerSteerDivergeWhenConfiguredDifferently`
+  - numerically proves the amphibian separation: the ground wheel-steer
+  formula (`PhysicsBridge.stepGround`'s own expression, mirrored in the
+  test since that call site is not itself a pure function) and
+  `Buoyancy.propellerSteerAngleRadians` diverge when `maxSteerDegrees`
+  and `marineSteerDegrees` are configured to different values at the
+  same rudder input, and agree exactly when `marineSteerDegrees` is left
+  to inherit the resolved `maxSteerDegrees` (the documented fallback).
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock` held for the whole Gradle lifetime).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline build` against the
+corrected head - `BUILD SUCCESSFUL`. The real JUnit XML reports total
+**895 tests**, 0 skipped, 0 failures, 0 errors across the whole suite
+(five new `BuoyancyTest` cases, every pre-existing test still passing
+unchanged, main unchanged from the prior reconciliation at this point).
+`build/libs/dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`
+(sha256 `9b75722cf8b86018a906c39ebe1cb823320595bda335a360c79e2dc70e079f18`)
+was produced.
+
 ## Axle-specific spring and damping tuning (MINECRAFT-539, added 2026-11-15)
 
 Schema-coordinator slice for this sprint. Inspected the named seams first:
