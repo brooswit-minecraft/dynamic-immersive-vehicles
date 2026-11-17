@@ -1196,23 +1196,27 @@ public final class PhysicsBridge {
   if (body instanceof BuoyantBody bb) return bb.debugStepInvocationCount;
   return 0;
  }
- /** Diagnostic/test-only companion to {@link #debugStepInvocationCount} (John's comment 54616,
-  * bug 2): {@code v.uniqueUUID} is the ENTITY's own identity, unchanged even when THIS registry's
-  * own body for {@code v} disappears or is replaced by a fresh instance (e.g. a reconnect that
-  * tears down and reconstructs the native body under the same entity) - a real body swap, not
-  * the same still-live body genuinely failing to advance. {@link #debugStepInvocationCount}
-  * returning {@code 0} is indistinguishable, from the entity UUID alone, between "this body
-  * genuinely never stepped" and "there is currently no body at all / a different body now."
-  * Returns {@code 0} if {@code registry.get(v)} is currently absent (no body registered for this
-  * entity right now); otherwise {@code System.identityHashCode} of the actual {@code VehicleBody}
-  * instance registry.get(v) returns right now - stable for as long as the SAME instance stays
-  * registered, and necessarily different the instant a fresh instance replaces it (construction
-  * always allocates a new object; Java never reuses an identity hash across live distinct
-  * instances of the same reference). Never called from any production code path - this reads
-  * {@code registry} for diagnostic observation only, never to make a production decision. */
- public static int debugRegistryBodyIdentity(EntityVehicleF_Physics v) {
-  var body = registry.get(v);
-  return body == null ? 0 : System.identityHashCode(body);
+ /** Diagnostic/test-only companion to {@link #debugStepInvocationCount} (John's comments
+  * 54616/54635, bug 2): {@code v.uniqueUUID} is the ENTITY's own identity, unchanged even when
+  * THIS registry's own body for {@code v} disappears or is replaced by a fresh instance (e.g. a
+  * reconnect that tears down and reconstructs the native body under the same entity) - a real
+  * body swap, not the same still-live body genuinely failing to advance.
+  * {@link #debugStepInvocationCount} returning {@code 0} is indistinguishable, from the entity
+  * UUID alone, between "this body genuinely never stepped" and "there is currently no body at
+  * all / a different body now." CORRECTED (54635): the first version of this returned
+  * {@code System.identityHashCode(body)}, documented as never colliding across distinct live
+  * instances - that claim was simply false, {@code identityHashCode} is a hash, not a guaranteed-
+  * unique id, and two distinct live objects CAN collide. Returns the actual {@code VehicleBody}
+  * reference itself instead (as a plain {@code Object}, since {@code VehicleBody}/{@code Body}/
+  * {@code BuoyantBody} are package-private) - {@code null} if {@code registry.get(v)} is
+  * currently absent. Neither {@code Body} nor {@code BuoyantBody} overrides {@code equals()}, so
+  * the default reference-identity {@code equals()}/{@code ==} genuinely distinguishes any two
+  * distinct instances with no collision risk, for as long as this diagnostic's own bounded
+  * capture window holds the reference (a {@code List<Sample>} kept only for this one fixture
+  * run) - never called from any production code path, never persisted/serialized/compared across
+  * JVM runs or GC epochs where a raw reference could otherwise be reused or become stale. */
+ public static Object debugRegistryBodyIdentity(EntityVehicleF_Physics v) {
+  return registry.get(v);
  }
  /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
   * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL

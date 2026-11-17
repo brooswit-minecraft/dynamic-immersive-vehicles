@@ -22,12 +22,14 @@ class LifecycleInvariantsTest {
  private static final UUID BODY_A = UUID.fromString("00000000-0000-0000-0000-00000000000a");
  private static final UUID BODY_B = UUID.fromString("00000000-0000-0000-0000-00000000000b");
 
- // Default registryBodyIdentity (1) stands in for "the same still-registered body instance" -
- // every test below that is not specifically about a body swap uses this same constant for every
- // sample, so the new registryBodyIdentity check never fires where it isn't the point of the test.
- private static final int SAME_BODY = 1, DIFFERENT_BODY = 2, NO_BODY = 0;
+ // registryBodyIdentity is now the actual body REFERENCE (54635: System.identityHashCode is not
+ // guaranteed collision-free, so an int stand-in was wrong) - these two distinct plain Objects
+ // stand in for "two distinct live body instances"; null stands in for "no body registered."
+ // SAME_BODY is the default for every test below that is not specifically about a body swap, so
+ // the registryBodyIdentity check never fires where it isn't the point of the test.
+ private static final Object SAME_BODY = new Object(), DIFFERENT_BODY = new Object(), NO_BODY = null;
  private static Sample s(UUID body, long gameTime, long count) { return new Sample(body, gameTime, count, SAME_BODY); }
- private static Sample s(UUID body, long gameTime, long count, int registryBodyIdentity) { return new Sample(body, gameTime, count, registryBodyIdentity); }
+ private static Sample s(UUID body, long gameTime, long count, Object registryBodyIdentity) { return new Sample(body, gameTime, count, registryBodyIdentity); }
 
  @Test void evaluatePassForAPerfectPerTickSequence() {
   assertEquals(Outcome.PASS, LifecycleInvariants.evaluate(List.of(
@@ -103,11 +105,23 @@ class LifecycleInvariantsTest {
  @Test void evaluateBodyIdentityChangedWhenTheRegistryBodyDisappearsEntirely() {
   // The entity still exists (same bodyId) and even the step count accessor still returns a
   // nonzero-looking value on the first sample, but the SECOND sample shows no body currently
-  // registered at all (registryBodyIdentity == 0, per PhysicsBridge.debugRegistryBodyIdentity's
-  // own documented "0 = absent" contract) - a real removal, correctly distinguished from a
-  // starved-but-still-live body.
+  // registered at all (registryBodyIdentity == null, per PhysicsBridge.debugRegistryBodyIdentity's
+  // own documented "null = absent" contract) - a real removal (a PRESENT-to-ABSENT transition),
+  // correctly distinguished from a starved-but-still-live body AND from BODY_ABSENT below (which
+  // is specifically "absent on BOTH sides," not a transition).
   assertEquals(Outcome.BODY_IDENTITY_CHANGED, LifecycleInvariants.evaluate(List.of(
     s(BODY_A, 100, 10, SAME_BODY), s(BODY_A, 101, 0, NO_BODY))));
+ }
+
+ @Test void evaluateBodyAbsentWhenNoBodyIsRegisteredOnEitherSide() {
+  // MINECRAFT-545/547 (John's comment 54635): two consecutive samples with NO body registered on
+  // EITHER side (registryBodyIdentity null both times) must NOT be read as FAIL_STARVED_TICK -
+  // debugStepInvocationCount's own accessor returns 0 when absent, so both samples' counts are
+  // 0, a zero delta, which is exactly the starvation pattern's own signature for a body that
+  // genuinely exists but isn't stepping. There is no body at all here, so there is nothing to
+  // have starved - BODY_ABSENT is the correct, distinct "nothing to check" outcome.
+  assertEquals(Outcome.BODY_ABSENT, LifecycleInvariants.evaluate(List.of(
+    s(BODY_A, 100, 0, NO_BODY), s(BODY_A, 101, 0, NO_BODY))));
  }
 
  @Test void evaluatePassesForTheFixedSingleFirstSamplePerTickSequence() {

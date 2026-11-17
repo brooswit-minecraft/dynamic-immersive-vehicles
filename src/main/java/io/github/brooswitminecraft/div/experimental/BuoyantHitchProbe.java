@@ -704,11 +704,16 @@ public final class BuoyantHitchProbe {
    var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
    towing2.connectTrailer(connection, false);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position);
-   // MINECRAFT-545/547 (John's comment 54616, bug 3): the detach/reconnect-specific check -
+   // MINECRAFT-545/547 (John's comments 54616/54635, bug 3): the detach/reconnect-specific check -
    // confirms the reconnect actually rewired BOTH directions (towed's own pointer AND towing2's
    // own list), the real connection-ownership state connectTrailer's own doc promises, not merely
    // that towed.towedByConnection became non-null again (which a stale/wrong connection object
-   // could also satisfy).
+   // could also satisfy). LOG-ONLY, same as TOWING_UNAVAILABLE's own analogous connection
+   // observations above - an OBSERVATION, deliberately not wired into any assertion/fail path
+   // (54635's own explicit instruction: "retain that distinction"). There is no established
+   // "wrong" value for these three booleans yet to assert against; the only thing in this fixture
+   // that actually fails anything on a lifecycle finding is the withinUnavailableOutcome check
+   // below, which these three booleans are not part of.
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT post-connect reconnect check"
      + " towed.towedByConnectionIsNewConnection=" + (towed.towedByConnection == connection)
      + " towed.towedByConnection.towingVehicleIsTowing2=" + (towed.towedByConnection != null && towed.towedByConnection.towingVehicle == towing2)

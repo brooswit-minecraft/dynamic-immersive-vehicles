@@ -16,19 +16,36 @@ public final class LifecycleInvariants {
   * {@code v.uniqueUUID}), the real Minecraft tick it was taken at, that body's own
   * {@code debugStepInvocationCount} at that moment, and {@code registryBodyIdentity} - the
   * REGISTRY's own body-presence/generation marker ({@code PhysicsBridge.debugRegistryBodyIdentity},
-  * {@code 0} when no body is currently registered, otherwise a value that changes the instant a
-  * fresh body instance replaces the one previously registered for this same entity). 54603 added
-  * {@code bodyId} to distinguish "this body genuinely was not stepped" from "this is actually a
-  * different/replaced/missing body" - but 54616 (bug 2) found that check alone insufficient: the
-  * ENTITY's own UUID never changes even when the underlying native body IS torn down and
-  * reconstructed under that same entity, so two samples can share an identical {@code bodyId}
-  * while actually straddling a real body swap. {@code registryBodyIdentity} is the separate,
-  * correct observable for that - never collapsed into or substituted for the entity UUID. */
- public record Sample(UUID bodyId, long gameTime, long stepInvocationCount, int registryBodyIdentity) {}
+  * {@code null} when no body is currently registered, otherwise the actual live body reference
+  * registered for this entity right now - compared by the default reference-identity
+  * {@code equals()}, since neither {@code Body} nor {@code BuoyantBody} overrides it). 54603
+  * added {@code bodyId} to distinguish "this body genuinely was not stepped" from "this is
+  * actually a different/replaced/missing body" - but 54616 (bug 2) found that check alone
+  * insufficient: the ENTITY's own UUID never changes even when the underlying native body IS torn
+  * down and reconstructed under that same entity, so two samples can share an identical
+  * {@code bodyId} while actually straddling a real body swap. {@code registryBodyIdentity} is the
+  * separate, correct observable for that - never collapsed into or substituted for the entity
+  * UUID. CORRECTED (54635): an earlier version of this field was {@code int}
+  * ({@code System.identityHashCode}), documented as collision-free - a false claim, since
+  * {@code identityHashCode} is a hash, not a guaranteed-unique id. Holding the actual reference
+  * instead is only safe because {@link #evaluate} runs within one bounded diagnostic capture
+  * (one fixture run's own in-memory sample list) - never serialized, persisted across JVM runs,
+  * or compared after GC could have reused an address; see {@code debugRegistryBodyIdentity}'s own
+  * javadoc for that scope. */
+ public record Sample(UUID bodyId, long gameTime, long stepInvocationCount, Object registryBodyIdentity) {}
 
  /** The real outcome of evaluating a sample sequence - not a bare boolean, so "could not be
-  * checked" is never silently conflated with "checked and passed" (54603's own point). */
- public enum Outcome { PASS, FAIL_STARVED_TICK, FAIL_DUPLICATE_TICK, INSUFFICIENT_SAMPLES, BODY_IDENTITY_CHANGED }
+  * checked" is never silently conflated with "checked and passed" (54603's own point).
+  * {@code BODY_ABSENT} (54635, bug 2 follow-up) is a separate "nothing to check" outcome: two
+  * consecutive samples where NO body is currently registered for this entity on either side are
+  * not a stepped body failing to advance (that would be {@code FAIL_STARVED_TICK}, a real
+  * defect) - there is no body at all, so there is nothing to have advanced or starved. Reporting
+  * that as a stepping failure would misreport "this entity currently has no body" as a lifecycle
+  * defect; {@code BODY_ABSENT} keeps it a distinct, correctly-named "could not be checked" case,
+  * same spirit as {@code INSUFFICIENT_SAMPLES}/{@code BODY_IDENTITY_CHANGED}. A TRANSITION between
+  * present and absent (one side has a body, the other does not) is still a real identity change,
+  * reported as {@code BODY_IDENTITY_CHANGED} - not folded into {@code BODY_ABSENT}. */
+ public enum Outcome { PASS, FAIL_STARVED_TICK, FAIL_DUPLICATE_TICK, INSUFFICIENT_SAMPLES, BODY_IDENTITY_CHANGED, BODY_ABSENT }
 
  /** True only if EVERY consecutive pair in {@code counts} (one sample per real tick, in tick
   * order) advances by exactly 1 - the genuine per-tick "no starvation, no duplicate stepping"
@@ -57,13 +74,19 @@ public final class LifecycleInvariants {
   for (int i = 1; i < samples.size(); i++) {
    Sample prev = samples.get(i - 1), cur = samples.get(i);
    if (!prev.bodyId().equals(cur.bodyId())) return Outcome.BODY_IDENTITY_CHANGED;
+   // 54635: BOTH sides absent is "nothing to check," not a stepping defect - checked BEFORE the
+   // identity-change/delta checks below, so it is never misread as FAIL_STARVED_TICK (both
+   // sides' debugStepInvocationCount would read 0, a zero delta, which IS the starvation
+   // pattern's own signature when a body genuinely exists but isn't stepping).
+   if (prev.registryBodyIdentity() == null && cur.registryBodyIdentity() == null) return Outcome.BODY_ABSENT;
    // 54616 (bug 2): the entity UUID check above cannot see a real body swap under the SAME
-   // entity - registryBodyIdentity is the separate observable for that. A transition either INTO
-   // or OUT OF "no body registered" (0 on one side, nonzero on the other), or between two
-   // different nonzero instances, is a real body-presence/generation change, checked before the
-   // step-count delta below so a swapped-in fresh body's own low/zero count is never misread as
-   // this same body starving.
-   if (prev.registryBodyIdentity() != cur.registryBodyIdentity()) return Outcome.BODY_IDENTITY_CHANGED;
+   // entity - registryBodyIdentity is the separate observable for that, compared by reference
+   // identity (the default equals() for Body/BuoyantBody, neither of which overrides it). A
+   // transition either INTO or OUT OF "no body registered" (null on exactly one side), or
+   // between two different live instances, is a real body-presence/generation change, checked
+   // before the step-count delta below so a swapped-in fresh body's own low/zero count is never
+   // misread as this same body starving.
+   if (!java.util.Objects.equals(prev.registryBodyIdentity(), cur.registryBodyIdentity())) return Outcome.BODY_IDENTITY_CHANGED;
    if (cur.gameTime() - prev.gameTime() != 1) return Outcome.INSUFFICIENT_SAMPLES;
    long delta = cur.stepInvocationCount() - prev.stepInvocationCount();
    if (delta == 0) return Outcome.FAIL_STARVED_TICK;

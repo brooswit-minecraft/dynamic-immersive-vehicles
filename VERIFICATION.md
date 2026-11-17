@@ -8859,3 +8859,212 @@ conditions. Follows in the next commit.
 Three of four concrete bugs from 54616 fixed and regression-tested; no
 native run performed or requested. Native hold remains CLOSED per 54616's
 own closing line.
+
+## Bug 4 fixed: launch-wrapper fail-closed preflight, inside the same FD9 lock, before exec
+
+Addresses the last of 54616's four concrete bugs. The prior `launch-
+wrapper.sh` acquired the exclusive `/tmp/div-gradle-slot.lock` then
+directly exec'd the SHARED `build/moddev/runServer.sh` with no
+verification step in between - a real race, since those files are shared
+across MULTIPLE tickets' own agents (the lock/owner-file convention exists
+specifically because of that sharing). Another ticket's own
+`prepareServerRun` running between this packet's own prep and this
+specific launch could silently substitute different runtime bytes under
+the same filenames, and the only thing catching that was an operator
+manually re-reading one `cd` argument by hand - which covered the arg
+TEXT only, never the actual jar/class bytes those args point at.
+
+### What changed
+
+New `preflight.sh`, run by the wrapper INSIDE the same lock acquisition,
+immediately after `CLAIMED` and before anything is launched. Six
+fail-closed checks, in order; any failure writes
+`RESULT=PREFLIGHT_FAILED` to the owner file, releases the lock, and exits
+- never execs:
+
+1. Live `runServer.sh`/`serverRunClasspath.txt`/`serverRunVmArgs.txt`/
+   `serverRunProgramArgs.txt` still match this packet's own archived
+   `generated-launch-artifacts.sha256` (unchanged check, now re-run live
+   instead of only at prep).
+2. NEW - `runtime-byte-manifest.sha256`: every individual CLASSPATH
+   ENTRY's own runtime bytes, not the arg text. A new shared
+   `runtime-manifest.sh` function (`compute_runtime_byte_manifest`)
+   parses the live `serverRunClasspath.txt`'s own `-classpath` line and,
+   for each of its 100 entries, hashes it directly if it's a single file
+   (all 98 dependency jars) or computes a sorted per-file content-hash
+   aggregate if it's a directory (the 2 exploded build-output dirs,
+   `build/classes/java/main` and `build/resources/main`) - the SAME
+   algorithm used once at packet-prep time (producing this packet's own
+   `runtime-byte-manifest.sha256`, archived) and again live, right before
+   launch, with a byte-for-byte diff between the two. A real jar swap or
+   recompiled class is now caught here, not just an arg-text change -
+   this is the actual gap 54616 named ("checking actual referenced
+   classes/resources/jars/arg files", not just arg-text hashes).
+3. The isolated rundir resolves to a genuinely different path than the
+   shared `run/` directory.
+4. No stale `world/` directory already exists under the isolated rundir
+   (fresh world for this specific trial).
+5. `level-seed=545547` is live-present in the isolated
+   `server.properties`, re-read right now, not merely checked once at
+   prep.
+6. The isolated config copy still matches this packet's own archived
+   `baseline-original-run-config.sha256` (re-run live, same as check 1).
+
+### Verification performed (no native run)
+
+Dry-ran `preflight.sh` directly against the real, freshly-prepared
+`M545-packet-f85e79f` packet (commit `f85e79f`, this ticket's current
+HEAD after the bug 1-3 fixes) - all 6 checks reported `OK`/`PASS`, exit
+code 0. This call is read-only (hashing/diffing only; it never execs
+anything) - running it is not a native/Minecraft execution and is not
+covered by the native hold.
+
+Ran two deliberate NEGATIVE tests against disposable copies of the
+packet (never the real packet), confirming the fail-closed path actually
+works and not just the happy path:
+- Mutated the isolated `config/mtsconfig.json` after copying - preflight
+  correctly reported `PREFLIGHT_FAILED` (config baseline mismatch), exit
+  code 1.
+- Corrupted one jar's expected hash in the copy's own
+  `runtime-byte-manifest.sha256` - preflight correctly reported
+  `PREFLIGHT_FAILED` (runtime-byte-manifest mismatch) with a readable
+  diff, exit code 1.
+Both disposable copies were deleted after the test; the real packet was
+never touched by either negative test.
+
+### Packet M545-packet-f85e79f prepared (NOT executed)
+
+Regenerated `build/moddev/runServer.sh`/`serverRunClasspath.txt`/
+`serverRunVmArgs.txt`/`serverRunProgramArgs.txt` under the exclusive lock
+(`gradle prepareServerRun createServerLaunchScript`,
+`DIV_ISOLATED_RUN_DIR`/`DIV_BUOYANT_HITCH_PROBE=true`), confirmed
+`runServer.sh`'s own `cd` argument points at this packet's own rundir
+(not `run/`, not a prior packet's rundir). Archived copies + arg-text
+hashes (`generated-launch-artifacts.sha256`) + the new
+`runtime-byte-manifest.sha256` (100 entries, 0 missing). Isolated
+`config`/`eula.txt`/`server.properties` copied from the shared `run/`
+directory with `level-seed=545547` set ONLY in the isolated copy
+(confirmed via `diff` - exactly one line differs). Isolated config
+confirmed byte-identical to the original, never-mutated reference run's
+own `baseline-original-run-config.sha256` - no DIV config drift since
+that baseline. Confirmed `rundir/world` does not exist (fresh). The new
+`launch-wrapper.sh`/`preflight.sh`/`runtime-manifest.sh` installed into
+the packet with real paths substituted. `rundir/` contains only
+config/eula/server.properties and the one retained
+`runtime-byte-manifest-live-*.sha256` evidence file from the successful
+dry-run above - NOT executed, no java process ever launched under this
+packet's own tag.
+
+### Disposition
+
+All four concrete bugs from 54616 now fixed and verified (1-3 via
+compile+test under the lock; 4 via the preflight dry-run plus two
+negative tests, all read-only/non-native). No native run performed or
+requested. Native hold remains CLOSED.
+
+## Corrections per 54635 (independent review of f85e79f)
+
+John's independent review of commit `f85e79f` (the bug 1-3 fixes) found
+two more concrete correctness problems with that change itself, confirmed
+the bug-3 connection observations should stay log-only (already true,
+now stated explicitly in-code), and flagged a scope distinction this
+entry must state plainly before any packet review. No native run
+performed or requested; "inside-lock preflight explicitly still
+underway, preserve same owner" - bug 4 continues under this same entry.
+
+### registryBodyIdentity: System.identityHashCode is not collision-free (FIXED)
+
+The prior `debugRegistryBodyIdentity`/`Sample.registryBodyIdentity`
+returned/stored `System.identityHashCode(body)` as an `int`, documented as
+"Java never reuses an identity hash across live distinct instances" -
+that claim is simply FALSE. `identityHashCode` is a hash, not a
+guaranteed-unique id; two distinct live objects CAN collide (small but
+real, and the javadoc asserted otherwise).
+
+Fix: `PhysicsBridge.debugRegistryBodyIdentity` now returns the actual
+`Object` reference (`registry.get(v)` directly, `null` if absent) instead
+of a hash code. `Sample.registryBodyIdentity` is now typed `Object`.
+Confirmed via grep that neither `Body` nor `BuoyantBody` overrides
+`equals()`/`hashCode()`, so the default reference-identity `equals()`
+(used by `evaluate` via `Objects.equals`) genuinely distinguishes any two
+distinct instances with zero collision risk - correct specifically
+because this stays within ONE bounded diagnostic capture (a single
+fixture run's own in-memory `List<Sample>`), never serialized or compared
+across JVM runs/GC epochs where a raw reference could be stale or reused.
+This is "reference-identity comparison within bounded diagnostic
+capture," per 54635's own wording - not a generation-token scheme, and no
+broad registry refactor.
+
+### registryBodyIdentity == null on both sides misread as FAIL_STARVED_TICK (FIXED)
+
+Two consecutive samples with no body registered on EITHER side (both
+`registryBodyIdentity == null`) previously fell through to the step-count
+delta check: `debugStepInvocationCount` also returns `0` when a body is
+absent, so both samples' counts were `0`, a zero delta - exactly
+`FAIL_STARVED_TICK`'s own signature for a body that genuinely exists but
+isn't stepping. There is no body at all in this case, so there is nothing
+that could have starved.
+
+Fix: added a new `Outcome.BODY_ABSENT`, checked immediately after the
+entity-UUID check and before the registryBodyIdentity-transition check -
+both sides `null` now reports `BODY_ABSENT`, a distinct "nothing to
+check" outcome (same spirit as `INSUFFICIENT_SAMPLES`/
+`BODY_IDENTITY_CHANGED`, never conflated with a real stepping defect). A
+genuine transition between present and absent (one side has a body, the
+other does not) is still correctly `BODY_IDENTITY_CHANGED`, not folded
+into `BODY_ABSENT` - a real disappearance event is real information, not
+"nothing to check."
+
+New test: `evaluateBodyAbsentWhenNoBodyIsRegisteredOnEitherSide`. All
+`Sample` construction in `LifecycleInvariantsTest` updated for the
+`Object`-typed field (two distinct plain `Object`s standing in for two
+distinct live body instances, `null` standing in for absent).
+
+### Reconnect-membership observations remain log-only (confirmed, no behavior change)
+
+54635 confirmed the bug-3 connection/reconnect-membership booleans
+(`towedConnection.towingVehicleIsRemovedTowing`,
+`towing.towingConnectionsStillContainsIt`,
+`towed.towedByConnectionIsNewConnection`, etc.) should stay observations,
+not assertions - already true in the committed code, now stated
+explicitly in-line at the reconnect-check log site: there is no
+established "wrong" value for these specific booleans to assert against
+yet: only `withinUnavailableOutcome` (a real per-tick lifecycle
+measurement with an actual established defect signature) is wired into
+the fixture's own fail path.
+
+### Scope statement: this packet, if ever run, is a BOUNDED lifecycle
+regression check, not a reconnect-crash reproduction
+
+Stated plainly, per 54635's own explicit instruction: the new terminal
+assertion added in the bug-3 fix (if `withinUnavailableOutcome` is
+`FAIL_STARVED_TICK`/`FAIL_DUPLICATE_TICK`) fires at `TOWING_REPLACEMENT`'s
+own `ticksInPhase==1` - i.e., at the very first tick of that phase, BEFORE
+the original, previously-observed crash site (`TOWING_REPLACEMENT`
+tick=7, the "left bounded area" divergence this investigation's single
+authorized run actually hit). If this packet is ever authorized and run
+and that assertion fires, the fixture stops at tick 1 with a
+lifecycle-defect verdict - it does NOT continue on to tick 7/8 to
+re-confirm the original crash still reproduces unchanged. These are two
+different experiments: "does the already-established starvation
+mechanism show up as a measured, per-tick-granular lifecycle defect" (what
+this packet's own new instrumentation checks) versus "does the full
+original reconnect-crash scenario still reproduce all the way to its own
+divergence point" (the ORIGINAL, still-unrepeated authorized run from
+earlier this investigation). A future reader/reviewer must not treat a
+tick-1 lifecycle-assertion failure from this packet as if it were an
+unchanged reproduction of the tick-7/8 crash - the evidence scope is
+narrower and arrives earlier in the phase.
+
+### Disposition
+
+Both concrete correctness bugs from 54635 fixed and regression-tested
+(compile+test under the lock, `RESULT=PASS`,
+`MINECRAFT-545-fix-54635-20261117T145603Z`). Reconnect-observation
+distinction confirmed and stated explicitly in-code. Scope distinction
+stated above. Bug 4 (inside-lock preflight) continues under this same
+owner, already implemented and dry-run verified against the prior
+commit's own packet - the packet itself needs regenerating against this
+new commit before it is ready for review, since the class files
+underlying its own runtime-byte-manifest have now changed again. No
+native run performed or requested. Native hold remains CLOSED.
