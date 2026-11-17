@@ -5386,3 +5386,84 @@ regenerated above, ready for independent review; Trial 1 will only be
 started after explicit release, and per 54389, Trial 2 gets its own
 separate readback/release only after Trial 1's own outcome/exit/slot
 release.
+
+## Trial 1 result: reproduced the crash, byte-identical to authrun-probe2 (54394/54395)
+
+Trial 1 was released (54394) and executed via its own already-verified
+`launch-wrapper.sh`, unchanged. **Result: Trial 1 REPRODUCED the known
+crash.**
+
+- Start: lock claimed by `M545-isolated-trial1` at 2026-11-17T00:36:29Z.
+  Java pid 2603913 launched.
+- Terminal: `[DIV buoyantHitchProbe] FAILED - left bounded area
+  tag=towingReplacement/towing2 phase=TOWING_REPLACEMENT tick=8
+  horizontal=65.44565659568023 vertical=50.060278582992964
+  position=[X:17597.89253401834, Y:155.06027858299296,
+  Z:17673.0803037519]` at local time 16:37:40.008 (log line 2200).
+- Orderly stop/shutdown: `Stopping server` (line 2265),
+  `All dimensions are saved` (line 2277). Java exited 0. Lock released
+  by `M545-isolated-trial1` at 2026-11-17T00:37:45Z.
+- `logs/latest.log` SHA-256: `1ead408a6558cc236f964edfc89ea35b9c5a4edb5dc05f91f9c203740b313ba2`
+  - matches John's own independent computation exactly.
+- World retained unconditionally at `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-trial1-seed545547/rundir/world`.
+- Original-baseline re-check: `run/config`'s 8 files and
+  `run/world/level.dat`/`level.dat_old` still match their first-
+  recorded baseline hashes - unaffected by this trial.
+
+### Byte-identical match to the prior crash reference (authrun-probe2) - a clean result
+
+Trial 1's own FAILED line is IDENTICAL, digit-for-digit, to
+`authrun-probe2`'s own FAILED line (same `tick=8`, same
+`horizontal=65.44565659568023`, same `vertical=50.060278582992964`,
+same exact `position`). The phase-local progression leading up to it
+also matches exactly: `TOWING_UNAVAILABLE tick=60`,
+`TOWING_REPLACEMENT tick=1/2/3` (including the `260.06966433253604`
+blocks/s runaway speed at tick=3) are all digit-for-digit identical
+between Trial 1 (fixed `level-seed=545547`) and `authrun-probe2`
+(empty/random seed). The `TOWING_UNAVAILABLE` pre-remove() bracket
+(`towing.angularVelocity=(-41.40,-12.50,-3.443)`,
+`towed.angularVelocity=(-73.00,-13.84,87.99)`,
+`lastPoseUpdateGameTime=203` both bodies) also matches the SAME bracket
+in BOTH `authrun-probe2` and the prior non-crash isolated run exactly -
+confirming (again) this bracket is deterministic regardless of outcome.
+
+**This rules out two more candidates with direct evidence, not
+inference:**
+- **World/seed identity is not the explanation.** Two DIFFERENT seeds
+  (authrun-probe2's own unrecorded random seed, and Trial 1's fixed
+  `545547`) produce digit-for-digit IDENTICAL physics outcomes. If seed
+  identity mattered, two different seeds would not be expected to
+  coincide this precisely by chance.
+- **Logging volume is not the explanation either.** Trial 1 has the SAME
+  heavy `BuoyantForces` diagnostic logging as the prior NON-crash
+  isolated run (same current commit, same instrumentation) and still
+  reproduced the crash - directly contradicting the logging-volume
+  confound raised after the first comparison (54379/54382).
+- The one remaining, still-unexplained data point is the SINGLE original
+  isolated run that did NOT crash - every other variable now controlled
+  (code, seed, logging volume) still reproduces the crash identically.
+  What made that one run different remains genuinely unknown - NOT
+  attributed to any mechanism here, native/solver-internal or otherwise.
+
+**This consumes Trial 1 - no substitute run.**
+
+## Trial 2's LIVE launch set prepared for independent readback - NOT launched
+
+Per 54395, Trial 2's own live launch set was prepared next, same
+procedure as Trial 1's own readback:
+
+- Re-ran `gradle prepareServerRun createServerLaunchScript` with Trial
+  2's own `DIV_ISOLATED_RUN_DIR`/`DIV_BUOYANT_HITCH_PROBE=true` under
+  the lock (`M545-trial2-livegen`). LIVE `build/moddev/runServer.sh`
+  now `cd`s into Trial 2's own directory - confirmed by direct read.
+- Lock identity re-confirmed: `664 2051 9214683`.
+- Fresh runtime-jar/compiled-instrumentation byte manifest (244 entries)
+  regenerated and diffed BYTE-IDENTICAL against the original run's own
+  set - same instrumentation, unchanged between arms.
+- Original-baseline config/world hashes re-verified fresh: unchanged.
+- Non-aliasing + world-absence re-checked fresh for Trial 2: distinct
+  from `run/`, no `world/` yet in its own `rundir`.
+
+**No launch performed for Trial 2.** Awaiting explicit coordinator
+release, per 54394/54395 ("do not launch Trial2 until explicit
+release").
