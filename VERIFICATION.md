@@ -5467,3 +5467,44 @@ procedure as Trial 1's own readback:
 **No launch performed for Trial 2.** Awaiting explicit coordinator
 release, per 54394/54395 ("do not launch Trial2 until explicit
 release").
+
+## Trial 2 result: also reproduced the crash, byte-identical to Trial 1 and authrun-probe2 (54396)
+
+Trial 2 was released (54396), the second and FINAL launch under the two-
+trial grant. Executed via its own already-verified `launch-wrapper.sh`,
+unchanged. **Result: Trial 2 also REPRODUCED the known crash.**
+
+- Start: lock claimed by `M545-isolated-trial2` at 2026-11-17T00:41:09Z.
+  Java pid 2619180 launched.
+- Terminal: `[DIV buoyantHitchProbe] FAILED - left bounded area
+  tag=towingReplacement/towing2 phase=TOWING_REPLACEMENT tick=8
+  horizontal=65.44565659568023 vertical=50.060278582992964
+  position=[X:17597.89253401834, Y:155.06027858299296,
+  Z:17673.0803037519]` at local time 16:42:22.417 (log line 2199) -
+  digit-for-digit IDENTICAL to both Trial 1's and `authrun-probe2`'s own
+  FAILED line.
+- Orderly stop/shutdown: `Stopping server` (line 2264),
+  `All dimensions are saved` (line 2276). Java exited 0. Lock released
+  by `M545-isolated-trial2` at 2026-11-17T00:42:28Z.
+- `logs/latest.log` SHA-256:
+  `afe210296a4b8bd2a1b5e3a52c49ff281857c15039c7a3e3d48dfcbe758dbc1b`.
+- World retained unconditionally at `/home/booswrit/div-evidence/MINECRAFT-545-547/M545-isolated-trial2-seed545547/rundir/world`.
+- Original-baseline re-check: `run/config`'s 8 files and
+  `run/world/level.dat`/`level.dat_old` still match their first-
+  recorded baseline hashes - unaffected by this trial either.
+
+### Final descriptive outcome: 2/2 reproduced
+
+Both fixed-seed, logging-matched, otherwise-identical trials reproduced
+the known crash, each byte-identical to the original `authrun-probe2`
+reference. This is a descriptive count only - **2/2, not a rate, not a
+statistical bound, and not a solver-cause conclusion.** Per 54396: STOP
+here - no third/substitute run, no tuning/logging change, no destructive
+cleanup, no signals to peers, no permission/lock changes, no deployment.
+Both trial worlds and full raw logs are retained unconditionally. The one
+remaining unexplained data point in this whole investigation is still
+the SINGLE original isolated run that did not crash - its cause remains
+genuinely unknown; nothing in this round attributes a mechanism to it or
+to anything else.
+
+**Two-trial grant is now fully consumed.**
