@@ -11185,3 +11185,129 @@ trailing newline) caught and fixed before any hash was frozen; preflight extende
 checks that actively confirm (not merely assert) the flag's isolation to this packet alone. No
 source or fixture changes. No native run performed - launch remains explicitly withheld pending
 a further, specific coordinator release naming this packet.
+
+## THE authorized run (per 54727): candidate active, no divergence/boundary escape, but the
+## already-known one-tick dispatch latency still trips the fixture's zero-tolerance invariant
+
+John's comment 54727 was the specific, named release for `M545-packet-95bc8ed-flagon` ("parent's
+conditional ONE-run authorization is satisfied... SAME owner may now execute exactly ONE launch
+via M545-packet-95bc8ed-flagon/launch-wrapper.sh"). Verified the three hashes that comment cited
+(`serverRunVmArgs.txt`, `launch-wrapper.sh`, `preflight.sh`) matched this packet's own files
+exactly before doing anything; re-ran a fresh dry-run preflight immediately before launch (all
+11 checks passed); then ran `launch-wrapper.sh` for real - the ONE authorized native execution
+this cycle.
+
+### Result: `FAILED - lifecycleInvariantCheck withinUnavailableOutcome=FAIL_STARVED_TICK`
+
+Java exited 0 (clean), orderly stop/shutdown confirmed (`Stopping server` / `All dimensions are
+saved` both present), lock released cleanly (confirmed free immediately after), original 8
+config + 2 world-level files confirmed byte-identical post-run (diffed directly against this
+packet's own archived baselines) - the trial itself was clean and well-formed.
+
+### Candidate was genuinely active
+
+12 `sequentialDragBoundCandidate=true` diagnostic lines (gameTime 258-263, the two floats of the
+towed hull), each showing `candidateBuoyancyOnlyForce` (buoyancy, untouched) and
+`candidateBoundedDragForce` separately from the OLD model's own `unconditionalForce` - the two
+genuinely differ (e.g. one sample: `unconditionalForce.y≈1808` vs `candidateForceToApply.y≈1675`
+- a real, non-trivial difference), confirming the candidate was not merely present but actually
+changing the applied impulse, not accidentally inert.
+
+### No divergence, no boundary escape - unlike the prior (unbounded-drag) run
+
+Unlike the SECOND authorized run (`df4b0c2`, unbounded drag), THIS run's linear/angular velocity
+DECAYED smoothly across the entire 60-tick `TOWING_UNAVAILABLE` window (peak linear speed
+~8.946, peak angular speed ~50.551, decaying to ~0.777/~0.445 by tick 60) and reached the
+`TOWING_UNAVAILABLE PASS - towed stayed finite/bounded 60 ticks` marker cleanly - no
+"left bounded area" failure, no explosion. This is consistent with (not proof of) the candidate
+preventing the divergence `df4b0c2` exposed - stated as an observation, not a general claim, per
+54730's own caution that "finite/bounded marker is partial evidence only."
+
+### The actual failure: a single, precisely-located one-tick dispatch gap
+
+Extracted every `TOWING_UNAVAILABLE tick=N ... stepInvocationCount=S` line (60 samples) and
+checked every adjacent delta: `tick=1 step=201`, `tick=2 step=201` (UNCHANGED - the only non-
+unit interval in the entire window), `tick=3 step=202`, then exactly `+1` every tick through
+`tick=60 step=259`. The terminal assertion (`sampleCount=61 withinUnavailableSampleCount=60`,
+`firstSample...stepInvocationCount=201` at `gameTime=204` through
+`lastWithinUnavailableSample...stepInvocationCount=259` at `gameTime=263`) fails because this
+ONE gap violates the invariant's own zero-tolerance requirement that every adjacent sample
+advance by exactly 1 - confirmed by John's own independent read (54730) of the exact same
+numbers.
+
+### Read-only root-cause: a structurally-bounded one-tick latency, confirmed via source + registration order (NOT a new defect, NOT something this candidate caused)
+
+Per 54730's own request ("read-only source/event accounting... distinguish expected recovery
+latency from unmet explicit invariant"):
+
+- `PhysicsBridge.cleanup()` (the orphan-connection-release sweep) is registered as a
+  `ServerTickEvent.Post` listener - confirmed directly in `DynamicImmersiveVehicles.java`
+  (`NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());`),
+  near the TOP of that file's own listener-registration sequence.
+- `BuoyantHitchProbe.maybeRun(...)` (the fixture's own per-tick driver, which performs the
+  `towing.remove()` despawn and takes the `tick=1`/`tick=2`/... samples) is ALSO a
+  `ServerTickEvent.Post` listener, registered SUBSTANTIALLY LATER in the same file - confirmed
+  by its own position in the listener list (roughly the 12th of ~17 `ServerTickEvent.Post`
+  registrations, vs. `cleanup()` at position 1).
+- NeoForge fires same-event listeners with no explicit `EventPriority` (neither listener here
+  specifies one) in REGISTRATION ORDER - so on every real Minecraft tick, `cleanup()` ALWAYS
+  runs BEFORE the fixture's own `maybeRun()` within that same tick's `ServerTickEvent.Post`
+  firing.
+- Combined with the already-established real ordering (native `step()` -> entity ticking
+  [where `BuoyantBody.step()`/`stepInvocationCount++` actually happens, gated by MTS's own
+  `blockMainUpdateCall()`] -> `ServerTickEvent.Post` listeners in registration order), the exact
+  mechanism is: on the real tick where the fixture calls `towing.remove()` (call it tick R),
+  `cleanup()` has ALREADY run for tick R (before the fixture's own later listener) and sees
+  nothing orphaned yet - the orphaning happens AFTER cleanup() already ran for that tick. On
+  tick R+1, `cleanup()` runs FIRST again (now correctly detecting and releasing the orphan via
+  the real `disconnectTrailer`), but tick R+1's own ENTITY-TICKING phase (which happens BEFORE
+  any Post listener, every tick) has ALREADY completed by the time `cleanup()` gets that chance
+  - so `BuoyantBody.step()` for tick R+1 is STILL blocked (matching the observed frozen
+  `tick=2` sample). Only on tick R+2's entity-ticking phase - now seeing the connection already
+  released at the end of R+1 - does dispatch resume (matching `tick=3`'s step increment).
+- This is a GENUINE, BOUNDED (exactly one real tick, not unbounded), FULLY EXPLAINED latency,
+  inherent to both relevant mechanisms being `ServerTickEvent.Post` listeners and the orphaning
+  trigger itself occurring mid-tick inside a Post listener registered after `cleanup()`. It is
+  the SAME mechanism already documented as "exactly-once dispatch restored from tick 3 onward"
+  in the `df4b0c2` disposition - NOT new, and NOT caused by anything in this `54694`-`54730`
+  correction cycle (none of which touched `PhysicsBridge.cleanup()`, its registration, or the
+  fixture's own tick-driving listener).
+- Simultaneously, equally true: the fixture's own `lifecycleInvariantCheck` is written with
+  ZERO tolerance for ANY single-tick gap across the 60-tick window. This structurally-expected,
+  bounded latency is still, as the invariant is CURRENTLY written, an unmet invariant - "this
+  mechanism is understood and bounded" does not mean "the explicit check is satisfied." Both
+  statements stand together; neither is waived by the other.
+
+**Not claimed**: that this finding resolves, excuses, or fixes anything; that the original
+hitch/reconnect crash this entire investigation started from is fixed; that the fixture's own
+invariant should be changed (no fixture change proposed or made); that `PhysicsBridge.cleanup()`'s
+registration or timing should change (no production change proposed or made). Per 54730's own
+instruction, this is read-only source/event accounting only.
+
+### Preserved evidence
+
+Full wrapper output (the actual inside-lock 11-check preflight output, launched Java PID
+`1619065`, exit code `0`, termination line, shutdown confirmation) archived as this packet's
+own `receipts/launch-wrapper-run-20261117T230509Z.log`. Isolated world/logs under this packet's
+own `rundir/` retained unconditionally, untouched, per the wrapper's own standing no-delete
+policy.
+
+### Disposition
+
+The one authorized native run for `M545-packet-95bc8ed-flagon` completed cleanly (exit 0,
+orderly shutdown, lock released, baselines unmutated). The candidate was confirmed genuinely
+active via 12 distinct diagnostic lines showing its own buoyancy/bounded-drag/combined-force
+breakdown differing from the old model. No divergence or boundary escape occurred this run,
+unlike the prior unbounded-drag run - stated as an observation, not a general proof. The
+terminal failure (`FAIL_STARVED_TICK`) is a single, precisely-located, fully-explained one-tick
+dispatch gap - confirmed via source-level event-registration-order analysis (read-only, no
+fixture or production change made) to be a structurally-bounded latency inherent to
+`PhysicsBridge.cleanup()` and the fixture both being `ServerTickEvent.Post` listeners, identical
+in mechanism to the already-documented `df4b0c2` behavior, not a new defect and not something
+this correction cycle's own candidate caused. The fixture's own invariant has zero tolerance for
+this latency and therefore still fails, correctly, as currently written - not waived, not
+reinterpreted as a pass. Native hold is CLOSED again (one run consumed) - no further native
+execution without a new explicit coordinator release. The underlying investigation's open
+questions (identity/missing-index gaps, whether/how to address this one-tick latency or the
+fixture's own tolerance for it, full hitch/reconnect-crash resolution) remain open and
+unresolved; none of this is claimed as final acceptance.
