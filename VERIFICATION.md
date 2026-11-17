@@ -5051,3 +5051,147 @@ wiring text and MultiContactFrictionSolverTirePartRollingResistanceTest
 description), so a full test-suite re-run was not required and was not
 performed; the green hosted-CI `build` job (which does run the full suite)
 is the completion evidence for behavior-preservation instead.
+
+## Gear-aware ground drive (MINECRAFT-553, added 2026-11-17)
+
+**Audit, source provenance first.** Current `main`'s `PhysicsBridge.stepGround`
+drive term was `Math.signum(engine.currentGearVar.currentValue)*throttle
+*enginePartDriveForce(...)` - every forward gear produces the IDENTICAL
+drive-force magnitude; only the gear's sign (forward/neutral/reverse) ever
+changed anything. Confirmed by decompiling (cfr) the ACTUAL pinned
+dependency bytecode (`~/.gradle/caches/modules-2/files-2.1/curse.maven/
+minecraft-transport-simulator-286703/7926606/.../minecraft-transport-
+simulator-286703-7926606.jar`, the exact curse.maven coordinate pinned in
+`build.gradle`) - not an unpinned GitHub checkout - that IV's own
+`PartEngine` ALREADY tracks a native per-current-gear ratio magnitude
+(`gearRatioVar`, a `ComputedVariable` kept in sync with `currentGearVar` on
+every shift via `gearRatioVar.setTo(definition.engine.gearRatios.get(
+currentGear+reverseGears))`) and the vehicle's own axle ratio
+(`EntityVehicleF_Physics.axleRatioVar`, `public final`) - both already used
+by IV's own internal RPM-feedback loop (`PartEngine.update()`, confirmed
+NOT cancelled by DIV's mixins) for its own `rpm`/`wheel.angularVelocity`
+bookkeeping, completely independent of DIV's own force application.
+
+**Why this is safe to consume (the implementation-gate question the
+ticket asks).** IV's own `addToForceOutput` - the native method that
+would otherwise apply a COMPETING propulsive force from these same
+ratios - is confirmed separately cancelled for every DIV-controlled
+vehicle (only ever called from `EntityVehicleF_Physics.getForcesAndMotions`,
+which `VehicleForcesMixin` cancels at HEAD for an active DIV vehicle - see
+the pre-existing native-contact-sync comment earlier in `PhysicsBridge.java`,
+MINECRAFT-532-era). So reading `gearRatios`' magnitude for DIV's own
+`stepGround` force scale cannot double-apply drive force: it is a pure
+READ of a value nothing else derives force from. This read also never
+writes `gearRatioVar`/`axleRatioVar`, never touches `groundDeviceCollective`,
+and is therefore orthogonal to - and cannot perturb - the still-open,
+unrelated RPM-feedback/`wheel.angularVelocity` multi-writer question that
+same comment documents (a different, not-yet-resolved mechanism this
+ticket does not touch). Net conclusion: physical gear-ratio magnitude CAN
+be safely consumed for ground drive-force scaling without touching the
+coupled engine/wheel RPM simulation - the implementation gate is cleared,
+not bypassed.
+
+Access requires no native source modification: `JSONPart.engine` is
+`public`, `JSONPartEngine.gearRatios` is `public List<Float>`, `PartEngine.
+reverseGears`/`currentGearVar` are `public`, and `engine.definition` is
+already statically typed `JSONPart` (via `APart extends
+AEntityF_Multipart<JSONPart>`'s own generic parameter) at every existing
+`engine.definition.*` call site in this file - no cast needed, exactly
+mirroring the existing `engine.definition.packID`/`.systemName` reads.
+
+**Scoped patch.** New `PhysicsBridge.gearForceScale(currentGearRatioMagnitude,
+referenceGearRatioMagnitude, enabled)` - pure, primitive-only (same shape as
+the existing `enginePartDriveForce`): disabled (default) returns exactly
+`1.0`, a byte-identical no-op; enabled returns `|current|/|reference|`
+clamped to `[MIN_GEAR_FORCE_SCALE=0.2, MAX_GEAR_FORCE_SCALE=5.0]` - a fixed
+safety envelope, not a new user-facing knob, bounding combined wheel/tire
+force against a pathological datapack ratio outlier; a non-finite/
+non-positive reference or a negative/non-finite current magnitude falls
+back to `1.0` rather than dividing by zero or propagating NaN. New private
+`PhysicsBridge.gearRatioMagnitudeAt(engine, gear)` reads `Math.abs` of
+`gear`'s own ratio straight off that SAME native `gearRatios` list, mirroring
+IV's own `gear+reverseGears` index formula, defensively bounds-clamped
+(untrusted datapack input) with a `0`-on-null/empty fallback.
+`stepGround`'s drive term gained one multiplicative factor:
+`*gearForceScale(gearRatioMagnitudeAt(engine,(int)engine.currentGearVar
+.currentValue), gearRatioMagnitudeAt(engine,1), Boolean.TRUE.equals(tuning
+.gearRatioAware))` - gear 1 (the reference) always resolves to scale 1.0,
+so first gear is byte-identical to today regardless of this opt-in; a
+nonconfigured vehicle (`gearRatioAware` unset/null/false) is completely
+unaffected (the whole factor collapses to `1.0`); neutral/engine-off are
+unaffected regardless of this method's result (`Math.signum(0)==0`, and the
+whole drive term is only ever computed for `engine.running==true`).
+Computed per-engine inside the existing `v.allParts` loop, so a mixed-
+installed-engine vehicle scales each running engine's own drive
+contribution by that SAME engine's own gear table - never another
+installed engine's.
+
+New `Overrides.Tuning#gearRatioAware` (`Boolean`, no FALLBACK entry -
+null/false is the documented no-op default, same "unset means untouched"
+shape as `axleDriveForceSharing`/`ackermannSteering`; rejected on `parts`
+entries - vehicle-only for this ticket, no part-level consumer yet). Wired
+through the full precedence chain (`effective`/`mergeOntoParent`/copy
+constructor) and `applyLiveSafeFields` (hot-reload live, same as every
+other boolean mode toggle in that list) exactly mirroring
+`axleDriveForceSharing`/`ackermannSteering`'s own five insertion points.
+
+**Evidence named by the ticket:** new `GearForceScaleTest` (10 tests) -
+disabled is always exactly `1.0` regardless of ratios; the reference
+(first forward) gear itself always resolves to exactly `1.0`; a higher
+gear (smaller ratio magnitude) produces a distinct, strictly smaller
+scale; a lower/stronger gear (larger magnitude) produces a distinct,
+strictly larger scale; both documented bounds are enforced against an
+extreme ratio outlier; non-finite/non-positive/negative/degenerate inputs
+(including a single-forward-gear table, `reference==0`) fall back to the
+safe `1.0` no-op; neutral stays exactly `0` at the real
+`signum*throttle*driveForce*scale` composition regardless of the scale
+value; and a dedicated production-composition test exercises the real
+`enginePartDriveForce(...)*gearForceScale(...)` call shape together,
+proving first-gear/disabled both reproduce exactly `8000.0` unscaled and a
+second-gear case is strictly less but still strictly positive (bounded,
+never collapsed to zero). `OverridesTest` gained `gearRatioAware` coverage
+mirroring `ackermannSteering`'s own three cases (no-fallback-stays-null,
+full precedence chain, part-override rejection).
+`PhysicsBridgeLiveOverrideApplicationTest` gained `gearRatioAware` to the
+existing exhaustive live-mutation test plus a dedicated revert-to-
+unconfigured-null test, mirroring `ackermannSteering`'s own.
+
+Local slot-lock coordination (shared cooperative `flock` on
+`/tmp/div-gradle-slot.lock`, held for the whole Gradle lifetime, no
+concurrent Java/Gradle process of another owner observed at claim time).
+`/tmp/gradle-8.14/bin/gradle --no-daemon --offline test --console=plain`
+against this branch (`minecraft-553/gear-aware-ground-drive`) at head
+(branched from `main` `61cc476`, unchanged at this ticket's start) -
+`BUILD SUCCESSFUL`. The real JUnit XML reports total **1000 tests**, 0
+skipped, 0 failures, 0 errors across the whole suite (10 from the new
+`GearForceScaleTest`, plus every pre-existing test - including every
+other ticket's own drive/brake/suspension/rotor behavior - run unchanged
+alongside them, confirming no regression).
+
+**M554 (PR #52) coordination:** diffed `minecraft-554-rotor-axis-damping`
+against `main` - it touches the same two production files
+(`Overrides.java`/`PhysicsBridge.java`) but in wholly unrelated
+rotor-pitch/roll/yaw-damping regions; the only overlap is the shared
+textual anchor point both tickets' new boolean field insert near
+(immediately after `ackermannSteering`) and the shared
+`PhysicsBridgeLiveOverrideApplicationTest` field-list/Set assertion both
+tickets extend - a routine ADJACENT-line merge conflict, not a semantic
+one (the two fields are independent). No field name, schema, or behavior
+collision. Resolved by this ticket history's own normal serialized
+merge-and-reconcile order (whichever of M553/M554 lands first, the other
+rebases onto the new main and re-resolves the adjacent insertion point
+before its own exact-head review) - not by either ticket holding back.
+
+**Preserved:** M545's hitch/buoyancy/diagnostic code, fixtures and
+evidence untouched (no file this ticket touches is in that ticket's own
+scope). M551/M552 schema and every rotor/flight/marine `driveForce`
+consumer unchanged (this ticket's only production edit to shared drive-
+force computation is the one new multiplicative factor in `stepGround`,
+gated off by default).
+
+Not yet performed: draft PR / exact-head review (in progress - this
+VERIFICATION.md entry and the ticket comment above are the audit receipt
+John's coordination comment asked for). In-game acceptance (a real
+vehicle with `gearRatioAware` configured, observed distinct per-gear feel)
+is out of this ticket's own engineering-test scope, same as every sibling
+M5xx ticket's own disclosed boundary.

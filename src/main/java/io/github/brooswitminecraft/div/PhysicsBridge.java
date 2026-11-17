@@ -296,6 +296,84 @@ public final class PhysicsBridge {
   return (partOverride != null && partOverride.driveForce != null) ? partOverride.driveForce : vehicleDriveForce;
  }
  /**
+  * MINECRAFT-553 (gear-aware ground drive): bounded, opt-in scale applied on top of {@link
+  * #enginePartDriveForce}'s already-resolved drive force, so a configured vehicle's drive force
+  * actually varies by current gear the way a real gearbox's torque multiplication does, instead
+  * of every forward gear producing the identical magnitude {@code stepGround} always applied
+  * before this ticket (only the gear's SIGN - forward/neutral/reverse - ever changed anything).
+  *
+  * <p>{@code currentGearRatioMagnitude}/{@code referenceGearRatioMagnitude} are {@code
+  * Math.abs} of two entries straight off the SAME native, already-pinned {@code
+  * JSONPartEngine#gearRatios} list IV's own engine RPM-feedback loop (decompiled and confirmed
+  * against the exact pinned curse.maven jar - see this ticket's VERIFICATION.md) already reads
+  * for its own {@code rpm}/{@code wheel.angularVelocity} bookkeeping ({@code
+  * PartEngine.gearRatioVar}, kept in sync with {@code currentGearVar} on every shift) - this
+  * method never writes either variable, never touches {@code groundDeviceCollective}, and is a
+  * pure read of a value nothing else derives force from: IV's own {@code addToForceOutput} (the
+  * native method that would otherwise apply a competing propulsive force from these same ratios)
+  * is confirmed separately cancelled for every DIV-controlled vehicle (see the native-contact-
+  * sync comment earlier in this file), so consuming the ratio's magnitude here cannot double-
+  * apply drive force and cannot perturb the still-open, unrelated RPM-feedback/{@code
+  * wheel.angularVelocity} multi-writer question that comment documents.
+  *
+  * <p>{@code referenceGearRatioMagnitude} is the vehicle's own configured FIRST FORWARD gear's
+  * ratio magnitude - the same reference every call site must use so gear 1 always resolves to
+  * exactly {@code scale=1.0} (today's unscaled drive force), keeping a vehicle's existing "first
+  * gear" feel byte-identical whether or not this ticket's opt-in is set, and higher forward gears
+  * (normally a smaller ratio magnitude - less torque multiplication, more top speed) scale down
+  * proportionally, matching real drivetrain mechanics (wheel torque, and so drive force at a
+  * constant wheel radius, is proportional to gear-ratio magnitude for a given engine torque).
+  *
+  * <p>{@code enabled} is the resolved {@code Overrides.Tuning#gearRatioAware} opt-in - {@code
+  * false} (including the documented unset/{@code null} default) returns exactly {@code 1.0}, a
+  * byte-identical no-op: a nonconfigured vehicle's drive force is completely unaffected by this
+  * ticket, same "unset means untouched" shape {@code axleDriveForceSharing}/{@code
+  * ackermannSteering} already use.
+  *
+  * <p><b>Safety/bounds:</b> a non-finite or non-positive {@code referenceGearRatioMagnitude} (a
+  * malformed or single-forward-gear datapack definition) falls back to {@code 1.0} rather than
+  * dividing by an invalid/degenerate reference. The resulting ratio is clamped to {@code
+  * [MIN_GEAR_FORCE_SCALE, MAX_GEAR_FORCE_SCALE]} so a pathological datapack gear-ratio table
+  * (e.g. an extreme outlier ratio) can never make the combined wheel/tire force this scales
+  * unboundedly large or collapse it to effectively zero while still "in gear" - this is the only
+  * bound this method imposes; it is a fixed safety envelope, not a new user-facing knob, keeping
+  * this ticket's configurable surface to exactly the one new {@code gearRatioAware} boolean.
+  * Neutral/engine-off are unaffected regardless of this method's result: {@code stepGround}
+  * multiplies this scale by {@code Math.signum(currentGearVar.currentValue)}, which is already
+  * {@code 0} at neutral, and the whole drive term is only ever computed for a {@code
+  * PartEngine} with {@code running==true}.
+  */
+ static final double MIN_GEAR_FORCE_SCALE = 0.2, MAX_GEAR_FORCE_SCALE = 5.0;
+ static double gearForceScale(double currentGearRatioMagnitude, double referenceGearRatioMagnitude, boolean enabled) {
+  if (!enabled) return 1.0;
+  if (!Double.isFinite(referenceGearRatioMagnitude) || referenceGearRatioMagnitude <= 0) return 1.0;
+  if (!Double.isFinite(currentGearRatioMagnitude) || currentGearRatioMagnitude < 0) return 1.0;
+  double raw = currentGearRatioMagnitude / referenceGearRatioMagnitude;
+  return Math.max(MIN_GEAR_FORCE_SCALE, Math.min(MAX_GEAR_FORCE_SCALE, raw));
+ }
+ /**
+  * MINECRAFT-553: {@code Math.abs} of {@code gear}'s own ratio from this specific engine's
+  * native, already-pinned {@code gearRatios} list ({@code JSONPart.engine.gearRatios} - {@code
+  * engine.definition} is already statically typed {@code JSONPart} via {@code
+  * APart<JSONPart>}'s own generic parameter, so no cast is needed, matching every other {@code
+  * engine.definition.*} read already in this file). Mirrors the exact {@code gear+reverseGears}
+  * index IV's own {@code PartEngine} uses internally ({@code gearRatioVar.setTo(...)} and its own
+  * initial-gear clamp - decompiled and confirmed against the real pinned jar) rather than reading
+  * the private {@code gearRatioVar} field itself through any reflection/variable-map workaround.
+  * Defensively clamps the index into the list's actual bounds (a datapack is untrusted input)
+  * and returns {@code 0} for a null/empty list - {@link #gearForceScale} already treats a
+  * non-positive reference or a negative/non-finite current magnitude as "fall back to the
+  * unscaled 1.0 no-op", so a malformed table degrades to today's exact behavior rather than
+  * throwing or producing {@code NaN}.
+  */
+ private static double gearRatioMagnitudeAt(PartEngine engine, int gear) {
+  var gearRatios = engine.definition.engine==null ? null : engine.definition.engine.gearRatios;
+  if (gearRatios==null || gearRatios.isEmpty()) return 0;
+  int index = Math.max(0, Math.min(gearRatios.size()-1, gear+engine.reverseGears));
+  Float ratio = gearRatios.get(index);
+  return ratio==null ? 0 : Math.abs(ratio);
+ }
+ /**
   * MINECRAFT-529 (installed tire-specific grip overrides): the tire/ground-device counterpart to
   * {@link #enginePartDriveForce} immediately above, same deliberate vehicle/part precedence - an
   * explicit part-level {@code friction} override, if THIS SPECIFIC installed tire part has one,
@@ -421,7 +499,9 @@ public final class PhysicsBridge {
   * suspensionDampingRatioCompression/suspensionDampingRatioRebound (MINECRAFT-551, stepGround
   * reads both fresh every tick via the per-wheel wheelCompressionRatio/wheelReboundRatio
   * computation feeding TireForces.suspension's 5-arg overload, same reasoning as
-  * suspensionDampingRatio immediately above). Mutating
+  * suspensionDampingRatio immediately above)/gearRatioAware (MINECRAFT-553, stepGround reads
+  * tuning.gearRatioAware fresh every tick via gearForceScale, same as every other field in this
+  * list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -520,6 +600,9 @@ public final class PhysicsBridge {
   // AckermannSteeringDistribution#steerRadians, same "no separate cached field" shape as
   // axleDriveForceSharing immediately above.
   if (!java.util.Objects.equals(target.ackermannSteering, fresh.ackermannSteering)) { target.ackermannSteering = fresh.ackermannSteering; appliedOut.add("ackermannSteering"); }
+  // MINECRAFT-553: stepGround reads tuning.gearRatioAware fresh every tick via gearForceScale,
+  // same live-reload shape as axleDriveForceSharing/ackermannSteering immediately above.
+  if (!java.util.Objects.equals(target.gearRatioAware, fresh.gearRatioAware)) { target.gearRatioAware = fresh.gearRatioAware; appliedOut.add("gearRatioAware"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
@@ -2047,7 +2130,9 @@ public final class PhysicsBridge {
    double rawDrive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
     rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue
-      *enginePartDriveForce(engine.definition.packID+":"+engine.definition.systemName, tuning.driveForce);
+      *enginePartDriveForce(engine.definition.packID+":"+engine.definition.systemName, tuning.driveForce)
+      *gearForceScale(gearRatioMagnitudeAt(engine,(int)engine.currentGearVar.currentValue),
+          gearRatioMagnitudeAt(engine,1), Boolean.TRUE.equals(tuning.gearRatioAware));
    // G29/wheel analog brake pedal strength (ticket MINECRAFT-504, comment 52840/53522) - IV's own
    // brakeVar.currentValue (ComputedVariable) already carries the real 0-1 pedal magnitude from
    // its ControlsJoystick.CAR_BRAKE axis (isActive is merely currentValue>0 - see that class's own
