@@ -7754,3 +7754,69 @@ entry - diagnostic evidence and a justified next-step proposal only.
 Read-only analysis of the one already-executed run. No new native run
 performed. No speculative physics fix proposed. Native gate: the one-run
 grant remains CONSUMED; this entry does not request or imply another.
+
+## Correcting the "apply never invoked" claim; tracing the true earliest observed divergence per 54535/54536
+
+Per 54535/54536: the tick~37-40 settling is NOT the earliest observed
+difference - already differing values were found at `TOWING_UNAVAILABLE`
+tick=1 (vs. Trial 1/2) and even at `ATTACH` tick=20. Traced further
+backward, read-only, no run.
+
+### Retracting "apply() is never invoked" for 258-263
+
+Checked `BuoyantBody.step entry` lines (the `lifecycleDiagnostic` marker,
+gated ONLY by the global `GroundContactDiagnostics` flag, not
+`DiagnosticContext` - confirmed by direct source re-read of
+`BuoyantBody.step`, lines 113-124: it refreshes pose, emits this entry
+marker, then calls `BuoyantForces.apply` UNCONDITIONALLY - no sleep branch
+in that method) for `towed`: 207 such lines exist, CONTINUOUSLY, across
+the entire run. This confirms `BuoyantBody.step()` - and therefore
+`BuoyantForces.apply()`, called unconditionally from it - ran EVERY tick,
+including `gameTime` 5-263. My prior claim that "apply() itself is never
+invoked" for that window is WRONG - retracted outright. What is actually
+true: the `applyInvoked=true` DIAGNOSTIC LINE inside `apply()` is gated by
+BOTH the global flag AND `DiagnosticContext`, and correctly did not log
+outside the armed window - a logging-gate consequence, not a call-path
+absence. Per 54535's own instruction, this is NOT yet full proof either -
+`VehicleMovementMixin` (lines 22-37) gates the whole mixin call on
+`PhysicsBridge.active()`, which has its own eligibility/defer/container/
+activation/reconciliation gates; the continuous `step entry` lines are
+strong evidence `active()` stayed true and `step()` ran throughout, but
+this entry does not claim to have traced `active()`'s own internals for
+every tick - stated as a real but incomplete confirmation, not a closed
+proof.
+
+### Backward trace: identical at construction, already different by the first logged ATTACH sample
+
+Compared the TWO sides' `createHitchDiagnostic` lines (the earliest
+retained per-tick-resolution snapshot after each body's construction,
+`gameTime=3`) between this run and Trial 1: BYTE-IDENTICAL to displayed
+precision on both the `towing` and `trailer` sides - same cached pose,
+same `linearVelocity=(0,0.8829,0)`/`(0,0,0)`, same `hitchAnchorWorld`,
+same `sampleGameTime`. The two runs start construction identically.
+
+Per 54536's own finding: by `ATTACH tick=20` - the FIRST logged ATTACH
+sample after construction - `anchorDistance` already differs
+(`0.0041` this run vs. Trial 1's `0.0024`), and `towingPos` differs in the
+4th-5th decimal. Checked the log's own actual granularity: `ATTACH` only
+logs every 20 ticks (`tick=20,40,60,...`), confirmed via direct `grep` -
+there is NO retained per-tick data between `gameTime=3` and `ATTACH
+tick=20` in EITHER run. This is the genuine resolution limit of the
+existing retained logs, not a gap left unsearched: the true earliest
+point of divergence lies somewhere within ticks 4-20 of `ATTACH`, and
+cannot be narrowed further using any already-retained log line in either
+run - stated as a real limit, not guessed past.
+
+### Disposition
+
+This narrows "earliest OBSERVED difference" to a bounded window
+(construction, `gameTime=3`: identical; first logged sample after,
+`ATTACH tick=20`: already different) - not a physical origin, per 54536's
+own caution; multiple real, confounding source changes exist between
+Trial 1/2 and this run's own HEAD, not disentangled by this comparison
+alone. No cause is asserted. No DIV-fixable bug established. No further
+native run performed, proposed, or needed to reach this specific boundary
+- it is a genuine limit of existing log resolution, not something a
+read-only re-analysis could still resolve. If finer resolution is ever
+wanted, that is a future instrumentation question (logging every ATTACH
+tick, not just every 20th) - not proposed or executed here.
