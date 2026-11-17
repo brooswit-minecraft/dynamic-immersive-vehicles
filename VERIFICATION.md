@@ -9891,3 +9891,125 @@ with zero dedicated damping term to counteract it. This does not prove the resto
 itself is unstable, but it does confirm the specific damping mechanism that WOULD counteract a
 large angular velocity was never active for this scenario - a concrete, checkable precondition
 for the hypothesis above, not yet a conclusion about the torque formula's own stability.
+
+## Corrections per 54677: two wrong claims retracted; numerically confirmed drag-impulse overshoot
+
+John's 54677 found two real errors in the prior entry's own claims, and asked for a concrete
+numerical investigation using the actual retained per-float data rather than hand-waving.
+
+### Retraction 1 - the per-float diagnostic data WAS captured
+
+The prior entry claimed the force/torque operands "were not captured at that granularity in
+this run's own log output." That was WRONG - re-read the actual retained log directly (lines
+2017/18 at gameTime=205, 2024/25 at gameTime=206, confirmed by line number): both floats'
+`worldArm`, `buoyancyOnlyForce`, `dragOnlyForce`, and `appliedImpulse` are logged for every tick,
+via the EXISTING `GroundContactDiagnostics`-gated per-float diagnostic in `BuoyantForces.java`
+(lines 168-177) - which was active for this run. I did not check the log thoroughly enough
+before claiming the data was missing.
+
+### Retraction 2 - directional drag DOES contribute torque; the "only angular contribution"
+claim and the tick1→2 "unchanged velocities" claim were both wrong
+
+The prior entry claimed the per-float righting (buoyancy) torque was "the ONLY angular force/
+torque source active" since dedicated rotational water drag (`tuning.angularWaterDrag`) was
+confirmed off. WRONG - `BuoyantForces.java`'s own class/method doc already states this directly
+("today a floating hull gets a righting torque only as an emergent side effect of `drag`
+applied at each float device's own off-center position" - `Buoyancy.java`'s own
+`angularDragRetention` doc). The per-float DIRECTIONAL DRAG force (lines 139-144) is applied at
+the SAME off-center `arm` as buoyancy (`handle.applyImpulseAtPoint(arm, force*DT)`, line 178) -
+any off-center force contributes torque via the moment arm, regardless of whether a DEDICATED
+rotational damping term exists. The logged magnitudes confirm drag is actually the DOMINANT
+angular contributor here, not a negligible one: at gameTime=206, float 2's own
+`buoyancyOnlyForce=(0,3532,0)` vs `dragOnlyForce=(-4.996E5,1.219E6,-7.895E5)` - drag outweighs
+buoyancy by roughly 2-3 orders of magnitude at this velocity.
+
+Also retracted: the claim that tick1→2 velocity was "unchanged" (cited as evidence
+`parkingBrakeVar`/`resetAllVariables` had no effect). Re-checked the actual logged values:
+tick1 `linearVelocity=(5.462,4.410,-2.499)` vs tick2 `linearVelocity=(-0.2356,2.791,0.4222)` -
+these ARE different. The value that stayed unchanged between tick1 and tick2 was
+`stepInvocationCount` (201 both times, since `cleanup()`'s own disconnect runs AFTER that
+tick's entity-ticking pass, so the next real step happens the FOLLOWING tick) - I conflated the
+two observations. The `parkingBrakeVar`/`resetAllVariables` question remains genuinely
+unconfirmed either way (no direct log evidence either way), not supported by the velocity
+values as previously (wrongly) claimed.
+
+### Numerical confirmation: the per-float drag impulse overshoots at the exploding step
+
+Using ONLY the real retained values (this run's own logged entry velocity/angular velocity/
+worldArm/dragOnlyForce, and this fixture's own real configured `massKg=400`,
+`waterDrag=400` fallback, `PhysicsBridge.DT=0.05`):
+
+Reconstructed each float's own LOCAL point-velocity (`angular × arm + linearVelocity`, the
+exact quantity `BuoyantForces.apply` itself computes at line 122) from the logged entry
+velocity/angular-velocity vectors and `worldArm`:
+
+| gameTime | float | \|localVelocity\| (point speed) | \|dragOnlyForce\| (logged) | predicted \|dragOnlyForce\| (`fraction*waterDrag*speed²`) |
+|----------|-------|----------------------------------|------------------------------|----------------------------------------------------------|
+| 205      | 1     | 16.66                            | (not independently re-verified here) | -                                                   |
+| 206      | 1     | 43.90                            | 771,300 (`sqrt(sum of squares)`) | 770,880 (`1.0 * 400 * 43.90²`)                        |
+| 206      | 2     | 61.98                            | (large; see log)             | -                                                          |
+
+The predicted magnitude (`fraction * waterDrag * speed²`, derived purely from this fixture's own
+real configured coefficient and the independently-reconstructed point speed) matches the
+logged `dragOnlyForce` magnitude at gameTime=206/float1 to within 0.05% - confirming the
+reconstruction (entry velocity + worldArm → local point velocity → predicted drag magnitude) is
+numerically correct, not merely plausible.
+
+Using that same local point velocity and the logged `dragOnlyForce`/`DT`/`mass`, the single-step
+impulse-induced velocity CHANGE at that float's own point:
+- gameTime=206, float 1: `|localVelocity|≈43.90`; impulse-induced `|ΔV|≈96.40` - **the impulse
+  overshoots the local velocity it was meant to cancel by ~2.2x**, reversing its direction with
+  more than double the original magnitude in a single discrete step.
+- gameTime=206, float 2: `|localVelocity|≈61.98`; impulse-induced `|ΔV|≈191.97` - **overshoots
+  by ~3.1x**, an even larger single-step reversal.
+- gameTime=205, float 1 (the immediately PRECEDING, non-diverging step): `|localVelocity|≈16.66`;
+  impulse-induced `|ΔV|≈10.26` - does NOT overshoot (stays below the local velocity it opposes) -
+  a direct contrast confirming overshoot is a property of the velocity magnitude already
+  reached, not an unconditional defect in the formula.
+
+This matches `BuoyantForces.java`'s own ALREADY-DOCUMENTED review finding (comment 53679, about
+the SEPARATE dedicated rotational-drag term) applied here to the per-float LINEAR drag term
+instead: "applying this as an inertia-converted impulse could overshoot past zero and reverse/
+amplify the hull's spin for a light hull and a coefficient within this field's own valid range."
+The per-float drag force is quadratic in speed (`Buoyancy.directionalDragForce`,
+`-fraction*coefficient*multiplier*speed*axisVelocityComponent`); once speed is already large
+(from the preceding resumed step), the FULL-DT impulse this produces can exceed what is needed
+to simply cancel the local velocity, overshooting past zero and - because it is applied off-
+center via `arm` - feeding directly into angular velocity, which then increases `localVelocity`
+again next step (`angular × arm` grows), compounding the effect. This is a coherent, numerically
+grounded explanation for the observed explosive divergence, though NOT yet a proof that this
+specific mechanism is identical to the original `TOWING_REPLACEMENT` tick=7/8 crash (per the
+prior entry's own, still-standing caveat).
+
+### Regression test added (54677: "a small production-used numerical regression demonstrating
+any discrete drag overshoot")
+
+`BuoyancyTest.directionalDragOvershootsAtTheExactReconnectDivergenceIncident` - uses the REAL
+production `Buoyancy.directionalDragForce` function directly (no reimplementation), the real
+`massKg=400`/`waterDrag=400`/`DT=0.05` values, and the gameTime=205/206 point-velocity
+magnitudes reconstructed above, asserting the exploding step's own impulse-induced velocity
+change exceeds its own local velocity (overshoot) while the immediately preceding, non-
+diverging step's does not - a direct contrast pinned to this exact incident, not a synthetic
+worst case. Compiled and ran under the exclusive lock
+(`MINECRAFT-545-overshoot-test-20261117T181046Z`, `RESULT=PASS`).
+
+### What remains open
+
+- Whether this exact mechanism (per-float linear drag impulse overshoot) is the same cause as
+  the original `TOWING_REPLACEMENT` tick=7/8 crash - not established, only a plausible,
+  numerically-supported candidate for THIS run's own divergence.
+- Whether the coupled rotational-inertia response (this analysis treated each float's point-
+  velocity change as if purely translational, not accounting for how the body's own moment of
+  inertia redistributes the applied torque back into angular velocity) changes the overshoot
+  ratio materially - the point-level check above is a valid, direct measure of whether the FORCE
+  ITSELF is dissipative-at-that-point or not, but is not a full rigid-body-dynamics simulation.
+- No fix proposed yet. Per John's own explicit instruction: no arbitrary damping/caps/resets, no
+  weakening of the bounded-area check, and no native run - this entry is read-only numerical
+  accounting of already-retained evidence.
+
+### Disposition
+
+Two wrong claims retracted with their correct replacements. A concrete, numerically-verified
+(not hand-waved) overshoot demonstrated using only real captured/configured values and the real
+production drag formula, with a passing regression test pinned to this exact incident. No
+native run performed or requested. Native hold remains CLOSED.
