@@ -9068,3 +9068,79 @@ commit's own packet - the packet itself needs regenerating against this
 new commit before it is ready for review, since the class files
 underlying its own runtime-byte-manifest have now changed again. No
 native run performed or requested. Native hold remains CLOSED.
+
+## Corrections per 54638 (readback of 4b6190b, concrete preflight gaps)
+
+John's 14:58:57Z readback confirmed the identity fixes from the previous
+entry (registry reference + BODY_ABSENT) are correct, confirmed the new
+wrapper invokes preflight.sh correctly (after FD9 acquisition, lock
+retained through Java exit), and found four concrete remaining gaps in
+`preflight.sh` itself - not new requirements, gaps in the already-
+requested bug-4 preflight. No native run performed or requested.
+
+### Fixed
+
+1. **Check 6 only covered 8 config files, never eula.txt/server.properties.**
+   Added check 7: re-verifies the FULL 10-file `isolated-input-manifest.sha256`
+   (config + eula.txt + server.properties) live, inside the lock -
+   previously that manifest was only ever checked once, at prep time.
+
+2. **Never checked the LIVE SHARED source config, only the isolated copy.**
+   Added check 8: re-hashes `run/config/*.*` (the shared directory the
+   isolated copy was itself made FROM) against the SAME
+   `baseline-original-run-config.sha256`, live, inside the lock. Catches
+   drift in the shared source that check 6 (isolated copy vs. archived
+   baseline) cannot see on its own.
+
+3. **Never checked the shared world's `level.dat`/`level.dat_old`.**
+   Added check 9: re-hashes `run/world/level.dat`/`level.dat_old` against
+   a new `baseline-original-run-world-level-dat.sha256`, archived in this
+   packet (reusing the SAME hash values an earlier packet already
+   confirmed, re-verified live right now - still `OK` against the shared
+   world, unmutated since that baseline was captured).
+
+4. **Only the seed was asserted, not the canonical world target.** Check
+   5 now also asserts `level-name=world` live in the isolated
+   `server.properties`, not only `level-seed=545547`.
+
+5. **`compute_runtime_byte_manifest` emitted "MISSING" and kept going -
+   two incomplete manifests could coincidentally both carry the same
+   "MISSING" line and still diff-match, silently passing.** A missing or
+   unreadable classpath entry (file or directory) is now a HARD FAILURE
+   of generation itself (prints the reason to stderr, returns 1
+   immediately, emits nothing further). `preflight.sh` check 2 now checks
+   generation's own exit status before comparing anything.
+
+### Verification performed (no native run)
+
+Regenerated the packet against commit `4b6190b` (the identity fixes from
+the previous entry) as `M545-packet-4b6190b` - the prior `f85e79f`
+packet's own runtime-byte-manifest predated those edits, per 54638's own
+point. Dry-ran the full 9-check `preflight.sh` directly against this real
+packet twice (before and after the negative tests below) - all 9 checks
+`OK`/`PASS` both times, exit code 0 both times.
+
+Four additional negative tests, all against disposable copies (the real
+packet/worktree untouched except one deliberate, fully-reverted live
+mutation, confirmed restored byte-for-byte against the baseline
+afterward):
+- Tampered the isolated `eula.txt` in a disposable copy - check 7
+  correctly failed closed.
+- Tampered the LIVE SHARED `run/config/mtsconfig.json` (reverted exactly
+  afterward via the pristine isolated copy, confirmed byte-identical to
+  the original baseline hash again before continuing) - check 8
+  correctly failed closed.
+- Corrupted the expected hash in a disposable copy's own
+  `baseline-original-run-world-level-dat.sha256` - check 9 correctly
+  failed closed.
+- Pointed `compute_runtime_byte_manifest` at a classpath referencing a
+  nonexistent jar - generation itself correctly failed (exit code 1,
+  explicit stderr reason), not a silently-matching "MISSING" line.
+
+### Disposition
+
+All four concrete gaps from 54638 fixed and verified; packet
+`M545-packet-4b6190b` now carries 9 fail-closed preflight checks, all
+passing against the real, current commit. No native run performed or
+requested. Native hold remains CLOSED. Awaiting further readback before
+considering this packet ready for native release.
