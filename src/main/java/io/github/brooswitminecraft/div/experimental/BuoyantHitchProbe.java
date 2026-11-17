@@ -533,6 +533,17 @@ public final class BuoyantHitchProbe {
   LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE tick=" + ticksInPhase
     + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
     + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
+  // MINECRAFT-545/547 (John's comment 54486): an "expected-body-this-tick" marker, logged OUTSIDE
+  // BuoyantForces.apply (this fixture already knows its own body IDs/window; apply() itself must
+  // not special-case any fixture) - restricted to towed and this phase's own final 6 ticks (55-60)
+  // via the pure, parameterized io.github.brooswitminecraft.div.DiagnosticWindow.inWindow, not a
+  // hardcoded gameTime range. Its presence/absence lets a reader tell "diagnostics were armed and
+  // this body/tick was in scope" apart from "apply's own per-float line is merely absent because
+  // genuinely not submerged" - a missing per-float line alone was never sufficient proof of that.
+  if (io.github.brooswitminecraft.div.DiagnosticWindow.inWindow(towed.uniqueUUID, ticksInPhase,
+      java.util.Set.of(towed.uniqueUUID), SHORT_PHASE_TICKS - 5, SHORT_PHASE_TICKS))
+   LOGGER.info("[DIV buoyantHitchProbe] expectedBodyThisTick=true v=" + towed.uniqueUUID
+     + " ticksInPhase=" + ticksInPhase + " gameTime=" + towed.world.getTime() + " phase=TOWING_UNAVAILABLE");
   if (ticksInPhase >= SHORT_PHASE_TICKS) {
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE PASS - towed stayed finite/bounded " + SHORT_PHASE_TICKS
      + " ticks after its towing vehicle despawned - spawning towing2 for TOWING_REPLACEMENT");
@@ -578,6 +589,19 @@ public final class BuoyantHitchProbe {
    var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
    towing2.connectTrailer(connection, false);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position);
+   // MINECRAFT-545/547 (John's comment 54486): the same expected-body marker as
+   // TOWING_UNAVAILABLE's own tail, extended to cover this phase's intended transition tick (its
+   // own ticksInPhase==1, not TOWING_UNAVAILABLE's nonexistent "tick 61") for both towed and the
+   // newly-connected towing2 - so the SAME-tick water-reentry/joint-creation window found earlier
+   // in this investigation is inside the marked diagnostic window, not just adjacent to it.
+   if (io.github.brooswitminecraft.div.DiagnosticWindow.inWindow(towed.uniqueUUID, ticksInPhase,
+       java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), 1, 1))
+    LOGGER.info("[DIV buoyantHitchProbe] expectedBodyThisTick=true v=" + towed.uniqueUUID
+      + " ticksInPhase=" + ticksInPhase + " gameTime=" + towed.world.getTime() + " phase=TOWING_REPLACEMENT");
+   if (io.github.brooswitminecraft.div.DiagnosticWindow.inWindow(towing2.uniqueUUID, ticksInPhase,
+       java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), 1, 1))
+    LOGGER.info("[DIV buoyantHitchProbe] expectedBodyThisTick=true v=" + towing2.uniqueUUID
+      + " ticksInPhase=" + ticksInPhase + " gameTime=" + towing2.world.getTime() + " phase=TOWING_REPLACEMENT");
   }
   if (!boundedOrFail("towingReplacement/towing2", towing2) || !boundedOrFail("towingReplacement/towed", towed)) return;
   double distance = anchorDistance(towing2, towing2Definition);

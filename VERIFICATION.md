@@ -6991,3 +6991,102 @@ Diff only - no native run performed or requested. Native gate remains CLOSED.
 No gameplay/fixture/physics behavior changed. No causal claim made or
 acceptance criteria weakened. Preserving old worlds/evidence, sole branch/
 owner, existing lock only, no external outreach/security/Zippy.
+
+## Correcting the bounded packet to actually match 54483/54486; focused pure tests delivered
+
+Per 54486's independent review of 4a8eec4: that diff was NOT yet the bounded
+packet 54483 asked for - the existing global `GroundContactDiagnostics` flag
+still logs every body/float/all ticks, and post-hoc log-grepping is not
+fixture/window gating. Missing: pose.position()/orientation actually
+consumed (not just the derived point), float index, an expected-body marker
+living OUTSIDE `apply()`, and - most importantly - a SECOND fluid query was
+never actually added (confirmed still single-query), but the found block's
+own Y/height were not captured separately from the combined surface value,
+and the scan-bounds description itself was imprecise (24 vs the real 25
+inclusive-both-ends visited values). Corrected all of these; diff committed.
+
+### Changes (BuoyantForces.java)
+
+- `scanForWater` (new, replacing the body of the old `waterSurfaceAt`)
+  performs the SAME single traversal, same loop/bounds, but returns a new
+  `WaterScanResult` record capturing `found`, `foundBlockY`, `fluidHeight`,
+  `surfaceY`, `fromYFloor`, `bottomY`, `visitedCount` - all from the ONE
+  scan, no second query. `waterSurfaceAt` (kept for the propeller-submersion
+  call site) now delegates to it via `.surfaceY()`.
+- `scanBottomY(fromYFloor)` and `scanVisitedCount(fromYFloor, bottomY)`:
+  extracted as their own PURE functions (no `ServerLevel`), package-visible,
+  directly unit-tested. Per 54486's own correction: the loop visits
+  `fromYFloor` down to `fromYFloor-24` INCLUSIVE on both ends - 25 Y values
+  for the 24-block span, not 24. Confirmed by direct enumeration in the test
+  below, not just restated.
+- The per-float diagnostic line (still gated behind the SAME existing opt-in
+  `GroundContactDiagnostics` flag) now logs: `floatIndex`; the ACTUAL
+  `pose.position()`/`q` consumed (not re-derived); `poseRefreshGameTime`;
+  the scan's own `fromYFloor`/`bottomY`/`visitedCount`; and the scan's real
+  result as `foundBlockY`+`foundFluidHeight` separately when found, or
+  `NO_WATER_FOUND_IN_RANGE` when not - distinguishing water-absent from
+  water-present-but-unsubmerged, using values from the single `scanForWater`
+  call already made for the fraction computation.
+
+### New: `DiagnosticWindow` (pure, no ServerLevel) + probe-side expected-body marker
+
+Per 54486's correction that the global flag alone isn't fixture/window
+gating: added `DiagnosticWindow.inWindow(bodyId, ticksInPhase,
+expectedBodyIds, startTick, endTick)` - a small, pure, parameterized helper
+(no hardcoded fixture IDs/ticks inside it). Called from OUTSIDE
+`BuoyantForces.apply`, in `BuoyantHitchProbe` itself (which already owns its
+own body IDs and tick counters): an `expectedBodyThisTick=true` marker logs
+for `towed` during `TOWING_UNAVAILABLE`'s own final 6 ticks (55-60), and for
+both `towed`/`towing2` at `TOWING_REPLACEMENT`'s own transition tick
+(`ticksInPhase==1`, NOT a nonexistent "tick 61" - TOWING_UNAVAILABLE's own
+counter resets into TOWING_REPLACEMENT's separate tick=1 at that boundary,
+per 54486/54469's correction, so this marker spans the ACTUAL transition
+rather than an invented continuation). Its presence/absence now lets a
+reader tell "diagnostics were armed and this body/tick was in scope" apart
+from "apply's per-float line is absent because genuinely not submerged" -
+addressing 54486's point that a missing per-float line alone was never
+sufficient proof of that. This is a new diagnostic-only log line in the
+probe fixture itself, not a change to its physics, timing, or pass/fail
+logic - read-only, consistent with the many other diagnostic lines already
+added to this same fixture throughout this investigation.
+
+### Focused pure tests delivered (JUnit only, no Mockito, no ServerLevel)
+
+Per 54486: window selection, zero-float/skip markers, and single-query
+capture "can use small production-used pure helpers/callback seams with
+existing JUnit" - correcting my own prior framing (54484) that treated
+Mockito-or-live-run as the only two choices, which was wrong; this third
+option is exactly what's implemented and tested here:
+
+- `DiagnosticWindowTest` (4 tests, all passing): body-in-set AND tick-in-
+  range required; tick outside range on either side is false; body not in
+  the expected set is false; a single-tick window (the TOWING_REPLACEMENT
+  transition's own usage) matches only that tick.
+- `BuoyantForcesWaterScanBoundsTest` (3 tests, all passing): `scanBottomY`
+  is exactly 24 below `fromYFloor`; the scan's own 25-visited-value claim is
+  checked against a direct enumeration loop (not just restated) for several
+  `fromYFloor` values including one matching this investigation's own real
+  logged value (259); confirms `scanVisitedCount` matches direct enumeration
+  generally, not only at one hand-picked point.
+
+Test receipt: `gradle test --tests io.github.brooswitminecraft.div.DiagnosticWindowTest --tests io.github.brooswitminecraft.div.BuoyantForcesWaterScanBoundsTest` under the existing exclusive `/tmp/div-gradle-slot.lock` slot - BUILD SUCCESSFUL; `TEST-...DiagnosticWindowTest.xml` tests="4" failures="0" errors="0"; `TEST-...BuoyantForcesWaterScanBoundsTest.xml` tests="3" failures="0" errors="0".
+
+Disclosed limit, not papered over: `scanForWater`'s own real `getFluidState`
+call, and `BuoyantForces.apply`'s own full integration (the actual logging
+output against a real world), remain untested by these two pure suites -
+that would need a real `ServerLevel`/dedicated server, which is outside this
+round's "no native run" constraint. The pure tests cover exactly the parts
+that don't need one; the parts that do are named here, not silently assumed
+covered.
+
+Full Gradle distribution used: no `gradlew` wrapper exists in this worktree;
+found and reused the Gradle 8.14 distribution already present at
+`/tmp/gradle-8.14` (used elsewhere in this environment for other DIV
+worktrees), invoked only under the existing exclusive slot.
+
+### Disposition
+
+Diff + two new pure test classes, committed. No native run performed. No
+gameplay/fixture PHYSICS/timing/pass-fail change - the probe's own new lines
+are read-only logging, same as its many existing diagnostic lines. Native
+gate remains CLOSED. No causal claim made or acceptance criteria weakened.

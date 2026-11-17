@@ -70,29 +70,39 @@ final class BuoyantForces {
     "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
       + " applyInvoked=true floatCount=" + floats.size()
       + " poseRefreshGameTime=" + PhysicsBridge.debugLastPoseUpdateGameTime(v));
+  int floatIndex = -1;
   for (var flt : floats) {
+   floatIndex++;
    double radius = Math.max(.1, flt.getHeight() / 2);
    Vector3d anchor = new Vector3d(flt.localOffset.x, flt.localOffset.y, flt.localOffset.z).sub(center);
    Vector3d arm = q.transform(new Vector3d(anchor));
    Vector3d point = new Vector3d(pose.position()).add(arm);
-   int queryFloorX = Mth.floor(point.x), queryFloorZ = Mth.floor(point.z), queryFromYFloor = Mth.floor(point.y + radius + 1);
-   double waterSurface = waterSurfaceAt(level, point.x, point.z, point.y + radius + 1);
+   // MINECRAFT-545/547 (John's comment 54486): ONE scanForWater call supplies both the fraction
+   // computation below and the diagnostic line's own detail - no second fluid query.
+   var scan = scanForWater(level, point.x, point.z, point.y + radius + 1);
+   double waterSurface = scan.surfaceY();
    double fraction = Buoyancy.submergedFraction(point.y - radius, point.y + radius, waterSurface);
-   // MINECRAFT-545/547 (John's comment 54469/54483) - diagnostic-only, same opt-in flag, fired
-   // BEFORE the skip below so it covers every float every tick (not just the ones that go on to
-   // apply a force): the exact per-float query inputs/outputs, reusing the SAME waterSurface/
-   // fraction values already computed above - no second fluid query is performed for this line.
-   // waterSurfaceResult distinguishes NO_WATER_FOUND_IN_RANGE (waterSurfaceAt's own documented
-   // NEGATIVE_INFINITY sentinel - no water tag found in its 24-block downward scan) from a real
-   // found height where the float's own bottom (point.y-radius) still sits above it - two
-   // mechanistically different "not submerged" causes this line can now tell apart.
+   // MINECRAFT-545/547 (John's comments 54469/54483/54486) - diagnostic-only, same opt-in flag,
+   // fired BEFORE the skip below so it covers every float every tick (not just the ones that go
+   // on to apply a force). Includes the actual pose/orientation consumed (not re-derived), this
+   // float's own index/geometry, the exact query point and the scan's own bounds (fromYFloor
+   // through scanBottomY, INCLUSIVE on both ends - scanVisitedCount values visited, 25 for this
+   // scan's 24-block span, not 24), and the scan's real result: either the found block's own Y
+   // and fluid height separately (so a found-but-still-above-the-float case is visible, not
+   // conflated with no-water-found), or NO_WATER_FOUND_IN_RANGE for the documented
+   // NEGATIVE_INFINITY sentinel - two mechanistically different "not submerged" causes this line
+   // can now tell apart.
    if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
      "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
-       + " floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
-       + " radius=" + radius + " center=" + center + " point=" + point
-       + " queryFloorX=" + queryFloorX + " queryFloorZ=" + queryFloorZ + " queryFromYFloor=" + queryFromYFloor
-       + " searchBottomY=" + (queryFromYFloor - 24)
-       + " waterSurfaceResult=" + (waterSurface == Double.NEGATIVE_INFINITY ? "NO_WATER_FOUND_IN_RANGE" : String.valueOf(waterSurface))
+       + " floatIndex=" + floatIndex + " floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
+       + " radius=" + radius + " center=" + center
+       + " consumedPosePosition=" + pose.position() + " consumedPoseOrientation=" + q
+       + " poseRefreshGameTime=" + PhysicsBridge.debugLastPoseUpdateGameTime(v)
+       + " point=" + point
+       + " queryFromYFloor=" + scan.fromYFloor() + " scanBottomY=" + scan.bottomY() + " scanVisitedCount=" + scan.visitedCount()
+       + " scanFound=" + scan.found() + " foundBlockY=" + (scan.found() ? String.valueOf(scan.foundBlockY()) : "N/A")
+       + " foundFluidHeight=" + (scan.found() ? String.valueOf(scan.fluidHeight()) : "N/A")
+       + " waterSurfaceResult=" + (scan.found() ? String.valueOf(waterSurface) : "NO_WATER_FOUND_IN_RANGE")
        + " fraction=" + fraction + " skip=" + (fraction <= 0));
    flt.contactThisTick = fraction > 0;
    totalFraction += fraction;
@@ -257,16 +267,45 @@ final class BuoyantForces {
   return awake;
  }
 
- /** First water surface Y found scanning straight down from fromY, or NEGATIVE_INFINITY if none. */
- private static double waterSurfaceAt(ServerLevel level, double x, double z, double fromY) {
-  var pos = new BlockPos.MutableBlockPos(Mth.floor(x), Mth.floor(fromY), Mth.floor(z));
-  int bottom = Mth.floor(fromY) - 24;
-  for (int y = Mth.floor(fromY); y >= bottom; y--) {
+ /** MINECRAFT-545/547 (John's comment 54486): captures the full scan detail - the found block's
+  * own Y and fluid height separately from the combined surface Y, plus the scan's own bounds -
+  * in the SAME single pass {@link #waterSurfaceAt} always performed, so a caller wanting this
+  * detail for logging never needs a second query. {@code bottomY}/{@code visitedCount} are pure
+  * functions of {@code fromYFloor} alone - see {@link #scanBottomY}/{@link #scanVisitedCount},
+  * unit-tested on their own without any {@code ServerLevel} dependency. */
+ record WaterScanResult(boolean found, int foundBlockY, double fluidHeight, double surfaceY, int fromYFloor, int bottomY, int visitedCount) {}
+
+ /** Pure: the scan's inclusive lower bound, exactly as the loop below computes it (24 blocks
+  * below {@code fromYFloor}, inclusive of both endpoints). */
+ static int scanBottomY(int fromYFloor) { return fromYFloor - 24; }
+
+ /** Pure: how many Y values the loop below actually visits - {@code fromYFloor} down to
+  * {@code bottomY} INCLUSIVE on both ends, so 25 (not 24) for the scan's own 24-block span. */
+ static int scanVisitedCount(int fromYFloor, int bottomY) { return fromYFloor - bottomY + 1; }
+
+ /** Scans straight down from fromY (inclusive) for up to 25 Y values (fromYFloor through
+  * fromYFloor-24, both inclusive - a 24-block span), looking for the first real water fluid
+  * block; captures its own Y and fluid height on a match, or an explicit not-found result. */
+ private static WaterScanResult scanForWater(ServerLevel level, double x, double z, double fromY) {
+  int fromYFloor = Mth.floor(fromY);
+  int bottom = scanBottomY(fromYFloor);
+  var pos = new BlockPos.MutableBlockPos(Mth.floor(x), fromYFloor, Mth.floor(z));
+  for (int y = fromYFloor; y >= bottom; y--) {
    pos.setY(y);
    var fluid = level.getFluidState(pos);
-   if (fluid.is(FluidTags.WATER)) return y + fluid.getHeight(level, pos);
+   if (fluid.is(FluidTags.WATER)) {
+    double height = fluid.getHeight(level, pos);
+    return new WaterScanResult(true, y, height, y + height, fromYFloor, bottom, scanVisitedCount(fromYFloor, bottom));
+   }
   }
-  return Double.NEGATIVE_INFINITY;
+  return new WaterScanResult(false, 0, 0, Double.NEGATIVE_INFINITY, fromYFloor, bottom, scanVisitedCount(fromYFloor, bottom));
+ }
+
+ /** First water surface Y found scanning straight down from fromY, or NEGATIVE_INFINITY if none
+  * - the propeller-submersion check's own single-value need; delegates to {@link #scanForWater}
+  * so both call sites share the one real scan implementation. */
+ private static double waterSurfaceAt(ServerLevel level, double x, double z, double fromY) {
+  return scanForWater(level, x, z, fromY).surfaceY();
  }
 
  /** Spares (MTS's own VehicleGroundDeviceBox excludes them from support the same way) carry
