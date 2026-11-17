@@ -11436,3 +11436,53 @@ real) prior-behavior timing at the logic level. Full suite green (889 tests, 0 f
 immutable packet prepared for independent review - NOT launched; the prior native run remains
 this cycle's only execution. Identity/missing-index gaps and the broader hitch/reconnect-crash
 investigation remain open, not claimed resolved by this fix.
+
+## Per 54755: the b6ec50e packet lacked the candidate flag - replacement flag-on packet prepared
+
+John's comment 54755 independently inspected `M545-packet-b6ec50e` and found it did NOT carry
+`-Ddiv.sequentialDragBound=true` in its frozen VM-args - correct catch: the parent's conditional
+single-run grant explicitly requires the frozen candidate TRUE, and that packet (prepared the
+same way as the ORIGINAL, non-flag `95bc8ed`/`3ba53cf` packets, matching this cycle's own
+production-fix-only framing at the time) would only have exercised the timing fix in isolation,
+not the fix combined with the candidate - not what any pending authorization actually covers.
+No launch occurred through it (confirmed independently by 54755 and consistent with this
+entry's own record - it was never invoked).
+
+### Replacement prepared: `M545-packet-b6ec50e-flagon`
+
+Per 54755's own instruction ("preserve packet unchanged as evidence... prepare a NEW immutable
+flag-on replacement retaining exact b6ec50e code... using packet-local VM/launcher references
+and flag checks as prior flagon pattern"):
+
+- `M545-packet-b6ec50e` left completely untouched - not reused as a launch target, not deleted,
+  not modified in any way.
+- New packet built reusing `b6ec50e`'s own already-reviewed compiled runtime unchanged (no
+  recompile, no Gradle-lock contention) - `serverRunClasspath.txt`/`serverRunProgramArgs.txt`
+  copied as-is; `runtime-byte-manifest.sha256` diffed byte-for-byte identical against
+  `b6ec50e`'s own.
+- `serverRunVmArgs.txt` copied from `b6ec50e`'s own, then the flag appended as a genuinely
+  separate line - the SAME missing-trailing-newline hazard caught in the first flagon packet
+  recurred here (same root cause: the shared source file has no trailing newline) and was fixed
+  the same way, verified via byte-for-byte diff of every prior line.
+- `runServer.sh` rewritten to reference only this packet's own local files/rundir, matching the
+  exact pattern already reviewed for `M545-packet-95bc8ed-flagon`.
+- `preflight.sh` carries the same 11 checks (not the plain 9) - checks 1-2 retargeted to this
+  packet's own local files; checks 10/11 (flag-present-locally / flag-absent-from-shared) newly
+  re-verified for this exact commit's own artifacts.
+- Fixture/seed/baseline hashes confirmed identical to `b6ec50e`'s own (diffed directly, zero
+  drift); fresh world confirmed absent from `rundir/`.
+- Dry-run preflight: all 11 checks passed.
+
+No source or fixture changes - pure packet/infrastructure correction, reusing `b6ec50e`'s own
+already-reviewed commit exactly as-is. **Not launched** - returned for independent review before
+any release, per 54755's own explicit instruction not to launch it directly.
+
+### Disposition
+
+A real packet-preparation gap caught by independent review (the production-fix validation
+packet lacked the candidate flag the pending authorization actually requires) corrected with a
+proper flag-on replacement, following the exact already-reviewed pattern, reusing the exact
+same reviewed runtime with zero recompilation. The original (flag-absent) packet preserved
+unchanged as evidence. No source or fixture changes. No native run performed - launch remains
+explicitly withheld pending independent review and a further, specific release naming this
+replacement packet.
