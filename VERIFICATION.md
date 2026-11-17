@@ -8410,3 +8410,92 @@ starvation mechanism remains a well-supported, source-confirmed
 CANDIDATE explanation - correctly labeled conditional, not proven, for
 this exact execution. No DIV fix proposed or implemented. No native run
 performed. Native gate: one-run grant remains CONSUMED.
+
+## Direct runtime confirmation found in already-retained logs per 54590
+
+Per 54590: extract the actual retained `lastPoseUpdateGameTime` evidence
+now, with body-role IDs and sample times, rather than propose a future
+measurement for data this investigation already has.
+
+### The exact, already-logged confirmation
+
+From the SAME retained run (`M545-packet-738b091`), `createHitchDiagnostic`
+lines (role-labeled `towing=`/`trailer=`, i.e. towed):
+
+- `sampleGameTime=3`: `trailer` (towed, `fe330803...`)
+  `lastPoseUpdateGameTime=-1` (never yet stepped - expected, pre-first-tick).
+- `sampleGameTime=203` (just before `towing.remove()`): `trailer`
+  `lastPoseUpdateGameTime=202` - one tick behind, normal steady-state lag.
+- `sampleGameTime=204` (`TOWING_UNAVAILABLE pre-remove()`, the SAME tick
+  `towing.remove()` is about to be called): `towed.lastPoseUpdateGameTime=203`
+  - still fresh.
+- **`sampleGameTime=264`** (`TOWING_REPLACEMENT`'s own fresh `createHitch`,
+  connecting `towed` to the NEW `towing2`): **`trailer`
+  (`fe330803...`, the SAME `towed`) `lastPoseUpdateGameTime=203`** -
+  UNCHANGED from 60 ticks earlier, while `towing2`'s own
+  `lastPoseUpdateGameTime=264` matches ITS OWN fresh `sampleGameTime`
+  exactly.
+
+**This is a direct, already-retained, REAL runtime measurement - not a
+mocked symptom or a future proposal**: `towed`'s own pose-update
+timestamp is frozen at EXACTLY `203` across a 61-tick span (`204` through
+`264` inclusive) - precisely the window between `towing.remove()` and the
+new `towing2`'s own connection. `BuoyantBody.step()` genuinely did not
+run for `towed` during this exact span, confirmed by body-role-labeled,
+already-logged data, not source inference alone. This upgrades the prior
+entry's "conditional, source-supported" framing for the SPECIFIC claim
+"`towed`'s own Java-side step/pose-update did not run during this window"
+to a direct runtime confirmation - while the DEEPER mechanism (precisely
+WHY, i.e. the `doPostUpdateLogic`-recursion-starvation chain) remains the
+source-level explanation already established, now with its predicted
+symptom directly measured, not merely consistent-with.
+
+### Production-relevant lifecycle regression seam - fuller definition
+
+Per 54590's own fuller framing, the real invariants worth a future
+regression (DESIGN ONLY, not implemented or run in this entry):
+
+1. **Ongoing exactly-once update**: while active and untowed-by-an-
+   invalid-connection, a body's own `debugLastPoseUpdateGameTime` should
+   advance by exactly 1 per real game tick - never 0 (starved) and never
+   >1 (duplicate-stepped).
+2. **Stale-connection cleanup / native-authority preservation**: an
+   already-active trailer whose own towing vehicle disappears should
+   either (a) keep its own native Sable body authoritative and
+   continuing to update via SOME path, or (b) have its stale connection
+   cleanly released - never silently stop updating while still reporting
+   itself as connected/active, which is what this investigation found.
+3. **Ordinary detach/reconnect without duplicate stepping**: a normal
+   `disconnectTrailer`-then-reconnect cycle (as `DETACH`/`ATTACH` already
+   exercise, confirmed working throughout this investigation) must not
+   produce two advances of `debugLastPoseUpdateGameTime` in the same
+   real tick, and must not regress once the starvation-prone path (an
+   abrupt `remove()` instead of an orderly disconnect) is eventually
+   addressed.
+
+A minimal future test (not built here) would assert invariant 1 directly
+against this exact fixture's own `TOWING_UNAVAILABLE` window, using
+`debugLastPoseUpdateGameTime`/`level.getGameTime()` exactly as already
+demonstrated above with real retained numbers - no mock, no native run,
+since the needed observable already exists and the exact expected
+numbers (frozen at 203 for 61 ticks) are now a concrete, falsifiable
+reference point for a REAL future run to be checked against.
+
+### Isolated observation packet - not needed further given the direct confirmation above
+
+54590's own fallback ("if runtime operands truly block discriminating
+changes, prepare the smallest isolated observation packet...") does not
+apply here - the runtime operands did NOT block a discriminating
+measurement; they were already retained and have now been extracted
+directly. No new packet is proposed.
+
+### Disposition
+
+A direct, already-retained runtime measurement now confirms the specific
+starvation symptom (frozen `lastPoseUpdateGameTime` across the exact
+`towing.remove()`-to-`towing2`-connect window) with body-role-labeled,
+real numbers - not a mock, not an inference. The deeper source-level
+mechanism from prior entries remains the explanation for WHY; this entry
+confirms its predicted symptom directly. No DIV fix implemented or
+proposed. No native run performed. Native gate: one-run grant remains
+CONSUMED.
