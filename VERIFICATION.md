@@ -7898,3 +7898,67 @@ new run. No native execution proposed.
 Retraction only - no new native run. No DIV-fixable bug established. No
 causal mechanism confirmed. Native gate: the one-run grant remains
 CONSUMED; nothing in this entry requests or implies another.
+
+## Retracting the DEFER_TO_NATIVE hypothesis per 54542 - mechanism remains genuinely unexplained
+
+Per 54542: the proposed `DEFER_TO_NATIVE` explanation is wrong, confirmed
+by evidence I should have checked before proposing it.
+
+### Both parts of the hypothesis are ruled out
+
+1. **The predicate itself evaluates false for this exact case.**
+   `unsafeLock` is itself computed FROM `towingHasHitchableBody` via a
+   short-circuited AND (confirmed by re-reading the surrounding source,
+   line ~666) - when `towingHasHitchableBody=false` (true here, since
+   `towing` was removed), `unsafeLock` is ALSO `false`, not independently
+   settable. So `deferToNativeHitch(towed=true, alreadyActive=true,
+   towingVehicleActive=false, unsafeLock=false)` = `true && true &&
+   (false||false)` = **FALSE** - NOT true as I claimed. This exact case is
+   already covered by an existing, passing unit test:
+   `PhysicsBridgeClassificationTest.java` line 84:
+   `assertFalse(PhysicsBridge.deferToNativeHitch(true, true, false,
+   false))`. I should have grepped for and read this existing test before
+   proposing the hypothesis from source-reading alone - a real process
+   failure, not just a reasoning error.
+2. **Even if DEFER_TO_NATIVE had fired, the consequence contradicts what's
+   observed anyway.** `deferToNativeHitch`'s own doc (re-read directly)
+   states explicitly: "An ALREADY-active trailer... must never be
+   deferred/torn down just because its towing vehicle's body has since
+   gone away - it stays an unjointed, free-rolling Sable vehicle instead."
+   `decide()` (lines 808-813) returns `ACTIVATE` here, not
+   `DEFER_TO_NATIVE` - by explicit design, not merely by the predicate's
+   own arithmetic. And had `DEFER_TO_NATIVE` somehow still occurred,
+   `active()`'s own `DEFER_TO_NATIVE` branch calls `deactivate(v)`, which
+   REMOVES the registry entry and the native body (`old.remove()`) - not
+   "skips Java forces while the native box keeps existing independently"
+   as I assumed. The retained logs show `towed`'s own native velocity
+   genuinely changing tick-to-tick throughout this window (read via
+   `PhysicsBridge.debugReadLinearVelocity`, which goes through the SAME
+   registry lookup) - directly inconsistent with the body having been
+   deactivated/removed.
+
+### The actual mechanism remains genuinely unexplained - not guessed a third time
+
+By the documented/tested design, `towed` should be `ACTIVATE`d throughout
+this window, meaning `BuoyantBody.step()` (and its own unconditional,
+globally-gated entry log line) SHOULD run every tick. It does not -
+confirmed zero such lines in the exact line range, independently
+re-verified twice now. This is a genuine, currently unexplained
+contradiction between the documented/tested Java-side decision logic and
+what the retained log shows. Not proposing a third unverified source-level
+guess - per 54542's own instruction, the next step is to trace the actual
+PINNED MTS CALLER upstream of `moveVehicle` itself (third-party code, not
+DIV's own mixin/active logic) to check whether MTS's own update loop
+might simply not be calling `moveVehicle`/`performGroundOperations` for
+`towed` during this specific window, for a reason entirely outside DIV's
+own gating - a decompile/source-read task, not a new run. Not executed in
+this entry.
+
+### Disposition
+
+Two candidate explanations ruled out by direct, authoritative evidence
+(an existing test and the design doc's own explicit statement) in this
+entry. No new hypothesis substituted without equivalent verification. No
+DIV-fixable bug established. No native run performed, proposed, or
+needed for this specific next step. Native gate: one-run grant remains
+CONSUMED.
