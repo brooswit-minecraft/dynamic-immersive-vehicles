@@ -159,7 +159,7 @@ public final class BuoyantHitchProbe {
  private static JSONVehicle towing3Definition;
  private static minecrafttransportsimulator.entities.instances.PartGroundDevice towed3HookupPart;
  private static double partPairSpawnX, partPairSpawnZ, partPairSpawnSurfaceY;
- private static boolean configured = false, chunkGridUnforced = false;
+ private static boolean configured = false, chunkGridUnforced = false, diagnosticContextDisarmed = false;
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -175,7 +175,7 @@ public final class BuoyantHitchProbe {
     case SPAWN -> spawn(level);
     case ATTACH -> attach();
     case DETACH -> detach();
-    case TOWING_UNAVAILABLE -> towingUnavailable();
+    case TOWING_UNAVAILABLE -> towingUnavailable(level);
     case DESPAWN_TRAILER -> despawnTrailer();
     case TOWING_REPLACEMENT -> towingReplacement(level);
     case LEVEL_UNLOAD -> levelUnload(level);
@@ -193,6 +193,16 @@ public final class BuoyantHitchProbe {
    chunkGridUnforced = true;
    unforceChunkGrid(level);
    LOGGER.info("[DIV buoyantHitchProbe] released terrain chunk grid");
+  }
+  // MINECRAFT-545/547 (John's comment 54494): DiagnosticContext.disarm() previously had NO
+  // production caller at all - clear the shared diagnostic state here, at the SAME terminal
+  // point as the chunk-grid release above (runs exactly once, DONE or FAILED, any abort path
+  // included via the catch block's own FAILED transition) - diagnostic-only, no physics/world
+  // cleanup change.
+  if ((phase == Phase.DONE || phase == Phase.FAILED) && !diagnosticContextDisarmed) {
+   diagnosticContextDisarmed = true;
+   io.github.brooswitminecraft.div.DiagnosticContext.disarm();
+   LOGGER.info("[DIV buoyantHitchProbe] diagnosticContextDisarmed=true phase=" + phase);
   }
  }
 
@@ -464,7 +474,7 @@ public final class BuoyantHitchProbe {
   }
  }
 
- private static void towingUnavailable() {
+ private static void towingUnavailable(ServerLevel level) {
   ticksInPhase++;
   if (ticksInPhase == 1) {
    // MINECRAFT-545/547 diagnostic (John's comment 54250: "record the immediately preceding
@@ -493,7 +503,7 @@ public final class BuoyantHitchProbe {
    var towingCenter = PhysicsBridge.debugReadCenter(towing);
    long towedLastPoseUpdateGameTime = PhysicsBridge.debugLastPoseUpdateGameTime(towed);
    long towingLastPoseUpdateGameTime = PhysicsBridge.debugLastPoseUpdateGameTime(towing);
-   long sampleGameTime = towed.world.getTime();
+   long sampleGameTime = level.getGameTime();
    var towedHookupOffset = towedCenter != null
      ? HitchJoint.anchorLocalOffset(towedCenter, new org.joml.Vector3d(HOOKUP_POS.x, HOOKUP_POS.y, HOOKUP_POS.z), new org.joml.Vector3d()) : null;
    var towingHitchOffset = towingCenter != null
@@ -542,7 +552,7 @@ public final class BuoyantHitchProbe {
   // TOWING_REPLACEMENT phase reset below - the actual restriction still comes from the body-ID
   // set, not from this margin being tight.
   if (ticksInPhase == SHORT_PHASE_TICKS - 6) {
-   long now = towed.world.getTime();
+   long now = level.getGameTime();
    io.github.brooswitminecraft.div.DiagnosticContext.arm(java.util.Set.of(towed.uniqueUUID), now + 1, now + 15);
   }
   // MINECRAFT-545/547 (John's comment 54486): an "expected-body-this-tick" marker, logged OUTSIDE
@@ -555,7 +565,7 @@ public final class BuoyantHitchProbe {
   if (io.github.brooswitminecraft.div.DiagnosticWindow.inWindow(towed.uniqueUUID, ticksInPhase,
       java.util.Set.of(towed.uniqueUUID), SHORT_PHASE_TICKS - 5, SHORT_PHASE_TICKS))
    LOGGER.info("[DIV buoyantHitchProbe] expectedBodyThisTick=true v=" + towed.uniqueUUID
-     + " ticksInPhase=" + ticksInPhase + " gameTime=" + towed.world.getTime() + " phase=TOWING_UNAVAILABLE");
+     + " ticksInPhase=" + ticksInPhase + " gameTime=" + level.getGameTime() + " phase=TOWING_UNAVAILABLE");
   if (ticksInPhase >= SHORT_PHASE_TICKS) {
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE PASS - towed stayed finite/bounded " + SHORT_PHASE_TICKS
      + " ticks after its towing vehicle despawned - spawning towing2 for TOWING_REPLACEMENT");
@@ -587,6 +597,16 @@ public final class BuoyantHitchProbe {
    // correction) rather than resting ON the surface like every other hull in this probe spawns.
    towing2Spawn.y = towed.position.y;
    towing2 = spawnHull(world, towing2Definition, towing2Spawn.x, towing2Spawn.y, towing2Spawn.z, 0);
+   // MINECRAFT-545/547 (John's comment 54497): re-armed HERE, immediately once towing2's own UUID
+   // exists and BEFORE connectTrailer is called below - not after, per 54497's own correction that
+   // arming after connectTrailer leaves a real (if currently untraced) possibility that
+   // connectTrailer's own pinned call path triggers an apply() call for towing2 before the context
+   // covers it. This is a diagnostic-only reordering of WHEN the context is armed; the actual
+   // spawn/connect ordering of the real gameplay calls below is unchanged. Uses level.getGameTime()
+   // directly - NOT AWrapperWorld.getTime() (confirmed via the pinned MTS source to return
+   // world.getDayTime()%24000, a DIFFERENT clock from ServerLevel.getGameTime(), the one
+   // BuoyantForces.apply actually consults - see VERIFICATION.md).
+   io.github.brooswitminecraft.div.DiagnosticContext.arm(java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), level.getGameTime(), level.getGameTime() + 15);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT pre-connect towing2=" + towing2.position + " towing2.motion=" + towing2.motion
      + " towed=" + towed.position + " towed.motion=" + towed.motion + " towedHookupAnchor=" + towedHookupAnchor);
    // MINECRAFT-545/547 diagnostic (John's comment 54237: trace actual pose/velocity BEFORE
@@ -601,15 +621,6 @@ public final class BuoyantHitchProbe {
    var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
    towing2.connectTrailer(connection, false);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position);
-   // MINECRAFT-545/547 (John's comment 54494): re-arm the shared DiagnosticContext to include the
-   // newly-created towing2 - its own first force hook runs on the NEXT Minecraft tick (it was
-   // only just spawned, this same probe-processing block, so it has not been ticked yet), so this
-   // re-arm still lands BEFORE that body's own first intended force hook, same as the original
-   // arm above did for towed.
-   {
-    long now = towed.world.getTime();
-    io.github.brooswitminecraft.div.DiagnosticContext.arm(java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), now, now + 15);
-   }
    // MINECRAFT-545/547 (John's comment 54486): the same expected-body marker as
    // TOWING_UNAVAILABLE's own tail, extended to cover this phase's intended transition tick (its
    // own ticksInPhase==1, not TOWING_UNAVAILABLE's nonexistent "tick 61") for both towed and the
@@ -618,11 +629,11 @@ public final class BuoyantHitchProbe {
    if (io.github.brooswitminecraft.div.DiagnosticWindow.inWindow(towed.uniqueUUID, ticksInPhase,
        java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), 1, 1))
     LOGGER.info("[DIV buoyantHitchProbe] expectedBodyThisTick=true v=" + towed.uniqueUUID
-      + " ticksInPhase=" + ticksInPhase + " gameTime=" + towed.world.getTime() + " phase=TOWING_REPLACEMENT");
+      + " ticksInPhase=" + ticksInPhase + " gameTime=" + level.getGameTime() + " phase=TOWING_REPLACEMENT");
    if (io.github.brooswitminecraft.div.DiagnosticWindow.inWindow(towing2.uniqueUUID, ticksInPhase,
        java.util.Set.of(towed.uniqueUUID, towing2.uniqueUUID), 1, 1))
     LOGGER.info("[DIV buoyantHitchProbe] expectedBodyThisTick=true v=" + towing2.uniqueUUID
-      + " ticksInPhase=" + ticksInPhase + " gameTime=" + towing2.world.getTime() + " phase=TOWING_REPLACEMENT");
+      + " ticksInPhase=" + ticksInPhase + " gameTime=" + level.getGameTime() + " phase=TOWING_REPLACEMENT");
   }
   if (!boundedOrFail("towingReplacement/towing2", towing2) || !boundedOrFail("towingReplacement/towed", towed)) return;
   double distance = anchorDistance(towing2, towing2Definition);

@@ -7171,3 +7171,133 @@ Diff + 2 new/extended pure test classes, committed. No native run performed.
 No gameplay/fixture physics/timing/pass-fail change - the probe's own new
 lines remain read-only logging/context-arming, not a behavior change.
 Native gate remains CLOSED. No causal claim made or acceptance weakened.
+
+## Third correction round per 54497: receipt correction, clock bug found and fixed, remaining lifecycle items, packet start
+
+Per 54497's independent review of 465d0e7:
+
+### Correcting my own 54496 coverage/receipt claims
+
+- **"23 cumulative" was wrong** - John independently found the same 16 tests
+  (`DiagnosticWindowTest`=4, `DiagnosticContextTest`=5,
+  `BuoyantForcesWaterScanBoundsTest`=7) in the retained run; my own "23
+  cumulative" figure double-counted the FIRST round's own (now-replaced)
+  3-test version of `BuoyantForcesWaterScanBoundsTest` as if it still existed
+  alongside the rewritten 7-test version - it does not; that file was
+  rewritten, not extended. Retracting "23" - 16 is the actual, current,
+  distinct test count.
+- **No receipt existed in `/tmp/div-gradle-slot.owner` for that run** -
+  confirmed: this investigation's own established cross-ticket convention
+  (visible throughout that file's own history, used by M524/M526/M531/M532/
+  M537/M544/etc.) is to append `CLAIMED by <label> pid=<pid> at <ts>` /
+  `RESULT=...` / `RELEASED by <label> at <ts>` lines to that shared file
+  around every exclusive-slot use - my own `flock` invocations this session
+  used the lock correctly but never wrote those lines, so no entry exists
+  for the 06:39:36 run despite it genuinely having happened (evidenced only
+  by the XML files' own timestamps and the commit they're paired with). Not
+  re-run solely to manufacture a missing receipt, per 54497's own
+  instruction - reported as a real gap in MY OWN process this session, now
+  fixed going forward: this round's own compile/test runs ARE recorded in
+  `/tmp/div-gradle-slot.owner` (`M545-compile22`, `M545-test10`, both
+  `RESULT=COMPLETE rc=0`), the first such entries this session actually
+  follows the established convention.
+
+### Real clock bug found and fixed: `AWrapperWorld.getTime()` is NOT `ServerLevel.getGameTime()`
+
+Per 54497's instruction to verify rather than assert equivalence: decompiled
+the pinned MTS jar's own `mcinterface1211.WrapperWorld.class` (same jar/hash
+`1d2f7512...` already resolved earlier in this investigation) via `cfr`:
+
+```java
+public long getTime() {
+    return this.world.getDayTime() % 24000L;
+}
+```
+
+This is Minecraft's DAY-TIME clock (wraps every 24000 ticks, day/night cycle,
+independently affectable by sleep/`/time set`/gamerules) - a DIFFERENT clock
+from `ServerLevel.getGameTime()` (monotonic, never wraps), the one
+`BuoyantForces.apply` actually consults. My own `DiagnosticContext.arm(...)`
+calls in the probe were using `towed.world.getTime()` (this wrong clock) -
+for this specific short fixture run (a few hundred ticks, well under 24000,
+no sleep/time-set), the two values happen to coincide numerically, so this
+did not change any RESULT in practice, but the mechanism itself was wrong
+and would silently break on a longer run or one that slept/changed time.
+Fixed: `towingUnavailable` now takes `ServerLevel level` (plumbed from its
+caller, `maybeRun`, which already has it) and every `DiagnosticContext.arm`/
+marker call in both phases now uses `level.getGameTime()` directly - the
+SAME clock `apply` consults. Also fixed the pre-existing `sampleGameTime`
+diagnostic line (54237-era) for the same reason, now on the right clock too.
+
+### Re-arm moved before `connectTrailer`
+
+Per 54497: the `towing2` re-arm previously ran AFTER `connectTrailer` -
+moved it to immediately after `spawnHull` returns (as soon as `towing2`'s
+own UUID exists), strictly BEFORE `connectTrailer` is called, removing the
+need to trace whether `connectTrailer`'s own pinned call path could trigger
+an `apply()` call for `towing2` before the context covered it. Diagnostic-
+only reordering - the real spawn/connect/gameplay ordering is unchanged.
+
+### `DiagnosticContext.disarm()` now has a real production caller
+
+Added at the SAME terminal guard point the existing `chunkGridUnforced`
+one-time release already uses (`phase == DONE || phase == FAILED`, guarded
+by a new `diagnosticContextDisarmed` flag so it fires exactly once,
+covering the ordinary-completion AND the `catch (RuntimeException)`→FAILED
+abort path identically) - diagnostic-only, no physics/world cleanup change.
+
+### Documented window spec (54497's request to state explicitly)
+
+- `TOWING_UNAVAILABLE` ticksInPhase==54: arms `{towed}`, window
+  `[gameTime+1, gameTime+15]`.
+- `TOWING_REPLACEMENT` ticksInPhase==1 (immediately after `towing2` spawns,
+  before `connectTrailer`): re-arms `{towed, towing2}`, window
+  `[gameTime, gameTime+15]`.
+- `DONE`/`FAILED`: disarms unconditionally (once).
+
+Verified via `gradle compileJava compileTestJava` then `gradle test` for the
+three pure suites, BOTH recorded in `/tmp/div-gradle-slot.owner` this time -
+`M545-compile22`/`M545-test10`, both `RESULT=COMPLETE rc=0`. XML unchanged
+at 16/16 passing (`DiagnosticWindowTest` 4, `DiagnosticContextTest` 5,
+`BuoyantForcesWaterScanBoundsTest` 7) after these fixes - no regression.
+
+### Isolated packet - real artifact identity, honest scope limit
+
+Per 54497's request for source/artifact/config hashes and a retained-
+world/lock-lifecycle plan - provided what is genuinely available without
+preparing to execute a run (native execution remains CLOSED; this is NOT a
+run authorization request):
+
+- **Source identity**: this branch's HEAD is `465d0e76da6c08be8351307213bb94f52e08bfc1`
+  (full commit hash) at the time of this review; this round's own changes
+  land in the next commit alongside this entry.
+- **Pinned dependency identity** (both already resolved/verified earlier in
+  this investigation, re-confirmed by direct `sha256sum` against the local
+  Gradle cache, which is itself content-addressed by hash in its own path):
+  MTS `minecraft-transport-simulator-286703-7926606.jar` =
+  `1d2f7512604636265703b29fdf13d7f8ef2323694b6435f4392973da6e78d251`; Sable
+  `sable-neoforge-1.21.1-2.0.5.jar` =
+  `c8710f85bc780bbf523e6726ceaaf76dd0b8c61479db497b382c6bb34317e7ab`.
+- **Lock/launch-lifecycle template**: NOT designing a new one - the owner
+  file's own history already contains a proven, orderly template for this
+  exact fixture (`M545-authrun-probe2`: "RESULT=COMPLETE (FAILED at
+  TOWING_REPLACEMENT as expected, orderly stdin stop, clean shutdown
+  confirmed: Stopping server / All dimensions are saved / BUILD
+  SUCCESSFUL)"); reusing that same template, not inventing a new launch/
+  shutdown mechanism, is the plan for any future authorized run.
+- **Retained-world plan**: unchanged from every prior entry - this round
+  touches NO world, creates NO new run, and does not read or modify any
+  retained evidence directory under `/home/booswrit/div-evidence/`.
+- **What's still outstanding, stated plainly rather than fabricated**: a
+  genuine dry-run rehearsal (confirming the lock/launch/shutdown sequence
+  end-to-end against the NEW logging/context code specifically, before any
+  real diagnostic run) has not been performed and is not proposed in this
+  entry - that is the natural next packet element once/if a run is
+  authorized, not something to simulate on paper here.
+
+### Disposition
+
+Diff + receipt correction + real pinned-source finding, committed. No
+native run performed or requested. No gameplay/fixture physics/timing/
+pass-fail change. Native gate remains CLOSED. No causal claim made or
+acceptance criteria weakened.
