@@ -9764,3 +9764,130 @@ reviews and releases this specific packet, per 54669's own instruction. The prio
 (`M545-packet-435937b`) remains preserved, unmodified, and not used for any launch. No further
 terminology/refactor churn pending that review, per 54669's own closing instruction. No native
 run performed. Native hold remains CLOSED.
+
+## Second authorized run (M545-packet-df4b0c2): dispatch confirmed restored, a NEW divergence
+observed at TOWING_UNAVAILABLE tick=10 - read-only accounting, per John's 54672/54674
+
+### The run
+
+Executed exactly once, per John's 54672 explicit single-use release of
+`M545-packet-df4b0c2/launch-wrapper.sh` (`LC_ALL=en_US.UTF-8`). All 9 preflight checks `PASS`
+inside the lock. Java launched (pid 983812), ran, exited cleanly (code 0), "All dimensions are
+saved", lock released (`RELEASED by M545-packet-df4b0c2 at 2026-11-17T17:45:53Z rc=0`). Post-run
+check (receipt `receipts/post-run-originals-and-evidence-20261117T174600Z.txt`): the 8 shared
+config files and 2 shared world files remain byte-identical to baseline.
+
+Per John's own 54674 explicit correction: **`rc=0` is the wrapper's own clean-shutdown exit
+code, not a probe PASS verdict** - the fixture's own terminal line is
+`FAILED - left bounded area tag=towingUnavailable/towed phase=TOWING_UNAVAILABLE tick=10
+horizontal=59.09 vertical=20.15`. This is NOT the lifecycle assertion from the first authorized
+run, and NOT the original `TOWING_REPLACEMENT` tick=7/8 crash - the fixture never reached
+`TOWING_REPLACEMENT` at all this time. A new, earlier failure point, via the pre-existing
+`boundedOrFail` check.
+
+### What is actually confirmed: the orphan-connection fix restores exactly-once dispatch
+
+Log evidence, in exact tick order (gameTime in parens where logged):
+- tick=1: `towed.stepInvocationCount=201` (unchanged - same frozen value every prior run showed).
+- Immediately after tick=1's own lines: `cleanup releasing orphaned towedByConnection
+  v=fe486389... removedTowingEntity=a5294719... indexInParentList=0` - the real
+  `disconnectTrailer(0)` call fired, at a real, valid index (not the missing-index fallback).
+- tick=2: `towedByConnectionNonNull=false`, `towingConnectionsStillContainsIt=false` - the real
+  disconnect's own effect on BOTH sides, confirmed directly (child pointer null, parent list
+  entry actually removed) - not inferred. `stepInvocationCount` still 201 (cleanup runs on
+  `ServerTickEvent.Post`, after this tick's own entity-ticking pass already completed, so the
+  very next step happens on the FOLLOWING tick).
+- tick=3: `stepInvocationCount=202` (advanced by exactly 1 - dispatch resumed).
+- ticks 3 through 9: `stepInvocationCount` advances by EXACTLY 1 every tick (202→203→...→208,
+  `lastPoseUpdateGameTime` 205→...→211, matching one-for-one) - genuinely exactly-once dispatch,
+  not starved, not duplicated, for as many ticks as the fixture got to observe before its own
+  unrelated bounded-area check fired.
+
+This is the first direct confirmation that the fix's own stated goal - restoring MTS's ordinary
+per-tick dispatch to an orphaned towed vehicle - actually happens, for a real native body, under
+the real native dispatch chain. It is NOT, per John's own correction, proof of "complete
+lifecycle/authority acceptance" - only of dispatch resuming over this specific bracket.
+
+### What is also observed, NOT yet explained: a severe velocity/torque divergence at the
+SECOND resumed step specifically
+
+Velocity magnitudes (computed from the logged linear/angular velocity vectors):
+
+| tick | stepInvocationCount | \|linearVelocity\| | \|angularVelocity\| |
+|------|---------------------|---------------------|----------------------|
+| 1    | 201 (frozen)        | 7.45                | 34.16                |
+| 2    | 201 (frozen)        | 2.83                | 23.63                |
+| 3    | 202 (1st resumed step) | 15.61            | 82.83                |
+| 4    | 203 (2nd resumed step) | 199.43           | 1244.13              |
+| 5-9  | 204-208             | ~199 (slow decay)   | ~1244 (near-constant) |
+
+The jump from tick=3 to tick=4 (step 202→203) is a ~13x increase in linear velocity magnitude
+and a ~15x increase in angular velocity magnitude, in a SINGLE step - not a gradual divergence.
+The FIRST resumed step (201→202, tick 2→3) only moderately changes velocity (7.45→15.61 linear,
+23.63→82.83 angular - itself already a real increase, but nowhere near the magnitude of the
+second step's own jump). From tick=4 onward, velocity stays near-constant at this extreme
+magnitude (consistent with the body now being essentially in unconstrained free-flight,
+gravity/drag only, no longer meaningfully coupled to buoyancy); the resulting ~199 blocks/s
+linear speed over the ~6 remaining ticks (at 20 ticks/s) accounts for the ~59m horizontal
+displacement the bounded-area check measured at tick=10, consistent kinematically with a single
+instability event at step 203 rather than a compounding multi-step drift.
+
+### Explicitly NOT claimed
+
+- NOT claimed: that this is the same mechanism as the original `TOWING_REPLACEMENT` tick=7/8
+  crash. The kinematic SIGNATURE (explosive divergence within a handful of resumed steps,
+  following a period of accumulated-but-uncorrected angular velocity) is qualitatively similar
+  to this investigation's own earlier description of that crash ("settled anchor, then 24-35
+  block divergence within 5-10 ticks") - but similarity in signature is not identity of cause,
+  and this occurred in a different phase (`TOWING_UNAVAILABLE`, not `TOWING_REPLACEMENT`), via a
+  different precipitating event (a cleanup-driven disconnect, not a `createHitch` reconnect).
+- NOT claimed: a specific root cause for WHY step 203 specifically produces this jump (vs. step
+  202, which did not). The leading, UNPROVEN hypothesis is that `BuoyantForces.apply()`'s own
+  restoring-torque computation is numerically unstable once angular velocity is already large
+  (33.71 rad/s backward-starvation-accumulated magnitude at disconnect, growing further at the
+  first resumed step to 82.83 before exploding at the second) - plausible given the ~15x
+  per-step growth ratio (consistent with positive feedback / insufficient damping relative to
+  the fixed physics timestep), but NOT verified against the actual force/torque values
+  `BuoyantForces.apply()` computed at that step (not captured at that granularity in this run's
+  own log output).
+- NOT claimed: that `disconnectTrailer`'s own `parkingBrakeVar.setTo(1.0, ...)` and
+  `resetAllVariables()` side effects had any bearing here. Per-tick velocity readings are
+  unaffected across the tick where the real disconnect ran (tick 1→2 velocity values are
+  unchanged), consistent with (but not direct proof of) a float-only hull's `BuoyantForces`
+  having no brake-force model that would react to `parkingBrakeVar` at all - not independently
+  instrumented/confirmed in this run's own log output.
+
+### Next falsifiable step (no native run required)
+
+Source-level review of `BuoyantForces.apply()`'s own restoring-torque/damping formula, checking
+specifically for a term that could grow super-linearly with angular velocity magnitude or that
+lacks a stability margin for a multi-tick-accumulated angular velocity this large - a concrete,
+checkable claim distinct from "exactly-once dispatch is the whole fix." If a future native run
+is ever authorized, bracketing ticks 2-4 of this exact scenario with a gated, per-float
+force/torque diagnostic (same style as the existing `GroundContactDiagnostics`-gated per-float
+logging already in `BuoyantForces.java`) would directly capture the computed force/torque at the
+step that actually produces the jump, rather than only its resulting velocity.
+
+### Disposition
+
+Dispatch-restoration goal of the orphan-connection fix CONFIRMED by direct native measurement.
+A real, severe, and currently unexplained velocity/torque divergence observed at the second
+resumed step - reported as a measured, open finding, not a proven root cause and not evidence
+against the fix itself (which did exactly what it was designed to do: restore per-tick
+dispatch). One grant consumed; native hold CLOSED again. No retry/substitute performed or
+requested.
+
+### Supplementary source-level check (no native run): rotational damping is OFF for this scenario
+
+Checked whether the leading hypothesis above (a numerically unstable restoring torque with no
+damping) is even POSSIBLE for this specific probe configuration, before treating it as worth
+further pursuit. `BuoyantForces.java`'s own rotational water-drag term (`tuning.angularWaterDrag`)
+is explicitly gated off when zero (`angularSpeed > 1e-6 && tuning.angularWaterDrag > 0`), and its
+global fallback default is `0.0` (`Overrides.java`, `FALLBACK.angularWaterDrag=0.0`). Confirmed
+via grep that `BuoyantHitchProbe.buildHullDefinition` (used for every hull in this fixture, towed
+and towing alike) never sets `angularWaterDrag` anywhere. So for this exact run, rotational water
+drag was OFF - the per-float righting torque was the ONLY angular force/torque source active,
+with zero dedicated damping term to counteract it. This does not prove the restoring torque
+itself is unstable, but it does confirm the specific damping mechanism that WOULD counteract a
+large angular velocity was never active for this scenario - a concrete, checkable precondition
+for the hypothesis above, not yet a conclusion about the torque formula's own stability.
