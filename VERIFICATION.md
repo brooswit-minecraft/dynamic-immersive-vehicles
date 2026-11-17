@@ -5275,3 +5275,33 @@ Pushed merge commit `8d9e0ab44ecbb53bb157199ac3ab2823ac57d3f1` to
 `minecraft-553/gear-aware-ground-drive`. GitHub confirms PR #53 is now
 `MERGEABLE` (was `CONFLICTING` at the prior head) at this exact commit.
 Returning this non-conflicting head for review.
+
+## MINECRAFT-553: document post-merge evidence after PR #53 landed
+
+Approved PR #53 (Wroosbit, exact head `6feaef97c0111f9c8fef7591b6a52782db7e726f`,
+matching GitHub's own recorded review commit) merged by this ticket's sole merge
+owner into `main` at merge commit `9ef8bee696e92ff3eda19b4f7392400394691de0`
+(clean merge - no branch-protection bypass, no required-status-check override;
+`build` and `runtime-smoke` both confirmed `pass` before merging).
+
+Post-merge hosted CI on this merge commit (run `44110643172`, triggered by the
+push) completed `success`. Started the required `Release build`
+(`workflow_dispatch`, this repo's established release-artifact workflow -
+merging itself does not auto-start it) against `main` at this exact merge
+commit - run `44112988715` completed `success`. Downloaded the artifact:
+`dynamic-immersive-vehicles-0.1.0-SNAPSHOT.jar`, sha256
+`74ab0261a392300be872501e590b001a6301ef952c4b6cee12e54a5298782e0f`, 402250
+bytes.
+
+Following this repo's own established per-ticket convention (every recent
+sibling ticket records its own post-merge evidence as a private draft GitHub
+Release, never a published one - the publish-worthy artifact/notes/
+installation step is a separate, explicitly out-of-scope human action, and
+this repo's real deployment pipeline remains disclosed-billing-blocked):
+created draft release `test-build/minecraft-553-merged-main-9ef8bee`
+("MINECRAFT-553 PR53 merged - gear-aware ground drive on main (not for
+publishing)"), target commit `9ef8bee696e92ff3eda19b4f7392400394691de0`,
+carrying the jar and its checksum file as assets -
+https://github.com/brooswit-minecraft/dynamic-immersive-vehicles/releases/tag/test-build/minecraft-553-merged-main-9ef8bee.
+Not published (remains Draft) - no GitHub Release is marked latest/public,
+per the same disclosed boundary every prior ticket's own entry states.
