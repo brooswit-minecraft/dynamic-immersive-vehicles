@@ -6514,3 +6514,102 @@ remains open and unchecked. No minimal instrumentation packet is
 proposed yet, since the specifically-asked-about DIV-side consumers have
 now been excluded rather than left speculative - reporting back for
 whether to trace the MTS-internal path next or redirect.
+
+## Found the actual tick-60 divergence mechanism: submerged vs. free-falling (54452)
+
+John's comment 54452: continue without waiting; trace MTS's own pinned
+`connectTrailer` via the actual resolved artifact (not treating third-
+party code as inaccessible), and explicitly separate origin (at/before
+`TOWING_UNAVAILABLE` tick=60, BEFORE any replacement-connect call) from
+later amplification. Both addressed - the second produced the most
+concrete finding of this entire investigation so far.
+
+### MTS's own `connectTrailer`, decompiled from the actual pinned artifact
+
+Extracted and decompiled (via `cfr.jar`, a real decompiler, not
+bytecode-reading alone) `AEntityG_Towable.class` from the ACTUALLY
+PINNED `curse.maven:minecraft-transport-simulator-286703:7926606` jar
+(resolved file hash `1d2f7512...`, from `~/.gradle/caches/modules-2/...`).
+`connectTrailer` reads `connection.towingEntity.orientation`/`.position`
+and `connection.towedEntity.orientation`/`.position` (the MTS-cached
+fields whose staleness was already observed) to compute
+`hitchCurrentPosition`/`hookupCurrentPosition` - MTS's own bookkeeping,
+not something DIV's own joint creation consults (confirmed earlier:
+`createHitch` uses only the connection's static local offset and the
+body's geometric center). It does NOT read `v.motion` at all in this
+method. **Per 54452's own correction, this is irrelevant to the tick=60
+origin regardless of what it reads: `connectTrailer` for the REPLACEMENT
+connection is called during `TOWING_REPLACEMENT`'s own tick=1 setup,
+strictly AFTER `TOWING_UNAVAILABLE` tick=60 has already diverged** - so
+this traced consumer is excluded as the origin by timing alone, not
+merely characterized. Whether it matters for later amplification (via
+whatever it feeds downstream) is not investigated further here.
+
+### The actual origin: found by checking what `TOWING_UNAVAILABLE` tick 53-60 are an instance of
+
+Compared `towed`'s own per-tick `linearVelocity`/`angularVelocity`
+AND the presence/absence of `buoyantForcesDiagnostic` lines for ticks
+46-60, between Trial 1 (crash) and the non-crash isolated run:
+
+- **Ticks 53-59 are IDENTICAL in both runs AND have ZERO
+  `buoyantForcesDiagnostic` lines for `towed`** - `angularVelocity`
+  frozen at exactly `(-6.341, -0.0303, -0.1173)`, `linearVelocity`'s X/Z
+  frozen at `(0.07543, -2.021)`, and Y decreasing by exactly `-0.55`
+  every tick (53→54→...→59: -1.189, -1.739, -2.289, -2.839, -3.389,
+  -3.939, -4.489) - the exact signature of unmodified GRAVITY-ONLY free
+  fall (no buoyancy/drag impulse logged because none is being applied -
+  `towed` is NOT submerged/in water during this entire stretch in either
+  run).
+- **At tick=60, the two runs diverge for the first time - and diverge
+  in KIND, not just magnitude:**
+  - Non-crash run: `linearVelocity=(0.1976, -4.881, -2.441)` - X and Z
+    both jump away from their frozen free-fall values, and Y's own
+    decrement from tick 59 is only `-0.392` (not `-0.55`) -
+    **consistent with a real buoyancy/drag impulse being applied this
+    tick, i.e. `towed` re-enters water at exactly this tick.**
+  - Trial 1 (crash): `linearVelocity=(0.07543, -5.039, -2.021)` - X/Z
+    UNCHANGED from the frozen free-fall values, Y's decrement is
+    exactly `-0.55` again - **`towed` is STILL in unmodified free fall
+    this tick; no buoyancy/drag applied.**
+
+**This is the actual, falsifiable, tick-60 divergence: whether `towed`
+re-enters water (becomes submerged) at that exact tick, not merely a
+numeric drift.** Since `towed`'s own trajectory is confirmed byte-
+identical through tick 59 in both runs (same velocity history, hence
+the same integrated position), the two runs' DIFFERENT answer to "is
+`towed` touching water at this position" can only come from the WATER
+SURFACE itself differing at that position between the two different-
+seeded worlds - reviving, in a position/time-specific form, the earlier-
+dismissed seed/terrain candidate. **That earlier dismissal (in the
+`TOWING_REPLACEMENT`-reconnect comparison, much earlier in this
+investigation) checked a DIFFERENT, much smaller displacement near the
+`DETACH` reconnect - it does not cover this much later point, reached
+after ~7+ ticks of unconstrained free fall following the earlier
+violent spin-up, which could plausibly carry `towed` well outside the
+probe's own deterministically-built pool (`POOL_RADIUS=14` blocks,
+`PLATFORM_Y=100`-111) into natural, seed-dependent terrain/water (if
+any) - or simply out of the water vertically.**
+
+### What remains unconfirmed - the next concrete, bounded check
+
+`towed`'s actual position at tick=60 (and whether it is still within
+`POOL_RADIUS`/the platform's own Y-range) is NOT logged by
+`TOWING_UNAVAILABLE`'s own per-tick line (only velocity is) and was not
+separately computed in this entry - this is the precise, falsifiable
+next check: reconstruct `towed`'s position via integrating its own
+logged velocity history (or checking whether any other log line nearby
+captures position), and compare that position against the pool
+boundary/platform Y-range to confirm or refute that it has left the
+deterministic footprint by tick 60.
+
+### Disposition
+
+This is the first entry in this investigation to localize the actual
+tick-60 divergence to a concrete, checkable PHYSICAL CONDITION (submerged
+vs. not) rather than an unexplained numeric drift - a real step forward,
+not yet a closed mechanism. No DIV-fixable bug is established (if the
+cause is natural/seed-dependent terrain outside the probe's own
+constructed pool, that is a property of the FIXTURE's own bounded-area
+behavior during free-float, not necessarily a DIV production defect) -
+stated as a hypothesis requiring the position check above, not asserted.
+No production change or native run proposed.
