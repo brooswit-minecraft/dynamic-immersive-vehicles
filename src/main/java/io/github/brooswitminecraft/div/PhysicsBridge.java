@@ -3,6 +3,7 @@ package io.github.brooswitminecraft.div;
 import dev.ryanhcode.sable.api.physics.constraint.GenericConstraintConfiguration;
 import dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
+import dev.ryanhcode.sable.api.physics.mass.MassData;
 import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
@@ -2278,12 +2279,16 @@ public final class PhysicsBridge {
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
     case ROTOR -> stepRotor(v,q,up,installedPropellers);
    };
-   // MINECRAFT-545/547 (John's comment 54706): this Body's own `box` is a plain BoxPhysicsObject
-   // (not the shape-aware variant) - its getMassTracker() would silently give Sable's shape-
-   // ignorant mass/6 fallback, so a correct solid-box MassData is built directly from this
-   // Body's own mass/halfExtents fields instead. Used only by
-   // BuoyantForces.SEQUENTIAL_DRAG_BOUND_ENABLED (off by default; see that field's own doc).
-   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle,BoxInertia.solidBoxMassData(mass,halfExtents));
+   // MINECRAFT-545/547 (John's comments 54706/54709): this Body's own `box` is a plain
+   // BoxPhysicsObject (not the shape-aware variant) - its getMassTracker() would silently give
+   // Sable's shape-ignorant mass/6 fallback, so a correct solid-box MassData is built directly
+   // from this Body's own mass/halfExtents fields instead, ONLY when the candidate flag is
+   // actually enabled (54709: a prior version built this - a Matrix3d inversion plus a new
+   // MassData instance - unconditionally, every tick, even with the flag off, contradicting the
+   // "passing it costs nothing when disabled" claim; this Body has no stored field to reuse the
+   // way BuoyantBody's own box.getMassTracker() does, so gate the construction itself instead).
+   MassData candidateMassData = BuoyantForces.SEQUENTIAL_DRAG_BOUND_ENABLED ? BoxInertia.solidBoxMassData(mass,halfExtents) : null;
+   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle,candidateMassData);
    if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));

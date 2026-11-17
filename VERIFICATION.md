@@ -11015,4 +11015,115 @@ test suite (884 tests, 0 failures); corrected the native-precision claim from "m
 to "formula match, not bit-identical numerics" given Rapier's own confirmed single-precision
 (`f32`) default; prepared (not launched) the next immutable validation packet. No production
 activation (the flag stays off everywhere), no native run performed or requested - native hold
-remains CLOSED pending a new explicit coordinator release.
+
+## Corrections per 54709: PhysicsBridge cost-when-disabled bug fixed, diagnostic gating/
+## labeling fixed, test-claim overclaim corrected, launch-readiness checkpoint assembled
+
+John's comment 54709 reviewed the actual `3ba53cf` diff, confirmed the virtual-buoyancy-first
+scheme/fresh getters/frame transforms/COM-relative-arm are correctly present, and said this is
+"sufficient to move toward one bounded isolated validation, not production activation" - but
+asked for a concrete launch-readiness checkpoint AND found two real review corrections first,
+all under the same standing authorization (no native run yet).
+
+### Confirmed bug: PhysicsBridge.Body rebuilt its MassData unconditionally, every tick, even with the flag off
+
+A prior version called `BoxInertia.solidBoxMassData(mass, halfExtents)` INLINE as a call
+argument, unconditionally, every tick - a `Matrix3d` inversion plus a new `MassData` instance,
+regardless of `SEQUENTIAL_DRAG_BOUND_ENABLED`. This directly contradicted the method's own doc
+("passing it costs nothing" when the flag is off). Fixed: the construction itself is now gated
+(`BuoyantForces.SEQUENTIAL_DRAG_BOUND_ENABLED ? BoxInertia.solidBoxMassData(mass,halfExtents) : null`)
+- `null` is passed, and nothing is built, whenever the flag is off (always, today). Checked
+`BuoyantBody`'s own call site separately: its `box.getMassTracker()` call is NOT equivalent risk
+- `ShapeAwareBoxPhysicsObject.getMassTracker()` just returns a field computed ONCE in its own
+constructor, confirmed by reading that class directly - genuinely free every call, no fix needed
+there.
+
+### Diagnostic gating and labeling fixed
+
+- The new candidate diagnostic line checked only `GroundContactDiagnostics.ENABLED`, not
+  `contextActive` - unlike the neighboring fixture/window-gated diagnostics in this same method.
+  Fixed: now gated with both, matching the existing convention, so only scoped evidence is
+  emitted.
+- The existing general diagnostic line's `dragOnlyForce`/`buoyancyOnlyForce` fields ALWAYS
+  reflect the OLD/unconditional model's own breakdown (computed regardless of the flag), while
+  `appliedImpulse` reflects whichever force was ACTUALLY applied (the candidate's, when active) -
+  a reviewer comparing them side-by-side without that distinction could easily misread them as
+  describing the same model. Fixed: renamed to `unconditionalBuoyancyOnlyForce`/
+  `unconditionalDragOnlyForce` with an explicit doc comment stating they are always the old
+  model's breakdown; the candidate's own diagnostic line now ALSO reports its own
+  `candidateBuoyancyOnlyForce`/`candidateBoundedDragForce` breakdown (previously only the
+  combined `candidateForceToApply` was logged) - so a reviewer gets both breakdowns, each
+  correctly labeled, not just combined totals.
+
+### Overclaim corrected: tests and inspection are separate kinds of evidence
+
+54709: "Avoid claiming 884 default tests prove zero production behavior change when apply
+itself is not exercised; report tests and inspection separately." Correct - the prior cycle's
+own summary language ("verified to change nothing when disabled via the FULL test suite") does
+overclaim: none of those 884 tests call `BuoyantForces.apply` itself (already stated correctly
+in that entry's own "testing boundary" paragraph, but the Disposition line above it did not
+carry that same care). Restating precisely, going forward: the 884 tests passing is REAL
+evidence that nothing this cycle touched broke any EXISTING tested behavior (including the pure
+logic `apply()` delegates to) - it is NOT evidence, empirical or otherwise, about `apply()`'s
+own default-path behavior specifically, which remains a CODE-INSPECTION claim (the gated branch
+is behind an `if` whose condition is `false` by default, confirmed by reading the diff) - the
+two are different kinds of evidence and should not be conflated.
+
+### Launch-readiness checkpoint, assembled in one place (per 54709's own request)
+
+- **Commit / packet**: this cycle's own commit (hash recorded at commit time, see this entry's
+  own git history) on `minecraft-545/float-only-hull-hitch-support`; a FRESH packet was prepared
+  for THIS commit (NOT a mutation of the existing `M545-packet-3ba53cf`, which stays exactly as
+  it was prepared, per 54709's own "no silent flag/manifest mutation to existing packet"
+  instruction) - see that fresh packet's own `PACKET-NOTES.md` for its exact directory name,
+  commit hash, and manifest/class-hash detail.
+- **Command line proving the flag is isolated-process-only**: the candidate flag is a JVM system
+  property (`-Ddiv.sequentialDragBound=true`), set ONLY via the isolated run's own generated
+  `runServer.sh`/VM-args file for that one launch - never via any shared config file, environment
+  default, or source-code default (the field itself defaults `false` via `Boolean.getBoolean`,
+  confirmed in `BuoyantForces.java`). A real future run would invoke the packet's own
+  `launch-wrapper.sh` with that flag added to the packet's own VM-args file BEFORE hashing/
+  freezing it (never mutating an already-hashed packet's files) - stated here as the exact
+  mechanism; not yet exercised, since no run has been authorized or attempted.
+- **Lifecycle fixture bounds/stages unchanged**: `BuoyantHitchProbe.java` has NOT been touched
+  by any commit in this `54700`-`54709` correction cycle (confirmed via `git diff` against the
+  commit the prior authorized native run, `df4b0c2`, actually used) - the fixture's own
+  tick/phase bounds are identical to that prior run's, so a future run changes exactly one
+  variable (the candidate flag) relative to that baseline, not the fixture itself.
+- **f32-aware tolerance for future evidence comparisons**: per the precision finding (prior
+  entry), any future comparison between this Java (`double`) model's predictions and real
+  native-reported velocity/impulse values must use a tolerance no tighter than single-precision
+  resolution at the relevant magnitude (roughly `1e-6` RELATIVE, i.e. `~1e-6 * |value|` absolute,
+  reflecting `f32`'s ~7 significant decimal digits) - NOT the `1e-9`/`1e-12` absolute tolerances
+  this ticket's own pure-Java unit tests use (those compare `double` against `double`, a
+  different, strictly tighter comparison than any future Java-vs-native check would be).
+- **Timeout/clean-shutdown/lock protocol**: unchanged from the already-reviewed
+  `launch-wrapper.sh` (copied, not modified, for the fresh packet - only its own `PACKET_DIR`/
+  `OWNER_TAG` path strings differ) - same FD9 lock held through actual process exit, same
+  orderly-stop-via-FIFO-stdin timeout sequence, same `preflight.sh` run inside that lock
+  lifetime before `exec`.
+- **Original baseline hashes**: `baseline-original-run-config.sha256` (8 files) and
+  `baseline-original-run-world-level-dat.sha256` (2 files), captured fresh from the live shared
+  `run/` source for the new packet - matched the prior packet's own archived values exactly
+  (confirmed, not assumed), i.e. zero drift in the shared source across this entire correction
+  cycle.
+
+This is a readiness CHECKLIST, not a launch authorization or a native run - none of the above
+constitutes or substitutes for an actual isolated execution. No native run performed or
+requested this cycle either.
+
+Compiled and tested under the exclusive Gradle lock (full suite, 884 tests, 0 failures/errors,
+same count as the prior cycle - this cycle's changes are diagnostic/cost-only, not logic
+changes to anything the test suite exercises).
+
+### Disposition
+
+Fixed a confirmed PhysicsBridge cost-when-disabled bug (unconditional MassData construction,
+now gated), fixed candidate diagnostic gating/labeling (contextActive added; old-vs-candidate
+breakdowns explicitly separated and labeled), corrected an overclaim conflating test-suite
+evidence with an apply()-specific behavior-change claim (now stated as two separate kinds of
+evidence), and assembled the requested launch-readiness checkpoint in one place (fresh packet
+for this commit, isolation command-line mechanism, fixture-bounds-unchanged confirmation,
+f32-aware tolerance guidance, lock/timeout/shutdown protocol confirmation, baseline hashes). No
+production activation, no native run performed or requested - native hold remains CLOSED
+pending a new explicit coordinator release.

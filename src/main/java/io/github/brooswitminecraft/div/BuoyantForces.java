@@ -208,10 +208,23 @@ final class BuoyantForces {
     Vector3d combinedLocal = ProposedFreshVelocityDragCallSite.virtualBuoyancyFirstCombinedForce(
       massData, localArm, localBuoyancyOnly, recomputeDragLocal, freshLocalLinear, freshLocalAngular, PhysicsBridge.DT);
     forceToApply = q.transform(combinedLocal);
-    if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+    // MINECRAFT-545/547 (John's comment 54709): gated with contextActive too (matching the
+    // neighboring fixture/window-gated diagnostics in this method - a prior version checked
+    // only GroundContactDiagnostics.ENABLED, emitting unscoped evidence). Also now reports the
+    // candidate's OWN buoyancy/bounded-drag breakdown explicitly (not just the combined
+    // force), since the general diagnostic block below still reports the OLD/unconditional
+    // model's own breakdown - a reviewer needs both, separately labeled, not just the combined
+    // totals, to actually evaluate the new scheme.
+    if (GroundContactDiagnostics.ENABLED && contextActive) {
+     Vector3d candidateBuoyancyWorld = q.transform(new Vector3d(localBuoyancyOnly));
+     Vector3d candidateBoundedDragWorld = new Vector3d(forceToApply).sub(candidateBuoyancyWorld);
+     com.mojang.logging.LogUtils.getLogger().info(
       "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
         + " sequentialDragBoundCandidate=true floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
-        + " unconditionalForce=" + force + " candidateForceToApply=" + forceToApply);
+        + " unconditionalForce=" + force
+        + " candidateBuoyancyOnlyForce=" + candidateBuoyancyWorld + " candidateBoundedDragForce=" + candidateBoundedDragWorld
+        + " candidateForceToApply=" + forceToApply);
+    }
    }
    // MINECRAFT-545/547 (John's comment 54357) - diagnostic-only, gated behind the existing
    // GroundContactDiagnostics flag (same opt-in every other per-tick diagnostic in this codebase
@@ -236,13 +249,18 @@ final class BuoyantForces {
    // which stays explicitly UNAVAILABLE (no accessor exposes which of config.substepsPerTick
    // substeps last touched/will touch this body).
    if (GroundContactDiagnostics.ENABLED) {
-    Vector3d dragOnlyForce = new Vector3d(force).sub(buoyancyOnlyForce);
+    // MINECRAFT-545/547 (John's comment 54709): explicitly labeled "unconditional" - this is
+    // ALWAYS the OLD/unconditional model's own buoyancy/drag breakdown (computed above
+    // regardless of SEQUENTIAL_DRAG_BOUND_ENABLED), not the candidate's. When the candidate is
+    // active, appliedImpulse below reflects ITS OWN result (forceToApply), not this breakdown -
+    // see the candidate's own separate diagnostic line above for ITS buoyancy/drag breakdown.
+    Vector3d unconditionalDragOnlyForce = new Vector3d(force).sub(buoyancyOnlyForce);
     com.mojang.logging.LogUtils.getLogger().info("[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID
       + " gameTime=" + level.getGameTime()
       + " knownEventPhase=BuoyantForces.apply(after-this-ticks-native-step,before-next-ticks) substepIndex=UNAVAILABLE"
       + " floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
       + " submergedFraction=" + fraction + " worldArm=" + arm
-      + " buoyancyOnlyForce=" + buoyancyOnlyForce + " dragOnlyForce=" + dragOnlyForce
+      + " unconditionalBuoyancyOnlyForce=" + buoyancyOnlyForce + " unconditionalDragOnlyForce=" + unconditionalDragOnlyForce
       + " appliedImpulse=" + new Vector3d(forceToApply).mul(PhysicsBridge.DT));
    }
    handle.applyImpulseAtPoint(inverse.transform(new Vector3d(arm)), inverse.transform(new Vector3d(forceToApply).mul(PhysicsBridge.DT)));
