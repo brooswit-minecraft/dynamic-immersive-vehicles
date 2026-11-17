@@ -191,30 +191,17 @@ public final class TuningCommandProbe {
     +" class="+minecraftEntity.getClass().getName()+" sameUUID="+vehicle.uniqueUUID.equals(minecraftEntity.getUUID()));
   String key = PACK_ID+":"+SYSTEM_NAME;
   Path configPath = FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json");
-  // Review finding (self-review, comment 54501): Files.exists()==false conflates a CONFIRMED
-  // absence with an INDETERMINATE read failure (permission denied, I/O error, etc) - treating
-  // the latter as "did not exist" risked overwriting, then later deleting, a real pre-existing
-  // file this probe never actually backed up. A single read, distinguishing NoSuchFileException
-  // (confirmed absent - safe to proceed) from every other IOException (unreliable - abort without
-  // writing anything), is the correct snapshot.
-  try {
-   ownership.originalConfigContent = Files.readString(configPath);
-   ownership.configExistedBefore = true;
-  } catch (java.nio.file.NoSuchFileException notFound) {
-   ownership.configExistedBefore = false;
-   ownership.originalConfigContent = null;
-  } catch (IOException ex) {
-   LOGGER.error("[DIV tuningCommandProbe] COMPLETE - FAILED: could not reliably snapshot the existing operator config file before writing (not a confirmed absence) - preserving it untouched rather than risk losing it: "+configPath, ex);
+  // Review findings (self-review, comment 54501; Wroosbit, comment 54502, finding 1); John's
+  // coordination readback (comment 54506) requires this exact decision to live in ONE method
+  // both this production call site and TuningCommandProbeOwnershipTest call identically, not a
+  // reimplementation of its branches in a test - see TuningCommandProbeOwnership.snapshotAndArm's
+  // own doc for the NoSuchFileException-vs-unreliable-read distinction and why configNeedsRestore
+  // is armed here, BEFORE the write below, not after it returns.
+  if (!ownership.snapshotAndArm(() -> Files.readString(configPath))) {
+   LOGGER.error("[DIV tuningCommandProbe] COMPLETE - FAILED: could not reliably snapshot the existing operator config file before writing (not a confirmed absence) - preserving it untouched rather than risk losing it: "+configPath);
    phase = Phase.CLEANUP;
    return;
   }
-  // Review finding (Wroosbit, comment 54502, finding 1): the old code set this only AFTER
-  // Files.writeString returned, so a write that threw partway through (a real partial/truncated
-  // write) left it false and cleanup never attempted to restore the now-corrupted file at all.
-  // Armed here instead, right after the snapshot above is confirmed reliable and BEFORE the
-  // first potentially destructive write - a partial write failure below is still followed by a
-  // real restoration attempt in cleanup().
-  ownership.configNeedsRestore = true;
   try {
    // Seed a real explicit operator override through the SAME public file-based reload path
    // every other probe in this package uses (see GroundSurfaceHotReloadProbe's own doc) - not
@@ -261,58 +248,64 @@ public final class TuningCommandProbe {
 
  /** Reached from every terminal path (success, any AWAIT_CHUNK/SETTLE timeout, any EXECUTE
   * failure, or an unexpected exception from any phase) - restores/removes exactly the resources
-  * {@link #ownership} recorded THIS run as actually owning, and nothing else. Review finding
-  * (Wroosbit, comment 54502, finding 2): each resource's own action is now wrapped in {@link
-  * TuningCommandProbeOwnership#attemptCleanup} independently - a failure in one can never block
-  * or skip any other - and that resource's ownership flag is cleared ONLY once its own action
-  * actually succeeds, so a failing resource is correctly retried on a later call (this method is
-  * re-entered every tick via maybeRun while {@code phase} stays CLEANUP) rather than either
-  * blocking everything else or being silently treated as done. Bounded by {@link
+  * {@link #ownership} recorded THIS run as actually owning, and nothing else, via {@link
+  * TuningCommandProbeOwnership#runCleanupPass} (the same method {@code
+  * TuningCommandProbeOwnershipTest} calls with fake callbacks - John's coordination readback,
+  * comment 54506). Each resource's own action is wrapped independently - a failure in one can
+  * never block or skip any other - and that resource's ownership flag is cleared ONLY once its
+  * own action actually succeeds, so a failing resource is correctly retried on a later call (this
+  * method is re-entered every tick via maybeRun while {@code phase} stays CLEANUP) rather than
+  * either blocking everything else or being silently treated as done. Bounded by {@link
   * #MAX_CLEANUP_ATTEMPTS} so a persistently-failing resource does not tick forever - giving up
   * still logs exactly which resource(s) remain unresolved for manual cleanup. */
  private static void cleanup(ServerLevel level) {
   Path configPath = FMLPaths.CONFIGDIR.get().resolve("dynamic-immersive-vehicles.json");
-  var configEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRestoreConfig(), () -> {
-   if (ownership.configExistedBefore) Files.writeString(configPath, ownership.originalConfigContent);
-   else Files.deleteIfExists(configPath);
-   Overrides.reload();
-   String restoredContent = ownership.configExistedBefore ? Files.readString(configPath) : null;
-   boolean restoredCleanly = ownership.configExistedBefore
-     ? ownership.originalConfigContent.equals(restoredContent)
-     : !Files.exists(configPath);
-   if (!restoredCleanly) throw new IOException("restored content does not read back byte-identical to the pre-probe original: "+configPath);
-  });
-  if (configEx == null) {
-   if (ownership.shouldRestoreConfig()) LOGGER.info("[DIV tuningCommandProbe] config restoration CONFIRMED byte-identical to the pre-probe original ("+(ownership.configExistedBefore?"restored":"deleted, as it did not exist before")+").");
-   ownership.configNeedsRestore = false;
+  boolean configWasOwnedThisPass = ownership.shouldRestoreConfig();
+  // John's coordination readback (comment 54506): this exact five-action orchestration must live
+  // in ONE method both this production call site and TuningCommandProbeOwnershipTest call
+  // identically (with fake callbacks there), not a reimplementation of its attemptCleanup-then-
+  // clear-the-flag sequence in a test - see TuningCommandProbeOwnership.runCleanupPass's own doc.
+  var result = ownership.runCleanupPass(
+    () -> {
+     if (ownership.configExistedBefore) Files.writeString(configPath, ownership.originalConfigContent);
+     else Files.deleteIfExists(configPath);
+     // Review finding (Wroosbit, comment 54507, finding 1): Overrides.reload() returns a
+     // ReloadResult that can report success=false WITHOUT throwing - ignoring that result let an
+     // unsuccessful reload (the probe override possibly still active in memory) read as a
+     // successful cleanup. Converted into a thrown failure so ownership stays armed for retry.
+     var reloadResult = Overrides.reload();
+     if (!reloadResult.success()) throw new IOException("Overrides.reload() reported failure while restoring the original config: "+reloadResult.message());
+     String restoredContent = ownership.configExistedBefore ? Files.readString(configPath) : null;
+     boolean restoredCleanly = ownership.configExistedBefore
+       ? ownership.originalConfigContent.equals(restoredContent)
+       : !Files.exists(configPath);
+     if (!restoredCleanly) throw new IOException("restored content does not read back byte-identical to the pre-probe original: "+configPath);
+    },
+    () -> { if (vehicle != null) vehicle.remove(); },
+    // Review finding carried into this hardening: an earlier version unconditionally cleared the
+    // force-load here, even when the chunk had already been force-loaded by someone else before
+    // this probe ran - that silently dropped another owner's own ticket. Only unforced when THIS
+    // probe is the one that actually requested it (enforced by runCleanupPass's own ownership
+    // check, not by this callback).
+    // Review finding (Wroosbit, comment 54507, finding 1): ServerLevel.setChunkForced returns a
+    // boolean (whether the forced state actually changed) that was being ignored - a false
+    // result (the unforce did not actually take effect) must not read as a successful cleanup.
+    () -> { if (!level.setChunkForced(0, 0, false)) throw new IOException("setChunkForced(0, 0, false) reported no change - the chunk may still be force-loaded"); },
+    // Review finding carried into this hardening: inserted pack config entries were never
+    // restored at all - left behind indefinitely regardless of outcome. Removed now, but only
+    // the entries THIS run actually inserted (putIfAbsent found absent beforehand).
+    () -> minecrafttransportsimulator.systems.ConfigSystem.settings.general.packSpeedFactors.value.remove(PACK_ID),
+    () -> minecrafttransportsimulator.systems.ConfigSystem.settings.general.packVehicleScales.value.remove(PACK_ID)
+  );
+  if (result.configEx() == null) {
+   if (configWasOwnedThisPass) LOGGER.info("[DIV tuningCommandProbe] config restoration CONFIRMED byte-identical to the pre-probe original ("+(ownership.configExistedBefore?"restored":"deleted, as it did not exist before")+").");
   } else {
-   LOGGER.error("[DIV tuningCommandProbe] failed to restore the original operator config file - manual check needed: "+configPath, configEx);
+   LOGGER.error("[DIV tuningCommandProbe] failed to restore the original operator config file - manual check needed: "+configPath, result.configEx());
   }
-
-  var vehicleEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRemoveVehicle(), () -> { if (vehicle != null) vehicle.remove(); });
-  if (vehicleEx == null) ownership.vehicleSpawned = false;
-  else LOGGER.error("[DIV tuningCommandProbe] failed to remove this probe's own spawned vehicle - manual check needed", vehicleEx);
-
-  // Review finding carried into this hardening: an earlier version unconditionally cleared the
-  // force-load here, even when the chunk had already been force-loaded by someone else before
-  // this probe ran - that silently dropped another owner's own ticket. Only unforced when THIS
-  // probe is the one that actually requested it.
-  var chunkEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldUnforceChunk(), () -> level.setChunkForced(0, 0, false));
-  if (chunkEx == null) ownership.chunkForcedByUs = false;
-  else LOGGER.error("[DIV tuningCommandProbe] failed to unforce chunk (0,0) - manual check needed", chunkEx);
-
-  // Review finding carried into this hardening: inserted pack config entries were never restored
-  // at all - left behind indefinitely regardless of outcome. Removed now, but only the entries
-  // THIS run actually inserted (putIfAbsent found absent beforehand).
-  var speedFactorEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRemovePackSpeedFactor(),
-    () -> minecrafttransportsimulator.systems.ConfigSystem.settings.general.packSpeedFactors.value.remove(PACK_ID));
-  if (speedFactorEx == null) ownership.packSpeedFactorAddedByUs = false;
-  else LOGGER.error("[DIV tuningCommandProbe] failed to remove the divtest packSpeedFactors entry - manual check needed", speedFactorEx);
-
-  var vehicleScaleEx = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRemovePackVehicleScale(),
-    () -> minecrafttransportsimulator.systems.ConfigSystem.settings.general.packVehicleScales.value.remove(PACK_ID));
-  if (vehicleScaleEx == null) ownership.packVehicleScaleAddedByUs = false;
-  else LOGGER.error("[DIV tuningCommandProbe] failed to remove the divtest packVehicleScales entry - manual check needed", vehicleScaleEx);
+  if (result.vehicleEx() != null) LOGGER.error("[DIV tuningCommandProbe] failed to remove this probe's own spawned vehicle - manual check needed", result.vehicleEx());
+  if (result.chunkEx() != null) LOGGER.error("[DIV tuningCommandProbe] failed to unforce chunk (0,0) - manual check needed", result.chunkEx());
+  if (result.speedFactorEx() != null) LOGGER.error("[DIV tuningCommandProbe] failed to remove the divtest packSpeedFactors entry - manual check needed", result.speedFactorEx());
+  if (result.vehicleScaleEx() != null) LOGGER.error("[DIV tuningCommandProbe] failed to remove the divtest packVehicleScales entry - manual check needed", result.vehicleScaleEx());
 
   if (ownership.allCleared()) {
    phase = Phase.DONE;

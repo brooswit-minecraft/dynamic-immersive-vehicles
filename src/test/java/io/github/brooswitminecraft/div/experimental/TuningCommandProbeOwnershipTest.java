@@ -1,16 +1,21 @@
 package io.github.brooswitminecraft.div.experimental;
 import org.junit.jupiter.api.Test;
 import java.io.IOException;
+import java.nio.file.NoSuchFileException;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** MINECRAFT-548: coverage for the pure decision logic {@code TuningCommandProbe} delegates to -
  * selecting its own spawned wrapper by actual identity (never the first candidate), bounded
- * waiting/timeout, and ownership cleanup orchestration (failure-isolated per resource, idempotent/
- * retryable repeat invocation, pre-existing-resource preservation, and a failed config snapshot
- * never being treated as something to restore). Review findings (Wroosbit, comment 54502 /
- * self-review, comment 54501) on this ticket's first revision are what this file's {@code
- * attemptCleanup}/{@code configNeedsRestore}-armed-before-write coverage specifically targets. */
+ * waiting/timeout, and ownership cleanup orchestration. Review findings (Wroosbit, comments
+ * 54502/54507; self-review, comment 54501) and John's coordination readback (comment 54506) on
+ * this ticket's earlier revisions: tests below call {@link TuningCommandProbeOwnership#snapshotAndArm}
+ * and {@link TuningCommandProbeOwnership#runCleanupPass} DIRECTLY - the exact same two methods
+ * {@code TuningCommandProbe.execute}/{@code .cleanup} themselves call with the real file/vehicle/
+ * level callbacks - with fake callbacks standing in for those same seams, never a reimplementation
+ * of their if/flag branches inline in a test. A wiring mistake in either production method (arm-
+ * after-write instead of before, an ignored unsuccessful reload/unforce result, a resource's flag
+ * cleared regardless of its own action's outcome) would fail these tests directly. */
 class TuningCommandProbeOwnershipTest {
 
  // ---- selectOwnWrapper ----
@@ -37,9 +42,6 @@ class TuningCommandProbeOwnershipTest {
  }
 
  @Test void unwrapReturningNullIsNeverMistakenForAMatch() {
-  // An ineligible candidate (e.g. not a BuilderEntityExisting) unwraps to null - must never be
-  // selected even if own itself happens to be null (it never legitimately is, but this is the
-  // boundary this method must not get backwards).
   List<String> candidates = List.of("ineligible-1", "ineligible-2");
   assertNull(TuningCommandProbeOwnership.selectOwnWrapper(candidates, c -> null, new Object()));
  }
@@ -62,79 +64,85 @@ class TuningCommandProbeOwnershipTest {
   assertEquals(TuningCommandProbeOwnership.AwaitOutcome.READY, TuningCommandProbeOwnership.pollBoundedWait(true, 1, 100));
  }
 
- // ---- TuningCommandProbeOwnership: pre-existing resource preservation ----
+ // ---- snapshotAndArm: the exact seam TuningCommandProbe.execute() calls ----
 
- @Test void doesNotUnforceAChunkItNeverForced() {
+ @Test void confirmedPresentSnapshotArmsRestorationBeforeAnyWrite() {
   var ownership = new TuningCommandProbeOwnership();
-  ownership.chunkForcedByUs = false; // pre-existing forced chunk - this run did not request it
-  assertFalse(ownership.shouldUnforceChunk(), "must never unforce a chunk this run did not itself force");
+  boolean canProceed = ownership.snapshotAndArm(() -> "pre-existing content");
+  assertTrue(canProceed, "a reliable snapshot must let the caller proceed to write");
+  assertTrue(ownership.configExistedBefore);
+  assertEquals("pre-existing content", ownership.originalConfigContent);
+  assertTrue(ownership.shouldRestoreConfig(), "restoration must be armed by snapshotAndArm itself, before the caller ever writes anything");
  }
 
- @Test void doesNotRemovePackEntriesItNeverAdded() {
+ @Test void confirmedAbsentSnapshotArmsRestorationToo() {
   var ownership = new TuningCommandProbeOwnership();
-  ownership.packSpeedFactorAddedByUs = false;
-  ownership.packVehicleScaleAddedByUs = false;
-  assertFalse(ownership.shouldRemovePackSpeedFactor());
-  assertFalse(ownership.shouldRemovePackVehicleScale());
+  boolean canProceed = ownership.snapshotAndArm(() -> { throw new NoSuchFileException("dynamic-immersive-vehicles.json"); });
+  assertTrue(canProceed, "a confirmed absence is a RELIABLE snapshot - the caller may still proceed to write");
+  assertFalse(ownership.configExistedBefore);
+  assertNull(ownership.originalConfigContent);
+  assertTrue(ownership.shouldRestoreConfig(), "even 'confirmed absent' must arm restoration, so cleanup deletes what this run writes");
  }
 
- @Test void unforcesOnlyWhatThisRunActuallyForced() {
+ @Test void unreliableSnapshotFailureNeverArmsRestorationAndTellsTheCallerNotToProceed() {
+  // Review finding (self-review, comment 54501): an IOException that is NOT a confirmed absence
+  // (permission denied, I/O error, etc) must never be treated as "the file didn't exist".
   var ownership = new TuningCommandProbeOwnership();
+  boolean canProceed = ownership.snapshotAndArm(() -> { throw new IOException("permission denied"); });
+  assertFalse(canProceed, "an unreliable read must tell the caller to abort WITHOUT writing anything");
+  assertFalse(ownership.shouldRestoreConfig(), "must never arm restoration for a snapshot this run could not reliably take");
+ }
+
+ // ---- runCleanupPass: the exact seam TuningCommandProbe.cleanup() calls ----
+
+ @Test void runCleanupPassAttemptsOnlyOwnedResourcesAndClearsThemOnSuccess() {
+  var ownership = new TuningCommandProbeOwnership();
+  ownership.configNeedsRestore = true;
+  ownership.vehicleSpawned = true;
   ownership.chunkForcedByUs = true;
-  assertTrue(ownership.shouldUnforceChunk());
+  ownership.packSpeedFactorAddedByUs = true;
+  ownership.packVehicleScaleAddedByUs = true;
+  boolean[] ran = new boolean[5];
+
+  var result = ownership.runCleanupPass(
+    () -> ran[0] = true,
+    () -> ran[1] = true,
+    () -> ran[2] = true,
+    () -> ran[3] = true,
+    () -> ran[4] = true);
+
+  assertNull(result.configEx()); assertNull(result.vehicleEx()); assertNull(result.chunkEx());
+  assertNull(result.speedFactorEx()); assertNull(result.vehicleScaleEx());
+  for (boolean r : ran) assertTrue(r, "every owned resource's own action must actually run");
+  assertTrue(ownership.allCleared(), "every resource must be cleared once its own action succeeds");
  }
 
- // ---- failed/unreliable config snapshot never becomes something to restore ----
+ @Test void runCleanupPassNeverAttemptsAnUnownedResourcesAction() {
+  var ownership = new TuningCommandProbeOwnership(); // nothing owned - e.g. a timeout before setup
+  boolean[] ran = new boolean[5];
+  ownership.runCleanupPass(() -> ran[0] = true, () -> ran[1] = true, () -> ran[2] = true, () -> ran[3] = true, () -> ran[4] = true);
+  for (boolean r : ran) assertFalse(r, "an unowned resource's action must never be attempted");
+  assertTrue(ownership.allCleared());
+ }
 
- @Test void neverRestoresConfigThatWasNeverArmedBecauseItsSnapshotFailed() {
+ @Test void oneOwnedResourcesFailureDoesNotPreventAnotherOwnedResourcesOwnCleanupAttempt() {
+  // Review finding (Wroosbit, comment 54502, finding 2): simulate the config-restore action
+  // failing - the vehicle removal (and every other owned action) must still run this same pass.
   var ownership = new TuningCommandProbeOwnership();
-  // An unreliable snapshot read means the caller must abort before ever arming restoration or
-  // writing - configNeedsRestore stays at its default false, exactly as the probe's own
-  // execute() leaves it on that path.
-  assertFalse(ownership.configNeedsRestore);
-  assertFalse(ownership.shouldRestoreConfig(), "must never attempt to restore config this run never actually armed for restoration");
+  ownership.configNeedsRestore = true;
+  ownership.vehicleSpawned = true;
+  boolean[] vehicleRan = {false};
+
+  var result = ownership.runCleanupPass(
+    () -> { throw new IOException("disk full"); },
+    () -> vehicleRan[0] = true,
+    () -> {}, () -> {}, () -> {});
+
+  assertNotNull(result.configEx(), "the failing resource's own failure is reported");
+  assertTrue(vehicleRan[0], "an unrelated owned resource's own action must still run despite the first one's failure");
+  assertTrue(ownership.shouldRestoreConfig(), "the failed resource must remain owned for a retry");
+  assertFalse(ownership.shouldRemoveVehicle(), "the succeeded resource must be cleared");
  }
-
- @Test void restoresConfigOnceArmedByTheCallerBeforeTheWrite() {
-  var ownership = new TuningCommandProbeOwnership();
-  ownership.configNeedsRestore = true; // armed BEFORE the write attempt, per the probe's own fix
-  assertTrue(ownership.shouldRestoreConfig());
- }
-
- // ---- attemptCleanup: per-resource failure isolation ----
-
- @Test void attemptCleanupSkipsTheActionAndReturnsNullWhenNotOwned() {
-  boolean[] ran = {false};
-  Exception result = TuningCommandProbeOwnership.attemptCleanup(false, () -> ran[0] = true);
-  assertNull(result);
-  assertFalse(ran[0], "an unowned resource's action must never even be attempted");
- }
-
- @Test void attemptCleanupRunsTheActionAndReturnsNullOnSuccess() {
-  boolean[] ran = {false};
-  Exception result = TuningCommandProbeOwnership.attemptCleanup(true, () -> ran[0] = true);
-  assertNull(result);
-  assertTrue(ran[0]);
- }
-
- @Test void attemptCleanupCatchesAndReturnsTheExceptionInsteadOfPropagatingIt() {
-  var thrown = new IOException("disk full");
-  Exception result = TuningCommandProbeOwnership.attemptCleanup(true, () -> { throw thrown; });
-  assertSame(thrown, result, "the exact caught exception must be returned so the caller can log/decide, never swallowed silently");
- }
-
- @Test void oneResourcesFailureDoesNotPreventAnotherResourcesOwnCleanupAttempt() {
-  // Review finding (Wroosbit, comment 54502, finding 2): simulate cleaning up two independent
-  // owned resources where the FIRST throws - the second's own action must still run.
-  boolean[] secondRan = {false};
-  Exception firstResult = TuningCommandProbeOwnership.attemptCleanup(true, () -> { throw new RuntimeException("boom"); });
-  Exception secondResult = TuningCommandProbeOwnership.attemptCleanup(true, () -> secondRan[0] = true);
-  assertNotNull(firstResult, "the first resource's own failure is reported");
-  assertTrue(secondRan[0], "the second resource's own cleanup must still run even though the first one failed");
-  assertNull(secondResult);
- }
-
- // ---- repeat invocation: failed resources retry, already-cleared resources are not repeated ----
 
  @Test void aFailedResourceIsRetriedOnTheNextCleanupPassWhileAnAlreadyClearedOneIsNotRepeated() {
   var ownership = new TuningCommandProbeOwnership();
@@ -144,11 +152,12 @@ class TuningCommandProbeOwnershipTest {
   int[] vehicleAttempts = {0};
 
   // Pass 1: chunk-unforce fails, vehicle-remove succeeds.
-  Exception chunkEx1 = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldUnforceChunk(), () -> { chunkAttempts[0]++; throw new RuntimeException("still locked"); });
-  if (chunkEx1 == null) ownership.chunkForcedByUs = false;
-  Exception vehicleEx1 = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRemoveVehicle(), () -> vehicleAttempts[0]++);
-  if (vehicleEx1 == null) ownership.vehicleSpawned = false;
-
+  var result1 = ownership.runCleanupPass(
+    () -> {}, () -> vehicleAttempts[0]++,
+    () -> { chunkAttempts[0]++; throw new IOException("still locked"); },
+    () -> {}, () -> {});
+  assertNotNull(result1.chunkEx());
+  assertNull(result1.vehicleEx());
   assertTrue(ownership.shouldUnforceChunk(), "the failed resource must remain owned for a retry");
   assertFalse(ownership.shouldRemoveVehicle(), "the succeeded resource must be cleared");
   assertEquals(1, chunkAttempts[0]);
@@ -156,14 +165,44 @@ class TuningCommandProbeOwnershipTest {
 
   // Pass 2 (repeat invocation): chunk-unforce succeeds this time; vehicle-remove must NOT be
   // attempted again since it is no longer owned.
-  Exception chunkEx2 = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldUnforceChunk(), () -> { chunkAttempts[0]++; });
-  if (chunkEx2 == null) ownership.chunkForcedByUs = false;
-  Exception vehicleEx2 = TuningCommandProbeOwnership.attemptCleanup(ownership.shouldRemoveVehicle(), () -> vehicleAttempts[0]++);
-  if (vehicleEx2 == null) ownership.vehicleSpawned = false;
-
+  var result2 = ownership.runCleanupPass(
+    () -> {}, () -> vehicleAttempts[0]++,
+    () -> chunkAttempts[0]++,
+    () -> {}, () -> {});
+  assertNull(result2.chunkEx());
   assertEquals(2, chunkAttempts[0], "the previously-failed resource is retried on repeat invocation");
   assertEquals(1, vehicleAttempts[0], "an already-cleared resource must never be repeated");
   assertTrue(ownership.allCleared());
+ }
+
+ @Test void runCleanupPassWiredThroughTheSameOwnershipFlagsAsSnapshotAndArm() {
+  // End-to-end through the two real production seams together: a reliable snapshot arms
+  // restoration, a successful restore clears it - exactly the sequence execute() then cleanup()
+  // drive the real probe through, with fakes standing in for the file I/O.
+  var ownership = new TuningCommandProbeOwnership();
+  assertTrue(ownership.snapshotAndArm(() -> "original"));
+  assertTrue(ownership.shouldRestoreConfig());
+
+  var result = ownership.runCleanupPass(() -> {}, () -> {}, () -> {}, () -> {}, () -> {});
+  assertNull(result.configEx());
+  assertFalse(ownership.shouldRestoreConfig(), "restoration must be cleared once its own action succeeds");
+ }
+
+ // ---- pre-existing resource preservation ----
+
+ @Test void doesNotUnforceAChunkItNeverForced() {
+  var ownership = new TuningCommandProbeOwnership();
+  ownership.chunkForcedByUs = false; // pre-existing forced chunk - this run did not request it
+  boolean[] ran = {false};
+  ownership.runCleanupPass(() -> {}, () -> {}, () -> ran[0] = true, () -> {}, () -> {});
+  assertFalse(ran[0], "must never unforce a chunk this run did not itself force");
+ }
+
+ @Test void doesNotRemovePackEntriesItNeverAdded() {
+  var ownership = new TuningCommandProbeOwnership();
+  boolean[] ran = {false, false};
+  ownership.runCleanupPass(() -> {}, () -> {}, () -> {}, () -> ran[0] = true, () -> ran[1] = true);
+  assertFalse(ran[0]); assertFalse(ran[1]);
  }
 
  // ---- allCleared / partial setup ----
@@ -175,7 +214,6 @@ class TuningCommandProbeOwnershipTest {
  }
 
  @Test void allClearedIsTrueWhenNothingWasEverOwned() {
-  // A timeout in AWAIT_CHUNK before anything else ran: nothing was ever set up.
   var ownership = new TuningCommandProbeOwnership();
   assertTrue(ownership.allCleared());
   assertFalse(ownership.shouldUnforceChunk());
@@ -188,7 +226,7 @@ class TuningCommandProbeOwnershipTest {
  @Test void partialSetupOnlyCleansUpWhatActuallySucceeded() {
   // A setup/execute failure partway through: the chunk and pack entries were claimed, but the
   // vehicle never spawned (e.g. buildAndSpawn itself threw) and the config was never armed for
-  // restoration (the failure happened before the snapshot ever succeeded).
+  // restoration (the failure happened before snapshotAndArm ever succeeded).
   var ownership = new TuningCommandProbeOwnership();
   ownership.chunkForcedByUs = true;
   ownership.packSpeedFactorAddedByUs = true;
