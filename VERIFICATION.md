@@ -2614,11 +2614,13 @@ all four comparisons PASS.
 
 **Schema.** Mirrors MINECRAFT-529's own `friction` part-override exactly
 in shape, for a new, INDEPENDENT field: `Overrides.Tuning.rollingResistance`
-(bounds `(0, 10]` - strictly positive to avoid a division-by-zero in the
-resolved-value ratio PhysicsBridge divides back out, same reasoning
-`friction`'s own `>0` bound already documents; capped at 10 to match
-`GroundSurfaceOverrides`'s own `rollingResistanceMultiplier` range, since
-the two compose multiplicatively). Threaded through `copy`/
+(bounds `(0, 10]` - strictly positive, same "never zero" reasoning
+`friction`'s own `>0` bound already documents: a zero or negative
+multiplier is a degenerate tuning value, not a real one. There is no
+division anywhere in the final composition - see "Production wiring"
+and "Fix" below; capped at 10 to match `GroundSurfaceOverrides`'s own
+`rollingResistanceMultiplier` range, since the two compose
+multiplicatively). Threaded through `copy`/
 `mergeOntoParent`/`resolveFields` the same as every other field;
 `FALLBACK.rollingResistance=1.0` (a true no-op against the ground-surface
 multiplier, byte-identical to before this ticket). `validateSupportedForPart`
@@ -2633,11 +2635,14 @@ part has one, REPLACES (never multiplies) the vehicle's own resolved
 `rollingResistance` for that one wheel; otherwise the vehicle's value
 passes through unchanged. `stepGround`'s own `FrictionContact`-construction
 stream now also computes `tirePartRollingResistance(tireKey,
-tuning.rollingResistance)/tuning.rollingResistance` - a pure ratio, exactly
-`1.0` with no override - and multiplies it into the EXISTING
+tuning.rollingResistance)` - the fully-resolved value either way, no
+ratio - and multiplies it directly into the EXISTING
 `rollingResistanceMultiplier` slot alongside the ground-surface multiplier
 already living there (MINECRAFT-508): `h.surface().rollingResistanceMultiplier()
-*tireRollingResistanceRatio`. No change to `MultiContactFrictionSolver`'s
+*tireRollingResistance` (an earlier version of this composition divided
+the resolved value back out by `tuning.rollingResistance`; the final
+composition does not - see "Review correction"/"Fix" below). No change
+to `MultiContactFrictionSolver`'s
 own rolling-resistance formula (`F=-speed*20*c.rollingResistanceMultiplier()`)
 or public API - the composition happens entirely in the caller, same as
 grip's own composition. This field is deliberately independent of
@@ -2690,8 +2695,8 @@ cannot be driven by a plain unit test without a live runtime):
   gravel times 3.0x draggy tire = 6.0x, neither one silently overriding
   the other); and changing only `rollingResistanceMultiplier` leaves
   achieved lateral (grip) force completely unaffected, proving the two
-  compositions (grip ratio, rolling-resistance ratio) are genuinely
-  independent.
+  compositions (the grip ratio, and the no-division rolling-resistance
+  value/multiplier composition) are genuinely independent.
 
 Not covered by a plain unit test (same pre-existing, already-disclosed
 limitation every other MISS/ground-contact-dependent behavior in this
