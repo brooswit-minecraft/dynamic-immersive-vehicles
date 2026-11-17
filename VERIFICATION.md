@@ -5006,3 +5006,48 @@ produced - a fresh build artifact (gradle's own `clean` ran first), not
 byte-comparable to the PR-branch jar's own prior sha, but the real JUnit
 pass/fail/skip counts are the actual completion evidence, matching the
 PR-branch build's own 924/0/0/0 exactly.
+
+## Post-merge (MINECRAFT-538, 2026-11-17)
+
+Independent review (Jira comments 54470 CHANGES_REQUESTED, 54475 APPROVED)
+approved exact head `06b744423dca1665da70b3615f6d898f456ad4c9` - this
+repo's own append-only `[review] APPROVED ... @ <sha>` convention in
+place of a native GitHub PR review object (no `reviews[]` entry was
+present via `gh pr view --json reviews`, consistent with the reviewer's
+own disclosed inability to perform some GitHub write operations on this
+PR, e.g. `gh pr ready --undo` failing with a permission denial); that
+40-character sha was verified to match the PR's own `headRefOid` exactly
+before acting on it. As sole merge owner, merged PR #45 into `main` at
+merge commit `f330f60b5c6f6a2c34cdd9e5dae83afbbef20646` - a clean merge
+(`main` had not advanced since the approved head; no conflict). No
+branch-protection bypass or settings change; this repo has no required
+status checks and no `release.yml`/tag-based release workflow beyond
+`ci.yml` - this documentation/comments-only change does not warrant
+inventing one.
+
+One round of review correction occurred before approval: the initial PR
+(head `6096e02`) left a stale "(grip ratio, rolling-resistance ratio)"
+description at VERIFICATION.md:2697 in the
+`MultiContactFrictionSolverTirePartRollingResistanceTest` section, still
+calling the no-division rolling-resistance composition a ratio. Reworded
+to "(the grip ratio, and the no-division rolling-resistance value/
+multiplier composition)" at head `06b7444`, re-verified by grep sweep for
+any remaining ratio/division wording tied to rolling-resistance, then
+resubmitted and approved.
+
+Post-merge hosted CI on this merge commit (run `44025887741`, triggered
+by the push) ran to completion - all 5 jobs (`build`, `runtime-smoke`,
+`anchor-frame-probe`, `ground-support-fixture`, `two-body-impulse-probe`)
+completed with `conclusion: success`, unlike the billing-blocked runs
+several recent sibling tickets on this repo disclosed.
+
+Local verification performed directly against the merged `main` head
+(`f330f60`, fast-forwarded into this checkout via `git fetch`+`merge
+--ff-only`): `flock`-protected `gradle --offline compileJava -q` (under
+`/tmp/div-gradle-slot.lock`) completed with no errors. Per this ticket's
+own declared scope, no executable code changed in either file (`Overrides.
+java`'s `validate()` comment and `VERIFICATION.md`'s own Schema/Production
+wiring text and MultiContactFrictionSolverTirePartRollingResistanceTest
+description), so a full test-suite re-run was not required and was not
+performed; the green hosted-CI `build` job (which does run the full suite)
+is the completion evidence for behavior-preservation instead.
