@@ -5029,3 +5029,116 @@ rather than attributing a result to either while they remain entangled.
 This is a design note for whenever a next run is separately authorized -
 no run is requested or proposed here, and no solver-cause conclusion is
 drawn from any of the above.
+
+## Next-experiment design proposal (54384) - PROPOSAL ONLY, nothing executed
+
+John's comment 54384: bounded, READ-ONLY design of the next experiment,
+after acknowledging two corrections to the prior comparison's framing:
+ticks 1-59 matching is only at DISPLAYED precision (not proven bit-
+identical), and the first OBSERVED divergence at tick=60 does not by
+itself establish a physical origin; likewise, the ~6.8x total log-volume
+difference does not by itself establish per-tick latency or causation -
+both were reported as observations, not conclusions, and remain so here.
+No run, build, physics edit, or cleanup was performed for this section.
+
+### Step 1: does a true pre-failure world snapshot exist? (checked, not assumed)
+
+Searched every retained evidence directory under
+`/home/booswrit/div-evidence/MINECRAFT-545-547/` for an actual copied
+`world/` directory from any point in this investigation: **none exists**.
+Every evidence directory holds logs/hashes/diffs, never a copy of the
+shared `run/world` itself. The shared `run/world` has been continuously
+reused across every run in this entire investigation (dozens of prior
+probe invocations, crashes included) with no point-in-time backup ever
+taken - today's `baseline-original-run-world-level-dat.sha256` is a
+fingerprint of its CURRENT (now, post-every-prior-run) state, not a
+snapshot from before any specific historical crash. **Conclusion: no
+adequate pre-failure world state is recoverable.** Per 54384's own
+branching instruction, this means a design that tries to isolate
+"historical/shared world" as a controlled variable against "fresh world"
+is not possible - there is no way to re-run history with the actual prior
+world state as it existed at any past crash. A matched-state comparison
+along that axis is ruled out here, not invented around.
+
+### Proposal: logging-matched, fresh-world reproducibility-RATE repeats (tests fresh-run variability only, not history)
+
+Since the history/environment axis cannot be tested, the only remaining
+well-posed question is: under IDENTICAL logging/config/launch controls,
+how often does a FRESH isolated world reproduce the known crash at all?
+This is a reproducibility-rate measurement, not a causal/environment
+study, and is proposed as the next bounded experiment - **not executed,
+proposal only**.
+
+**Controls (identical across every repeat):**
+- Compiled instrumentation: the SAME commit already built and hash-
+  verified this round (`compiled-instrumentation.sha256`,
+  `effective-classpath-hashes.sha256`) - re-verified immediately before
+  each repeat's launch (cheap hash check, no rebuild needed unless the
+  worktree has changed, which it must NOT be for this proposal to hold).
+  This holds logging volume constant and identical to the one successful
+  run already measured - no MORE and no FEWER diagnostic lines per tick.
+- Config/launch: identical `DIV_BUOYANT_HITCH_PROBE=true`, same config/
+  eula/server.properties content (hash-verified against the existing
+  `isolated-input-manifest.sha256`/`baseline-original-run-config.sha256`
+  baseline) - reused as-is, since nothing about them is expected to
+  differ run-to-run.
+- World: intentionally NOT pinned - each repeat gets its OWN freshly
+  generated, uniquely-named isolated directory (same realpath + per-file
+  dev:inode non-aliasing proof already established for the first run),
+  never reusing a world and never touching the shared `run/` or any
+  existing retained evidence directory. This is the one dimension
+  deliberately left to vary, since reproducibility-RATE under fresh
+  worlds is exactly what's being measured.
+
+**Finite run count / stopping criteria (fixed in advance, never silently
+extended):** propose N=5 repeats, maximum, decided up front - stop at 5
+regardless of outcome. An early-stop rule is allowed to shorten (not
+lengthen) the run: stop early only if 2 CONSECUTIVE repeats reproduce the
+known crash (`FAILED - left bounded area ... phase=TOWING_REPLACEMENT`),
+since that alone would already demonstrate non-reproduction is not simply
+the typical case - this is a stop-early-on-signal rule, not a reason to
+exceed 5.
+
+**Outcome interpretation (stated in advance, not fitted after the fact):**
+- 0/5 reproduce: consistent with (but does not prove) the one successful
+  run NOT being an outlier - reproducibility under these matched controls
+  would appear to be rare or absent. Cannot distinguish this from "the
+  historical shared world was somehow necessary" since that axis remains
+  untestable (Step 1) - stated as an open question, not resolved by this
+  design.
+- Some mix (1-4/5 reproduce): establishes an actual empirical
+  reproduction rate under matched logging for the first time in this
+  investigation - every historical run before this differed in some
+  uncontrolled way (see 54379's logging-volume finding), so no such rate
+  has ever actually been measured. Still not a mechanism.
+- 5/5 reproduce: suggests the one successful (non-reproducing) run was
+  itself the outlier, not the historical world being special - still not
+  a mechanism, and does not retroactively validate or invalidate anything
+  already reported about that run.
+- **No outcome of this experiment, under any result, licenses a solver-
+  cause claim** - it bounds a reproducibility rate under stated controls,
+  nothing else.
+
+**Safe isolation / evidence retention / shutdown / lock lifetime (reuse,
+not reinvent):** each repeat reuses the EXACT mechanism already built and
+proven this round - `launch-wrapper.sh`'s own self-contained exclusive-
+lock claim/release (never releases while its own java descendant is
+alive, for any terminal reason), its real terminal-pattern detection
+(`[DIV buoyantHitchProbe] (COMPLETE|FAILED)`), and its bounded startup-
+failure (180s)/no-progress (900s) handling - parameterized ONLY by a
+fresh, uniquely-timestamped `ISO_DIR`/`OWNER_TAG` per repeat (e.g.
+`M545-isolated-run2` through `M545-isolated-run6`), nothing else changed.
+Every repeat's isolated world/log is retained UNCONDITIONALLY (no delete
+branch), exactly like the first. Runs are strictly SEQUENTIAL under the
+one shared exclusive lock - never a second worker, never parallel.
+
+**Available artifacts cited, missing inputs stated plainly:** this
+proposal reuses `compiled-instrumentation.sha256`,
+`effective-classpath-hashes.sha256`, `isolated-input-manifest.sha256`,
+and `baseline-original-run-config.sha256` (all already produced and
+verified this round) as the control baseline. The one missing input,
+stated explicitly rather than invented: no pre-failure world snapshot
+exists (Step 1) - this proposal does not attempt to supply one.
+
+**This is a proposal for review, not an execution - no run has been
+started, and none will be without separate, explicit authorization.**
