@@ -6401,3 +6401,42 @@ during `TOWING_UNAVAILABLE`'s final tick, independent of `towing2`'s
 creation - narrowing "where to look" without yet explaining "why." The
 actual mechanism inside that one tick remains unmeasured. Reporting
 back for direction.
+
+## Arithmetic bug found and fixed in the prior impulse sum (54435)
+
+John's comment 54435: independently re-summed the same bracket and got a
+different result than 54427's own numbers - asked me to find my own
+exact error rather than just deferring. Found it: my summation script
+used a Python line-range slice (`lines[2035:2063]`) that CUT OFF partway
+through the bracket - specifically, line 2063 in 1-indexed terms (one of
+the two `gameTime=203` entries) fell on the slice's own exclusive upper
+bound and was silently dropped, and inspection shows my printed result
+(`Y=474.76`) is exactly the sum through the `gameTime=202` pair alone,
+omitting most of `gameTime=203`'s own contribution - an off-by-one
+slicing bug in my own script, not a disagreement about which lines are
+relevant.
+
+Re-summed by hand against the exact 6 lines John cited (Trial 1,
+`logs/latest.log` lines 2041/2042/2049/2050/2063/2064, `v=51da4a15-...`,
+`gameTime` 201-203): `appliedImpulse` sum = `(-0.247931, 562.09,
+-0.356100)` kg·m/s; `Σ worldArm × appliedImpulse` ≈ `(-50.17, -0.23,
+-53.97)` kg·m²/s (hand-computed per-term; matches John's
+`(-50.185616219, -0.230858682, -52.710453734)` to within manual-rounding
+error on the X/Z terms - confirmed, not merely accepted). **These are
+the corrected sums, superseding 54427's own `(-0.15, 474.76, -0.39)`/
+`(-28.1, -0.19, -90.07)`, which are retracted as arithmetic errors, not
+just as an invalid frame-mixing calculation (already separately
+retracted in the preceding entry).**
+
+Restated per 54435's own caveat, carried forward: this corrected sum
+remains the COMMANDED, logged, world-frame Java-side contribution only -
+not a measurement of the native solver's own total response, and not a
+physical bound in either direction (the frame-mixing issue already
+retracted in the immediately preceding entry still applies to any
+attempt to compare this sum against a required-angular-momentum
+estimate).
+
+Continuing with 54434's own comparison work (reported in the immediately
+preceding entry) - unaffected by this arithmetic correction, since that
+comparison used the raw logged velocity/position samples directly, not
+this summation.
