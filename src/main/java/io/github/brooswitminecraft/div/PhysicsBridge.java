@@ -1,5 +1,6 @@
 package io.github.brooswitminecraft.div;
 
+import net.neoforged.neoforge.common.NeoForge;
 import dev.ryanhcode.sable.api.physics.constraint.GenericConstraintConfiguration;
 import dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
@@ -3167,20 +3168,26 @@ public final class PhysicsBridge {
    // paired load. Records have no mutable fields by design - replacing the whole record, rather
    // than mutating `normal` in place, keeps every other already-computed field (compression,
    // localVelocity, damperUsed, ...) untouched and exactly what Phase 1 actually measured.
+   // MINECRAFT-510: contactBlockPos/contactFace are the EXACT raycast result Phase 1 already
+   // computed (terrainHit.getBlockPos()/getDirection() below) - carried through unchanged by
+   // both withNormal/withDriveShareRatio exactly like every other already-measured field, so a
+   // later consumer (WheelGroundContactEvent, fired in Phase 3) never re-derives or floors a
+   // block position from the transformed/owner-relative `point` vector, which is not a
+   // substitute for the original raycast hit (review finding, comment 55238/M55554611).
    record WheelHit(PartGroundDevice wheel, double radius, Vector3d arm, Vector3d start, Vector3d end, double length,
      double compression, Vector3d localVelocity, double normal, Vector3d forward, Vector3d right, Vector3d point,
      double skidSteerMultiplier, double brakeShareRatio, double driveShareRatio, double damperUsed, double effectiveMassUsed, boolean upperOwned, GroundSurface surface,
-     int wheelIndex) {
+     int wheelIndex, net.minecraft.core.BlockPos contactBlockPos, net.minecraft.core.Direction contactFace) {
     WheelHit withNormal(double newNormal) {
      return new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,newNormal,forward,right,point,
-       skidSteerMultiplier,brakeShareRatio,driveShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
+       skidSteerMultiplier,brakeShareRatio,driveShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex,contactBlockPos,contactFace);
     }
     // MINECRAFT-532: lets the post-Phase-1 axle drive-force-sharing pass (below) rebuild this
     // record with a redistributed driveShareRatio - same "replace the whole record" shape as
     // withNormal immediately above, for the same reason.
     WheelHit withDriveShareRatio(double newDriveShareRatio) {
      return new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,
-       skidSteerMultiplier,brakeShareRatio,newDriveShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex);
+       skidSteerMultiplier,brakeShareRatio,newDriveShareRatio,damperUsed,effectiveMassUsed,upperOwned,surface,wheelIndex,contactBlockPos,contactFace);
     }
    }
    // MINECRAFT-506: each wheel's own static load SHARE, from its horizontal (x,z) anchor
@@ -3374,7 +3381,8 @@ public final class PhysicsBridge {
     GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
       hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      brakeShareRatio,driveShareRatio,damperActuallyUsed,damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
+      brakeShareRatio,driveShareRatio,damperActuallyUsed,damperResult.effectiveMass(),upperOwned,surface,wheelIdx,
+      terrainHit.getBlockPos(),terrainHit.getDirection()));
    }
    // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
    // class-level correction for the full defect this closes). For the single-body path this is
@@ -3688,6 +3696,17 @@ public final class PhysicsBridge {
     Vector3d point=new Vector3d(h.point()).add(owner.leverArmCorrection()), forward=h.forward(), right=h.right();
     Vector3d contactVelocity=new Vector3d(owner.ownerAngular()).cross(point).add(owner.ownerVelocity());
     double speed=contactVelocity.dot(forward), sideSpeed=contactVelocity.dot(right);
+    // MINECRAFT-510 (comment 55238/M55554611): generic, read-only observation hook - no erosion
+    // policy here, no Layered Slopes dependency. Real tire-local lateral slip (NOT a vehicle-
+    // local Phase 1 velocity component; no longitudinal wheelspin/lockup claim), real supported
+    // load (normal/gravity, this tick's real per-dimension gravity), and the EXACT Phase 1
+    // raycast block/face threaded through WheelHit unchanged - never re-derived from `point`.
+    // Finite-positive-load guard: a wheel with zero/non-finite normal has no real contact to
+    // report. Listeners must not mutate the world from this handler - see the event's own doc.
+    if (Double.isFinite(h.normal()) && h.normal()>0 && h.contactBlockPos()!=null) {
+     NeoForge.EVENT_BUS.post(new WheelGroundContactEvent(level,h.contactBlockPos(),h.contactFace(),
+       Math.abs(sideSpeed),h.normal()/gravity,level.getServer().getTickCount()));
+    }
     Vector3d force=new Vector3d(up).mul(h.normal()).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
     // Captured BEFORE the world-frame point/force below are mutated in place into the
     // local-frame values actually passed to applyImpulseAtPoint - "requested" (world-frame,
