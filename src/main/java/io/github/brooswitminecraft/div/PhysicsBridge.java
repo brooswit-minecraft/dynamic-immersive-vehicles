@@ -1599,11 +1599,17 @@ public final class PhysicsBridge {
       // UNCONDITIONAL (not gated behind the opt-in GroundContactDiagnostics flag) so a server
       // operator has visibility into exactly when this known gap may be affecting a live client,
       // without this ever being silently invisible by default.
+      // MINECRAFT-545/547 (John's comment 54974): the prior wording of this log claimed a
+      // specific resolution path ("until it reconnects or leaves render distance") that was
+      // never actually verified at runtime - a source-predicted guess, not observed behavior.
+      // Narrowed to state only what is actually confirmed: the server-side clear happened with
+      // no notification sent, full stop, with no speculation about if/when/how any affected
+      // client's own state is ever corrected.
       com.mojang.logging.LogUtils.getLogger().warn(
         "[DIV] missing-index fallback fired for towed vehicle " + v.uniqueUUID + " - this vehicle's own towing connection was cleared"
-          + " server-side with NO client notification packet sent (none is supported for this exact case - see MINECRAFT-547)."
-          + " Any client that was already tracking this vehicle may retain stale towedByConnection/group/parking-brake state until"
-          + " it reconnects or the vehicle leaves its render distance and returns.");
+          + " server-side with NO client notification packet sent (none of MTS's existing client-sync mechanisms is supported for this"
+          + " exact case - see MINECRAFT-547). Whether, or how, any client already tracking this vehicle ever has its own local state"
+          + " corrected is NOT established by this log line alone.");
       // 54862/54870: the real, direct, bounded observation - a complete no-op unless a caller
       // has explicitly registered for this exact vehicle UUID, and only counts a match if the
       // connection object captured here is reference-identical to what that caller registered.
@@ -1615,6 +1621,72 @@ public final class PhysicsBridge {
    }
   });
  }
+
+ /** MINECRAFT-545/547 (John's comment 54974): a PROPOSAL, not yet wired to any real packet -
+  * the pure identity-safety DECISION LOGIC a future DIV-owned server-to-client disconnect
+  * notification would need before this fixture's own client-side policy may safely act. Design
+  * rationale (full detail in VERIFICATION.md's own "Per 54974" entry):
+  * <p>The server missing a valid index into {@code towingConnections} does NOT imply the
+  * CLIENT also lacks one - the client's own copy may still be fully intact, in which case the
+  * real, public {@code disconnectTrailer(int)} should be used with the CLIENT's OWN index, not
+  * skipped. Only if the client ALSO lacks a valid index does this fall back to the same
+  * idempotent, public-only cleanup {@link #fallbackClearConnection} already performs server-side.
+  * <p>Critical safety requirement (54974's own explicit correction): the same vehicle-UUID pair
+  * can legitimately disconnect and reconnect - an old, late/replayed notification about a
+  * now-superseded connection must NEVER tear down a genuine REPLACEMENT connection to the same
+  * pair. {@link TowingConnectionIdentity} captures every field {@code TowingConnection} actually
+  * exposes that could distinguish one connection from another (both vehicle UUIDs plus all four
+  * group/connection-slot indices) - a notification is only ever acted on if the client's OWN
+  * current connection for that towed vehicle matches it in EVERY one of those fields.
+  * <p><b>Disclosed, not glossed over</b>: {@code TowingConnection} has no generation/session/
+  * timestamp field of its own, and DIV cannot add one to a dependency class it does not own
+  * without reflection (forbidden). A reconnect to the EXACT SAME hitch/hookup points for the
+  * EXACT SAME vehicle pair would therefore produce a byte-identical {@link
+  * TowingConnectionIdentity} to the one it replaced - genuinely indistinguishable through any
+  * API this investigation has found to be supported. This residual ambiguity is the smallest
+  * upstream (MTS-side) addition that would fully close it: a connection generation/session
+  * counter in {@code TowingConnection} itself. Until/unless that exists upstream, this policy's
+  * own match requirement is the closest supported mitigation - it still correctly preserves the
+  * overwhelmingly common case (any replacement that differs in EVEN ONE field: a different
+  * vehicle, a different hitch/hookup point, etc.), and still never fabricates an index or
+  * touches private/protected state to narrow the remaining gap further. */
+ public record TowingConnectionIdentity(
+     java.util.UUID towingVehicleUuid, java.util.UUID towedVehicleUuid,
+     int hitchGroupIndex, int hitchConnectionIndex,
+     int hookupGroupIndex, int hookupConnectionIndex) {}
+
+ /** What a client receiving a (proposed, not-yet-implemented) stale-disconnect notification
+  * should do, given its OWN current state - never a blind instruction from the server alone. */
+ public enum StaleDisconnectAction {
+  /** The client's own current connection for this towed vehicle matches the notification
+   * exactly, AND the client's own towingConnections list still contains it at a real index -
+   * use that REAL, CLIENT-OWN index with the actual public {@code disconnectTrailer(int)}. */
+  DISCONNECT_BY_CLIENT_OWN_INDEX,
+  /** The client's own current connection matches, but the client ALSO has no valid index for
+   * it (same structural gap as the server's own fallback) - apply the same idempotent,
+   * public-only cleanup, never fabricating an index. */
+  IDEMPOTENT_CLEANUP_ONLY,
+  /** The client has no current connection for this towed vehicle at all, OR has a DIFFERENT
+   * one (a genuine replacement, or simply never had one) - the notification does not apply;
+   * taking any action here would risk tearing down a connection this notification was never
+   * actually about. Always the safe default. */
+  IGNORE_NOTIFICATION
+ }
+
+ /** Pure, MTS/Minecraft-free: decides what a client should do with a stale-disconnect
+  * notification, given only comparable identity data - no live object references, no network
+  * I/O, directly unit-testable with synthetic values. {@code notified} is the identity of the
+  * connection the SERVER cleared via the fallback path; {@code clientCurrent} is null if the
+  * client currently has no connection at all for the named towed vehicle, else the identity of
+  * whatever connection it currently has; {@code clientHasValidIndex} is only consulted when
+  * {@code clientCurrent} is non-null and matches - whether the client's OWN towingConnections
+  * list still contains that exact connection at a real index. */
+ public static StaleDisconnectAction decideStaleDisconnectAction(
+     TowingConnectionIdentity notified, TowingConnectionIdentity clientCurrent, boolean clientHasValidIndex) {
+  if (clientCurrent == null || !clientCurrent.equals(notified)) return StaleDisconnectAction.IGNORE_NOTIFICATION;
+  return clientHasValidIndex ? StaleDisconnectAction.DISCONNECT_BY_CLIENT_OWN_INDEX : StaleDisconnectAction.IDEMPOTENT_CLEANUP_ONLY;
+ }
+
  public static void cleanup() {
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.

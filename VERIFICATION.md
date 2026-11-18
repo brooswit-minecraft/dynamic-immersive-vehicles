@@ -13213,3 +13213,125 @@ overwritten) to distinguish the structural `connectionGroupsIndexesInUse` access
 claim). No merge/Done transition made or implied - the structural resource-leak-risk gap, the
 now-precisely-understood client-notification gap, and the original five-crash native history
 this ticket exists to diagnose all remain open.
+
+## Per 54974: corrected overclaims, a DIV-owned packet proposal, and the pure identity-safety
+## decision logic implemented and tested now
+
+John's 54974 found the prior round's own "every avenue foreclosed" conclusion premature: it only
+considered REUSING MTS's existing `PacketEntityTowingChange`, not a DIV-owned custom
+server-to-client payload built on NeoForge's own supported networking (confirmed to exist in
+this codebase already - `WheelAuxPayload`, a client-to-server `CustomPacketPayload`, is DIV's own
+existing precedent for this exact infrastructure). Also corrected: the prior round's warning log
+claimed a specific resolution path ("until it reconnects or leaves render distance") that was
+never actually verified at runtime - a source-predicted guess presented with too much
+confidence - and "every avenue foreclosed" itself overstated what had actually been checked.
+
+### Corrections made
+
+- The warning log's wording (`PhysicsBridge`'s fallback `clearConnection`) no longer claims any
+  specific resolution path - it now states only what is directly confirmed: no notification was
+  sent, full stop, with no speculation about if/when/how any affected client's state is ever
+  corrected.
+- `VERIFICATION.md`'s own prior framing of "every avenue foreclosed" is corrected here: every
+  avenue involving MTS's EXISTING mechanisms (its own index-based packet, its own client
+  self-heal check) is still confirmed foreclosed - that specific, narrower claim stands - but a
+  DIV-owned custom payload was not evaluated at the time and is addressed below.
+- Round3's own single-run `NO_LEAK_OBSERVED` result and `b6ec50e`'s own separate, earlier
+  candidate-on native success remain preserved as two distinct records, exactly as before - this
+  round does not blur them, and makes no blanket "five-crash-unresolved" summary.
+
+### The proposal - a DIV-owned identity-addressed disconnect notification
+
+**Packet shape**: a new `CustomPacketPayload` (same `playToClient` registration pattern as the
+existing `WheelAuxPayload`'s own `playToServer`), carrying the OLD connection's comparable
+identity (see `TowingConnectionIdentity` below) plus the towed vehicle's own UUID (to resolve the
+target entity client-side).
+
+**Server emission point**: inside `PhysicsBridge`'s existing fallback `clearConnection` -
+exactly where the new diagnostic log already sits - captured BEFORE `v.towedByConnection` is
+nulled (the same ordering discipline `fallbackClearConnection`'s own pure orchestration already
+enforces).
+
+**Recipient routing**: NeoForge's own `PacketDistributor.sendToPlayersTrackingEntity(Entity,
+...)` (confirmed to exist and be the correct supported mechanism for "appropriate tracking
+clients" - the same category of API `sendToAllClients` uses for the normal-disconnect case,
+just scoped to trackers of one entity instead of everyone) - **one open question, disclosed
+honestly, not glossed over**: this requires a real vanilla `Entity` handle, and `EntityVehicleF_
+Physics`/`AEntityB_Existing` (confirmed, by direct inspection, to have no public method or field
+exposing its own backing vanilla-entity wrapper, `BuilderEntityExisting`) does not obviously
+expose one from DIV's own package. `WrapperWorld.spawnEntityInternal` constructs the wrapper but
+is `protected`. This is the one remaining API question to resolve (via further reading or,
+failing that, as a cited limitation) BEFORE any real packet is wired - not yet resolved in this
+round, and not worked around with reflection.
+
+**Client dispatch**: `context.enqueueWork(...)` (same convention as `WheelAuxPayload.handle`,
+running on the client's own game thread, never the network thread) resolves the notification
+against the client's OWN current state via the identity-safety decision below, then acts only
+through genuinely public MTS methods (`disconnectTrailer(int)` with the CLIENT's own real index,
+or the same public-only cleanup the server's own fallback already performs) - never a fabricated
+index, never reflection.
+
+### The identity-safety decision logic - implemented, tested, NOT yet wired to any packet
+
+Per John's own explicit framing ("implement only after identity/authority safety is
+established"), this round lands ONLY the pure decision policy itself - safe to review and test
+in isolation, with no live networking, no client/server integration, and no new native run.
+
+`PhysicsBridge.TowingConnectionIdentity` is a record of every field `TowingConnection` actually
+exposes that could distinguish one connection from another: both vehicles' UUIDs, plus all four
+group/connection-slot indices (`hitchGroupIndex`/`hitchConnectionIndex`/`hookupGroupIndex`/
+`hookupConnectionIndex`) - confirmed by direct inspection of the real `TowingConnection` class,
+no field invented. `decideStaleDisconnectAction(TowingConnectionIdentity notified,
+TowingConnectionIdentity clientCurrent, boolean clientHasValidIndex)` is pure, MTS/Minecraft-free,
+and returns one of three outcomes:
+- `IGNORE_NOTIFICATION` - the client has no current connection for the named towed vehicle at
+  all, or has a DIFFERENT one (differs in even one field) - covers "no connection," "wrong
+  entity/identity," and the critical "same-pair new-generation replacement preserved" case
+  together, since a genuine replacement necessarily differs in at least the connection's own
+  identity tuple at the moment a stale notification arrives.
+- `DISCONNECT_BY_CLIENT_OWN_INDEX` - the client's own current connection matches exactly AND its
+  own `towingConnections` list still contains it at a real index - use that REAL, CLIENT-OWN
+  index with the actual `disconnectTrailer(int)`, never skipped just because the SERVER's own
+  index was gone (54974's own explicit point: server-missing does not imply client-missing).
+- `IDEMPOTENT_CLEANUP_ONLY` - the client's own current connection matches exactly, but the
+  client ALSO independently lacks a valid index (the same structural gap the server itself hit) -
+  fall back to the same public-only cleanup, never fabricating an index.
+
+**Disclosed limitation, not glossed over**: `TowingConnection` has no generation/session/
+timestamp field of its own, and none can be added to a dependency class DIV does not own without
+reflection (forbidden). A reconnect to the EXACT SAME hitch/hookup points for the EXACT SAME
+vehicle pair, happening before a stale notification arrives, would produce a byte-identical
+`TowingConnectionIdentity` to the one it replaced - genuinely indistinguishable through any
+currently-supported API. The smallest upstream addition that would fully close this residual gap
+is a connection generation/session counter in MTS's own `TowingConnection` class - outside what
+DIV can add from the consuming side. Until/unless that exists upstream, exact-field matching is
+the closest supported mitigation: it still correctly preserves the overwhelmingly common
+replacement case (differing in even one field), at the cost of this one narrow, disclosed,
+residual ambiguity.
+
+6 new `PhysicsBridgeClassificationTest` cases cover the full matrix John named: no current
+connection (ignore), wrong towing vehicle (ignore), wrong hitch/hookup slot - i.e. same-pair
+replacement (ignore, preserved), exact match with a valid client index (disconnect by that
+index), exact match with no valid client index (idempotent cleanup), and repeated/replayed
+delivery of the identical notification (idempotent - same inputs, same output, confirmed by
+calling the pure function twice).
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **942 tests** (up from 936 - 6 new identity-safety
+policy cases), 0 failures, 0 errors.
+
+### Disposition
+
+Two overclaims from the prior round corrected (the warning log's speculative resolution-path
+wording; "every avenue foreclosed" narrowed to what was actually checked at the time). A concrete
+DIV-owned packet proposal published, grounded in existing, already-precedented DIV infrastructure
+(`WheelAuxPayload`) and confirmed-supported NeoForge APIs (`PacketDistributor.
+sendToPlayersTrackingEntity`), with exactly one open API question disclosed (resolving an
+`AEntityB_Existing` to its own vanilla-entity wrapper) rather than worked around. The
+identity-safety decision logic itself - the part John explicitly asked to be established BEFORE
+any implementation proceeds - is implemented, pure, and fully tested against the exact scenario
+matrix requested (942 tests, 0 failures). No live packet, no client/server wiring, no new native
+run in this round - per John's own explicit instruction, that follows only after this proposal
+and its safety logic are reviewed. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on
+success remain two distinct, unblurred records. No merge/Done transition made or implied.

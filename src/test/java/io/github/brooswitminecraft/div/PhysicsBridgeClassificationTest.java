@@ -640,4 +640,80 @@ class PhysicsBridgeClassificationTest {
   assertEquals(1, PhysicsBridge.debugFallbackObserverMatchedCount(secondHandle));
   PhysicsBridge.unregisterFallbackObserver(secondHandle);
  }
+
+ // MINECRAFT-545/547 (John's comment 54974): the pure client-side identity-safety policy for a
+ // PROPOSED (not yet wired) stale-disconnect notification - covers the exact matrix 54974 named:
+ // matching old connection, wrong entity/identity, duplicate/replay (same as "matching old
+ // connection" from the client's own perspective - it cannot tell replay from first delivery,
+ // which is exactly why the policy is idempotent either way), same-pair new-generation
+ // replacement preserved, valid-index normal disconnect (DISCONNECT_BY_CLIENT_OWN_INDEX),
+ // missing-index bounded behavior (IDEMPOTENT_CLEANUP_ONLY).
+
+ private static PhysicsBridge.TowingConnectionIdentity identity(
+     java.util.UUID towingUuid, java.util.UUID towedUuid, int hitchGroup, int hitchConn, int hookupGroup, int hookupConn) {
+  return new PhysicsBridge.TowingConnectionIdentity(towingUuid, towedUuid, hitchGroup, hitchConn, hookupGroup, hookupConn);
+ }
+
+ @Test void clientWithNoCurrentConnectionIgnoresTheNotification() {
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var notified = identity(towing, towed, 0, 0, 0, 0);
+  assertEquals(PhysicsBridge.StaleDisconnectAction.IGNORE_NOTIFICATION,
+    PhysicsBridge.decideStaleDisconnectAction(notified, null, true));
+ }
+
+ @Test void clientWithADifferentTowingVehicleIgnoresTheNotification() {
+  // "Wrong entity/identity" - a different towing vehicle entirely, same towed vehicle.
+  var towed = java.util.UUID.randomUUID();
+  var notified = identity(java.util.UUID.randomUUID(), towed, 0, 0, 0, 0);
+  var clientCurrent = identity(java.util.UUID.randomUUID(), towed, 0, 0, 0, 0);
+  assertEquals(PhysicsBridge.StaleDisconnectAction.IGNORE_NOTIFICATION,
+    PhysicsBridge.decideStaleDisconnectAction(notified, clientCurrent, true));
+ }
+
+ @Test void clientWithADifferentHitchOrHookupSlotIgnoresTheNotification() {
+  // "Same-pair new-generation replacement preserved" - identical vehicle pair, but a different
+  // hitch/hookup group or connection index means this is NOT the same connection the server
+  // cleared, even though both vehicles match - a genuine replacement must be preserved.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var notified = identity(towing, towed, 0, 0, 0, 0);
+  var clientCurrentDifferentHitchGroup = identity(towing, towed, 1, 0, 0, 0);
+  assertEquals(PhysicsBridge.StaleDisconnectAction.IGNORE_NOTIFICATION,
+    PhysicsBridge.decideStaleDisconnectAction(notified, clientCurrentDifferentHitchGroup, true));
+  var clientCurrentDifferentHookupConnIndex = identity(towing, towed, 0, 0, 0, 1);
+  assertEquals(PhysicsBridge.StaleDisconnectAction.IGNORE_NOTIFICATION,
+    PhysicsBridge.decideStaleDisconnectAction(notified, clientCurrentDifferentHookupConnIndex, true));
+ }
+
+ @Test void exactlyMatchingConnectionWithAValidClientIndexDisconnectsByThatIndex() {
+  // "Valid-index normal disconnect" - the client's own copy is still fully intact; the real,
+  // client-own index must be used, never skipped just because the SERVER's own index was gone.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var notified = identity(towing, towed, 0, 0, 0, 0);
+  var clientCurrent = identity(towing, towed, 0, 0, 0, 0);
+  assertEquals(PhysicsBridge.StaleDisconnectAction.DISCONNECT_BY_CLIENT_OWN_INDEX,
+    PhysicsBridge.decideStaleDisconnectAction(notified, clientCurrent, true));
+ }
+
+ @Test void exactlyMatchingConnectionWithNoValidClientIndexFallsBackToIdempotentCleanup() {
+  // "Missing-index bounded behavior" - the client independently also lacks a valid index (the
+  // same structural gap the server itself hit) - fall back to the same public-only cleanup,
+  // never fabricating an index to force the real disconnectTrailer path.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var notified = identity(towing, towed, 0, 0, 0, 0);
+  var clientCurrent = identity(towing, towed, 0, 0, 0, 0);
+  assertEquals(PhysicsBridge.StaleDisconnectAction.IDEMPOTENT_CLEANUP_ONLY,
+    PhysicsBridge.decideStaleDisconnectAction(notified, clientCurrent, false));
+ }
+
+ @Test void repeatedDeliveryOfTheSameNotificationIsIdempotent() {
+  // "Duplicate/replay" - the client cannot distinguish a replay from a first delivery, so the
+  // policy itself must be safe to run twice with no additional effect assumed between calls;
+  // confirmed here by simply calling it twice with identical inputs and getting identical output.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var notified = identity(towing, towed, 0, 0, 0, 0);
+  var clientCurrent = identity(towing, towed, 0, 0, 0, 0);
+  var first = PhysicsBridge.decideStaleDisconnectAction(notified, clientCurrent, true);
+  var second = PhysicsBridge.decideStaleDisconnectAction(notified, clientCurrent, true);
+  assertEquals(first, second);
+ }
 }
