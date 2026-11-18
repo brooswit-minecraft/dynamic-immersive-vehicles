@@ -13780,3 +13780,130 @@ performed or proposed - any future client/network validation still requires the 
 specific, single-use coordinator release and fresh parent/M510 slot coordination every prior
 native run in this investigation has required. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own
 candidate-on success remain distinct, unblurred. No merge/Done transition made or implied.
+
+## Per 55010: the 55005 round's own fixes were still not safe - a stricter fail-closed binding,
+## event-driven announcements, and a real client/server side separation
+
+John's exact-head review of `ae21031` explicitly refused to accept "all four defects fixed":
+the client-local lookup and client-ledger changes were real progress, but the binding fix
+itself was still unsafe, the retry loop could still misfire, the retry window still had a hard
+miss case, the session-cleanup claim didn't match its own implementation, and the direct
+`Minecraft` reference needed an actual side-separated adapter, not just a correctness argument.
+
+### 1. The 55005 round's own "strictly greater than the watermark" fix was STILL unsafe
+
+Confirmed exactly as John found it: "55005 never limited protection to already-bound
+replacements." A numerically higher, NEVER-BEFORE-SEEN generation value provides no trustworthy
+evidence that an announcement is actually about the CURRENT object - only that nothing else has
+claimed that number yet. A stale announcement for an UNBOUND same-tuple replacement (its own
+real announcement lost or simply not yet arrived) could still bind under the "greater than
+watermark" rule, and a matching stale DISCONNECT notification would then correctly "match" the
+wrongly-bound state and tear down a connection with no real evidence it had actually been
+superseded.
+
+**Fixed per John's own explicit instruction** ("immediately fail closed on any binding lacking
+trustworthy creation/order evidence... watermarks alone do not establish object identity"):
+`shouldBindAnnouncedGeneration` now accepts ONLY (a) the first-ever announcement for a given
+towed vehicle (nothing to compare against yet - the mechanism cannot bootstrap any other way),
+or (b) an announced value EXACTLY EQUAL to the already-trusted watermark (the one case 55010
+separately asked to be preserved: "same-generation retrack with a NEW client object" - a
+legitimate retrack that rebuilt the client's own local object reference, but is genuinely still
+the SAME trusted generation). Any value STRICTLY GREATER than the watermark now fails closed.
+
+**Explicit, standing acceptance gap** (not glossed over): once a genuine replacement occurs for
+a given towed vehicle, THIS client is never again protected for that specific vehicle - no
+further binding ever succeeds - until a real session boundary (logout/rejoin, world unload)
+resets its own watermark. Only the FIRST connection a client ever observes for a given towed
+vehicle in a session is ever protected. Fully closing this needs a stronger protocol than a
+bare counter (an upstream MTS connection-generation/session field, or a handshake/acknowledgment
+scheme DIV would need to design as its own separate, larger follow-on) - cited as the precise
+impossibility, not asserted away. 5 corrected pure tests: first-ever (accept), already-bound
+(reject regardless of value), delayed-old-after-newer (reject), exact repeat of an
+already-trusted value (accept - the retrack case), and genuinely-newer-than-watermark (now
+correctly rejected - this is the exact case the 55005 round's own tests wrongly asserted should
+be accepted).
+
+### 2 & 3. The retry loop could misfire after a normal disconnect, and still had a hard miss case
+
+Confirmed: the 55005 round's own bounded retry loop resent to a CAPTURED connection reference on
+every tick within its window with no recheck that the reference was still actually the
+vehicle's own CURRENT connection - a connection that disconnected NORMALLY (through MTS's own
+code, which DIV never hooks and which therefore never calls `forgetConnectionGeneration`) could
+still be re-announced during its own remaining window. Separately, the fixed 100-tick window
+itself still had a hard miss case: any player who started tracking AFTER the window expired
+(e.g. more than 5 seconds after the connection formed) would never receive the announcement at
+all - "a larger global window" was explicitly rejected as the fix.
+
+**Fixed by removing the retry window entirely**, replaced with real NeoForge tracking events:
+`PlayerEvent.StartTracking` (confirmed server-side, fired for exactly one player the instant
+they begin tracking exactly one entity) is now registered in `DynamicImmersiveVehicles`,
+delegating to a new `PhysicsBridge.announceConnectionGenerationToNewTracker` - which RE-DERIVES
+the connection fresh from the target entity's own live `towedByConnection` field on every single
+call, never from any captured/cached reference, so an already-superseded or already-normally-
+disconnected connection can never be re-announced (closing defect 2 structurally, not by adding
+another recheck to chase). Every late join/retrack, at any delay, is now covered by an ACTUAL
+event instead of a window that could expire (closing defect 3 structurally too - no timer to
+outlast). The original per-tick-scan send (for players already tracking at the exact moment of
+first assignment) remains, now as the sole "first send," with `StartTracking` covering every
+later tracker.
+
+### 4. `forgetAllClientStateForTowedVehicle` had no call site and did not match its own doc
+
+Confirmed: never invoked anywhere, and its own doc claimed it cleared "both maps" when the
+implementation only ever touched the watermark map.
+
+**Fixed**: the doc claim is corrected (the per-object `clientConnectionGenerations` map is
+already weakly held and self-cleans once unreferenced - "clearing both maps" was never
+literally necessary, only the prose was wrong), and a REAL call site now exists:
+`ClientTowingConnectionTracker.onLevelUnload` subscribes to `LevelEvent.Unload`, explicitly
+checks `event.getLevel().isClientSide()` (this event fires on BOTH logical sides for a common
+event - on an integrated singleplayer world, the internal SERVER's own level unload would
+otherwise also trigger this same handler in the same JVM), and clears BOTH maps outright on a
+genuine client session boundary.
+
+### 5. The direct `Minecraft` client-class reference needed a real side-separated adapter
+
+Confirmed the concern as John framed it: compiling successfully in this dev environment (whose
+merged classpath includes client classes) does not by itself prove a production dedicated-server
+JVM can load the referencing class safely.
+
+**Fixed with an actual side separation**, not merely an argument: ALL client-only state and
+logic (the client-side generation ledger, `findClientTrackedVehicleByUuid`,
+`bindClientConnectionGeneration`, `forgetClientConnectionGeneration`,
+`forgetAllClientStateForTowedVehicle`, `handleClientStaleDisconnectNotification`, and the real
+`REAL_STALE_DISCONNECT_OPS` adapter) moved to a NEW class,
+`io.github.brooswitminecraft.div.client.ClientTowingConnectionTracker` - DIV's own existing,
+already-reviewed convention for client-only code (`client.WheelAuxInput`/`client.DivClientConfig`
+already live there), annotated `@EventBusSubscriber(Dist.CLIENT)`, which is a FRAMEWORK-level
+guarantee (not merely organizational discipline) that this class and its event handlers are
+registered, and only ever actually need loading, on the client physical side. The common
+`PhysicsBridge` class no longer references `net.minecraft.client.Minecraft` (or anything
+client-only) anywhere; `ConnectionGenerationPayload.handle()` (itself only ever executed
+client-side, since this payload is `playToClient`) is the one remaining common-class call site
+that references the new client class - the same standard pattern every `playToClient` payload
+handler in any NeoForge mod already relies on (a dedicated server registers the payload type but
+never actually executes its `handle()` body, so the JVM's own lazy symbolic resolution of
+`ClientTowingConnectionTracker` never triggers there).
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **960 tests** (5 `shouldBindAnnouncedGeneration` cases
+corrected in place for the new, stricter semantics - net count unchanged from the prior round,
+since the pending-retry-ledger tests were removed along with the mechanism they tested and no
+new direct tests were added for the now event-driven announce path, which - like every other
+real MTS/NeoForge-event adapter in this codebase - is checked by compilation and direct
+inspection, not a unit test requiring a live tracking event), 0 failures, 0 errors.
+
+### Disposition
+
+Five real issues from the "all four defects fixed" claim in the prior round are corrected: the
+binding fix itself is now genuinely fail-closed (accepting only a first-ever or exactly-repeated
+trusted value, never a numerically-newer guess), with the narrowed, now-explicit acceptance gap
+disclosed precisely rather than asserted away; the retry mechanism is removed entirely in favor
+of real tracking events, which structurally closes both the stale-reannounce risk and the
+missed-late-join risk at once (no window to misfire or expire); the session-cleanup function now
+has a real call site and an accurate doc; and the client-only Minecraft-referencing code is
+actually separated into its own `Dist.CLIENT`-scoped class, not merely argued to be safe where
+it previously sat. Full suite green (960 tests). No native run performed or proposed. Round3's
+`NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on success remain distinct, unblurred. No
+merge/Done transition made or implied.

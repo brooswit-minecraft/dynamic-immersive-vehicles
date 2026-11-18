@@ -47,6 +47,16 @@ public final class DynamicImmersiveVehicles {
   var overridesHotReload = new OverridesHotReload();
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> overridesHotReload.maybeReload());
   NeoForge.EVENT_BUS.addListener((LevelEvent.Unload event) -> PhysicsBridge.unload(event.getLevel()));
+  // MINECRAFT-545/547 (John's comment 55010): the event-driven replacement for the 55005
+  // round's own blind, fixed-length announce-retry window - PlayerEvent.StartTracking fires
+  // server-side for exactly the one player who just started tracking exactly one entity,
+  // covering an arbitrarily late join/retrack with no timer and no missed window. See
+  // PhysicsBridge.announceConnectionGenerationToNewTracker's own doc.
+  NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.entity.player.PlayerEvent.StartTracking event) -> {
+   if (event.getEntity() instanceof net.minecraft.server.level.ServerPlayer player) {
+    PhysicsBridge.announceConnectionGenerationToNewTracker(player, event.getTarget());
+   }
+  });
   // Opt-in, CI/isolated-host-only anchor-frame probe (ticket comment 53243/53244) - OFF by
   // default (Boolean.getBoolean read once inside the probe itself), a strict no-op otherwise.
   // Never touches any real vehicle or world content - see AnchorFrameProbe's own doc.

@@ -1,4 +1,5 @@
 package io.github.brooswitminecraft.div;
+import io.github.brooswitminecraft.div.client.ClientTowingConnectionTracker;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -68,16 +69,20 @@ public record ConnectionGenerationPayload(
 
  public static void handle(ConnectionGenerationPayload payload, IPayloadContext context) {
   context.enqueueWork(() -> {
-   // MINECRAFT-545/547 (John's comment 55005): this payload is playToClient - handle() only
-   // ever runs client-side - resolved via the CLIENT's own local entity set, NEVER PhysicsBridge's
-   // own physics registry (confirmed unsafe for this purpose - see
-   // PhysicsBridge.findClientTrackedVehicleByUuid's own doc for why).
-   var towed = PhysicsBridge.findClientTrackedVehicleByUuid(payload.towedVehicleUuid());
+   // MINECRAFT-545/547 (John's comment 55010): this payload is playToClient - handle() (and
+   // therefore this lambda) only ever EXECUTES client-side; the JVM's own lazy symbolic
+   // resolution of ClientTowingConnectionTracker (a referenced class, not yet loaded until
+   // actually invoked) never triggers on a dedicated server, which never calls into this
+   // lambda body at all - the same standard pattern every playToClient payload handler in any
+   // NeoForge mod already relies on. All client-only state/logic itself lives in
+   // ClientTowingConnectionTracker (Dist.CLIENT-scoped), never referenced from common
+   // PhysicsBridge - see that class's own doc for the full reasoning.
+   var towed = ClientTowingConnectionTracker.findClientTrackedVehicleByUuid(payload.towedVehicleUuid());
    if (towed == null) return; // not currently loaded/tracked client-side - nothing to do.
    if (payload.disconnected()) {
-    PhysicsBridge.handleClientStaleDisconnectNotification(towed, payload.identity(), payload.generation());
+    ClientTowingConnectionTracker.handleClientStaleDisconnectNotification(towed, payload.identity(), payload.generation());
    } else {
-    PhysicsBridge.bindClientConnectionGeneration(towed, payload.identity(), payload.generation());
+    ClientTowingConnectionTracker.bindClientConnectionGeneration(towed, payload.identity(), payload.generation());
    }
   });
  }
