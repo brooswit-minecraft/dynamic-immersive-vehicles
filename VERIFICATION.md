@@ -16550,3 +16550,95 @@ carrying the jar and its checksum file as assets -
 https://github.com/brooswit-minecraft/dynamic-immersive-vehicles/releases/tag/test-build/minecraft-553-merged-main-9ef8bee.
 Not published (remains Draft) - no GitHub Release is marked latest/public,
 per the same disclosed boundary every prior ticket's own entry states.
+
+## 2026-11-18 — Per 55043: current-main merge
+
+### What John directed
+
+Comment 55043 authorized, as part of the existing sprint scope (no further permission/
+announcement wait needed), actually resolving the current-main merge conflict reported in the
+55037 round (`mergeable: "CONFLICTING"`). Explicit constraints: a normal merge preserving
+history (no rebase, no force-push, no blind `--ours`/`--theirs`), no resurrection of any removed
+client-protocol experiment, and if a conflict can't be confidently resolved from code/evidence
+alone, report it as a substantive ownership conflict rather than guess.
+
+### What was done
+
+`git fetch origin main` (now at `958e645`, carrying MINECRAFT-553's merged gear-aware-drive work
+and others), then `git merge origin/main`. Only 5 of the 8 previously-reported files produced a
+real textual conflict — `README.md`, `BuoyantForces.java`, and `PhysicsBridge.java` auto-merged
+cleanly; `VERIFICATION.md`, `build.gradle`, `Buoyancy.java`, `DynamicImmersiveVehicles.java`, and
+`BuoyancyTest.java` needed manual resolution:
+
+- **`VERIFICATION.md`** — pure both-sides-appended history (this branch's own entries, and main's
+  independent MINECRAFT-544/553 entries from unrelated tickets). Resolved by keeping both halves
+  in full, concatenated — no entry from either side dropped.
+- **`build.gradle`** — two conflicts, both line-based artifacts of unrelated `if`-blocks/comment
+  blocks added by each side inside the same enclosing block; git's merge mis-attributed each
+  side's own trailing closing brace as a shared suffix. Resolved by keeping every `if`-block from
+  both sides (this branch's `DIV_ALREADY_ACTIVE_UNSAFE_FALLBACK_PROBE` etc., main's
+  `DIV_ROTOR_AIR_DRAG_RUNTIME_PROBE`/`DIV_TUNING_COMMAND_PROBE`) and manually restoring the one
+  closing `}` git's line-merge had conflated between sides; verified brace balance by inspection
+  after the fix.
+- **`Buoyancy.java`** — same brace-conflation pattern: this branch's own `impulseEnergyChange`/
+  `isImpulseDissipative`/`maxDissipativeImpulseMagnitude`/`maxNonReversingImpulseMagnitude`
+  (John's comment 54691/54694/54697/54703 energy-dissipativity work) and main's own
+  `propellerSteerAngleRadians`/`propellerThrustDirection` (MINECRAFT-544) are unrelated methods on
+  the same class; kept both, restored the missing brace between them.
+- **`DynamicImmersiveVehicles.java`** — same pattern again: this branch's
+  `MissingIndexFallbackProbe` event listener registration and main's
+  `RotorAirDragRuntimeProbe`/`TuningCommandProbe` registrations are unrelated, independent
+  listener blocks; kept both, restored the missing `});`.
+- **`BuoyancyTest.java`** — same pattern: this branch's energy-dissipativity test block and main's
+  `propellerSteerAngleRadians`/`propellerThrustDirection` test block (MINECRAFT-544) are
+  unrelated test methods; kept both, restored the missing closing brace between them.
+
+**One real semantic collision found that git's line-based merge did NOT flag as a textual
+conflict** (both `PhysicsBridge.java` "auto-merged cleanly" per git, but the result failed to
+compile): `debugReadLinearVelocity(EntityVehicleF_Physics)` was defined twice — once by this
+branch (handles both `Body` and `BuoyantBody`, added for the float-only-hull work) and once by
+main's own older MINECRAFT-526-review version (`Body`-only). Confirmed by direct comparison that
+this branch's version is a strict superset (identical `Body`-case behavior, plus the added
+`BuoyantBody` case) — resolved by keeping this branch's definition and removing main's narrower
+duplicate, with a comment at the removal site explaining why.
+
+**No conflict required stopping for a substantive ownership decision** — every one was either
+purely additive (different content, no actual logic collision) or, in the one semantic-collision
+case, resolvable with confidence because one side was a direct strict superset of the other, not
+a genuine disagreement about behavior.
+
+**Resurrection check, explicit.** Confirmed by direct search of the final merged tree:
+`find . -iname "ConnectionGenerationPayload.java" -o -iname "ClientTowingConnectionTracker.java"`
+returns nothing; `grep -rn` across `src/` for `shouldBindAnnouncedGeneration`,
+`ConnectionGenerationPayload`, `ClientTowingConnectionTracker`, `PendingTrackerAnnounce`,
+`TRACKER_ANNOUNCE_RETRY_TICKS`, `processPendingTrackerAnnounces`,
+`announceConnectionGenerationToNewTracker` returns nothing. None of the client-protocol machinery
+removed in 98c41cc was resurrected by this merge.
+
+### Test receipt
+
+Full suite, exclusive Gradle lock, tied to merge commit **24bb360**: **105 suites, 1164 tests, 0
+failures, 0 errors** (up from 936 — the difference is entirely main's own unrelated work merged
+in: AckermannSteering/AxleSuspension/TuningCommand/TuningProvenance/GearForceScale test classes
+and others, none of it touching this ticket's own hitch/towing scope).
+
+### Acceptance-matrix citations (55037 round) — unaffected
+
+None of `HitchJointTest.java`, `HitchRegistryTest.java`, or `PhysicsBridgeClassificationTest.java`
+were touched by this merge (confirmed via `git show --stat` on the merge commit) — the 55037
+round's exact line-number citations remain accurate as written, no update needed.
+
+### `gh pr view 39`, re-checked after the merge
+
+To be re-verified and reported in the next Jira comment, not asserted here ahead of an actual
+fresh check.
+
+### Disposition
+
+The main-branch conflict reported in the 55037 round is resolved via a genuine merge commit
+(history preserved both ways, no force-push, no blind side-selection). One real semantic
+collision the line-based merge missed was found and resolved with a stated, verifiable
+justification, not guessed through. No removed client-protocol machinery was resurrected,
+confirmed by direct search. Full suite green (1164 tests, 0 failures/errors) on the merge commit
+itself. No native run performed or proposed. No merge/Done transition made or implied —
+independent review (still request-only as of the 55037 round) remains the outstanding gate.
