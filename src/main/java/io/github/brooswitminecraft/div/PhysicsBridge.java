@@ -1263,11 +1263,10 @@ public final class PhysicsBridge {
   * unconditionally and crashed inside that stale body's own step call, never at the lookup.
   * Reclaims via the SAME registry-removal path {@code cleanup()}/{@code unload()} already use -
   * not a new, second teardown mechanism: {@code deactivate} plus the identical companion
-  * cleanup, with no additional {@code remove()} call since the native object is already gone.
-  * This does NOT suppress or alter any probe's own FAILED verdict - that fires independently,
-  * earlier, from {@code BuoyantHitchProbe}'s own bounded-area check; this guard only prevents
-  * the SEPARATE crash that was following it. Generic and pure (no entity/Sable/world
-  * dependency) - directly unit-testable with fake keys/a fake body, the same seam-testing
+  * cleanup. This does NOT suppress or alter any probe's own FAILED verdict - that fires
+  * independently, earlier, from {@code BuoyantHitchProbe}'s own bounded-area check; this guard
+  * only prevents the SEPARATE crash that was following it. Generic and pure (no entity/Sable/
+  * world dependency) - directly unit-testable with fake keys/a fake body, the same seam-testing
   * pattern {@link #activateOrClassify} already uses for registry-dependent logic that can't
   * construct a real {@code EntityVehicleF_Physics}.
   *
@@ -1278,6 +1277,21 @@ public final class PhysicsBridge {
   * this method's own SECOND, independent cleanup step. {@code cleanup(key)} now always runs
   * regardless of whether {@code release(key)} throws; the exception itself (if any) is still
   * re-thrown afterward, not swallowed.
+  *
+  * <p>MINECRAFT-545/547 (John's comment 55116 - "partial two-body survivor cleanup"): the
+  * ORIGINAL version of this method never called {@code body.remove()} at all in this branch -
+  * reasoned (correctly, for the single-body case) that the native object was already fully
+  * gone, so calling {@code remove()} again would be a pointless or unsafe double-removal.
+  * That reasoning missed the TWO-BODY case: {@code isActive()} can be {@code false} because
+  * only ONE half died, leaving the SURVIVING half's own native resource never released - a real
+  * leak, not merely a missed optimization. Fixed at the root instead of special-cased here: every
+  * {@code VehicleBody.remove()} implementation ({@code Body}, {@code BuoyantBody}) is now
+  * itself idempotent (checks its own {@code isActive()} before touching anything), so calling
+  * {@code remove()} unconditionally here is now always safe - a no-op for an already-fully-dead
+  * single body, and a genuine partial-survivor cleanup for a partially-dead two-body one.
+  * {@code remove()} is now called BEFORE {@code hitches.release}/{@code cleanup}, with the same
+  * first-failure-captured-rethrown-at-end pattern already established for the other two steps -
+  * a throw from any one of the three never prevents the other two from still running.
   */
  static <K, B extends VehicleBody> B activeOrReclaimStale(
      BodyRegistry<K, B> registry, HitchRegistry<K> hitches, PendingReplacementState<K, ?> pendingInheritedVelocity, K key) {
@@ -1285,14 +1299,19 @@ public final class PhysicsBridge {
   if (body == null) return null;
   if (!body.isActive()) {
    registry.deactivate(key);
-   RuntimeException releaseFailure = null;
+   RuntimeException firstFailure = null;
+   try {
+    body.remove();
+   } catch (RuntimeException ex) {
+    firstFailure = ex;
+   }
    try {
     hitches.release(key);
    } catch (RuntimeException ex) {
-    releaseFailure = ex;
+    if (firstFailure == null) firstFailure = ex;
    }
    pendingInheritedVelocity.cleanup(key);
-   if (releaseFailure != null) throw releaseFailure;
+   if (firstFailure != null) throw firstFailure;
    return null;
   }
   return body;
@@ -2780,11 +2799,49 @@ public final class PhysicsBridge {
   // same way it now treats a BuoyantBody.
   public BoxPhysicsObject box() { return box; }
   public Vector3dc center() { return center; }
+  /**
+   * MINECRAFT-545/547 (John's comment 55116 - "partial two-body survivor cleanup"): made
+   * idempotent and partial-survivor-safe. The single-body branch now skips the native call
+   * entirely once {@code box} already reports inactive - calling {@code removeObject} a second
+   * time on an already-removed box is never attempted, not merely tolerated.
+   * {@code TwoBodyLifecycle.remove} is still used for the common case (both halves genuinely
+   * alive) UNCHANGED - that file's own existing {@code removeBoth}/{@code removeJoint} already
+   * independently try/catch each half and the joint, matching this class's own established
+   * per-step-guarded pattern ({@link HitchRegistry#release}). The NEW case this method now
+   * handles is PARTIAL survival (exactly one half already inactive, confirmed via
+   * {@link #isActive} no longer being the only caller that distinguishes this): removal is done
+   * directly here instead of delegating to {@code TwoBodyLifecycle.remove} (which always calls
+   * removeObject on BOTH boxes unconditionally) - only the box(es) still genuinely active, and
+   * the joint only if still valid, are actually touched; a throwing removal never prevents the
+   * other resource's own removal attempt (same first-failure-captured-rethrown-at-end pattern
+   * {@code HitchRegistry.release} already established). If BOTH halves are already inactive,
+   * this is a true no-op - nothing left to remove.
+   */
   public void remove() {
    var c=SubLevelContainer.getContainer(level);
    if (c==null) return;
-   if (twoBodyActive) TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
-   else c.physicsSystem().removeObject(box);
+   if (twoBodyActive) {
+    boolean boxActive=box.isActive(), upperActive=upperBox.isActive();
+    if (boxActive && upperActive) {
+     TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
+     return;
+    }
+    RuntimeException firstFailure=null;
+    if (twoBodyJoint!=null) {
+     try { if (twoBodyJoint.isValid()) twoBodyJoint.remove(); }
+     catch (RuntimeException ex) { firstFailure=ex; }
+    }
+    if (boxActive) {
+     try { c.physicsSystem().removeObject(box); }
+     catch (RuntimeException ex) { if (firstFailure==null) firstFailure=ex; }
+    }
+    if (upperActive) {
+     try { c.physicsSystem().removeObject(upperBox); }
+     catch (RuntimeException ex) { if (firstFailure==null) firstFailure=ex; }
+    }
+    if (firstFailure!=null) throw firstFailure;
+   }
+   else if (box.isActive()) c.physicsSystem().removeObject(box);
   }
   /**
    * MINECRAFT-545/547 (John's comment 55103 - "Body.isActive currently lower-box only"): for a

@@ -88,7 +88,9 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
   return PhysicsBridge.captureReplacementState(v, box, handle, center, false, 0);
  }
  public ServerLevel level() { return level; }
- public void remove() { var c = SubLevelContainer.getContainer(level); if (c != null) c.physicsSystem().removeObject(box); }
+ /** MINECRAFT-545/547 (John's comment 55116): idempotent - a second call once {@code box}
+  * already reports inactive is now a true no-op, never a second {@code removeObject} attempt. */
+ public void remove() { if (!box.isActive()) return; var c = SubLevelContainer.getContainer(level); if (c != null) c.physicsSystem().removeObject(box); }
  public boolean isActive() { return box.isActive(); }
  public Overrides.Tuning tuning() { return tuning; }
  // HitchAnchor (MINECRAFT-545): box/center already exist for this body's own buoyancy/pose
