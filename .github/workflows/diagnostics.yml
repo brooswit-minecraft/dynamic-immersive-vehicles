@@ -1,0 +1,305 @@
+name: Diagnostics
+
+# On-demand runtime probes (MINECRAFT-550). These are investigation-only
+# fixtures from past reviews, not ordinary regression checks: each boots a
+# full headless dedicated server to settle one specific past question
+# (constraint-frame space, two-body impulse response, real ground-support
+# activation). They used to run on every PR/main push as part of ci.yml;
+# moving them here (manual trigger only) keeps that evidence available on
+# demand - run this workflow from the Actions tab, or `gh workflow run
+# diagnostics.yml` - without repeating multiple multi-minute server boots on
+# every ordinary PR. See README.md#build and VERIFICATION.md for what each
+# probe does and does not prove.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Bounded, isolated runtime probe (ticket comment 53243/53244) resolving whether Sable's
+  # GenericConstraintConfiguration anchors are world-space or body-local - a direct conflict
+  # between DIV's own existing hitch code and a review finding that could not be settled by
+  # reading source alone. Entirely separate disposable world/run directory from runtime-smoke
+  # and, like it, boots no vehicle content and never touches any real player's install.
+  anchor-frame-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 8.8
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.8'
+
+      - name: Accept Minecraft EULA for this disposable CI run only
+        run: |
+          mkdir -p run
+          echo "eula=true" > run/eula.txt
+
+      - name: Boot headless dedicated server with the anchor-frame probe enabled
+        env:
+          DIV_ANCHOR_FRAME_PROBE: 'true'
+        run: |
+          mkfifo server.stdin
+          exec 3<> server.stdin
+          timeout 660 gradle --no-daemon --stacktrace runServer <&3 > server.log 2>&1 &
+          gradle_pid=$!
+          elapsed=0
+          limit=600
+          status=TIMEOUT
+          while kill -0 "$gradle_pid" 2>/dev/null; do
+            if grep -qE '\[DIV anchorFrameProbe\] COMPLETE' server.log 2>/dev/null; then
+              status=PROBE_COMPLETE; break
+            fi
+            # Review 53265: fail fast on ANY "[DIV anchorFrameProbe] FAILED" marker (the
+            # chunk-wait/activation give-up paths added in v3-v5), not just a hard server crash -
+            # no point waiting out the full budget once the probe itself has already given up.
+            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|\[.*\] \[.*/FATAL\]|anchorFrameProbe\] failed to start|anchorFrameProbe\] FAILED' server.log 2>/dev/null; then
+              status=CRASHED; break
+            fi
+            sleep 3; elapsed=$((elapsed + 3))
+            if [ "$elapsed" -ge "$limit" ]; then status=TIMEOUT; break; fi
+          done
+          printf 'stop\n' >&3
+          exec 3>&-
+          wait "$gradle_pid" 2>/dev/null || true
+          # Review 53265: print the concise evidence (liveness/drift/runtime-ID lines) directly
+          # to job output BEFORE the upload step, so the result is readable from the job log
+          # alone even if the artifact upload stalls/fails - this is already everything the
+          # upload step would otherwise be the only way to see.
+          echo "=== anchor-frame probe log lines ==="
+          grep 'DIV anchorFrameProbe' server.log || true
+          echo "=== result: $status ==="
+          if [ "$status" != "PROBE_COMPLETE" ]; then
+            echo "Anchor-frame probe did not complete cleanly (status=$status) - see server.log." >&2
+            exit 1
+          fi
+
+      - name: Upload anchor-frame probe log
+        # Review 53265: short, explicit timeout and non-fatal on failure/hang - the probe's own
+        # evidence is already printed to this job's own output above; this upload is a secondary
+        # convenience (full raw log, not just grepped lines), not something the job's success
+        # should depend on. A prior run (43093338842) had this step hang well past the whole
+        # job's own 15-minute timeout without the job itself being terminated - bounding this
+        # specific step directly is the fix, not relying on the job-level timeout alone.
+        if: always()
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: anchor-frame-probe-log-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            server.log
+            run/logs/**
+
+  # Bounded, isolated runtime probe (review comment 53280) measuring the real two-half chassis'
+  # ACTUAL constrained response to a known impulse, at both f=0.5 and f=0.4, against the
+  # isolated-owner-half assumption the production friction solver currently makes and the
+  # physically-correct combined-assembly prediction - see TwoBodyImpulseResponseProbe's own doc.
+  # Same disposable-world/hardened pattern as anchor-frame-probe above (short bounded wait, fail
+  # fast on any FAILED marker, non-fatal short-timeout log upload).
+  two-body-impulse-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 8.8
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.8'
+
+      - name: Accept Minecraft EULA for this disposable CI run only
+        run: |
+          mkdir -p run
+          echo "eula=true" > run/eula.txt
+
+      - name: Boot headless dedicated server with the two-body impulse-response probe enabled
+        env:
+          DIV_TWO_BODY_IMPULSE_PROBE: 'true'
+        run: |
+          mkfifo server.stdin
+          exec 3<> server.stdin
+          timeout 660 gradle --no-daemon --stacktrace runServer <&3 > server.log 2>&1 &
+          gradle_pid=$!
+          elapsed=0
+          limit=600
+          status=TIMEOUT
+          while kill -0 "$gradle_pid" 2>/dev/null; do
+            if grep -qE '\[DIV twoBodyImpulseProbe\] COMPLETE' server.log 2>/dev/null; then
+              status=PROBE_COMPLETE; break
+            fi
+            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|\[.*\] \[.*/FATAL\]|twoBodyImpulseProbe\] failed to start|twoBodyImpulseProbe\] FAILED' server.log 2>/dev/null; then
+              status=CRASHED; break
+            fi
+            sleep 3; elapsed=$((elapsed + 3))
+            if [ "$elapsed" -ge "$limit" ]; then status=TIMEOUT; break; fi
+          done
+          printf 'stop\n' >&3
+          exec 3>&-
+          wait "$gradle_pid" 2>/dev/null || true
+          echo "=== two-body impulse probe log lines ==="
+          grep 'DIV twoBodyImpulseProbe' server.log || true
+          echo "=== result: $status ==="
+          if [ "$status" != "PROBE_COMPLETE" ]; then
+            echo "Two-body impulse probe did not complete cleanly (status=$status) - see server.log." >&2
+            exit 1
+          fi
+
+      - name: Upload two-body impulse probe log
+        if: always()
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: two-body-impulse-probe-log-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            server.log
+            run/logs/**
+
+  # Bounded, isolated runtime probe (review comment 53287) spawning a REAL EntityVehicleF_Physics
+  # with real wheel/engine parts over real generated terrain, with the two-body chassis candidate
+  # actually enabled, so stepGround's own real Mixin-intercepted production path is exercised -
+  # not the formula-level unit tests (TwoBodyChassisTest/TwoBodyChassisGroundForceCompositionTest),
+  # which would pass even if stepGround still wired isolated mass. Same hardened pattern as the
+  # other probe jobs above.
+  ground-support-fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 8.8
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.8'
+
+      - name: Accept Minecraft EULA and seed massKg/upperMassFraction overrides for this disposable CI run only
+        run: |
+          mkdir -p run/config
+          echo "eula=true" > run/eula.txt
+          cat > run/config/dynamic-immersive-vehicles.json <<'EOF'
+          {
+            "vehicles": {
+              "divtest:f0p5": {"massKg": 350.0, "upperMassFraction": 0.5},
+              "divtest:f0p4": {"massKg": 350.0, "upperMassFraction": 0.4}
+            }
+          }
+          EOF
+
+      - name: Boot headless dedicated server with the ground-support fixture enabled
+        env:
+          DIV_GROUND_SUPPORT_FIXTURE: 'true'
+        run: |
+          mkfifo server.stdin
+          exec 3<> server.stdin
+          timeout 660 gradle --no-daemon --stacktrace runServer <&3 > server.log 2>&1 &
+          gradle_pid=$!
+          elapsed=0
+          limit=600
+          status=TIMEOUT
+          while kill -0 "$gradle_pid" 2>/dev/null; do
+            if grep -qE '\[DIV groundSupportFixture\] scenario=f=0\.4 COMPLETE' server.log 2>/dev/null \
+              && grep -qE '\[DIV groundSupportFixture\] scenario=f=0\.5 COMPLETE' server.log 2>/dev/null; then
+              status=PROBE_COMPLETE; break
+            fi
+            if grep -qE 'Mixin[A-Za-z]*(Error|Exception)|FAILED TO APPLY MIXIN|Exception in thread "main"|\[.*\] \[.*/FATAL\]|groundSupportFixture\].*FAILED' server.log 2>/dev/null; then
+              status=CRASHED; break
+            fi
+            sleep 3; elapsed=$((elapsed + 3))
+            if [ "$elapsed" -ge "$limit" ]; then status=TIMEOUT; break; fi
+          done
+          printf 'stop\n' >&3
+          exec 3>&-
+          wait "$gradle_pid" 2>/dev/null || true
+          echo "=== ground-support fixture log lines ==="
+          grep 'DIV groundSupportFixture' server.log || true
+          echo "=== ground contact diagnostics (activation/classification/construction) ==="
+          grep 'DIV debugGroundContact\] \(classify\|constructed\|chassisReceipt\)' server.log || true
+          echo "=== result: $status ==="
+          if [ "$status" != "PROBE_COMPLETE" ]; then
+            echo "Ground-support fixture did not complete cleanly (status=$status) - see server.log." >&2
+            exit 1
+          fi
+          # Review 53291: "native fallback must not count as success" - this probe's own
+          # COMPLETE marker only proves the vehicle's externally-observed motion looked right; it
+          # cannot by itself distinguish DIV's real Body actually driving that motion from MTS's
+          # native ground physics coincidentally doing something similar. Independently require,
+          # for EACH scenario's own packID:systemName key, real evidence from the existing
+          # GroundContactDiagnostics that DIV actually classified it as a ground vehicle AND
+          # constructed the real two-body-capable Body class AND resolved the correct
+          # upperMassFraction for that scenario.
+          activation_ok=true
+          for key_frac in "divtest:f0p5:0.5" "divtest:f0p4:0.4"; do
+            key="${key_frac%:*}"; frac="${key_frac##*:}"
+            if ! grep -qE "DIV debugGroundContact\] classify entity=\S+ side=server key=${key} ground=true" server.log; then
+              echo "ACTIVATION_CHECK FAILED: no server-side ground=true classification found for key=${key}" >&2
+              activation_ok=false
+            fi
+            if ! grep -qE "DIV debugGroundContact\] constructed entity=\S+ side=server key=${key} class=Body" server.log; then
+              echo "ACTIVATION_CHECK FAILED: no real Body construction found for key=${key} (native fallback, or construction never succeeded)" >&2
+              activation_ok=false
+            fi
+            # Two independent checks rather than one ordered regex: chassisReceipt logs
+            # upperMassFraction earlier in the line than experimentalTwoBodyChassis, and field
+            # order is an implementation detail neither check should depend on.
+            receipt_line=$(grep -E "DIV debugGroundContact\] chassisReceipt entity=\S+ key=${key} " server.log || true)
+            if [ -z "$receipt_line" ]; then
+              echo "ACTIVATION_CHECK FAILED: no chassisReceipt line found for key=${key}" >&2
+              activation_ok=false
+            else
+              if ! grep -qE "experimentalTwoBodyChassis=true" <<< "$receipt_line"; then
+                echo "ACTIVATION_CHECK FAILED: chassisReceipt for key=${key} does not show experimentalTwoBodyChassis=true" >&2
+                activation_ok=false
+              fi
+              if ! grep -qE "upperMassFraction=${frac}\b" <<< "$receipt_line"; then
+                echo "ACTIVATION_CHECK FAILED: chassisReceipt for key=${key} does not show upperMassFraction=${frac}" >&2
+                activation_ok=false
+              fi
+            fi
+          done
+          if [ "$activation_ok" != "true" ]; then
+            echo "Ground-support fixture's own probe reported COMPLETE, but real DIV/two-body activation evidence is missing or wrong - treating as a failure, not a native-fallback success." >&2
+            exit 1
+          fi
+          echo "=== ACTIVATION_CHECK: real Body/twoBodyActive/resolved-f confirmed for both scenarios ==="
+
+      - name: Upload ground-support fixture log
+        if: always()
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ground-support-fixture-log-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            server.log
+            run/logs/**

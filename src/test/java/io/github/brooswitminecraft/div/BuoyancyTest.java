@@ -1,4 +1,5 @@
 package io.github.brooswitminecraft.div;
+import org.joml.Vector3d;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -511,5 +512,77 @@ class BuoyancyTest {
   assertEquals(0, Buoyancy.maxDissipativeImpulseMagnitude(0, 1.0 / 400));
   assertFalse(Buoyancy.isImpulseDissipative(1.0, 0, 1.0 / 400));
   assertTrue(Buoyancy.isImpulseDissipative(0, 0, 1.0 / 400));
+ }
+ // MINECRAFT-544 (review 54430/54431): the exact production seam BuoyantForces.apply calls for
+ // the propeller thrust-direction angle and the resulting body-local force direction, so the
+ // configured-direction/reverse/amphibian-separation acceptance evidence is on a real production
+ // calculation path, not merely inferred from Overrides resolution or scalar thrust sign/magnitude.
+ private static final double MAX_RUDDER_ANGLE = minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics.MAX_RUDDER_ANGLE;
+
+ @Test void propellerSteerAngleIsZeroWhenMarineSteerDegreesIsZeroRegardlessOfRudderInput() {
+  // Omitted/zero fallback: a zero marineSteerDegrees (a real, accepted configuration since the
+  // self-review fix) keeps water-propeller thrust pointed straight ahead no matter how far the
+  // rudder is deflected - thrust direction is governed entirely by this configured limit.
+  assertEquals(0, Buoyancy.propellerSteerAngleRadians(MAX_RUDDER_ANGLE, MAX_RUDDER_ANGLE, 0), 1e-12);
+  assertEquals(0, Buoyancy.propellerSteerAngleRadians(-MAX_RUDDER_ANGLE, MAX_RUDDER_ANGLE, 0), 1e-12);
+  Vector3d straight = Buoyancy.propellerThrustDirection(Buoyancy.propellerSteerAngleRadians(MAX_RUDDER_ANGLE, MAX_RUDDER_ANGLE, 0));
+  assertEquals(0, straight.x, 1e-12); assertEquals(0, straight.y, 1e-12); assertEquals(1, straight.z, 1e-12);
+ }
+
+ @Test void propellerSteerAngleAtFullRudderEqualsTheConfiguredMarineSteerDegreesExactly() {
+  // Configured limit: at full rudder deflection the body-local steer angle must equal exactly
+  // the configured marineSteerDegrees (converted to radians, sign per the existing rudder
+  // convention) - the ticket's own "actual applied propeller thrust direction changes" criterion,
+  // proven on the real production formula rather than inferred.
+  double angle = Buoyancy.propellerSteerAngleRadians(MAX_RUDDER_ANGLE, MAX_RUDDER_ANGLE, 20.0);
+  assertEquals(-Math.toRadians(20.0), angle, 1e-12);
+  Vector3d direction = Buoyancy.propellerThrustDirection(angle);
+  assertEquals(new Vector3d(Math.sin(angle), 0, Math.cos(angle)), direction);
+  assertTrue(Math.abs(direction.x) > 1e-9, "a nonzero configured marine limit must produce a measurably non-straight thrust direction");
+ }
+
+ @Test void propellerSteerAngleFlipsSignWithRudderDirection() {
+  // Full rudder one way versus the other must steer thrust to opposite sides at the same
+  // configured marine limit.
+  double left = Buoyancy.propellerSteerAngleRadians(MAX_RUDDER_ANGLE, MAX_RUDDER_ANGLE, 25.0);
+  double right = Buoyancy.propellerSteerAngleRadians(-MAX_RUDDER_ANGLE, MAX_RUDDER_ANGLE, 25.0);
+  assertEquals(-left, right, 1e-12);
+  assertTrue(left != 0 && right != 0);
+ }
+
+ @Test void propellerThrustDirectionIsIndependentOfForwardOrReverseThrustSign() {
+  // Reverse: BuoyantForces.apply computes `new Vector3d(forward).mul(thrust)` - this direction
+  // vector itself must stay fixed at the configured steer angle regardless of forward (positive
+  // thrust) or reverse (negative thrust) drive; only the resulting force vector's own magnitude/
+  // sign changes, never the direction it is measured against.
+  double angle = Buoyancy.propellerSteerAngleRadians(MAX_RUDDER_ANGLE, MAX_RUDDER_ANGLE, 30.0);
+  Vector3d direction = Buoyancy.propellerThrustDirection(angle);
+  double forwardThrust = 5000.0, reverseThrust = -5000.0;
+  Vector3d forwardForce = new Vector3d(direction).mul(forwardThrust);
+  Vector3d reverseForce = new Vector3d(direction).mul(reverseThrust);
+  assertEquals(forwardForce.x, -reverseForce.x, 1e-9, "reverse must mirror forward exactly, never re-point to a different direction");
+  assertEquals(forwardForce.z, -reverseForce.z, 1e-9, "reverse must mirror forward exactly, never re-point to a different direction");
+  assertTrue(forwardForce.z > 0, "forward thrust at a nonzero marine steer angle still has a positive bow-stern component");
+  assertTrue(reverseForce.z < 0, "reverse thrust pushes astern along that same configured angle");
+ }
+
+ @Test void amphibianGroundWheelSteerAndWaterPropellerSteerDivergeWhenConfiguredDifferently() {
+  // Amphibian separation, proven numerically on the real formulas: PhysicsBridge.stepGround's
+  // own wheel-steer computation (`(-rudderInput/MAX_RUDDER_ANGLE)*toRadians(maxSteerDegrees)`,
+  // mirrored here verbatim since that production site is not a pure function to call directly)
+  // and Buoyancy.propellerSteerAngleRadians share the same formula SHAPE but are parameterized by
+  // two independent configured fields - at the same rudder input, a vehicle with maxSteerDegrees
+  // (ground) distinct from marineSteerDegrees (water) must see the two steer angles diverge.
+  double rudderInput = MAX_RUDDER_ANGLE * 0.6;
+  double maxSteerDegrees = 35.0, marineSteerDegrees = 12.0;
+  double groundWheelSteer = (-rudderInput / MAX_RUDDER_ANGLE) * Math.toRadians(maxSteerDegrees);
+  double waterPropellerSteer = Buoyancy.propellerSteerAngleRadians(rudderInput, MAX_RUDDER_ANGLE, marineSteerDegrees);
+  assertNotEquals(groundWheelSteer, waterPropellerSteer, 1e-9,
+    "ground wheel steer and water propeller steer must diverge when maxSteerDegrees and marineSteerDegrees are configured differently");
+  // And when marineSteerDegrees is left to inherit the resolved maxSteerDegrees (Overrides'
+  // own fallback semantics - see OverridesTest), the two formulas must agree exactly instead.
+  double waterPropellerSteerInherited = Buoyancy.propellerSteerAngleRadians(rudderInput, MAX_RUDDER_ANGLE, maxSteerDegrees);
+  assertEquals(groundWheelSteer, waterPropellerSteerInherited, 1e-12,
+    "an unconfigured marineSteerDegrees (inheriting maxSteerDegrees) must reproduce the exact ground formula's angle");
  }
 }

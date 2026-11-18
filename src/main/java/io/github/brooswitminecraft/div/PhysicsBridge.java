@@ -298,6 +298,91 @@ public final class PhysicsBridge {
   return (partOverride != null && partOverride.driveForce != null) ? partOverride.driveForce : vehicleDriveForce;
  }
  /**
+  * MINECRAFT-553 (gear-aware ground drive): bounded, opt-in scale applied on top of {@link
+  * #enginePartDriveForce}'s already-resolved drive force, so a configured vehicle's drive force
+  * actually varies by current gear the way a real gearbox's torque multiplication does, instead
+  * of every forward gear producing the identical magnitude {@code stepGround} always applied
+  * before this ticket (only the gear's SIGN - forward/neutral/reverse - ever changed anything).
+  *
+  * <p>{@code currentGearRatioMagnitude}/{@code referenceGearRatioMagnitude} are {@code
+  * Math.abs} of two entries straight off the SAME native, already-pinned {@code
+  * JSONPartEngine#gearRatios} list IV's own engine RPM-feedback loop (decompiled and confirmed
+  * against the exact pinned curse.maven jar - see this ticket's VERIFICATION.md) already reads
+  * for its own {@code rpm}/{@code wheel.angularVelocity} bookkeeping ({@code
+  * PartEngine.gearRatioVar}, kept in sync with {@code currentGearVar} on every shift) - this
+  * method never writes either variable, never touches {@code groundDeviceCollective}, and is a
+  * pure read of a value nothing else derives force from: IV's own {@code addToForceOutput} (the
+  * native method that would otherwise apply a competing propulsive force from these same ratios)
+  * is confirmed separately cancelled for every DIV-controlled vehicle (see the native-contact-
+  * sync comment earlier in this file), so consuming the ratio's magnitude here cannot double-
+  * apply drive force and cannot perturb the still-open, unrelated RPM-feedback/{@code
+  * wheel.angularVelocity} multi-writer question that comment documents.
+  *
+  * <p>{@code referenceGearRatioMagnitude} is the vehicle's own configured FIRST FORWARD gear's
+  * ratio magnitude - the same reference every call site must use so gear 1 always resolves to
+  * exactly {@code scale=1.0} (today's unscaled drive force), keeping a vehicle's existing "first
+  * gear" feel byte-identical whether or not this ticket's opt-in is set, and higher forward gears
+  * (normally a smaller ratio magnitude - less torque multiplication, more top speed) scale down
+  * proportionally, matching real drivetrain mechanics (wheel torque, and so drive force at a
+  * constant wheel radius, is proportional to gear-ratio magnitude for a given engine torque).
+  *
+  * <p>{@code enabled} is the resolved {@code Overrides.Tuning#gearRatioAware} opt-in - {@code
+  * false} (including the documented unset/{@code null} default) returns exactly {@code 1.0}, a
+  * byte-identical no-op: a nonconfigured vehicle's drive force is completely unaffected by this
+  * ticket, same "unset means untouched" shape {@code axleDriveForceSharing}/{@code
+  * ackermannSteering} already use.
+  *
+  * <p><b>Safety/bounds:</b> a non-finite or non-positive {@code referenceGearRatioMagnitude} (a
+  * malformed or single-forward-gear datapack definition) falls back to {@code 1.0} rather than
+  * dividing by an invalid/degenerate reference. A non-finite or non-positive (including exactly
+  * {@code 0} - {@link #gearRatioMagnitudeAt}'s own fallback for a null/missing list entry) {@code
+  * currentGearRatioMagnitude} ALSO falls back to {@code 1.0} - this is the documented malformed-
+  * ratio safety contract: missing/invalid CURRENT-gear data must preserve the vehicle's default
+  * (unscaled) drive force, never silently apply {@code MIN_GEAR_FORCE_SCALE} as if a genuinely
+  * tiny but valid ratio had been configured. The resulting ratio (when both magnitudes are valid)
+  * is clamped to {@code
+  * [MIN_GEAR_FORCE_SCALE, MAX_GEAR_FORCE_SCALE]} so a pathological datapack gear-ratio table
+  * (e.g. an extreme outlier ratio) can never make the combined wheel/tire force this scales
+  * unboundedly large or collapse it to effectively zero while still "in gear" - this is the only
+  * bound this method imposes; it is a fixed safety envelope, not a new user-facing knob, keeping
+  * this ticket's configurable surface to exactly the one new {@code gearRatioAware} boolean.
+  * Neutral/engine-off are unaffected regardless of this method's result: {@code stepGround}
+  * multiplies this scale by {@code Math.signum(currentGearVar.currentValue)}, which is already
+  * {@code 0} at neutral, and the whole drive term is only ever computed for a {@code
+  * PartEngine} with {@code running==true}.
+  */
+ static final double MIN_GEAR_FORCE_SCALE = 0.2, MAX_GEAR_FORCE_SCALE = 5.0;
+ static double gearForceScale(double currentGearRatioMagnitude, double referenceGearRatioMagnitude, boolean enabled) {
+  if (!enabled) return 1.0;
+  if (!Double.isFinite(referenceGearRatioMagnitude) || referenceGearRatioMagnitude <= 0) return 1.0;
+  if (!Double.isFinite(currentGearRatioMagnitude) || currentGearRatioMagnitude <= 0) return 1.0;
+  double raw = currentGearRatioMagnitude / referenceGearRatioMagnitude;
+  return Math.max(MIN_GEAR_FORCE_SCALE, Math.min(MAX_GEAR_FORCE_SCALE, raw));
+ }
+ /**
+  * MINECRAFT-553: {@code Math.abs} of {@code gear}'s own ratio from this specific engine's
+  * native, already-pinned {@code gearRatios} list ({@code JSONPart.engine.gearRatios} - {@code
+  * engine.definition} is already statically typed {@code JSONPart} via {@code
+  * APart<JSONPart>}'s own generic parameter, so no cast is needed, matching every other {@code
+  * engine.definition.*} read already in this file). Mirrors the exact {@code gear+reverseGears}
+  * index IV's own {@code PartEngine} uses internally ({@code gearRatioVar.setTo(...)} and its own
+  * initial-gear clamp - decompiled and confirmed against the real pinned jar) rather than reading
+  * the private {@code gearRatioVar} field itself through any reflection/variable-map workaround.
+  * Defensively clamps the index into the list's actual bounds (a datapack is untrusted input)
+  * and returns {@code 0} for a null/empty list - {@link #gearForceScale} already treats a
+  * non-positive (including exactly {@code 0}, e.g. this method's own null-entry fallback) or
+  * non-finite reference OR current magnitude as "fall back to the unscaled 1.0 no-op", so a
+  * malformed table degrades to today's exact behavior rather than throwing, producing {@code
+  * NaN}, or silently clamping missing data to {@code MIN_GEAR_FORCE_SCALE}.
+  */
+ private static double gearRatioMagnitudeAt(PartEngine engine, int gear) {
+  var gearRatios = engine.definition.engine==null ? null : engine.definition.engine.gearRatios;
+  if (gearRatios==null || gearRatios.isEmpty()) return 0;
+  int index = Math.max(0, Math.min(gearRatios.size()-1, gear+engine.reverseGears));
+  Float ratio = gearRatios.get(index);
+  return ratio==null ? 0 : Math.abs(ratio);
+ }
+ /**
   * MINECRAFT-529 (installed tire-specific grip overrides): the tire/ground-device counterpart to
   * {@link #enginePartDriveForce} immediately above, same deliberate vehicle/part precedence - an
   * explicit part-level {@code friction} override, if THIS SPECIFIC installed tire part has one,
@@ -353,6 +438,33 @@ public final class PhysicsBridge {
   return (partOverride != null && partOverride.rollingResistance != null) ? partOverride.rollingResistance : vehicleRollingResistance;
  }
  /**
+  * MINECRAFT-552 (installed-tire lateral-grip overrides): the lateral-grip counterpart to
+  * {@link #tirePartFriction} above, same exact deliberate vehicle/part precedence and "replace,
+  * not stack/multiply" semantics - an explicit part-level {@code lateralGripMultiplier} override,
+  * if THIS SPECIFIC installed tire part has one, REPLACES the vehicle's own resolved {@code
+  * lateralGripMultiplier} for that one wheel's contact outright; otherwise the vehicle's already-
+  * resolved value is used completely unchanged, so an installation with no {@code parts}
+  * lateralGripMultiplier entries at all behaves byte-identically to before this ticket. {@code
+  * partKey} is resolved fresh from {@code stepGround}'s own wheel loop every tick (never cached
+  * at vehicle-construction time), the same {@code packID+":"+systemName} key shape {@link
+  * #tirePartFriction}/{@link #tirePartRollingResistance} use. {@code
+  * Overrides.effectivePartOverride} (unlike {@code resolvedPart}) returns {@code null} - never
+  * the flat documented fallback - for a field the part says nothing about, which is exactly the
+  * signal needed to tell "no override" apart from "override explicitly set it".
+  *
+  * <p>Affects ONLY the lateral (sideways slip) semi-axis of that one wheel's own friction
+  * ellipse - the longitudinal (drive/brake) semi-axis is untouched, same lateral-only scope the
+  * vehicle-level field already documents (see {@code TireForces.frictionAnisotropic}). Callers
+  * must apply this ONLY to a wheel that actually has ground contact this tick (same {@code
+  * stepGround} {@code HitResult.Type.MISS} continue {@link #tirePartFriction}'s own doc
+  * describes) - a phantom/spare/airborne tire's configured override can never contribute any
+  * grip change, matching this ticket's explicit "no phantom/airborne contribution" requirement.
+  */
+ static double tirePartLateralGripMultiplier(String partKey, double vehicleLateralGripMultiplier) {
+  var partOverride = Overrides.effectivePartOverride(partKey);
+  return (partOverride != null && partOverride.lateralGripMultiplier != null) ? partOverride.lateralGripMultiplier : vehicleLateralGripMultiplier;
+ }
+ /**
   * Which {@code Overrides.Tuning} fields a currently-active {@code Body}/{@code BuoyantBody}
   * already re-reads fresh from its own live {@code tuning} object every tick/call, rather than
   * caching into a separate field at construction time (ticket 53518/MINECRAFT-505) - confirmed
@@ -362,9 +474,14 @@ public final class PhysicsBridge {
   * waterDrag/propellerForce/angularWaterDrag/antiRollStiffness (MINECRAFT-519 - stepGround reads
   * {@code tuning.antiRollStiffness} fresh every tick, same as every other field in this list)/
   * stallAngleDegrees/liftSlope/controlSurfaceSlope (MINECRAFT-521, stepFlight only)/
+  * aileronAuthorityScale/elevatorAuthorityScale/rudderAuthorityScale (MINECRAFT-541, stepFlight
+  * only, same reasoning as stallAngleDegrees/liftSlope/controlSurfaceSlope immediately above)/
   * cyclicLimitDegrees/cyclicAuthorityScale/yawAuthorityScale (MINECRAFT-522, stepRotor only)/
   * rotorAngularDampingCoefficient (MINECRAFT-537, stepRotor only - read fresh every tick via
   * rotorAngularDampingTorque, same as the MINECRAFT-522 fields immediately above)/
+  * rotorAirDragCoefficient (MINECRAFT-543, stepRotor only - read fresh every tick via
+  * RotorForces.translationalDragForce, same reasoning as rotorAngularDampingCoefficient
+  * immediately above)/
   * brakeBiasFront (MINECRAFT-520, same reasoning)/driveBiasFront (MINECRAFT-524, same reasoning -
   * stepGround reads tuning.driveBiasFront fresh every tick via DriveBiasDistribution#shareRatios)/
   * suspensionDampingRatio (MINECRAFT-523, stepGround reads tuning.suspensionDampingRatio fresh
@@ -375,11 +492,25 @@ public final class PhysicsBridge {
   * Multiplier/lateralWaterDragMultiplier/verticalWaterDragMultiplier (MINECRAFT-535,
   * BuoyantForces.apply reads all three fresh every tick alongside waterDrag itself)/
   * parasiticDragMultiplier/oswaldEfficiency (MINECRAFT-536, stepFlight only, same reasoning as
-  * stallAngleDegrees/liftSlope/controlSurfaceSlope above)/axleDriveForceSharing (MINECRAFT-532,
+  * stallAngleDegrees/liftSlope/controlSurfaceSlope above)/fixedWingAngularDampingCoefficient
+  * (MINECRAFT-542, stepFlight only - read fresh every tick via rotorAngularDampingTorque, same
+  * reasoning as rotorAngularDampingCoefficient above, a wholly separate field)/
+  * axleDriveForceSharing (MINECRAFT-532,
   * stepGround reads tuning.axleDriveForceSharing fresh every tick via
-  * AxleDriveForceSharing#shareRatios, same as every other field in this list)/rollingResistance
+  * AxleDriveForceSharing#shareRatios, same as every other field in this list)/ackermannSteering
+  * (MINECRAFT-540, stepGround reads tuning.ackermannSteering fresh every tick via
+  * AckermannSteeringDistribution#steerRadians, same as every other field in this list)/
+  * rollingResistance
   * (MINECRAFT-534, stepGround reads tuning.rollingResistance fresh every tick at the
-  * FrictionContact-construction call site, same as every other field in this list). Mutating
+  * FrictionContact-construction call site, same as every other field in this list)/
+  * marineSteerDegrees (MINECRAFT-544, BuoyantForces.apply reads tuning.marineSteerDegrees fresh
+  * every tick for propeller thrust direction, same as maxSteerDegrees itself)/
+  * suspensionDampingRatioCompression/suspensionDampingRatioRebound (MINECRAFT-551, stepGround
+  * reads both fresh every tick via the per-wheel wheelCompressionRatio/wheelReboundRatio
+  * computation feeding TireForces.suspension's 5-arg overload, same reasoning as
+  * suspensionDampingRatio immediately above)/gearRatioAware (MINECRAFT-553, stepGround reads
+  * tuning.gearRatioAware fresh every tick via gearForceScale, same as every other field in this
+  * list). Mutating
   * the SAME live Tuning object's one of these fields in place therefore takes effect on that
   * body's very next tick, with no reconstruction at all - true hot reload for exactly this set.
   * Every OTHER field ({@code massKg}, {@code hullFillFactor}, {@code upperMassFraction}, every
@@ -405,6 +536,9 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.driveForce, fresh.driveForce)) { target.driveForce = fresh.driveForce; appliedOut.add("driveForce"); }
   if (!java.util.Objects.equals(target.brakeForce, fresh.brakeForce)) { target.brakeForce = fresh.brakeForce; appliedOut.add("brakeForce"); }
   if (!java.util.Objects.equals(target.maxSteerDegrees, fresh.maxSteerDegrees)) { target.maxSteerDegrees = fresh.maxSteerDegrees; appliedOut.add("maxSteerDegrees"); }
+  // MINECRAFT-544: BuoyantForces.apply reads tuning.marineSteerDegrees fresh every tick, same
+  // "no separate cached field" shape as maxSteerDegrees immediately above.
+  if (!java.util.Objects.equals(target.marineSteerDegrees, fresh.marineSteerDegrees)) { target.marineSteerDegrees = fresh.marineSteerDegrees; appliedOut.add("marineSteerDegrees"); }
   if (!java.util.Objects.equals(target.lateralGripMultiplier, fresh.lateralGripMultiplier)) { target.lateralGripMultiplier = fresh.lateralGripMultiplier; appliedOut.add("lateralGripMultiplier"); }
   if (!java.util.Objects.equals(target.waterDrag, fresh.waterDrag)) { target.waterDrag = fresh.waterDrag; appliedOut.add("waterDrag"); }
   if (!java.util.Objects.equals(target.propellerForce, fresh.propellerForce)) { target.propellerForce = fresh.propellerForce; appliedOut.add("propellerForce"); }
@@ -413,6 +547,12 @@ public final class PhysicsBridge {
   if (!java.util.Objects.equals(target.stallAngleDegrees, fresh.stallAngleDegrees)) { target.stallAngleDegrees = fresh.stallAngleDegrees; appliedOut.add("stallAngleDegrees"); }
   if (!java.util.Objects.equals(target.liftSlope, fresh.liftSlope)) { target.liftSlope = fresh.liftSlope; appliedOut.add("liftSlope"); }
   if (!java.util.Objects.equals(target.controlSurfaceSlope, fresh.controlSurfaceSlope)) { target.controlSurfaceSlope = fresh.controlSurfaceSlope; appliedOut.add("controlSurfaceSlope"); }
+  // MINECRAFT-541: stepFlight reads tuning.aileron/elevator/rudderAuthorityScale fresh every
+  // tick, same "no separate cached field" shape as stallAngleDegrees/liftSlope/
+  // controlSurfaceSlope immediately above.
+  if (!java.util.Objects.equals(target.aileronAuthorityScale, fresh.aileronAuthorityScale)) { target.aileronAuthorityScale = fresh.aileronAuthorityScale; appliedOut.add("aileronAuthorityScale"); }
+  if (!java.util.Objects.equals(target.elevatorAuthorityScale, fresh.elevatorAuthorityScale)) { target.elevatorAuthorityScale = fresh.elevatorAuthorityScale; appliedOut.add("elevatorAuthorityScale"); }
+  if (!java.util.Objects.equals(target.rudderAuthorityScale, fresh.rudderAuthorityScale)) { target.rudderAuthorityScale = fresh.rudderAuthorityScale; appliedOut.add("rudderAuthorityScale"); }
   if (!java.util.Objects.equals(target.cyclicLimitDegrees, fresh.cyclicLimitDegrees)) { target.cyclicLimitDegrees = fresh.cyclicLimitDegrees; appliedOut.add("cyclicLimitDegrees"); }
   if (!java.util.Objects.equals(target.cyclicAuthorityScale, fresh.cyclicAuthorityScale)) { target.cyclicAuthorityScale = fresh.cyclicAuthorityScale; appliedOut.add("cyclicAuthorityScale"); }
   if (!java.util.Objects.equals(target.yawAuthorityScale, fresh.yawAuthorityScale)) { target.yawAuthorityScale = fresh.yawAuthorityScale; appliedOut.add("yawAuthorityScale"); }
@@ -420,6 +560,16 @@ public final class PhysicsBridge {
   // rotorAngularDampingTorque, same "no separate cached field" shape as cyclicLimitDegrees/
   // cyclicAuthorityScale/yawAuthorityScale immediately above.
   if (!java.util.Objects.equals(target.rotorAngularDampingCoefficient, fresh.rotorAngularDampingCoefficient)) { target.rotorAngularDampingCoefficient = fresh.rotorAngularDampingCoefficient; appliedOut.add("rotorAngularDampingCoefficient"); }
+  // MINECRAFT-554: stepRotor reads tuning.rotorAngularDampingCoefficientPitch/Roll/Yaw fresh
+  // every tick too, same "no separate cached field" shape as rotorAngularDampingCoefficient
+  // immediately above.
+  if (!java.util.Objects.equals(target.rotorAngularDampingCoefficientPitch, fresh.rotorAngularDampingCoefficientPitch)) { target.rotorAngularDampingCoefficientPitch = fresh.rotorAngularDampingCoefficientPitch; appliedOut.add("rotorAngularDampingCoefficientPitch"); }
+  if (!java.util.Objects.equals(target.rotorAngularDampingCoefficientRoll, fresh.rotorAngularDampingCoefficientRoll)) { target.rotorAngularDampingCoefficientRoll = fresh.rotorAngularDampingCoefficientRoll; appliedOut.add("rotorAngularDampingCoefficientRoll"); }
+  if (!java.util.Objects.equals(target.rotorAngularDampingCoefficientYaw, fresh.rotorAngularDampingCoefficientYaw)) { target.rotorAngularDampingCoefficientYaw = fresh.rotorAngularDampingCoefficientYaw; appliedOut.add("rotorAngularDampingCoefficientYaw"); }
+  // MINECRAFT-543: stepRotor reads tuning.rotorAirDragCoefficient fresh every tick via
+  // RotorForces.translationalDragForce, same "no separate cached field" shape as
+  // rotorAngularDampingCoefficient immediately above.
+  if (!java.util.Objects.equals(target.rotorAirDragCoefficient, fresh.rotorAirDragCoefficient)) { target.rotorAirDragCoefficient = fresh.rotorAirDragCoefficient; appliedOut.add("rotorAirDragCoefficient"); }
   if (!java.util.Objects.equals(target.brakeBiasFront, fresh.brakeBiasFront)) { target.brakeBiasFront = fresh.brakeBiasFront; appliedOut.add("brakeBiasFront"); }
   if (!java.util.Objects.equals(target.driveBiasFront, fresh.driveBiasFront)) { target.driveBiasFront = fresh.driveBiasFront; appliedOut.add("driveBiasFront"); }
   if (!java.util.Objects.equals(target.suspensionDampingRatio, fresh.suspensionDampingRatio)) { target.suspensionDampingRatio = fresh.suspensionDampingRatio; appliedOut.add("suspensionDampingRatio"); }
@@ -427,6 +577,18 @@ public final class PhysicsBridge {
   // suspensionSpring/suspensionSpringForShare, same "no separate cached field" shape as
   // suspensionDampingRatio immediately above.
   if (!java.util.Objects.equals(target.suspensionSpringMultiplier, fresh.suspensionSpringMultiplier)) { target.suspensionSpringMultiplier = fresh.suspensionSpringMultiplier; appliedOut.add("suspensionSpringMultiplier"); }
+  // MINECRAFT-539: stepGround reads tuning.suspensionDampingRatioFront/Rear and
+  // suspensionSpringMultiplierFront/Rear fresh every tick via AxleSuspensionDistribution, same
+  // "no separate cached field" shape as suspensionDampingRatio/suspensionSpringMultiplier above.
+  if (!java.util.Objects.equals(target.suspensionDampingRatioFront, fresh.suspensionDampingRatioFront)) { target.suspensionDampingRatioFront = fresh.suspensionDampingRatioFront; appliedOut.add("suspensionDampingRatioFront"); }
+  if (!java.util.Objects.equals(target.suspensionDampingRatioRear, fresh.suspensionDampingRatioRear)) { target.suspensionDampingRatioRear = fresh.suspensionDampingRatioRear; appliedOut.add("suspensionDampingRatioRear"); }
+  if (!java.util.Objects.equals(target.suspensionSpringMultiplierFront, fresh.suspensionSpringMultiplierFront)) { target.suspensionSpringMultiplierFront = fresh.suspensionSpringMultiplierFront; appliedOut.add("suspensionSpringMultiplierFront"); }
+  // MINECRAFT-551: stepGround reads tuning.suspensionDampingRatioCompression/Rebound fresh every
+  // tick via the per-wheel wheelCompressionRatio/wheelReboundRatio computation, same "no separate
+  // cached field" shape as every other suspension field above.
+  if (!java.util.Objects.equals(target.suspensionDampingRatioCompression, fresh.suspensionDampingRatioCompression)) { target.suspensionDampingRatioCompression = fresh.suspensionDampingRatioCompression; appliedOut.add("suspensionDampingRatioCompression"); }
+  if (!java.util.Objects.equals(target.suspensionDampingRatioRebound, fresh.suspensionDampingRatioRebound)) { target.suspensionDampingRatioRebound = fresh.suspensionDampingRatioRebound; appliedOut.add("suspensionDampingRatioRebound"); }
+  if (!java.util.Objects.equals(target.suspensionSpringMultiplierRear, fresh.suspensionSpringMultiplierRear)) { target.suspensionSpringMultiplierRear = fresh.suspensionSpringMultiplierRear; appliedOut.add("suspensionSpringMultiplierRear"); }
   // MINECRAFT-535: BuoyantForces.apply reads tuning.longitudinal/lateral/verticalWaterDragMultiplier
   // fresh every tick, same "no separate cached field" shape as waterDrag/angularWaterDrag above.
   if (!java.util.Objects.equals(target.longitudinalWaterDragMultiplier, fresh.longitudinalWaterDragMultiplier)) { target.longitudinalWaterDragMultiplier = fresh.longitudinalWaterDragMultiplier; appliedOut.add("longitudinalWaterDragMultiplier"); }
@@ -437,6 +599,10 @@ public final class PhysicsBridge {
   // controlSurfaceSlope immediately above - both are safe to hot-mutate in place.
   if (!java.util.Objects.equals(target.parasiticDragMultiplier, fresh.parasiticDragMultiplier)) { target.parasiticDragMultiplier = fresh.parasiticDragMultiplier; appliedOut.add("parasiticDragMultiplier"); }
   if (!java.util.Objects.equals(target.oswaldEfficiency, fresh.oswaldEfficiency)) { target.oswaldEfficiency = fresh.oswaldEfficiency; appliedOut.add("oswaldEfficiency"); }
+  // MINECRAFT-542: stepFlight reads tuning.fixedWingAngularDampingCoefficient fresh every tick
+  // via rotorAngularDampingTorque, same "no separate cached field" shape as
+  // rotorAngularDampingCoefficient (MINECRAFT-537, stepRotor only) immediately above.
+  if (!java.util.Objects.equals(target.fixedWingAngularDampingCoefficient, fresh.fixedWingAngularDampingCoefficient)) { target.fixedWingAngularDampingCoefficient = fresh.fixedWingAngularDampingCoefficient; appliedOut.add("fixedWingAngularDampingCoefficient"); }
   // MINECRAFT-533: stepGround reads tuning.toeFrontDegrees/toeRearDegrees fresh every tick via
   // AxleToeDistribution.toeRadians, same "no separate cached field" shape as maxSteerDegrees/
   // brakeBiasFront/driveBiasFront above - no respawn needed for either field.
@@ -445,6 +611,13 @@ public final class PhysicsBridge {
   // MINECRAFT-532: stepGround reads tuning.axleDriveForceSharing fresh every tick via
   // AxleDriveForceSharing#shareRatios, same "no separate cached field" shape as driveBiasFront.
   if (!java.util.Objects.equals(target.axleDriveForceSharing, fresh.axleDriveForceSharing)) { target.axleDriveForceSharing = fresh.axleDriveForceSharing; appliedOut.add("axleDriveForceSharing"); }
+  // MINECRAFT-540: stepGround reads tuning.ackermannSteering fresh every tick via
+  // AckermannSteeringDistribution#steerRadians, same "no separate cached field" shape as
+  // axleDriveForceSharing immediately above.
+  if (!java.util.Objects.equals(target.ackermannSteering, fresh.ackermannSteering)) { target.ackermannSteering = fresh.ackermannSteering; appliedOut.add("ackermannSteering"); }
+  // MINECRAFT-553: stepGround reads tuning.gearRatioAware fresh every tick via gearForceScale,
+  // same live-reload shape as axleDriveForceSharing/ackermannSteering immediately above.
+  if (!java.util.Objects.equals(target.gearRatioAware, fresh.gearRatioAware)) { target.gearRatioAware = fresh.gearRatioAware; appliedOut.add("gearRatioAware"); }
  }
  /** The complementary set to {@link #applyLiveSafeFields} - never mutates {@code target}, only
   * reports (by field name) which of the construction-cached fields differ from {@code fresh} so
@@ -1079,6 +1252,21 @@ public final class PhysicsBridge {
  }
  public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
  /**
+  * Ticket MINECRAFT-546 (tuning-provenance diagnostic): the live {@code Overrides.Tuning} the
+  * currently-active body for {@code v} was actually constructed with - see {@code
+  * VehicleBody.tuning()}'s own doc for exactly which fields a later hot reload can still mutate
+  * in place on this SAME object vs. which were only read once at construction. Returns {@code
+  * null} if {@code v} has no active body at all (never activated, opted out, or a broken
+  * definition) - the diagnostic's only way to tell "this vehicle is running tuning X right now"
+  * apart from "a fresh {@code Overrides.resolved} call against the current config would compute
+  * X" (the two can legitimately differ for a respawn-required field changed since this vehicle's
+  * body was built).
+  */
+ public static Overrides.Tuning activeTuning(EntityVehicleF_Physics v) {
+  VehicleBody body = registry.get(v);
+  return body != null ? body.tuning() : null;
+ }
+ /**
   * Diagnostic/test-only (ticket 53390's explicit "native angular before/after receipt on
   * rotating airborne rebuild remains necessary and cheap"): directly injects a KNOWN angular
   * velocity into this vehicle's currently-active Body, so a test can establish a real, nonzero,
@@ -1336,6 +1524,29 @@ public final class PhysicsBridge {
   if (body instanceof Body b) return b.center();
   if (body instanceof BuoyantBody bb) return bb.center();
   return null;
+ }
+ /**
+  * Diagnostic/test-only (MINECRAFT-543, {@code RotorAirDragRuntimeProbe}): the translational
+  * twin of {@link #debugInjectAngularVelocity} - directly injects a KNOWN linear velocity into
+  * this vehicle's currently-active Body's live Sable handle, so a test/probe can establish a
+  * real, nonzero, precisely-known translational speed WITHOUT needing thrust/control input to
+  * produce one. A no-op if this vehicle has no active Body right now. Never called from any
+  * production code path.
+  */
+ public static void debugInjectLinearVelocity(EntityVehicleF_Physics v, Vector3d linearVelocity) {
+  if (registry.get(v) instanceof Body body) {
+   body.handle.addLinearAndAngularVelocity(linearVelocity, new Vector3d());
+   if (body.twoBodyActive) body.upperHandle.addLinearAndAngularVelocity(linearVelocity, new Vector3d());
+  }
+ }
+ /**
+  * Diagnostic/test-only companion to {@link #debugInjectLinearVelocity} - reads back this
+  * vehicle's CURRENT actual native linear velocity directly from its live Sable handle, the
+  * translational twin of {@link #debugReadAngularVelocity}. Returns null if there is no active
+  * Body.
+  */
+ public static Vector3d debugReadLinearVelocity(EntityVehicleF_Physics v) {
+  return registry.get(v) instanceof Body body ? body.handle.getLinearVelocity(new Vector3d()) : null;
  }
  /**
   * Diagnostic/test-only snapshot (MINECRAFT-526 review 53897/53905/53907) bundling everything a
@@ -1793,6 +2004,20 @@ public final class PhysicsBridge {
   return 2*Math.sqrt(spring*mass*loadShare)*dampingRatio;
  }
  /**
+  * MINECRAFT-551: this wheel's own effective ratio for ONE direction (compression or rebound) -
+  * {@code directionalOverride} (the vehicle-wide {@code Overrides.Tuning#suspensionDampingRatioCompression}/
+  * {@code Rebound}, whichever the caller is resolving) when configured, else exactly {@code
+  * axleResolvedRatio} (this wheel's own already axle-resolved {@code suspensionDampingRatio} -
+  * {@link AxleSuspensionDistribution#dampingRatios}'s own output). Never a second,
+  * independently-defaulted value - an unconfigured direction inherits the SAME per-wheel ratio
+  * the symmetric (pre-this-ticket) path already used, so a vehicle that never sets either
+  * directional field is byte-identical on every wheel, and explicitly setting both directions to
+  * the same value reproduces the corresponding existing symmetric setting exactly.
+  */
+ static double directionalDampingRatio(Double directionalOverride, double axleResolvedRatio) {
+  return directionalOverride != null ? directionalOverride : axleResolvedRatio;
+ }
+ /**
   * MINECRAFT-520: this wheel's own composed {@code MultiContactFrictionSolver.FrictionContact}
   * brake magnitude, folding the configurable front/rear bias into ONLY the service-pedal
   * component, exactly the way {@link BrakeBiasDistribution}'s own doc promises:
@@ -2008,12 +2233,39 @@ public final class PhysicsBridge {
   * its other torque/impulse application today (see its own class doc), so this follows that same
   * established single-handle pattern rather than introducing two-body awareness nothing else in
   * this method has yet.
+  *
+  * <p>MINECRAFT-542: reused verbatim (same method, unmodified) by {@code Body.stepFlight} for
+  * fixed-wing angular-rate damping - nothing about the assembly above is actually rotor-specific
+  * (it only combines a per-axis dissipative torque with this body's own axes/inertia), so the
+  * fixed-wing caller passes its own, wholly separate {@code tuning.fixedWingAngularDampingCoefficient}
+  * rather than sharing {@code tuning.rotorAngularDampingCoefficient} - see that field's own doc.
   */
  static Vector3d rotorAngularDampingTorque(Vector3d angularVelocity, Vector3d forward, Vector3d right, Vector3d up,
      Vector3d inertiaBody, double dampingCoefficient, double dt) {
-  double torqueRight = RotorForces.angularDampingTorque(angularVelocity.dot(right), inertiaBody.x, dampingCoefficient, dt);
-  double torqueUp = RotorForces.angularDampingTorque(angularVelocity.dot(up), inertiaBody.y, dampingCoefficient, dt);
-  double torqueForward = RotorForces.angularDampingTorque(angularVelocity.dot(forward), inertiaBody.z, dampingCoefficient, dt);
+  return rotorAngularDampingTorque(angularVelocity, forward, right, up, inertiaBody, dampingCoefficient, dampingCoefficient, dampingCoefficient, dt);
+ }
+ /**
+  * MINECRAFT-554: {@link #rotorAngularDampingTorque(Vector3d,Vector3d,Vector3d,Vector3d,Vector3d,double,double)}
+  * with the single {@code dampingCoefficient} split into three independent per-axis coefficients -
+  * {@code pitchCoefficient} for the {@code right} axis (same pairing {@code Body.stepRotor}'s own
+  * {@code pitchTorque} already uses, {@code inertiaBody.x}), {@code rollCoefficient} for
+  * {@code forward} (same pairing {@code Body.stepRotor}'s own {@code rollTorque} already uses,
+  * {@code inertiaBody.z}), {@code yawCoefficient} for {@code up} (same pairing {@code
+  * Body.stepRotor}'s own {@code yawTorque} already uses, {@code inertiaBody.y}). The single-
+  * coefficient overload above now simply delegates here with the same value three times, so every
+  * existing caller (including {@code Body.stepFlight}'s wholly separate {@code
+  * fixedWingAngularDampingCoefficient} use) is completely unaffected - this reuses, rather than
+  * duplicates, the exact per-axis {@link RotorForces#angularDampingTorque} call and assembly
+  * {@link #rotorAngularDampingTorque(Vector3d,Vector3d,Vector3d,Vector3d,Vector3d,double,double)}
+  * already established (MINECRAFT-537), just with three independently-resolved coefficients
+  * instead of one shared value - passing the same coefficient for all three reproduces that exact
+  * prior uniform behavior, byte-identical.
+  */
+ static Vector3d rotorAngularDampingTorque(Vector3d angularVelocity, Vector3d forward, Vector3d right, Vector3d up,
+     Vector3d inertiaBody, double pitchCoefficient, double rollCoefficient, double yawCoefficient, double dt) {
+  double torqueRight = RotorForces.angularDampingTorque(angularVelocity.dot(right), inertiaBody.x, pitchCoefficient, dt);
+  double torqueUp = RotorForces.angularDampingTorque(angularVelocity.dot(up), inertiaBody.y, yawCoefficient, dt);
+  double torqueForward = RotorForces.angularDampingTorque(angularVelocity.dot(forward), inertiaBody.z, rollCoefficient, dt);
   return new Vector3d(right).mul(torqueRight).fma(torqueUp, up).fma(torqueForward, forward);
  }
  private static final class Body implements VehicleBody, HitchAnchor {
@@ -2573,7 +2825,9 @@ public final class PhysicsBridge {
    double rawDrive=0;
    for(var part:v.allParts) if(part instanceof PartEngine engine && engine.running)
     rawDrive=Math.signum(engine.currentGearVar.currentValue)*v.throttleVar.currentValue
-      *enginePartDriveForce(engine.definition.packID+":"+engine.definition.systemName, tuning.driveForce);
+      *enginePartDriveForce(engine.definition.packID+":"+engine.definition.systemName, tuning.driveForce)
+      *gearForceScale(gearRatioMagnitudeAt(engine,(int)engine.currentGearVar.currentValue),
+          gearRatioMagnitudeAt(engine,1), Boolean.TRUE.equals(tuning.gearRatioAware));
    // G29/wheel analog brake pedal strength (ticket MINECRAFT-504, comment 52840/53522) - IV's own
    // brakeVar.currentValue (ComputedVariable) already carries the real 0-1 pedal magnitude from
    // its ControlsJoystick.CAR_BRAKE axis (isActive is merely currentValue>0 - see that class's own
@@ -2738,10 +2992,15 @@ public final class PhysicsBridge {
    // rounding for every currently-accepted default/symmetric vehicle - only an asymmetric
    // layout (COM offset toward one axle/corner) actually changes any wheel's calibrated rate.
    double[] loadShareX=new double[wheels.size()], loadShareZ=new double[wheels.size()];
+   // MINECRAFT-540: each wheel's own turnsWithSteer flag, read once here alongside loadShareX/
+   // loadShareZ so AckermannSteeringDistribution.steerRadians below never needs a Minecraft/IV
+   // type either, same "pure x/z/flag arrays" shape AxleToeDistribution already uses.
+   boolean[] turnsWithSteerArr=new boolean[wheels.size()];
    for (int i=0;i<wheels.size();i++) {
     var w=wheels.get(i);
     loadShareX[i]=w.localOffset.x-center.x;
     loadShareZ[i]=w.localOffset.z-center.z;
+    turnsWithSteerArr[i]=w.placementDefinition.turnsWithSteer;
    }
    double[] loadShares=WheelLoadDistribution.shares(loadShareX,loadShareZ);
    // MINECRAFT-520: each wheel's own SERVICE-BRAKE budget share, from the same per-wheel `z`
@@ -2771,6 +3030,35 @@ public final class PhysicsBridge {
    // convention. Unset tuning.toeFrontDegrees/toeRearDegrees (both null) reproduces the exact
    // pre-ticket all-zero offset.
    double[] toeRadians=AxleToeDistribution.toeRadians(loadShareX,loadShareZ,tuning.toeFrontDegrees,tuning.toeRearDegrees);
+   // MINECRAFT-540: the existing uniform steer angle (radians) every turnsWithSteer wheel used
+   // pre-ticket, unchanged - still the fallback value below whenever Ackermann is disabled or
+   // the layout is ambiguous, and still the SAME input AckermannSteeringDistribution redistributes
+   // per wheel when enabled (never a second independent reading of the rudder/maxSteerDegrees).
+   double uniformSteerRadians=(-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees);
+   // MINECRAFT-540: opt-in per-wheel Ackermann steer angle (radians), from the same loadShareX/
+   // loadShareZ anchor positions used for the load/brake/drive/toe shares above - see
+   // AckermannSteeringDistribution's own doc for the bicycle-model geometry and the full
+   // ambiguous-layout fallback list (null means "keep uniformSteerRadians unchanged for every
+   // turnsWithSteer wheel", the exact pre-ticket behavior). tuning.ackermannSteering unset/false
+   // (the documented default) never even calls into the geometry - a byte-identical no-op.
+   double[] ackermannSteerRadians=Boolean.TRUE.equals(tuning.ackermannSteering)
+     ? AckermannSteeringDistribution.steerRadians(loadShareX,loadShareZ,turnsWithSteerArr,skidSteer,uniformSteerRadians,Math.toRadians(tuning.maxSteerDegrees))
+     : null;
+   // MINECRAFT-539: each wheel's own EFFECTIVE spring multiplier/damping ratio - the vehicle-wide
+   // tuning.suspensionSpringMultiplier/suspensionDampingRatio resolved above, overridden per
+   // geometric axle when suspensionSpringMultiplierFront/Rear or suspensionDampingRatioFront/Rear
+   // is configured (see AxleSuspensionDistribution's own doc for the inheritance/ambiguous-layout
+   // fallback). Unset axle fields (or an ambiguous layout) reproduce the exact pre-ticket uniform
+   // per-wheel value on every wheel.
+   double[] axleSpringMultipliers=AxleSuspensionDistribution.springMultipliers(loadShareZ,tuning.suspensionSpringMultiplier,tuning.suspensionSpringMultiplierFront,tuning.suspensionSpringMultiplierRear);
+   double[] axleDampingRatios=AxleSuspensionDistribution.dampingRatios(loadShareZ,tuning.suspensionDampingRatio,tuning.suspensionDampingRatioFront,tuning.suspensionDampingRatioRear);
+   // MINECRAFT-551: compression/rebound each independently inherit the per-wheel axleDampingRatios
+   // resolved immediately above (which already applied the axle override chain) whenever the
+   // corresponding directional field is unset - never a second, independently-defaulted value.
+   // When set, tuning.suspensionDampingRatioCompression/Rebound is VEHICLE-WIDE (see its own doc
+   // for why this deliberately does not get its own Front/Rear pair) and applies to every wheel
+   // in that direction, overriding axleDampingRatios for that direction only. See
+   // #directionalDampingRatio below for the actual per-wheel resolution.
    List<WheelHit> hits=new java.util.ArrayList<>();
    int wheelIndex=0;
    for(var wheel:wheels) {
@@ -2778,8 +3066,19 @@ public final class PhysicsBridge {
     double loadShare=loadShares[wheelIdx];
     double brakeShareRatio=brakeShareRatios[wheelIdx];
     double driveShareRatio=driveShareRatios[wheelIdx];
-    double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
-    double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring,tuning.suspensionDampingRatio);
+    double wheelSpringMultiplier=axleSpringMultipliers[wheelIdx];
+    double wheelDampingRatio=axleDampingRatios[wheelIdx];
+    double wheelSpring=suspensionSpringForShare(mass,loadShare,tuning.suspensionTravel,gravity,wheelSpringMultiplier);
+    double wheelDamper=suspensionDamperForShare(mass,loadShare,wheelSpring,wheelDampingRatio);
+    // MINECRAFT-551: this wheel's own effective compression/rebound ratio - the configured
+    // vehicle-wide directional override if set, else exactly wheelDampingRatio (this wheel's own
+    // already axle-resolved base) above, so an unconfigured vehicle (or one that only configures
+    // axle overrides, never compression/rebound) gets byte-identical wheelDamperCompression==
+    // wheelDamperRebound==wheelDamper on every wheel.
+    double wheelCompressionRatio=directionalDampingRatio(tuning.suspensionDampingRatioCompression,wheelDampingRatio);
+    double wheelReboundRatio=directionalDampingRatio(tuning.suspensionDampingRatioRebound,wheelDampingRatio);
+    double wheelDamperCompression=suspensionDamperForShare(mass,loadShare,wheelSpring,wheelCompressionRatio);
+    double wheelDamperRebound=suspensionDamperForShare(mass,loadShare,wheelSpring,wheelReboundRatio);
     double radius=wheel.getHeight()/2;
     Vector3d anchor=new Vector3d(wheel.localOffset.x,wheel.localOffset.y+tuning.suspensionTravel*.5,wheel.localOffset.z).sub(center);
     boolean upperOwned=twoBodyActive && io.github.brooswitminecraft.div.experimental.TwoBodyChassis.isUpperHalf(anchor.y);
@@ -2823,7 +3122,7 @@ public final class PhysicsBridge {
     // disappear when this experimental candidate is opted in.
     Vector3d predictorPoint=new Vector3d(point).add(predictorLeverArmCorrection);
     var damperResult = EXPERIMENTAL_EFFECTIVE_MASS_DAMPING
-      ? effectiveMassDamper(wheelSpring,mass,predictorPoint,up,inverse,aggregateInertiaBody,tuning.suspensionDampingRatio,wheelDamper)
+      ? effectiveMassDamper(wheelSpring,mass,predictorPoint,up,inverse,aggregateInertiaBody,wheelDampingRatio,wheelDamper)
       : new EffectiveMassDamperResult(wheelDamper, Double.NaN);
     // The vehicle-wide mass*gravity safety cap is UNCHANGED (not tightened to mass*gravity*
     // loadShare) - it is documented as a safety cap, not a load-distribution model (see
@@ -2831,12 +3130,34 @@ public final class PhysicsBridge {
     // behavior under hard compression, which this ticket's "preserve defaults" constraint rules
     // out. Only the calibrated RATE that normally keeps compression near travel*.5 varies by
     // load share; this clamp is the same last-resort backstop every wheel already had.
-    double normal=Math.min(mass*gravity,TireForces.suspension(compression,localVelocity.dot(up),wheelSpring,damperResult.damper()));
+    // MINECRAFT-551: the experimental effective-mass-damping candidate (default off) keeps its
+    // existing, documented semantics unexpanded - when active it still produces exactly ONE
+    // ratio-driven damper (effectiveMassDamper is never called twice with different ratios, which
+    // would be the "expansion of that experiment" this ticket's own scope rules out), used for
+    // BOTH directions; the compression/rebound split only actually differentiates the damper on
+    // the default (EXPERIMENTAL_EFFECTIVE_MASS_DAMPING off) path. Byte-identical to today whenever
+    // compression/rebound are unset (both collapse to wheelDamper/damperResult.damper() exactly).
+    double damperCompressionUsed=EXPERIMENTAL_EFFECTIVE_MASS_DAMPING?damperResult.damper():wheelDamperCompression;
+    double damperReboundUsed=EXPERIMENTAL_EFFECTIVE_MASS_DAMPING?damperResult.damper():wheelDamperRebound;
+    double normalSpeed=localVelocity.dot(up);
+    double normal=Math.min(mass*gravity,TireForces.suspension(compression,normalSpeed,wheelSpring,damperCompressionUsed,damperReboundUsed));
+    // Diagnostic-only: the single scalar damper actually selected THIS tick by normalSpeed's own
+    // sign (see TireForces.suspension's 5-arg overload) - what WheelHit.damperUsed below reports,
+    // so the existing damperUsed= log line (comment 53219's receipt) stays a true statement of
+    // what was applied, not merely the compression-side value.
+    double damperActuallyUsed=normalSpeed<0?damperCompressionUsed:damperReboundUsed;
     // MINECRAFT-533: static toe offset composes ADDITIVELY with steer input (never replacing
     // it) - a steering wheel still toes at center and continues to sweep with rudder input
     // exactly as before, just around a toed-in/out neutral rather than dead-ahead; a non-
     // steering wheel (turnsWithSteer false, steer==0 above) still gets its own configured toe.
-    double steer=(wheel.placementDefinition.turnsWithSteer ? (-v.rudderInputVar.currentValue / EntityVehicleF_Physics.MAX_RUDDER_ANGLE)*Math.toRadians(tuning.maxSteerDegrees) : 0)+toeRadians[wheelIdx];
+    // MINECRAFT-540: ackermannSteerRadians (non-null only when tuning.ackermannSteering is
+    // opted in AND the layout qualifies - see AckermannSteeringDistribution's own doc) replaces
+    // ONLY the uniform per-wheel steer term below, never the toe addition immediately after it -
+    // disabled/ambiguous falls back to uniformSteerRadians unchanged, byte-identical to before
+    // this ticket.
+    double steer=(wheel.placementDefinition.turnsWithSteer
+        ? (ackermannSteerRadians!=null ? ackermannSteerRadians[wheelIdx] : uniformSteerRadians)
+        : 0)+toeRadians[wheelIdx];
     Vector3d forward=q.transform(new Vector3d(Math.sin(steer),0,Math.cos(steer)));
     Vector3d right=new Vector3d(up).cross(forward);
     double skidSteerMultiplier=skidSteer ? 1-Math.signum(anchor.x)*(v.rudderInputVar.currentValue/EntityVehicleF_Physics.MAX_RUDDER_ANGLE) : 1;
@@ -2852,7 +3173,7 @@ public final class PhysicsBridge {
     GroundSurface surface=DirectionalGroundSurface.at(level,terrainHit.getBlockPos(),terrainHit.getDirection(),
       hitLocal.x,hitLocal.y,hitLocal.z,forward.x,forward.y,forward.z);
     hits.add(new WheelHit(wheel,radius,arm,start,end,length,compression,localVelocity,normal,forward,right,point,skidSteerMultiplier,
-      brakeShareRatio,driveShareRatio,damperResult.damper(),damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
+      brakeShareRatio,driveShareRatio,damperActuallyUsed,damperResult.effectiveMass(),upperOwned,surface,wheelIdx));
    }
    // Two-body ground-force owner resolution (review 53272's correctness fix - see Body's own
    // class-level correction for the full defect this closes). For the single-body path this is
@@ -2936,8 +3257,14 @@ public final class PhysicsBridge {
      int hi=hitIndexForWheel[wi], hj=hitIndexForWheel[partnerWi];
      if (hi<0 || hj<0) continue; // one or both sides not actually grounded this tick - leave both alone
      double normalA=hits.get(hi).normal(), normalB=hits.get(hj).normal();
-     double rateA=suspensionSpringForShare(mass,loadShares[wi],tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
-     double rateB=suspensionSpringForShare(mass,loadShares[partnerWi],tuning.suspensionTravel,gravity,tuning.suspensionSpringMultiplier);
+     // MINECRAFT-539: each side's own EFFECTIVE (axle-resolved) spring multiplier, not the flat
+     // vehicle-wide tuning.suspensionSpringMultiplier - this is the SAME per-wheel rate Phase 1
+     // above already used to build that wheel's own wheelSpring, so an anti-roll pair with an
+     // axle-specific multiplier configured sees the same calibrated rate anti-roll's own
+     // restoring-force conversion already depends on (see this class's own doc immediately above
+     // for why using the pair's own rate, not a shared one, matters).
+     double rateA=suspensionSpringForShare(mass,loadShares[wi],tuning.suspensionTravel,gravity,axleSpringMultipliers[wi]);
+     double rateB=suspensionSpringForShare(mass,loadShares[partnerWi],tuning.suspensionTravel,gravity,axleSpringMultipliers[partnerWi]);
      double t=AntiRoll.transfer(hits.get(hi).compression(),hits.get(hj).compression(),rateA,rateB,normalA,normalB,tuning.antiRollStiffness);
      newNormal[hi]=normalA+t;
      newNormal[hj]=normalB-t;
@@ -3134,9 +3461,16 @@ public final class PhysicsBridge {
     String tireKey = h.wheel().definition.packID+":"+h.wheel().definition.systemName;
     double tireGripRatio = tirePartFriction(tireKey, tuning.friction)/tuning.friction;
     double tireRollingResistance = tirePartRollingResistance(tireKey, tuning.rollingResistance);
+    // MINECRAFT-552: this wheel's own installed tire-part lateral-grip ratio, same "divide back
+    // out against the vehicle baseline" shape tireGripRatio uses immediately above (never the
+    // raw-resolved-value shape tireRollingResistance uses, since lateralGripMultiplier - like
+    // friction - IS a separate baseline parameter solveFriction multiplies per-contact INSIDE the
+    // solver; see FrictionContact.lateralGripOverrideRatio's own doc). tuning.lateralGripMultiplier
+    // is always > 0 (Tuning.validate()'s own bound), so this division never degenerates.
+    double tireLateralGripRatio = tirePartLateralGripMultiplier(tireKey, tuning.lateralGripMultiplier)/tuning.lateralGripMultiplier;
     return new io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact(
      new Vector3d(h.point()).add(predictorLeverArmCorrection),h.forward(),h.right(),h.normal(),h.skidSteerMultiplier(),
-     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier()*tireRollingResistance,wheelBrakeMagnitude,h.driveShareRatio());
+     h.surface().frictionMultiplier()*tireGripRatio,h.surface().rollingResistanceMultiplier()*tireRollingResistance,wheelBrakeMagnitude,h.driveShareRatio(),tireLateralGripRatio);
    }).toArray(io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.FrictionContact[]::new);
    var results=io.github.brooswitminecraft.div.experimental.MultiContactFrictionSolver.solveFriction(contacts,mass,aggregateInertiaBody,q,inverse,workingVelocity,workingAngular,
      wheels.isEmpty()?0:tuning.brakeForce/wheels.size(),wheels.isEmpty()?0:drive/wheels.size(),tuning.friction,tuning.lateralGripMultiplier,DT,
@@ -3437,6 +3771,54 @@ public final class PhysicsBridge {
    * the live {@code tuning} object every tick, same as every other live-safe field below - an
    * unconfigured vehicle gets exactly {@link FlightForces}'s own previous hardcoded constants via
    * {@link Overrides}'s FALLBACK.
+   * MINECRAFT-541: {@code tuning.aileron/elevator/rudderAuthorityScale} are each passed to their
+   * own {@link FlightForces#controlSurfaceForce(double, double, double, double, double)} call
+   * below (the same "explicit authority-multiplier overload" shape {@link
+   * RotorForces#cyclicTorque(double, double, double, double)}/{@link
+   * RotorForces#yawTorque(double, double, double, double)} already established for the rotor
+   * fields above) - independently multiplying that one axis's force, never the shared {@code
+   * controlSurfaceSlope}, the native area, or the externally-applied {@code wingArm}/{@code
+   * tailArm} lever arm (all still read/applied exactly as before, unduplicated). Since the scale
+   * is folded in BEFORE the lever arm, not after, and {@code rudderDeflection-sideslip} is still
+   * computed first and passed in as this call's own deflection argument, the existing
+   * sideslip-restoring term's semantics are entirely unchanged - only the resulting yaw torque's
+   * magnitude is scaled. All three are read fresh from the live {@code tuning} object every
+   * tick, same as every other live-safe field below; FALLBACK 1.0 reproduces the exact prior
+   * controlSurfaceSlope-only torque for an unconfigured vehicle.
+   *
+   * <p>MINECRAFT-541 (review kickback correction, comment 54361): each axis's scale is passed
+   * through {@link FlightForces#gatedControlAuthorityScale} first - gated on {@code
+   * motorized.isBlimp} (the authoritative classification, same reasoning MINECRAFT-542's own
+   * {@code gatedFixedWingAngularDampingCoefficient} gate below already uses for a blimp that can
+   * itself carry positive wing/control-surface geometry) - so a blimp always gets the documented
+   * {@code 1.0} no-op regardless of its configured/inherited scale, preserving this ticket's own
+   * "preserve non-fixed-wing/blimp behavior" requirement exactly. Only a non-blimp fixed wing
+   * gets its configured scale passed through unchanged.
+   *
+   * <p>MINECRAFT-542: {@code tuning.fixedWingAngularDampingCoefficient} additionally ADDS (never
+   * replaces) a bounded, dissipative angular-rate damping torque on top of the aileron/elevator/
+   * rudder control torque above, via {@link #rotorAngularDampingTorque} / {@link
+   * RotorForces#angularDampingTorque} - the exact same inertia-aware, no-reversal formula
+   * MINECRAFT-537 established for {@link #stepRotor}, reused here verbatim (never duplicated) but
+   * driven by its own wholly separate {@code tuning.fixedWingAngularDampingCoefficient}, never
+   * {@code tuning.rotorAngularDampingCoefficient} - the two fields are deliberately never shared
+   * or aliased. It opposes only this body's OWN current angular velocity (read fresh from {@code
+   * handle.getAngularVelocity} every tick, never the pilot's aileron/elevator/rudder input), so it
+   * is deliberately NOT autopilot, NOT a target-attitude/auto-level system, and NOT a sideslip
+   * redesign - it cannot substitute for the pilot's own control authority, and leaves the existing
+   * aileron/elevator/rudder torque above completely independent. 0.0 (the FALLBACK) is a true
+   * no-op, so an unconfigured fixed-wing vehicle's torque - and the resulting {@code
+   * handle.applyTorqueImpulse} below - is byte-identical to before this ticket. Gated on {@code
+   * aspectRatio>0} (a real wing present, the same gate {@link FlightForces#dragCoefficient}'s own
+   * {@code parasiticDragMultiplier}/{@code oswaldEfficiency} already use, MINECRAFT-536) AND on
+   * {@code !motorized.isBlimp} - the authoritative classification, needed IN ADDITION to the
+   * aspect-ratio check because a blimp definition can itself carry a positive {@code wingArea}/
+   * {@code wingSpan} (e.g. stabilizer fins, or a copied/mistaken config), which would otherwise
+   * still give a positive aspect ratio despite the vehicle being a blimp. A blimp's angular motion
+   * therefore stays completely unaffected by this field regardless of how it OR its wing geometry
+   * are configured, matching this ticket's "fixed-wing only, preserve blimps" scope exactly.
+   * Never reaches a rotorcraft ({@link #stepRotor} never reads this field) or a ground/boat
+   * vehicle either.
    */
   private boolean stepFlight(EntityVehicleF_Physics v, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d up) {
    var motorized = v.definition.motorized;
@@ -3476,10 +3858,39 @@ public final class PhysicsBridge {
    double aileronDeflection=Math.toRadians(v.aileronInputVar.currentValue);
    double elevatorDeflection=Math.toRadians(v.elevatorInputVar.currentValue);
    double rudderDeflection=Math.toRadians(v.rudderInputVar.currentValue);
-   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope)*wingArm;
-   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope)*tailArm;
-   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope)*tailArm;
+   // MINECRAFT-541 (review kickback correction, comment 54361): gate each axis's authority
+   // scale on the authoritative motorized.isBlimp classification via
+   // FlightForces.gatedControlAuthorityScale (same shape as MINECRAFT-542's own
+   // gatedFixedWingAngularDampingCoefficient immediately below) - a blimp always gets the
+   // documented 1.0 no-op regardless of configured scale or wing/control-surface geometry.
+   double effectiveAileronAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.aileronAuthorityScale);
+   double effectiveElevatorAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.elevatorAuthorityScale);
+   double effectiveRudderAuthorityScale=FlightForces.gatedControlAuthorityScale(motorized.isBlimp,tuning.rudderAuthorityScale);
+   double rollTorque=FlightForces.controlSurfaceForce(aileronDeflection,motorized.aileronArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveAileronAuthorityScale)*wingArm;
+   double pitchTorque=FlightForces.controlSurfaceForce(elevatorDeflection,motorized.elevatorArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveElevatorAuthorityScale)*tailArm;
+   double yawTorque=FlightForces.controlSurfaceForce(rudderDeflection-sideslip,motorized.rudderArea,dynamicPressure,tuning.controlSurfaceSlope,effectiveRudderAuthorityScale)*tailArm;
    Vector3d torque=new Vector3d(forward).mul(rollTorque).fma(pitchTorque,right).fma(yawTorque,up);
+   // MINECRAFT-542: tuning.fixedWingAngularDampingCoefficient is read live off this tick's tuning
+   // object, same as stallAngleDegrees/liftSlope/controlSurfaceSlope/parasiticDragMultiplier/
+   // oswaldEfficiency above - see applyLiveSafeFields. ADDED to (never substituted for) the
+   // pilot's own aileron/elevator/rudder control torque just assembled above - it only ever
+   // opposes this body's OWN current angular velocity (read fresh here, not cached), so it cannot
+   // be mistaken for autopilot/auto-level/sideslip redesign. Overrides.resolved always fills this
+   // from FALLBACK (0.0) when unconfigured, and RotorForces.angularDampingTorque returns exactly 0
+   // for a non-positive coefficient, so an unconfigured fixed-wing vehicle's torque - and
+   // therefore handle.applyTorqueImpulse below - is byte-identical to before this ticket.
+   // Gated on aspectRatio>0 AND !motorized.isBlimp via
+   // FlightForces.gatedFixedWingAngularDampingCoefficient - the no-wing half mirrors
+   // dragCoefficient's own parasiticDragMultiplier/oswaldEfficiency gate just above
+   // (MINECRAFT-536); the explicit isBlimp half is required in addition (review correction) since
+   // a blimp definition can itself carry a positive wingArea/wingSpan (e.g. stabilizer fins, or a
+   // copied/mistaken config), which would otherwise give a positive aspectRatio despite the
+   // vehicle being a blimp. A blimp's angular motion must stay completely unaffected by this
+   // field regardless of how it or its wing geometry are configured, not merely
+   // still-damped-by-something.
+   double effectiveFixedWingAngularDampingCoefficient = FlightForces.gatedFixedWingAngularDampingCoefficient(aspectRatio, motorized.isBlimp, tuning.fixedWingAngularDampingCoefficient);
+   Vector3d angularVelocity=handle.getAngularVelocity(new Vector3d());
+   torque.add(rotorAngularDampingTorque(angularVelocity,forward,right,up,inertiaBody,effectiveFixedWingAngularDampingCoefficient,DT));
    handle.applyTorqueImpulse(torque.mul(DT));
    applyTowingCompensation(v);
    return true;
@@ -3521,6 +3932,15 @@ public final class PhysicsBridge {
    * it cannot substitute for the pilot's own control authority. 0.0 (the FALLBACK) is a true
    * no-op, so an unconfigured rotorcraft's torque - and the resulting
    * {@code handle.applyTorqueImpulse} below - is byte-identical to before this ticket.
+   *
+   * <p>MINECRAFT-543: {@code tuning.rotorAirDragCoefficient} additionally ADDS (never replaces)
+   * a bounded, dissipative quadratic drag force on top of the thrust force above, via {@link
+   * RotorForces#translationalDragForce} - independent of the MINECRAFT-522/537 fields, which only
+   * ever touch attitude/yaw authority or angular rate. It opposes only this body's OWN current
+   * linear velocity (read fresh from {@code handle.getLinearVelocity} every tick, never the
+   * pilot's throttle/cyclic input), so it cannot substitute for the pilot's own thrust authority.
+   * 0.0 (the FALLBACK) is a true no-op, so an unconfigured rotorcraft's force - and the resulting
+   * {@code handle.applyLinearImpulse} below - is byte-identical to before this ticket.
    */
   private boolean stepRotor(EntityVehicleF_Physics v, Quaterniond q, Vector3d up, List<JSONPart.JSONPartPropeller> installedPropellers) {
    var motorized = v.definition.motorized;
@@ -3542,6 +3962,24 @@ public final class PhysicsBridge {
    double forwardComp=RotorForces.horizontalComponent(thrust,tiltPitch);
    double lateralComp=RotorForces.horizontalComponent(thrust,tiltRoll);
    Vector3d force=new Vector3d(up).mul(vertical).fma(forwardComp,forward).fma(lateralComp,right);
+   // MINECRAFT-543: tuning.rotorAirDragCoefficient is read live off this tick's tuning object,
+   // same as driveForce/cyclicLimitDegrees/etc. above - see applyLiveSafeFields. ADDED to (never
+   // substituted for) the thrust force just assembled above - it only ever opposes this body's
+   // OWN current linear velocity (read fresh here via handle.getLinearVelocity, never the pilot's
+   // throttle/cyclic/yaw input), so it cannot be mistaken for reduced thrust or an autopilot.
+   // Overrides.resolved always fills this from FALLBACK (0.0) when unconfigured, and
+   // RotorForces.translationalDragForce returns an exact-zero vector for a non-positive
+   // multiplier, so an unconfigured rotorcraft's force - and therefore handle.applyLinearImpulse
+   // below - is byte-identical to before this ticket. Orientation-independent by construction
+   // (RotorForces.translationalDragForce's own doc): it opposes the actual world-frame velocity
+   // regardless of this body's attitude, so a rotated body/frame needs no special handling here.
+   // Review correction (Wroosbit, PR #40): reuses the SAME native air-density/area/drag-
+   // coefficient pieces stepFlight's own parasitic drag already consumes (AIR_DENSITY,
+   // motorized.dragCoefficient, the wingArea/crossSectionalArea reference-area fallback - see
+   // stepFlight's own identical pattern just below this method) rather than an arbitrary scalar.
+   Vector3d linearVelocity=handle.getLinearVelocity(new Vector3d());
+   double referenceArea=motorized.wingArea>0 ? motorized.wingArea : motorized.crossSectionalArea;
+   force.add(RotorForces.translationalDragForce(linearVelocity,mass,AIR_DENSITY,motorized.dragCoefficient,referenceArea,tuning.rotorAirDragCoefficient,DT));
    handle.applyLinearImpulse(force.mul(DT));
    double tailArm=motorized.tailDistance>0 ? motorized.tailDistance : 1;
    double rotorRadiusMeters=RotorForces.rotorRadiusMeters(installedPropellers.stream()
@@ -3560,8 +3998,17 @@ public final class PhysicsBridge {
    // unconfigured, and RotorForces.angularDampingTorque returns exactly 0 for a non-positive
    // coefficient, so an unconfigured rotorcraft's torque - and therefore handle.applyTorqueImpulse
    // below - is byte-identical to before this ticket.
+   // MINECRAFT-554: tuning.rotorAngularDampingCoefficientPitch/Roll/Yaw are each read live off
+   // this tick's tuning object too (see applyLiveSafeFields), independently falling back to this
+   // SAME tuning.rotorAngularDampingCoefficient when that axis's own override is unset - Overrides
+   // never fills these three from a separate FALLBACK, so an unconfigured rotorcraft (or one that
+   // only sets the base scalar) gets the exact same uniform coefficient on every axis as before
+   // this ticket, byte-identical.
    Vector3d angularVelocity=handle.getAngularVelocity(new Vector3d());
-   torque.add(rotorAngularDampingTorque(angularVelocity,forward,right,up,inertiaBody,tuning.rotorAngularDampingCoefficient,DT));
+   double pitchDampingCoefficient=tuning.rotorAngularDampingCoefficientPitch!=null?tuning.rotorAngularDampingCoefficientPitch:tuning.rotorAngularDampingCoefficient;
+   double rollDampingCoefficient=tuning.rotorAngularDampingCoefficientRoll!=null?tuning.rotorAngularDampingCoefficientRoll:tuning.rotorAngularDampingCoefficient;
+   double yawDampingCoefficient=tuning.rotorAngularDampingCoefficientYaw!=null?tuning.rotorAngularDampingCoefficientYaw:tuning.rotorAngularDampingCoefficient;
+   torque.add(rotorAngularDampingTorque(angularVelocity,forward,right,up,inertiaBody,pitchDampingCoefficient,rollDampingCoefficient,yawDampingCoefficient,DT));
    handle.applyTorqueImpulse(torque.mul(DT));
    applyTowingCompensation(v);
    return true;

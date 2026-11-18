@@ -67,16 +67,22 @@ class OverridesTest {
   var r = Overrides.resolved("packid:not_configured");
   assertEquals(0.3, r.suspensionTravel); assertEquals(1.0, r.friction); assertEquals(8000.0, r.driveForce);
   assertEquals(12000.0, r.brakeForce); assertEquals(30.0, r.maxSteerDegrees);
+  assertEquals(30.0, r.marineSteerDegrees, "marineSteerDegrees has no flat fallback of its own - it inherits the resolved maxSteerDegrees (30deg here)");
   assertEquals(0.5, r.hullFillFactor); assertEquals(400.0, r.waterDrag); assertEquals(6000.0, r.propellerForce);
   assertEquals(0.0, r.angularWaterDrag, "angularWaterDrag's fallback is 0 - no rotational damping term unless configured");
   assertEquals(0.0, r.antiRollStiffness, "antiRollStiffness's fallback is 0 - no axle anti-roll coupling unless configured");
   assertEquals(FlightForces.DEFAULT_STALL_ANGLE_DEGREES, r.stallAngleDegrees, "stallAngleDegrees falls back to FlightForces's own previously-hardcoded 15deg");
   assertEquals(FlightForces.DEFAULT_LIFT_SLOPE, r.liftSlope, 1e-9, "liftSlope falls back to FlightForces's own previously-hardcoded 2*pi");
   assertEquals(FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE, r.controlSurfaceSlope, 1e-9, "controlSurfaceSlope falls back to the same previously-hardcoded 2*pi");
+  assertEquals(1.0, r.aileronAuthorityScale, "aileronAuthorityScale's fallback is unit scaling - no change from prior behavior");
+  assertEquals(1.0, r.elevatorAuthorityScale, "elevatorAuthorityScale's fallback is unit scaling - no change from prior behavior");
+  assertEquals(1.0, r.rudderAuthorityScale, "rudderAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(20.0, r.cyclicLimitDegrees, "cyclicLimitDegrees' fallback matches RotorForces' own prior hardcoded 20-degree clamp");
   assertEquals(1.0, r.cyclicAuthorityScale, "cyclicAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(1.0, r.yawAuthorityScale, "yawAuthorityScale's fallback is unit scaling - no change from prior behavior");
   assertEquals(0.0, r.rotorAngularDampingCoefficient, "rotorAngularDampingCoefficient's fallback is 0 - no angular-rate damping term at all unless configured (MINECRAFT-537 zero/off parity)");
+  assertEquals(0.0, r.fixedWingAngularDampingCoefficient, "fixedWingAngularDampingCoefficient's fallback is 0 - no angular-rate damping term at all unless configured (MINECRAFT-542 zero/off parity), a wholly separate field from rotorAngularDampingCoefficient");
+  assertEquals(0.0, r.rotorAirDragCoefficient, "rotorAirDragCoefficient's fallback is 0 - no translational drag term at all unless configured (MINECRAFT-543 zero/off parity)");
   assertEquals(0.7, r.suspensionDampingRatio, "suspensionDampingRatio's fallback matches PhysicsBridge's own prior hardcoded 0.7 critical-damping multiplier");
   assertEquals(1.0, r.suspensionSpringMultiplier, "suspensionSpringMultiplier's fallback is a pure no-op - an unconfigured vehicle's calibrated spring rate is unchanged");
   assertEquals(1.0, r.longitudinalWaterDragMultiplier, "longitudinalWaterDragMultiplier's fallback is a pure no-op - an unconfigured vehicle's isotropic water drag is unchanged");
@@ -93,12 +99,16 @@ class OverridesTest {
   var r = Overrides.resolved("packid:not_configured", null, null, null);
   assertNotNull(r.suspensionTravel); assertNotNull(r.friction); assertNotNull(r.driveForce);
   assertNotNull(r.brakeForce); assertNotNull(r.maxSteerDegrees);
+  assertNotNull(r.marineSteerDegrees);
   assertNotNull(r.hullFillFactor); assertNotNull(r.waterDrag); assertNotNull(r.propellerForce);
   assertNotNull(r.angularWaterDrag);
   assertNotNull(r.antiRollStiffness);
   assertNotNull(r.stallAngleDegrees); assertNotNull(r.liftSlope); assertNotNull(r.controlSurfaceSlope);
+  assertNotNull(r.aileronAuthorityScale); assertNotNull(r.elevatorAuthorityScale); assertNotNull(r.rudderAuthorityScale);
   assertNotNull(r.cyclicLimitDegrees); assertNotNull(r.cyclicAuthorityScale); assertNotNull(r.yawAuthorityScale);
   assertNotNull(r.rotorAngularDampingCoefficient);
+  assertNotNull(r.fixedWingAngularDampingCoefficient);
+  assertNotNull(r.rotorAirDragCoefficient);
   assertNotNull(r.suspensionDampingRatio);
   assertNotNull(r.suspensionSpringMultiplier);
   assertNotNull(r.longitudinalWaterDragMultiplier); assertNotNull(r.lateralWaterDragMultiplier); assertNotNull(r.verticalWaterDragMultiplier);
@@ -264,6 +274,240 @@ class OverridesTest {
   }
  }
 
+ // MINECRAFT-554: rotorAngularDampingCoefficientPitch/Roll/Yaw - optional per-axis overrides of
+ // rotorAngularDampingCoefficient above, same [0, MAX_ANGULAR_DAMPING_COEFFICIENT] bound, same
+ // "no FALLBACK entry, inherits the sibling resolved field instead" shape
+ // suspensionDampingRatioFront/Rear/Compression/Rebound already establish.
+
+ @Test void rotorAngularDampingCoefficientPerAxisOutOfRangeFailsValidation() {
+  var negativePitch = new Overrides.Tuning(); negativePitch.rotorAngularDampingCoefficientPitch = -0.1;
+  assertThrows(IllegalArgumentException.class, negativePitch::validate);
+  var tooLargeRoll = new Overrides.Tuning(); tooLargeRoll.rotorAngularDampingCoefficientRoll = RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT + 0.01;
+  assertThrows(IllegalArgumentException.class, tooLargeRoll::validate);
+  var nonFiniteYaw = new Overrides.Tuning(); nonFiniteYaw.rotorAngularDampingCoefficientYaw = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nonFiniteYaw::validate);
+  var zeroPitch = new Overrides.Tuning(); zeroPitch.rotorAngularDampingCoefficientPitch = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zeroPitch::validate);
+  var atCapRoll = new Overrides.Tuning(); atCapRoll.rotorAngularDampingCoefficientRoll = RotorForces.MAX_ANGULAR_DAMPING_COEFFICIENT; // the cap itself is allowed
+  assertDoesNotThrow(atCapRoll::validate);
+  var inRangeYaw = new Overrides.Tuning(); inRangeYaw.rotorAngularDampingCoefficientYaw = 5.0;
+  assertDoesNotThrow(inRangeYaw::validate);
+ }
+
+ @Test void rotorAngularDampingCoefficientPerAxisStaysNullWhenUnconfigured() {
+  // Unlike rotorAngularDampingCoefficient itself (which falls back to 0.0), the per-axis
+  // overrides have no FALLBACK entry at all - Overrides.resolved() leaves them null so
+  // PhysicsBridge.stepRotor knows to inherit the vehicle's own resolved rotorAngularDampingCoefficient
+  // instead of a second, independently-defaulted value.
+  var r = Overrides.resolved("packid:not_configured");
+  assertNull(r.rotorAngularDampingCoefficientPitch);
+  assertNull(r.rotorAngularDampingCoefficientRoll);
+  assertNull(r.rotorAngularDampingCoefficientYaw);
+  assertNull(Overrides.defaultTuning().rotorAngularDampingCoefficientPitch);
+  assertNull(Overrides.defaultTuning().rotorAngularDampingCoefficientRoll);
+  assertNull(Overrides.defaultTuning().rotorAngularDampingCoefficientYaw);
+ }
+
+ @Test void rotorAngularDampingCoefficientPerAxisParticipatesInTheFullPrecedenceChainIndependently() {
+  try {
+   // Mixed-axis case (ticket requirement): only pitch and yaw configured, roll left unset -
+   // each axis resolves independently, roll stays null (inherits the base scalar downstream).
+   var override = new Overrides.Tuning();
+   override.rotorAngularDampingCoefficient = 4.5;
+   override.rotorAngularDampingCoefficientPitch = 1.0; override.rotorAngularDampingCoefficientYaw = 7.0;
+   Overrides.setForTest(java.util.Map.of("packid:mixed_axis_rotor", override));
+   var resolved = Overrides.resolved("packid:mixed_axis_rotor");
+   assertEquals(1.0, resolved.rotorAngularDampingCoefficientPitch, "an explicit per-axis override must take precedence");
+   assertNull(resolved.rotorAngularDampingCoefficientRoll, "an unset axis must stay null, not fall back to a second hardcoded default");
+   assertEquals(7.0, resolved.rotorAngularDampingCoefficientYaw);
+   assertEquals(4.5, resolved.rotorAngularDampingCoefficient, "the base scalar itself is unaffected by the per-axis overrides");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAngularDampingCoefficientPerAxisInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.rotorAngularDampingCoefficientRoll = 2.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "per-axis-damping-base"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("per-axis-damping-base", template), java.util.Map.of("packid:inherited_axis_damping", child), java.util.Map.of());
+   assertEquals(2.0, Overrides.resolved("packid:inherited_axis_damping").rotorAngularDampingCoefficientRoll,
+     "a field the child never set must inherit the template's value, same as every other tuning field");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAngularDampingCoefficientPerAxisIsRejectedOnAPartOverride() {
+  var pitchPart = new Overrides.Tuning(); pitchPart.rotorAngularDampingCoefficientPitch = 1.5;
+  assertThrows(IllegalArgumentException.class, pitchPart::validateSupportedForPart,
+    "this is a vehicle-only concept - a rotorcraft part has no own angular-damping consumer");
+  var rollPart = new Overrides.Tuning(); rollPart.rotorAngularDampingCoefficientRoll = 1.5;
+  assertThrows(IllegalArgumentException.class, rollPart::validateSupportedForPart);
+  var yawPart = new Overrides.Tuning(); yawPart.rotorAngularDampingCoefficientYaw = 1.5;
+  assertThrows(IllegalArgumentException.class, yawPart::validateSupportedForPart);
+ }
+
+ @Test void validThenInvalidPerAxisRotorAngularDampingReloadAppliesThenRetainsThePriorGoodOverride() {
+  try {
+   var goodHelicopter = new Overrides.Tuning(); goodHelicopter.rotorAngularDampingCoefficientYaw = 3.0;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_axis_helicopter", goodHelicopter), java.util.Map.of()));
+   assertTrue(goodResult.success(), "a valid rotorAngularDampingCoefficientYaw reload must apply cleanly");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_axis_helicopter").rotorAngularDampingCoefficientYaw);
+
+   var invalidHelicopter = new Overrides.Tuning(); invalidHelicopter.rotorAngularDampingCoefficientYaw = -1.0; // out of range
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_axis_helicopter", invalidHelicopter), java.util.Map.of()));
+   assertFalse(badResult.success(), "a negative rotorAngularDampingCoefficientYaw reload must be rejected, not silently applied");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_axis_helicopter").rotorAngularDampingCoefficientYaw,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid value or a silent null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-542: fixedWingAngularDampingCoefficient - bounded, optional, fixed-wing-only
+ // angular-rate damping torque, reusing M537's dissipative-drag formula/no-reversal clamp but a
+ // wholly separate field from rotorAngularDampingCoefficient above (deliberately never shared).
+
+ @Test void fixedWingAngularDampingCoefficientOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.fixedWingAngularDampingCoefficient = -0.1;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.fixedWingAngularDampingCoefficient = FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT + 0.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nonFinite = new Overrides.Tuning(); nonFinite.fixedWingAngularDampingCoefficient = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nonFinite::validate);
+  var zero = new Overrides.Tuning(); zero.fixedWingAngularDampingCoefficient = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zero::validate);
+  var atCap = new Overrides.Tuning(); atCap.fixedWingAngularDampingCoefficient = FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT; // the cap itself is allowed
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.fixedWingAngularDampingCoefficient = 5.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void fixedWingAngularDampingCoefficientParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.fixedWingAngularDampingCoefficient = 4.5;
+   Overrides.setForTest(java.util.Map.of("packid:damped_fixed_wing_vehicle", override));
+   assertEquals(4.5, Overrides.resolved("packid:damped_fixed_wing_vehicle").fixedWingAngularDampingCoefficient,
+     "an explicit operator override must take precedence over the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void fixedWingAngularDampingCoefficientInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.fixedWingAngularDampingCoefficient = 2.0;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "fixed-wing-damping-base"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("fixed-wing-damping-base", template), java.util.Map.of("packid:inherited_fixed_wing_damping", child), java.util.Map.of());
+   assertEquals(2.0, Overrides.resolved("packid:inherited_fixed_wing_damping").fixedWingAngularDampingCoefficient,
+     "a field the child never set must inherit the template's value, same as every other tuning field");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void fixedWingAngularDampingCoefficientIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.fixedWingAngularDampingCoefficient = 1.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart,
+    "this is a vehicle-only concept - a fixed-wing part has no own angular-damping consumer");
+ }
+
+ @Test void validThenInvalidFixedWingAngularDampingReloadAppliesThenRetainsThePriorGoodOverride() {
+  // Same "invalid reload retains last-known-good" structure as rotorAngularDampingCoefficient
+  // above - exercises the REAL Overrides.apply(Supplier<Config>) seam, not merely setForTest, so
+  // a bad edit mid-session cannot silently corrupt an already-good fixed-wing damping
+  // configuration.
+  try {
+   var goodAirplane = new Overrides.Tuning(); goodAirplane.fixedWingAngularDampingCoefficient = 3.0;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_airplane", goodAirplane), java.util.Map.of()));
+   assertTrue(goodResult.success(), "a valid fixedWingAngularDampingCoefficient reload must apply cleanly");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_airplane").fixedWingAngularDampingCoefficient);
+
+   var invalidAirplane = new Overrides.Tuning(); invalidAirplane.fixedWingAngularDampingCoefficient = -1.0; // out of range
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_airplane", invalidAirplane), java.util.Map.of()));
+   assertFalse(badResult.success(), "a negative fixedWingAngularDampingCoefficient reload must be rejected, not silently applied");
+   assertEquals(3.0, Overrides.resolved("examplepack:reloadable_airplane").fixedWingAngularDampingCoefficient,
+     "a rejected reload must retain the PRIOR GOOD fixedWingAngularDampingCoefficient, not the invalid value or the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-543: rotorAirDragCoefficient - bounded, optional, rotorcraft-only translational
+ // (linear) air-drag force, independent of rotorAngularDampingCoefficient (MINECRAFT-537, which
+ // only ever damps angular rate) and the MINECRAFT-522 cyclic/yaw authority fields above.
+
+ @Test void rotorAirDragCoefficientOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.rotorAirDragCoefficient = -0.1;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.rotorAirDragCoefficient = RotorForces.MAX_AIR_DRAG_COEFFICIENT + 0.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var nonFinite = new Overrides.Tuning(); nonFinite.rotorAirDragCoefficient = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nonFinite::validate);
+  var zero = new Overrides.Tuning(); zero.rotorAirDragCoefficient = 0.0; // explicit zero/off is allowed
+  assertDoesNotThrow(zero::validate);
+  var atCap = new Overrides.Tuning(); atCap.rotorAirDragCoefficient = RotorForces.MAX_AIR_DRAG_COEFFICIENT; // the cap itself is allowed
+  assertDoesNotThrow(atCap::validate);
+  var inRange = new Overrides.Tuning(); inRange.rotorAirDragCoefficient = 2.0;
+  assertDoesNotThrow(inRange::validate);
+ }
+
+ @Test void rotorAirDragCoefficientParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.rotorAirDragCoefficient = 1.2;
+   Overrides.setForTest(java.util.Map.of("packid:drag_rotor_vehicle", override));
+   assertEquals(1.2, Overrides.resolved("packid:drag_rotor_vehicle").rotorAirDragCoefficient,
+     "an explicit operator override must take precedence over the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAirDragCoefficientInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.rotorAirDragCoefficient = 0.8;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "air-drag-base"; // sets no fields of its own
+   Overrides.setForTest(java.util.Map.of("air-drag-base", template), java.util.Map.of("packid:inherited_air_drag", child), java.util.Map.of());
+   assertEquals(0.8, Overrides.resolved("packid:inherited_air_drag").rotorAirDragCoefficient,
+     "a field the child never set must inherit the template's value, same as every other tuning field");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void rotorAirDragCoefficientIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.rotorAirDragCoefficient = 0.5;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart,
+    "this is a vehicle-only concept - a rotorcraft part has no own translational-drag consumer");
+ }
+
+ @Test void validThenInvalidRotorAirDragReloadAppliesThenRetainsThePriorGoodOverride() {
+  // Same "invalid reload retains last-known-good" structure as
+  // validThenInvalidRotorAngularDampingReloadAppliesThenRetainsThePriorGoodOverride above -
+  // exercises the REAL Overrides.apply(Supplier<Config>) seam, not merely setForTest.
+  try {
+   var goodHelicopter = new Overrides.Tuning(); goodHelicopter.rotorAirDragCoefficient = 0.6;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:draggy_helicopter", goodHelicopter), java.util.Map.of()));
+   assertTrue(goodResult.success(), "a valid rotorAirDragCoefficient reload must apply cleanly");
+   assertEquals(0.6, Overrides.resolved("examplepack:draggy_helicopter").rotorAirDragCoefficient);
+
+   var invalidHelicopter = new Overrides.Tuning(); invalidHelicopter.rotorAirDragCoefficient = -1.0; // out of range
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(),
+     java.util.Map.of("examplepack:draggy_helicopter", invalidHelicopter), java.util.Map.of()));
+   assertFalse(badResult.success(), "a negative rotorAirDragCoefficient reload must be rejected, not silently applied");
+   assertEquals(0.6, Overrides.resolved("examplepack:draggy_helicopter").rotorAirDragCoefficient,
+     "a rejected reload must retain the PRIOR GOOD rotorAirDragCoefficient, not the invalid value or the 0.0 fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  // MINECRAFT-518: angularWaterDrag - rotational water-drag torque coefficient for a floating
  // hull, the rotational analogue of waterDrag.
 
@@ -357,6 +601,70 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, lift::validateSupportedForPart);
   var control = new Overrides.Tuning(); control.controlSurfaceSlope = 4.0;
   assertThrows(IllegalArgumentException.class, control::validateSupportedForPart);
+ }
+
+ // MINECRAFT-541: aileron/elevator/rudderAuthorityScale - bounded, independent per-axis
+ // fixed-wing control authority, each a multiplier on top of the shared controlSurfaceSlope
+ // above, consumed by PhysicsBridge.stepFlight.
+
+ @Test void axisAuthorityScalesOutOfRangeFailValidation() {
+  // Review correction (comment 54143): unlike cyclicAuthorityScale/yawAuthorityScale, 0.0 must
+  // be explicitly VALID here (the ticket's own "test zero/unit/extreme valid values"
+  // acceptance) - there is no other per-axis knob to zero out just one axis's authority.
+  var negativeAileron = new Overrides.Tuning(); negativeAileron.aileronAuthorityScale = -1.0;
+  assertThrows(IllegalArgumentException.class, negativeAileron::validate);
+  var tooLargeAileron = new Overrides.Tuning(); tooLargeAileron.aileronAuthorityScale = 5.01;
+  assertThrows(IllegalArgumentException.class, tooLargeAileron::validate);
+  var zeroAileron = new Overrides.Tuning(); zeroAileron.aileronAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroAileron::validate, "0.0 (fully disabling just this one axis's authority) must be explicitly valid");
+  var atCapAileron = new Overrides.Tuning(); atCapAileron.aileronAuthorityScale = 5.0;
+  assertDoesNotThrow(atCapAileron::validate);
+  var inRangeAileron = new Overrides.Tuning(); inRangeAileron.aileronAuthorityScale = 1.5;
+  assertDoesNotThrow(inRangeAileron::validate);
+
+  var negativeElevator = new Overrides.Tuning(); negativeElevator.elevatorAuthorityScale = -0.01;
+  assertThrows(IllegalArgumentException.class, negativeElevator::validate);
+  var tooLargeElevator = new Overrides.Tuning(); tooLargeElevator.elevatorAuthorityScale = 100.0;
+  assertThrows(IllegalArgumentException.class, tooLargeElevator::validate);
+  var zeroElevator = new Overrides.Tuning(); zeroElevator.elevatorAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroElevator::validate, "0.0 must be explicitly valid");
+  var inRangeElevator = new Overrides.Tuning(); inRangeElevator.elevatorAuthorityScale = 0.5;
+  assertDoesNotThrow(inRangeElevator::validate);
+
+  var negativeRudder = new Overrides.Tuning(); negativeRudder.rudderAuthorityScale = -1.0;
+  assertThrows(IllegalArgumentException.class, negativeRudder::validate);
+  var tooLargeRudder = new Overrides.Tuning(); tooLargeRudder.rudderAuthorityScale = 5.001;
+  assertThrows(IllegalArgumentException.class, tooLargeRudder::validate);
+  var zeroRudder = new Overrides.Tuning(); zeroRudder.rudderAuthorityScale = 0.0;
+  assertDoesNotThrow(zeroRudder::validate, "0.0 must be explicitly valid");
+  var inRangeRudder = new Overrides.Tuning(); inRangeRudder.rudderAuthorityScale = 2.0;
+  assertDoesNotThrow(inRangeRudder::validate);
+ }
+
+ @Test void axisAuthorityScalesParticipateInTheFullPrecedenceChainIndependently() {
+  try {
+   var override = new Overrides.Tuning();
+   // Only aileronAuthorityScale is overridden - the others must still resolve to their own
+   // 1.0 fallback, not pick up this value or any other axis' override (ticket acceptance:
+   // "changing one axis does not scale the others").
+   override.aileronAuthorityScale = 2.0;
+   Overrides.setForTest(java.util.Map.of("packid:glider", override));
+   var r = Overrides.resolved("packid:glider");
+   assertEquals(2.0, r.aileronAuthorityScale, "an explicit operator override must take precedence over the 1.0 fallback");
+   assertEquals(1.0, r.elevatorAuthorityScale, "an unrelated axis override must not change elevatorAuthorityScale's own fallback");
+   assertEquals(1.0, r.rudderAuthorityScale, "an unrelated axis override must not change rudderAuthorityScale's own fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void axisAuthorityScalesAreRejectedOnAPartOverride() {
+  var aileron = new Overrides.Tuning(); aileron.aileronAuthorityScale = 1.5;
+  assertThrows(IllegalArgumentException.class, aileron::validateSupportedForPart);
+  var elevator = new Overrides.Tuning(); elevator.elevatorAuthorityScale = 1.5;
+  assertThrows(IllegalArgumentException.class, elevator::validateSupportedForPart);
+  var rudder = new Overrides.Tuning(); rudder.rudderAuthorityScale = 1.5;
+  assertThrows(IllegalArgumentException.class, rudder::validateSupportedForPart);
  }
 
  // MINECRAFT-536: parasiticDragMultiplier/oswaldEfficiency - bounded fixed-wing parasitic/
@@ -520,6 +828,88 @@ class OverridesTest {
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
  }
 
+ // MINECRAFT-544: marineSteerDegrees - an independent, bounded water-propeller steering limit
+ // from the ground maxSteerDegrees, see BuoyantForces.apply. Unlike brakeBiasFront/driveBiasFront
+ // (which stay null when unconfigured), marineSteerDegrees falls through to the SAME entry's own
+ // resolved maxSteerDegrees rather than staying null or using a second flat constant.
+
+ @Test void marineSteerDegreesOutOfRangeFailsValidation() {
+  var negative = new Overrides.Tuning(); negative.marineSteerDegrees = -0.01;
+  assertThrows(IllegalArgumentException.class, negative::validate);
+  var tooLarge = new Overrides.Tuning(); tooLarge.marineSteerDegrees = 60.01;
+  assertThrows(IllegalArgumentException.class, tooLarge::validate);
+  var inRange = new Overrides.Tuning(); inRange.marineSteerDegrees = 45.0;
+  assertDoesNotThrow(inRange::validate);
+  var atCeiling = new Overrides.Tuning(); atCeiling.marineSteerDegrees = 60.0;
+  assertDoesNotThrow(atCeiling::validate);
+ }
+
+ @Test void marineSteerDegreesZeroIsAValidInclusiveExtremeUnlikeMaxSteerDegreesItself() {
+  // Review correction: UNLIKE maxSteerDegrees (strictly positive), 0.0 must be an ACCEPTED
+  // marineSteerDegrees value - a vehicle whose propellers physically cannot swivel at all
+  // (straight-only thrust) is a real, sensible configuration, not a degenerate one.
+  var zeroMarine = new Overrides.Tuning(); zeroMarine.marineSteerDegrees = 0.0;
+  assertDoesNotThrow(zeroMarine::validate);
+  // And it must stay genuinely independent: a zero marine limit must not force (or require)
+  // maxSteerDegrees to also be zero - wheel steering can stay fully nonzero at the same time.
+  try {
+   var override = new Overrides.Tuning(); override.maxSteerDegrees = 35.0; override.marineSteerDegrees = 0.0;
+   Overrides.setForTest(java.util.Map.of("packid:straight_thrust_steerable_wheels_vehicle", override));
+   var r = Overrides.resolved("packid:straight_thrust_steerable_wheels_vehicle");
+   assertEquals(35.0, r.maxSteerDegrees, "wheel steering must stay fully nonzero");
+   assertEquals(0.0, r.marineSteerDegrees, "the explicit zero marine limit must resolve exactly, not get coerced to something nonzero");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void marineSteerDegreesInheritsTheResolvedMaxSteerDegreesWhenUnconfigured() {
+  assertEquals(30.0, Overrides.resolved("packid:not_configured").marineSteerDegrees,
+    "unconfigured marineSteerDegrees must inherit the resolved (fallback) maxSteerDegrees, not a second hardcoded constant");
+  try {
+   var override = new Overrides.Tuning(); override.maxSteerDegrees = 42.0; // no marineSteerDegrees set
+   Overrides.setForTest(java.util.Map.of("packid:custom_steer_vehicle", override));
+   assertEquals(42.0, Overrides.resolved("packid:custom_steer_vehicle").marineSteerDegrees,
+     "with maxSteerDegrees itself overridden but marineSteerDegrees left unset, marineSteerDegrees must inherit that SAME resolved maxSteerDegrees, not the flat 30deg fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void marineSteerDegreesExplicitOverrideWinsOverTheInheritedMaxSteerDegrees() {
+  try {
+   var override = new Overrides.Tuning(); override.maxSteerDegrees = 42.0; override.marineSteerDegrees = 15.0;
+   Overrides.setForTest(java.util.Map.of("packid:independent_steer_vehicle", override));
+   var r = Overrides.resolved("packid:independent_steer_vehicle");
+   assertEquals(42.0, r.maxSteerDegrees, "maxSteerDegrees (ground) must stay exactly what was configured");
+   assertEquals(15.0, r.marineSteerDegrees, "an explicit marineSteerDegrees must win over inheriting maxSteerDegrees - the two limits are independent");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void marineSteerDegreesParticipatesInTheFullPrecedenceChain() {
+  var packMetadata = new Overrides.Tuning(); packMetadata.marineSteerDegrees = 25.0;
+  assertEquals(25.0, Overrides.resolved("packid:not_configured", packMetadata, null, null).marineSteerDegrees,
+    "with no operator override, pack DIV metadata must still be used over inheriting maxSteerDegrees");
+ }
+
+ @Test void marineSteerDegreesIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.marineSteerDegrees = 20.0;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ @Test void marineSteerDegreesIsInheritedThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.marineSteerDegrees = 18.0;
+   var entry = new Overrides.Tuning(); entry.extendsTemplate = "steer_template";
+   Overrides.setForTest(java.util.Map.of("steer_template", template), java.util.Map.of("packid:extends_steer_vehicle", entry), java.util.Map.of());
+   assertEquals(18.0, Overrides.resolved("packid:extends_steer_vehicle").marineSteerDegrees);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  @Test void axleDriveForceSharingHasNoFallbackAndStaysNullWhenNeverConfigured() {
   // Same "stays null, not a default value" shape as driveBiasFront above -
   // AxleDriveForceSharing's own caller treats null as "disabled", not a fabricated default.
@@ -543,6 +933,58 @@ class OverridesTest {
 
  @Test void axleDriveForceSharingIsRejectedOnAPartOverride() {
   var part = new Overrides.Tuning(); part.axleDriveForceSharing = true;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ @Test void ackermannSteeringHasNoFallbackAndStaysNullWhenNeverConfigured() {
+  // Same "stays null, not a default value" shape as axleDriveForceSharing above -
+  // AckermannSteeringDistribution's own caller treats null/false as "disabled uniform steer".
+  assertNull(Overrides.resolved("packid:not_configured").ackermannSteering);
+  assertNull(Overrides.defaultTuning().ackermannSteering);
+ }
+
+ @Test void ackermannSteeringParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.ackermannSteering = true;
+   Overrides.setForTest(java.util.Map.of("packid:ackermann_vehicle", override));
+   assertEquals(true, Overrides.resolved("packid:ackermann_vehicle").ackermannSteering,
+     "an explicit operator override must be used instead of staying null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+  var packMetadata = new Overrides.Tuning(); packMetadata.ackermannSteering = true;
+  assertEquals(true, Overrides.resolved("packid:not_configured", packMetadata, null, null).ackermannSteering,
+    "with no operator override, pack DIV metadata must still be used over staying null");
+ }
+
+ @Test void gearRatioAwareHasNoFallbackAndStaysNullWhenNeverConfigured() {
+  // Same "stays null, not a default value" shape as axleDriveForceSharing/ackermannSteering
+  // above - PhysicsBridge.gearForceScale's own caller treats null/false as "disabled 1.0 no-op".
+  assertNull(Overrides.resolved("packid:not_configured").gearRatioAware);
+  assertNull(Overrides.defaultTuning().gearRatioAware);
+ }
+
+ @Test void gearRatioAwareParticipatesInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning(); override.gearRatioAware = true;
+   Overrides.setForTest(java.util.Map.of("packid:gear_ratio_aware_vehicle", override));
+   assertEquals(true, Overrides.resolved("packid:gear_ratio_aware_vehicle").gearRatioAware,
+     "an explicit operator override must be used instead of staying null");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+  var packMetadata = new Overrides.Tuning(); packMetadata.gearRatioAware = true;
+  assertEquals(true, Overrides.resolved("packid:not_configured", packMetadata, null, null).gearRatioAware,
+    "with no operator override, pack DIV metadata must still be used over staying null");
+ }
+
+ @Test void gearRatioAwareIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.gearRatioAware = true;
+  assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
+ }
+
+ @Test void ackermannSteeringIsRejectedOnAPartOverride() {
+  var part = new Overrides.Tuning(); part.ackermannSteering = true;
   assertThrows(IllegalArgumentException.class, part::validateSupportedForPart);
  }
 
@@ -1158,6 +1600,200 @@ class OverridesTest {
   }
  }
 
+ // MINECRAFT-552: installed-tire lateral-grip overrides - lateralGripMultiplier is now a
+ // supported part field, same exact shape as friction's own MINECRAFT-529 coverage above
+ // (bounds, extends-inheritance, vehicle-fallthrough precedence, independent per-wheel
+ // resolution, valid/invalid reload retention), applied to only the lateral friction-ellipse
+ // semi-axis, never the longitudinal (drive/brake) one - a tire can override this without
+ // touching friction/rollingResistance.
+
+ @Test void partEntrySettingLateralGripMultiplierPassesTheSupportedFieldsCheck() {
+  var part = new Overrides.Tuning(); part.lateralGripMultiplier = 0.4;
+  assertDoesNotThrow(part::validateSupportedForPart,
+    "MINECRAFT-552: an installed tire part's own lateralGripMultiplier override must be an accepted part field");
+ }
+
+ @Test void partEntrySettingOutOfRangeLateralGripMultiplierStillFailsPlainValidation() {
+  var tooHigh = new Overrides.Tuning(); tooHigh.lateralGripMultiplier = 1.1;
+  assertThrows(IllegalArgumentException.class, tooHigh::validate);
+  var tooLow = new Overrides.Tuning(); tooLow.lateralGripMultiplier = 0.0;
+  assertThrows(IllegalArgumentException.class, tooLow::validate);
+ }
+
+ @Test void partEntrySettingNonFiniteLateralGripMultiplierStillFailsPlainValidation() {
+  // Self-review finding: the ticket explicitly requires non-finite coverage, not just finite
+  // out-of-range values - validate()'s own lateralGripMultiplier check is
+  // Double.isFinite(...) && >0 && <=1, so NaN and either infinity must all fail loudly too.
+  var nan = new Overrides.Tuning(); nan.lateralGripMultiplier = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nan::validate, "a NaN lateralGripMultiplier must fail validate()");
+  var positiveInfinity = new Overrides.Tuning(); positiveInfinity.lateralGripMultiplier = Double.POSITIVE_INFINITY;
+  assertThrows(IllegalArgumentException.class, positiveInfinity::validate, "a positive-infinity lateralGripMultiplier must fail validate()");
+  var negativeInfinity = new Overrides.Tuning(); negativeInfinity.lateralGripMultiplier = Double.NEGATIVE_INFINITY;
+  assertThrows(IllegalArgumentException.class, negativeInfinity::validate, "a negative-infinity lateralGripMultiplier must fail validate()");
+ }
+
+ @Test void partLateralGripMultiplierOverrideInheritsThroughAnExtendsTemplate() {
+  try {
+   var template = new Overrides.Tuning(); template.lateralGripMultiplier = 0.55;
+   var part = new Overrides.Tuning(); part.extendsTemplate = "tire-base";
+   Overrides.setForTest(java.util.Map.of("tire-base", template), java.util.Map.of(), java.util.Map.of("packid:inherited_tire", part));
+   var merged = Overrides.effectivePartOverride("packid:inherited_tire");
+   assertEquals(0.55, merged.lateralGripMultiplier, "a part inheriting lateralGripMultiplier from a template must fold it in exactly like any other field");
+   assertDoesNotThrow(merged::validateSupportedForPart);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartLateralGripMultiplierOverrideWinsOverTheVehicleResolvedValue() {
+  try {
+   var part = new Overrides.Tuning(); part.lateralGripMultiplier = 0.3;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:slick_tire", part));
+   assertEquals(0.3, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:slick_tire", 1.0),
+     "an explicit part-level lateralGripMultiplier override must win outright (replace, not multiply) over the vehicle's own resolved value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartLateralGripMultiplierFallsThroughToTheVehicleResolvedValueWhenNoPartOverrideExists() {
+  assertEquals(1.0, PhysicsBridge.tirePartLateralGripMultiplier("packid:ordinary_tire_with_no_override", 1.0),
+    "no parts entry at all for this tire key must be a true no-op, reproducing the vehicle's resolved lateralGripMultiplier unchanged");
+ }
+
+ @Test void tirePartLateralGripMultiplierResolvesIndependentlyPerWheelKeySoDifferentInstalledTiresGetDifferentGrip() {
+  try {
+   var slick = new Overrides.Tuning(); slick.lateralGripMultiplier = 0.2;
+   var grippy = new Overrides.Tuning(); grippy.lateralGripMultiplier = 1.0;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:slick_tire", slick, "examplepack:grippy_tire", grippy));
+   assertEquals(0.2, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:slick_tire", 0.7));
+   assertEquals(1.0, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:grippy_tire", 0.7));
+   assertEquals(0.7, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:unconfigured_tire", 0.7),
+     "a third, unconfigured tire key on the same vehicle must stay at the vehicle's own resolved value - independent wheel identities");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void tirePartLateralGripMultiplierIsIndependentOfTirePartFrictionAndRollingResistanceOnTheSamePart() {
+  try {
+   var part = new Overrides.Tuning(); part.lateralGripMultiplier = 0.25; // friction/rollingResistance left unset
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:only_lateral_grip_tire", part));
+   assertEquals(0.25, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:only_lateral_grip_tire", 1.0));
+   assertEquals(1.0, PhysicsBridge.tirePartFriction("examplepack:only_lateral_grip_tire", 1.0),
+     "a part overriding only lateralGripMultiplier must leave friction completely untouched - independent fields");
+   assertEquals(1.0, PhysicsBridge.tirePartRollingResistance("examplepack:only_lateral_grip_tire", 1.0),
+     "a part overriding only lateralGripMultiplier must leave rollingResistance completely untouched - independent fields");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void validThenInvalidPartLateralGripMultiplierReloadAppliesThenRetainsThePriorGoodTireOverride() {
+  try {
+   var goodTire = new Overrides.Tuning(); goodTire.lateralGripMultiplier = 0.65;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", goodTire)));
+   assertTrue(goodResult.success(), "a valid parts.<tire>.lateralGripMultiplier reload must apply cleanly");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "PhysicsBridge.tirePartLateralGripMultiplier must observe the newly-applied valid part lateralGripMultiplier override");
+
+   var invalidTire = new Overrides.Tuning(); invalidTire.lateralGripMultiplier = 0.0; // out of range: must be >0
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", invalidTire)));
+   assertFalse(badResult.success(), "an out-of-range part lateralGripMultiplier (0.0) reload must be rejected, not silently applied");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "a rejected reload must retain the PRIOR GOOD part lateralGripMultiplier override, not the invalid value or the vehicle fallback");
+
+   var tooHighTire = new Overrides.Tuning(); tooHighTire.lateralGripMultiplier = 1.5; // out of range: must be <=1
+   var badResult2 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", tooHighTire)));
+   assertFalse(badResult2.success(), "an out-of-range part lateralGripMultiplier (1.5) reload must also be rejected");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "a second rejected reload must still retain the same prior good part lateralGripMultiplier override");
+
+   // Self-review finding: the ticket explicitly requires non-finite reload coverage too, not
+   // just finite out-of-range values - Tuning.validate()'s own lateralGripMultiplier check uses
+   // Double.isFinite(...) (see that bound's own doc), so both NaN and an infinity must also be
+   // rejected while retaining the same prior good override.
+   var nanTire = new Overrides.Tuning(); nanTire.lateralGripMultiplier = Double.NaN;
+   var badResult3 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", nanTire)));
+   assertFalse(badResult3.success(), "a NaN part lateralGripMultiplier reload must be rejected, not silently applied");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "a NaN-rejected reload must still retain the same prior good part lateralGripMultiplier override");
+
+   var infiniteTire = new Overrides.Tuning(); infiniteTire.lateralGripMultiplier = Double.POSITIVE_INFINITY;
+   var badResult4 = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:reloadable_tire", infiniteTire)));
+   assertFalse(badResult4.success(), "a positive-infinity part lateralGripMultiplier reload must be rejected, not silently applied");
+   assertEquals(0.65, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:reloadable_tire", 1.0),
+     "an infinity-rejected reload must still retain the same prior good part lateralGripMultiplier override");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // Review finding (PR #51/Jira comment 54581): swappingTheResolvedTireLateralGripChangesTheComposedRatio
+ // in MultiContactFrictionSolverTirePartLateralGripTest only exercises local arithmetic on two
+ // already-resolved doubles - it never changes live Overrides state, so it would pass even if
+ // real installed-tire replacement/removal kept returning a stale override. This regression
+ // drives the REAL active-config seam (Overrides.apply, the same one a live config reload uses)
+ // for one canonical installed-part key: apply a part entry, observe its resolved lateral
+ // multiplier through PhysicsBridge.tirePartLateralGripMultiplier; replace that same key's entry
+ // with a different value and observe the NEW value take effect; then remove the entry entirely
+ // and confirm the exact vehicle-level fallback is restored, not the removed value or a stale
+ // cache - the ticket's explicit "canonical-key resolution/inheritance, removal/replacement"
+ // coverage requirement, proven through live state rather than local arithmetic.
+ @Test void tirePartLateralGripMultiplierObservesLiveReplacementAndRestoresVehicleFallbackOnRemoval() {
+  try {
+   double vehicleLateralGrip = 0.6;
+   var initial = new Overrides.Tuning(); initial.lateralGripMultiplier = 0.3;
+   var applyInitial = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:canonical_tire", initial)));
+   assertTrue(applyInitial.success(), "the initial parts.<tire>.lateralGripMultiplier config must apply cleanly");
+   assertEquals(0.3, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "the installed tire's resolved lateralGripMultiplier must observe the just-applied part override");
+
+   var replacement = new Overrides.Tuning(); replacement.lateralGripMultiplier = 0.9;
+   var applyReplacement = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(),
+     java.util.Map.of("examplepack:canonical_tire", replacement)));
+   assertTrue(applyReplacement.success(), "replacing the same canonical tire key's part entry must apply cleanly");
+   assertEquals(0.9, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "replacing the part entry for the SAME canonical key must be observed as the new resolved value, not the stale prior override");
+
+   var applyRemoval = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(), java.util.Map.of()));
+   assertTrue(applyRemoval.success(), "removing the tire's part entry entirely must itself apply cleanly");
+   assertEquals(vehicleLateralGrip, PhysicsBridge.tirePartLateralGripMultiplier("examplepack:canonical_tire", vehicleLateralGrip), 0,
+     "removing the part entry entirely must restore the exact vehicle-level fallback, not the removed override or a stale cache");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void nonUnitVehicleLateralGripMultiplierFallsThroughUnchangedWhenNoPartOverrideExists() {
+  double vehicleLateralGrip = 0.6;
+  double resolved = PhysicsBridge.tirePartLateralGripMultiplier("packid:no_override_tire", vehicleLateralGrip);
+  assertEquals(0.6, resolved, 0, "with no part override, the resolved value must equal the configured vehicle baseline exactly");
+  double ratio = resolved / vehicleLateralGrip; // the exact stepGround composition
+  assertEquals(1.0, ratio, 0, "a configured, non-unit vehicle lateralGripMultiplier with no part override must compose to the exact no-op ratio 1.0");
+ }
+
+ @Test void nonUnitVehicleLateralGripMultiplierIsReplacedOutrightByAPartOverrideInTheComposedRatio() {
+  try {
+   var part = new Overrides.Tuning(); part.lateralGripMultiplier = 0.9;
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of("examplepack:overridden_tire", part));
+   double vehicleLateralGrip = 0.6;
+   double resolved = PhysicsBridge.tirePartLateralGripMultiplier("examplepack:overridden_tire", vehicleLateralGrip);
+   assertEquals(0.9, resolved, 0, "a part override must replace the vehicle's own non-unit baseline outright, not multiply/divide against it");
+   double ratio = resolved / vehicleLateralGrip; // the exact stepGround composition
+   assertEquals(1.5, ratio, 1e-12, "the composed ratio must be part/vehicle=1.5, which stepGround then multiplies back against the shared lateralGripMultiplier parameter");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
  @Test void enginePartDriveForceFallsThroughWhenThePartEntryExistsButDoesNotSetDriveForce() {
   try {
    var part = new Overrides.Tuning(); part.friction = 0.9; // sets a different field, not driveForce
@@ -1233,6 +1869,49 @@ class OverridesTest {
      "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
    assertEquals(0.7, Overrides.resolved("packid:glider3").oswaldEfficiency, 1e-9,
      "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ // MINECRAFT-541 self-review: same "invalid reload retaining last-good values" regression
+ // already covered for stallAngleDegrees/liftSlope/controlSurfaceSlope above, for the new
+ // aileron/elevator/rudderAuthorityScale fields. Also covers live removal: the second reload
+ // below OMITS the vehicle entirely (not merely setting an invalid value), confirming it falls
+ // all the way back to the flat 1.0 FALLBACK rather than retaining the first reload's values.
+
+ @Test void invalidReloadRetainsThePriorGoodAxisAuthorityScalesAndRemovalFallsBackToDefault() {
+  try {
+   var good = new Overrides.Tuning();
+   good.aileronAuthorityScale = 1.3; good.elevatorAuthorityScale = 0.9; good.rudderAuthorityScale = 1.1;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider4", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(1.3, Overrides.resolved("packid:glider4").aileronAuthorityScale, 1e-9);
+   assertEquals(0.9, Overrides.resolved("packid:glider4").elevatorAuthorityScale, 1e-9);
+   assertEquals(1.1, Overrides.resolved("packid:glider4").rudderAuthorityScale, 1e-9);
+
+   var invalid = new Overrides.Tuning();
+   // 0.0 is now explicitly VALID (review correction 54143), so use genuinely out-of-range
+   // values here instead - negative and above the 5.0 cap.
+   invalid.aileronAuthorityScale = -1.0; invalid.elevatorAuthorityScale = 999.0; invalid.rudderAuthorityScale = -2.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:glider4", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload for these fields must be rejected, not silently applied");
+
+   assertEquals(1.3, Overrides.resolved("packid:glider4").aileronAuthorityScale, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(0.9, Overrides.resolved("packid:glider4").elevatorAuthorityScale, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+   assertEquals(1.1, Overrides.resolved("packid:glider4").rudderAuthorityScale, 1e-9,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or the flat fallback");
+
+   var removalResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of(), java.util.Map.of()));
+   assertTrue(removalResult.success(), "a reload that simply omits the vehicle entirely must itself apply cleanly");
+   assertEquals(1.0, Overrides.resolved("packid:glider4").aileronAuthorityScale, 1e-9,
+     "removing the vehicle's entry entirely must fall back to the flat 1.0 default, not retain the prior good override");
+   assertEquals(1.0, Overrides.resolved("packid:glider4").elevatorAuthorityScale, 1e-9,
+     "removing the vehicle's entry entirely must fall back to the flat 1.0 default, not retain the prior good override");
+   assertEquals(1.0, Overrides.resolved("packid:glider4").rudderAuthorityScale, 1e-9,
+     "removing the vehicle's entry entirely must fall back to the flat 1.0 default, not retain the prior good override");
   } finally {
    Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
   }
@@ -1577,6 +2256,324 @@ class OverridesTest {
    case "lateral" -> t.lateralWaterDragMultiplier = value;
    case "vertical" -> t.verticalWaterDragMultiplier = value;
    default -> throw new IllegalArgumentException(field);
+  }
+ }
+
+ // MINECRAFT-539: suspensionSpringMultiplierFront/Rear, suspensionDampingRatioFront/Rear -
+ // per-geometric-axle overrides of suspensionSpringMultiplier/suspensionDampingRatio, same bounds
+ // as those base fields, no FALLBACK entry (unset axle field inherits the vehicle's own already-
+ // resolved base value - see AxleSuspensionDistribution's own doc), participating in the SAME
+ // combined travel-aware stability check as the base fields, generalized per axle.
+
+ @Test void axleSpringAndDampingFieldsOutOfRangeFailValidation() {
+  var zeroRatioFront = new Overrides.Tuning(); zeroRatioFront.suspensionDampingRatioFront = 0.0;
+  assertThrows(IllegalArgumentException.class, zeroRatioFront::validate);
+  var tooLargeRatioRear = new Overrides.Tuning(); tooLargeRatioRear.suspensionDampingRatioRear = 2.01;
+  assertThrows(IllegalArgumentException.class, tooLargeRatioRear::validate);
+  var nanRatioFront = new Overrides.Tuning(); nanRatioFront.suspensionDampingRatioFront = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nanRatioFront::validate);
+  var atBoundMultiplierFront = new Overrides.Tuning(); atBoundMultiplierFront.suspensionSpringMultiplierFront = 0.5; // fully bottomed out, same reasoning as the base field
+  assertThrows(IllegalArgumentException.class, atBoundMultiplierFront::validate);
+  var tooLargeMultiplierRear = new Overrides.Tuning(); tooLargeMultiplierRear.suspensionSpringMultiplierRear = 4.01;
+  assertThrows(IllegalArgumentException.class, tooLargeMultiplierRear::validate);
+  var validRatioFront = new Overrides.Tuning(); validRatioFront.suspensionDampingRatioFront = 1.0;
+  assertDoesNotThrow(validRatioFront::validate);
+  var validMultiplierRear = new Overrides.Tuning(); validMultiplierRear.suspensionSpringMultiplierRear = 1.0;
+  assertDoesNotThrow(validMultiplierRear::validate);
+ }
+
+ @Test void unsetAxleFieldsHaveNoFallbackAndStayNullWhenNeverConfigured() {
+  // No FALLBACK entry for any of the four fields (mirrors brakeBiasFront/toeFrontDegrees above)
+  // - a vehicle that never sets any of them must stay null through resolution
+  // (AxleSuspensionDistribution's own inheritance, not a second independently-resolved default,
+  // is what substitutes the base value at runtime).
+  assertNull(Overrides.resolved("packid:not_configured").suspensionDampingRatioFront);
+  assertNull(Overrides.resolved("packid:not_configured").suspensionDampingRatioRear);
+  assertNull(Overrides.resolved("packid:not_configured").suspensionSpringMultiplierFront);
+  assertNull(Overrides.resolved("packid:not_configured").suspensionSpringMultiplierRear);
+  assertNull(Overrides.defaultTuning().suspensionDampingRatioFront);
+ }
+
+ @Test void axleSpringAndDampingFieldsParticipateInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.suspensionDampingRatioFront = 1.4; override.suspensionSpringMultiplierRear = 0.7;
+   Overrides.setForTest(java.util.Map.of("packid:axle_tuned_vehicle", override));
+   var resolved = Overrides.resolved("packid:axle_tuned_vehicle");
+   assertEquals(1.4, resolved.suspensionDampingRatioFront,
+     "an explicit operator override must take precedence and stay non-null, unlike the no-FALLBACK base resolution");
+   assertEquals(0.7, resolved.suspensionSpringMultiplierRear);
+   assertNull(resolved.suspensionDampingRatioRear, "the unconfigured axle field must stay null, not fall back to any flat constant");
+
+   var packMetadata = new Overrides.Tuning(); packMetadata.suspensionSpringMultiplierFront = 1.6;
+   assertEquals(1.6, Overrides.resolved("packid:not_configured", packMetadata, null, null).suspensionSpringMultiplierFront,
+     "pack metadata must win over the (nonexistent) fallback when no operator override exists");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void axleSpringAndDampingFieldsAreRejectedOnAPartOverride() {
+  var dampingFront = new Overrides.Tuning(); dampingFront.suspensionDampingRatioFront = 1.0;
+  assertThrows(IllegalArgumentException.class, dampingFront::validateSupportedForPart);
+  var dampingRear = new Overrides.Tuning(); dampingRear.suspensionDampingRatioRear = 1.0;
+  assertThrows(IllegalArgumentException.class, dampingRear::validateSupportedForPart);
+  var springFront = new Overrides.Tuning(); springFront.suspensionSpringMultiplierFront = 1.2;
+  assertThrows(IllegalArgumentException.class, springFront::validateSupportedForPart);
+  var springRear = new Overrides.Tuning(); springRear.suspensionSpringMultiplierRear = 1.2;
+  assertThrows(IllegalArgumentException.class, springRear::validateSupportedForPart);
+ }
+
+ @Test void axleSpringAndDampingFieldsAreInheritedThroughExtends() {
+  try {
+   var template = new Overrides.Tuning();
+   template.suspensionDampingRatioFront = 1.1; template.suspensionSpringMultiplierRear = 0.8;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "axle-tuned-template";
+   Overrides.setForTest(java.util.Map.of("axle-tuned-template", template), java.util.Map.of("packid:inherits_axle_tuning", child), java.util.Map.of());
+   var resolved = Overrides.resolved("packid:inherits_axle_tuning");
+   assertEquals(1.1, resolved.suspensionDampingRatioFront,
+     "a child entry leaving suspensionDampingRatioFront unset must inherit its template's own value");
+   assertEquals(0.8, resolved.suspensionSpringMultiplierRear);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void invalidReloadRetainsThePriorGoodAxleSuspensionFields() {
+  try {
+   var good = new Overrides.Tuning(); good.suspensionDampingRatioFront = 1.2;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:axle_reload", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(1.2, Overrides.resolved("packid:axle_reload").suspensionDampingRatioFront);
+
+   var invalid = new Overrides.Tuning(); invalid.suspensionDampingRatioFront = -3.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:axle_reload", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload must be rejected, not silently applied");
+
+   assertEquals(1.2, Overrides.resolved("packid:axle_reload").suspensionDampingRatioFront,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or null");
+
+   // Removal (a reload that omits the field entirely) must successfully fall back to null
+   // (inherit the base value) - the live-reload-retention above must not make a legitimate
+   // removal impossible.
+   var removed = new Overrides.Tuning();
+   var removedResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:axle_reload", removed), java.util.Map.of()));
+   assertTrue(removedResult.success(), "removing the field entirely must itself be a valid reload");
+   assertNull(Overrides.resolved("packid:axle_reload").suspensionDampingRatioFront,
+     "a reload that no longer sets the field must resolve back to null (inherit base), not retain the old value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void axleOverrideAloneCanBeRejectedForDestabilizingTheUnconfiguredDefaultOnThatAxle() {
+  // Same shape as suspensionSpringMultiplierAloneCanBeRejectedForDestabilizingTheUnconfiguredDefaultRatio
+  // above, generalized per-axle: a front-only multiplier override must be checked against the
+  // UNCONFIGURED default 0.7 ratio for the front axle specifically, even with no vehicle-wide or
+  // rear-axle field touched at all.
+  var destabilizingFront = new Overrides.Tuning();
+  destabilizingFront.suspensionTravel = 0.2; destabilizingFront.suspensionSpringMultiplierFront = 4.0;
+  assertThrows(IllegalArgumentException.class, destabilizingFront::validate,
+    "a front-axle-only spring multiplier must be rejected when it destabilizes the unconfigured default ratio on that axle");
+  var destabilizingRearRatio = new Overrides.Tuning();
+  destabilizingRearRatio.suspensionTravel = 0.2; destabilizingRearRatio.suspensionDampingRatioRear = 1.77;
+  assertThrows(IllegalArgumentException.class, destabilizingRearRatio::validate,
+    "a rear-axle-only damping ratio must be rejected when it is unstable against the unconfigured default multiplier on that axle");
+  // A safe axle-specific pair must remain accepted.
+  var safeFront = new Overrides.Tuning();
+  safeFront.suspensionTravel = 0.2; safeFront.suspensionSpringMultiplierFront = 1.0; safeFront.suspensionDampingRatioFront = 0.9;
+  assertDoesNotThrow(safeFront::validate);
+ }
+
+ @Test void invalidAxlePairsAreRejectedEvenWhenTheOtherAxleAndTheVehicleWideFieldsAreSafe() {
+  // The vehicle-wide pair (0.7/1.0 defaults) and the REAR axle are both safe here - only the
+  // FRONT axle's own (multiplier, ratio) pair is destabilizing - the per-axle generalization must
+  // still catch it rather than only checking the vehicle-wide base pair.
+  var frontOnlyUnstablePair = new Overrides.Tuning();
+  frontOnlyUnstablePair.suspensionTravel = 0.2;
+  frontOnlyUnstablePair.suspensionSpringMultiplierFront = 2.5;
+  frontOnlyUnstablePair.suspensionDampingRatioFront = 1.8;
+  frontOnlyUnstablePair.suspensionDampingRatioRear = 0.5; // safe on its own
+  assertThrows(IllegalArgumentException.class, frontOnlyUnstablePair::validate,
+    "an unstable front-axle (multiplier,ratio) pair must be rejected even though the rear axle and the vehicle-wide base pair are both safe");
+ }
+
+ // MINECRAFT-551: suspensionDampingRatioCompression/Rebound - vehicle-wide, direction-selected
+ // (by the suspension anchor's own signed velocity, see TireForces.suspension's 5-arg overload)
+ // overrides of suspensionDampingRatio. Same [strictly-positive, 2.0] bound as the base field, no
+ // FALLBACK entry (unset direction inherits the per-wheel value AxleSuspensionDistribution already
+ // resolved - see PhysicsBridge.directionalDampingRatio), checked against every axle's own
+ // effective spring multiplier since (unlike suspensionDampingRatioFront/Rear) these two are
+ // deliberately vehicle-wide once configured.
+
+ @Test void directionalDampingRatioFieldsOutOfRangeFailValidation() {
+  var zeroCompression = new Overrides.Tuning(); zeroCompression.suspensionDampingRatioCompression = 0.0;
+  assertThrows(IllegalArgumentException.class, zeroCompression::validate);
+  var negativeRebound = new Overrides.Tuning(); negativeRebound.suspensionDampingRatioRebound = -0.5;
+  assertThrows(IllegalArgumentException.class, negativeRebound::validate);
+  var tooLargeCompression = new Overrides.Tuning(); tooLargeCompression.suspensionDampingRatioCompression = 2.01;
+  assertThrows(IllegalArgumentException.class, tooLargeCompression::validate);
+  var nanRebound = new Overrides.Tuning(); nanRebound.suspensionDampingRatioRebound = Double.NaN;
+  assertThrows(IllegalArgumentException.class, nanRebound::validate);
+  var validCompression = new Overrides.Tuning(); validCompression.suspensionDampingRatioCompression = 1.2;
+  assertDoesNotThrow(validCompression::validate);
+  var validReboundAtUpperBound = new Overrides.Tuning(); validReboundAtUpperBound.suspensionDampingRatioRebound = 2.0;
+  assertDoesNotThrow(validReboundAtUpperBound::validate);
+ }
+
+ @Test void unsetDirectionalFieldsHaveNoFallbackAndStayNullWhenNeverConfigured() {
+  assertNull(Overrides.resolved("packid:not_configured").suspensionDampingRatioCompression);
+  assertNull(Overrides.resolved("packid:not_configured").suspensionDampingRatioRebound);
+  assertNull(Overrides.defaultTuning().suspensionDampingRatioCompression);
+  assertNull(Overrides.defaultTuning().suspensionDampingRatioRebound);
+ }
+
+ @Test void directionalDampingRatioFieldsParticipateInTheFullPrecedenceChain() {
+  try {
+   var override = new Overrides.Tuning();
+   override.suspensionDampingRatioCompression = 1.3; override.suspensionDampingRatioRebound = 0.4;
+   Overrides.setForTest(java.util.Map.of("packid:directional_tuned_vehicle", override));
+   var resolved = Overrides.resolved("packid:directional_tuned_vehicle");
+   assertEquals(1.3, resolved.suspensionDampingRatioCompression);
+   assertEquals(0.4, resolved.suspensionDampingRatioRebound);
+
+   var packMetadata = new Overrides.Tuning(); packMetadata.suspensionDampingRatioCompression = 1.1;
+   assertEquals(1.1, Overrides.resolved("packid:not_configured", packMetadata, null, null).suspensionDampingRatioCompression,
+     "pack metadata must win over the (nonexistent) fallback when no operator override exists");
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
+  }
+ }
+
+ @Test void directionalDampingRatioFieldsAreRejectedOnAPartOverride() {
+  var compression = new Overrides.Tuning(); compression.suspensionDampingRatioCompression = 1.0;
+  assertThrows(IllegalArgumentException.class, compression::validateSupportedForPart);
+  var rebound = new Overrides.Tuning(); rebound.suspensionDampingRatioRebound = 1.0;
+  assertThrows(IllegalArgumentException.class, rebound::validateSupportedForPart);
+ }
+
+ @Test void directionalDampingRatioFieldsAreInheritedThroughExtends() {
+  try {
+   var template = new Overrides.Tuning();
+   template.suspensionDampingRatioCompression = 1.5; template.suspensionDampingRatioRebound = 0.3;
+   var child = new Overrides.Tuning(); child.extendsTemplate = "directional-tuned-template";
+   Overrides.setForTest(java.util.Map.of("directional-tuned-template", template), java.util.Map.of("packid:inherits_directional_tuning", child), java.util.Map.of());
+   var resolved = Overrides.resolved("packid:inherits_directional_tuning");
+   assertEquals(1.5, resolved.suspensionDampingRatioCompression,
+     "a child entry leaving suspensionDampingRatioCompression unset must inherit its template's own value");
+   assertEquals(0.3, resolved.suspensionDampingRatioRebound);
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void invalidReloadRetainsThePriorGoodDirectionalDampingFields() {
+  try {
+   var good = new Overrides.Tuning(); good.suspensionDampingRatioCompression = 1.2;
+   var goodResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:directional_reload", good), java.util.Map.of()));
+   assertTrue(goodResult.success(), "the known-good config itself must apply cleanly");
+   assertEquals(1.2, Overrides.resolved("packid:directional_reload").suspensionDampingRatioCompression);
+
+   var invalid = new Overrides.Tuning(); invalid.suspensionDampingRatioCompression = -3.0;
+   var badResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:directional_reload", invalid), java.util.Map.of()));
+   assertFalse(badResult.success(), "an out-of-range reload must be rejected, not silently applied");
+
+   assertEquals(1.2, Overrides.resolved("packid:directional_reload").suspensionDampingRatioCompression,
+     "a rejected reload must retain the PRIOR GOOD value, not the invalid one or null");
+
+   var removed = new Overrides.Tuning();
+   var removedResult = Overrides.apply(() -> new Overrides.Config(java.util.Map.of(), java.util.Map.of("packid:directional_reload", removed), java.util.Map.of()));
+   assertTrue(removedResult.success(), "removing the field entirely must itself be a valid reload");
+   assertNull(Overrides.resolved("packid:directional_reload").suspensionDampingRatioCompression,
+     "a reload that no longer sets the field must resolve back to null (inherit the per-wheel base), not retain the old value");
+  } finally {
+   Overrides.setForTest(java.util.Map.of(), java.util.Map.of(), java.util.Map.of());
+  }
+ }
+
+ @Test void directionalDampingRatioAloneCanBeRejectedForDestabilizingAnyAxlesEffectiveSpringMultiplier() {
+  // suspensionDampingRatioCompression/Rebound are VEHICLE-WIDE once set - they must be checked
+  // against EVERY axle's own effective spring multiplier (front/rear/base), not only the
+  // vehicle-wide one, since once configured they apply to every wheel in that direction
+  // regardless of which axle that wheel belongs to.
+  var destabilizingAgainstFront = new Overrides.Tuning();
+  destabilizingAgainstFront.suspensionTravel = 0.2;
+  destabilizingAgainstFront.suspensionSpringMultiplierFront = 2.5; // only the front axle is stiff
+  destabilizingAgainstFront.suspensionDampingRatioCompression = 1.8; // unstable specifically against the front axle's multiplier
+  assertThrows(IllegalArgumentException.class, destabilizingAgainstFront::validate,
+    "a vehicle-wide suspensionDampingRatioCompression must be rejected when it destabilizes even just the FRONT axle's own effective spring multiplier");
+
+  var destabilizingAgainstRear = new Overrides.Tuning();
+  destabilizingAgainstRear.suspensionTravel = 0.2;
+  destabilizingAgainstRear.suspensionSpringMultiplierRear = 2.5;
+  destabilizingAgainstRear.suspensionDampingRatioRebound = 1.8;
+  assertThrows(IllegalArgumentException.class, destabilizingAgainstRear::validate,
+    "a vehicle-wide suspensionDampingRatioRebound must be rejected when it destabilizes even just the REAR axle's own effective spring multiplier");
+
+  // A safe directional ratio must remain accepted even with an axle-specific multiplier present.
+  var safe = new Overrides.Tuning();
+  safe.suspensionTravel = 0.2;
+  safe.suspensionSpringMultiplierFront = 1.0; safe.suspensionSpringMultiplierRear = 1.0;
+  safe.suspensionDampingRatioCompression = 0.9; safe.suspensionDampingRatioRebound = 1.1;
+  assertDoesNotThrow(safe::validate);
+ }
+
+ @Test void equalCompressionAndReboundValuesReproduceTheCorrespondingExistingSymmetricSetting() {
+  // Setting suspensionDampingRatioCompression==suspensionDampingRatioRebound (both to the same
+  // value as a plain suspensionDampingRatio) must resolve to the exact same effective per-wheel
+  // ratio as the existing symmetric field alone - the required default/equal-value equivalence.
+  double sharedValue = 1.1;
+  var symmetricOnly = new Overrides.Tuning(); symmetricOnly.suspensionDampingRatio = sharedValue;
+  double axleResolvedBase = AxleSuspensionDistribution.dampingRatios(new double[]{1.5,-1.5}, symmetricOnly.suspensionDampingRatio, null, null)[0];
+  assertEquals(sharedValue, axleResolvedBase, 0.0);
+
+  var directional = new Overrides.Tuning();
+  directional.suspensionDampingRatioCompression = sharedValue; directional.suspensionDampingRatioRebound = sharedValue;
+  assertDoesNotThrow(directional::validate);
+  // PhysicsBridge.directionalDampingRatio is the actual runtime resolution step - both
+  // directions, given the SAME axle-resolved base used above, must resolve to the shared value.
+  assertEquals(sharedValue, PhysicsBridge.directionalDampingRatio(directional.suspensionDampingRatioCompression, axleResolvedBase), 0.0);
+  assertEquals(sharedValue, PhysicsBridge.directionalDampingRatio(directional.suspensionDampingRatioRebound, axleResolvedBase), 0.0);
+ }
+
+ /**
+  * Review finding (comment 54547): {@code resolveFields} validated each of {@code packMetadata}/
+  * {@code ivAdapted}/{@code physicallyDerived} individually (and {@code override} was already
+  * validated at config-load time) but never validated the actual COMPOSED {@code result} it
+  * returns - a field-by-field precedence chain can pick a directional damping ratio from one
+  * source and an axle spring multiplier from a DIFFERENT source, each individually valid against
+  * only its own source's other fields, yet unstable together once resolved onto the same wheel.
+  * Reproduces the reviewer's own exact numbers: at travel 0.3, an operator-configured compression
+  * ratio of 1.8 is safe alone (bound ~2.2167 at the unconfigured multiplier 1.0), and a pack-
+  * metadata front spring multiplier of 4.0 is safe alone (bound ~0.948892900565 at the
+  * unconfigured fallback ratio 0.7) - but {@code resolved()} composing the two together puts
+  * ratio 1.8 against the front axle's OWN effective multiplier 4.0, whose bound is that same
+  * ~0.9489, so the composed tuple is actually unstable and must now be rejected.
+  */
+ @Test void resolvedMustRejectACrossPrecedenceCombinationOfADirectionalRatioAndAnAxleSpringMultiplierThatIsUnstableOnlyTogether() {
+  try {
+   var operatorOverride = new Overrides.Tuning();
+   operatorOverride.suspensionTravel = 0.3;
+   operatorOverride.suspensionDampingRatioCompression = 1.8; // safe alone at the unconfigured multiplier 1.0
+   assertDoesNotThrow(operatorOverride::validate, "test setup sanity: the operator's own override must be valid in isolation");
+
+   var packMetadata = new Overrides.Tuning();
+   packMetadata.suspensionSpringMultiplierFront = 4.0; // safe alone at the unconfigured fallback ratio 0.7
+   assertDoesNotThrow(packMetadata::validate, "test setup sanity: the pack metadata's own fields must be valid in isolation");
+
+   Overrides.setForTest(java.util.Map.of("packid:cross_precedence_unstable", operatorOverride));
+   assertThrows(IllegalArgumentException.class, () -> Overrides.resolved("packid:cross_precedence_unstable", packMetadata, null, null),
+     "a directional ratio from one precedence source combined with an axle spring multiplier from ANOTHER must be rejected when the EFFECTIVE combination is unstable, even though each source passes validation alone");
+
+   // A safe cross-precedence combination must still resolve successfully - this is not a
+   // blanket rejection of composing fields from different sources.
+   var safePackMetadata = new Overrides.Tuning();
+   safePackMetadata.suspensionSpringMultiplierFront = 1.0;
+   var resolved = Overrides.resolved("packid:cross_precedence_unstable", safePackMetadata, null, null);
+   assertEquals(1.8, resolved.suspensionDampingRatioCompression, 0.0);
+   assertEquals(1.0, resolved.suspensionSpringMultiplierFront, 0.0);
+  } finally {
+   Overrides.setForTest(java.util.Map.of());
   }
  }
 }

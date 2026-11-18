@@ -25,7 +25,8 @@
       "cyclicLimitDegrees": 15.0,
       "cyclicAuthorityScale": 1.3,
       "yawAuthorityScale": 0.8,
-      "rotorAngularDampingCoefficient": 2.5
+      "rotorAngularDampingCoefficient": 2.5,
+      "rotorAirDragCoefficient": 0.6
     },
     "examplepack:front_biased_car": {
       "brakeForce": 12000.0,
@@ -43,13 +44,24 @@
       "driveForce": 9000.0,
       "axleDriveForceSharing": true
     },
+    "examplepack:axle_tuned_suspension_car": {
+      "suspensionSpringMultiplierFront": 1.3,
+      "suspensionDampingRatioFront": 0.9,
+      "suspensionSpringMultiplierRear": 0.9,
+      "suspensionDampingRatioRear": 0.75
+    },
+    "examplepack:directional_damping_car": {
+      "suspensionDampingRatioCompression": 0.5,
+      "suspensionDampingRatioRebound": 1.3
+    },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
       "hullFillFactor": 0.5,
       "waterDrag": 400.0,
       "propellerForce": 6000.0,
       "angularWaterDrag": 0.0,
-      "maxSteerDegrees": 30.0
+      "maxSteerDegrees": 30.0,
+      "marineSteerDegrees": 20.0
     },
     "examplepack:knife_hull_boat": {
       "massKg": 900.0,
@@ -69,8 +81,12 @@
       "stallAngleDegrees": 15.0,
       "liftSlope": 6.283185307179586,
       "controlSurfaceSlope": 6.283185307179586,
+      "aileronAuthorityScale": 1.2,
+      "elevatorAuthorityScale": 1.0,
+      "rudderAuthorityScale": 0.8,
       "parasiticDragMultiplier": 1.0,
-      "oswaldEfficiency": 0.8
+      "oswaldEfficiency": 0.8,
+      "fixedWingAngularDampingCoefficient": 1.5
     },
     "examplepack:sporty_car": {
       "extends": "sporty-base",
@@ -81,6 +97,10 @@
   "parts": {
     "examplepack:high_output_engine": {
       "driveForce": 9500.0
+    },
+    "examplepack:slick_tire": {
+      "friction": 1.4,
+      "lateralGripMultiplier": 0.5
     }
   }
 }

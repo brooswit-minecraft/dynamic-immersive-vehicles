@@ -143,6 +143,35 @@ class FlightForcesTest {
   }
  }
 
+ // MINECRAFT-542: fixedWingAngularDampingCoefficient is gated the same "fixed-wing only, never a
+ // blimp/no-wing vehicle" way parasiticDragMultiplier/oswaldEfficiency are above (MINECRAFT-536) -
+ // on BOTH aspectRatio<=0 AND the authoritative isBlimp classification (review correction: a
+ // blimp definition can itself carry a positive wingArea/wingSpan, which would otherwise give a
+ // positive aspect ratio despite the vehicle being a blimp).
+
+ @Test void gatedFixedWingAngularDampingCoefficientIsZeroForANoWingVehicle() {
+  // A no-wing, non-blimp vehicle (aspectRatio<=0) must see exactly 0 regardless of the
+  // configured coefficient.
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, false, 4.0));
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(-5, false, 4.0), "a negative aspectRatio must also gate off, not pass the coefficient through");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, false, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT), "even the maximum configured coefficient must be fully gated off for a no-wing vehicle");
+ }
+
+ @Test void gatedFixedWingAngularDampingCoefficientIsZeroForABlimpEvenWithPositiveWingGeometry() {
+  // Review correction: a blimp (isBlimp=true) must see exactly 0 regardless of the configured
+  // coefficient EVEN WHEN it carries a positive wingArea/wingSpan (e.g. stabilizer fins, or a
+  // copied/mistaken config) that would otherwise give a positive aspect ratio - the authoritative
+  // isBlimp classification must win, not merely the aspect-ratio check alone.
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, true, 4.0), "a blimp with a positive aspect ratio must still be fully gated off");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, true, FlightForces.MAX_FIXED_WING_ANGULAR_DAMPING_COEFFICIENT), "even the maximum configured coefficient must be fully gated off for a blimp with a positive aspect ratio");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(0, true, 4.0), "a blimp with no wing geometry at all must also be fully gated off (both conditions agree)");
+ }
+
+ @Test void gatedFixedWingAngularDampingCoefficientPassesThroughUnchangedForAnActualNonBlimpWing() {
+  assertEquals(4.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, false, 4.0), "a non-blimp positive aspectRatio (a real wing) must pass the configured coefficient through unchanged");
+  assertEquals(0.0, FlightForces.gatedFixedWingAngularDampingCoefficient(8, false, 0.0), "the off/unconfigured 0.0 value must also pass through unchanged on an actual wing");
+ }
+
  @Test void dragForceScalesQuadraticallyWithAirspeedAtAFixedCoefficient() {
   // Ticket's own "quadratic speed drag" acceptance requirement: aeroForce composed with
   // dynamicPressure (q = 1/2*rho*v^2) at a fixed, speed-independent drag coefficient must scale
@@ -194,6 +223,88 @@ class FlightForcesTest {
  @Test void boundedExtremeControlSurfaceSlopeStaysFinite() {
   double atCap = FlightForces.controlSurfaceForce(0.1,5,50,10);
   assertTrue(Double.isFinite(atCap) && atCap > 0);
+ }
+
+ // MINECRAFT-541: independent per-axis control authority - the 5-arg overload with an explicit
+ // operator-configured authorityScale, same "explicit authority-multiplier overload" shape as
+ // RotorForces.cyclicTorque/yawTorque's own authorityScale overload.
+
+ @Test void controlSurfaceForceWithUnitScaleMatchesTheUnscaledOverload() {
+  assertEquals(
+    FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE),
+    FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,1.0), 1e-9);
+ }
+
+ @Test void controlSurfaceForceScalesLinearlyWithAuthorityScale() {
+  double base = FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,1.0);
+  assertEquals(2*base, FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,2.0), 1e-6);
+  assertEquals(0.5*base, FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,0.5), 1e-6);
+ }
+
+ @Test void controlSurfaceForceAuthorityScaleIsIndependentOfControlSurfaceSlope() {
+  // Ticket acceptance: "changing one axis does not scale the others" - the authority scale and
+  // the shared controlSurfaceSlope are independent multiplicative factors, so doubling one must
+  // not interact with (double, cancel, or otherwise depend on) the other's own value.
+  double doubledSlopeOnly = FlightForces.controlSurfaceForce(0.1,5,50,2*FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,1.0);
+  double doubledScaleOnly = FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,2.0);
+  double base = FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,1.0);
+  assertEquals(2*base, doubledSlopeOnly, 1e-6);
+  assertEquals(2*base, doubledScaleOnly, 1e-6);
+  double both = FlightForces.controlSurfaceForce(0.1,5,50,2*FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,2.0);
+  assertEquals(4*base, both, 1e-6, "the two multipliers must compose, neither overriding the other");
+ }
+
+ @Test void controlSurfaceForceAuthorityScaleAtExtremeStaysFinite() {
+  double atCap = FlightForces.controlSurfaceForce(0.1,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,5.0);
+  assertTrue(Double.isFinite(atCap) && atCap > 0);
+ }
+
+ // Review correction (comment 54143): the ticket's own "test zero/unit/extreme valid values"
+ // acceptance means an authorityScale of exactly 0.0 itself, not merely zero deflection at a
+ // nonzero scale - 0.0 is explicitly valid (Overrides.validate's bound is now [0,5], not (0,5]),
+ // and must actually zero the resulting force even with a real, nonzero deflection.
+
+ @Test void controlSurfaceForceIsZeroAtZeroAuthorityScaleEvenWithNonzeroDeflection() {
+  assertEquals(0, FlightForces.controlSurfaceForce(0.2,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,0.0), 1e-9,
+    "an authorityScale of exactly 0.0 must zero out this axis's force even with a real deflection, the documented way to fully disable just one axis");
+ }
+
+ @Test void controlSurfaceForceIsZeroAtZeroDeflectionRegardlessOfAuthorityScale() {
+  assertEquals(0, FlightForces.controlSurfaceForce(0,5,50,FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE,3.0));
+ }
+
+ // Review kickback correction (comment 54361): aileron/elevator/rudderAuthorityScale must be
+ // gated the exact same "fixed-wing only, never a blimp" way MINECRAFT-542's own
+ // gatedFixedWingAngularDampingCoefficient already gates its field - a blimp that happens to
+ // carry nonzero control-surface geometry and a non-unit configured/inherited scale must still
+ // see exactly the unscaled (1.0) torque, never the configured scale applied.
+
+ @Test void gatedControlAuthorityScaleIsOneForABlimpRegardlessOfTheConfiguredScale() {
+  assertEquals(1.0, FlightForces.gatedControlAuthorityScale(true, 4.0), "a blimp must always get the 1.0 no-op regardless of the configured scale");
+  assertEquals(1.0, FlightForces.gatedControlAuthorityScale(true, 0.0), "even an explicit 0.0 configured scale must be gated to the 1.0 no-op for a blimp");
+  assertEquals(1.0, FlightForces.gatedControlAuthorityScale(true, 5.0), "even the maximum configured scale must be gated to the 1.0 no-op for a blimp");
+ }
+
+ @Test void gatedControlAuthorityScalePassesThroughUnchangedForAnActualNonBlimpWing() {
+  assertEquals(4.0, FlightForces.gatedControlAuthorityScale(false, 4.0), "a non-blimp fixed wing must pass the configured scale through unchanged");
+  assertEquals(0.0, FlightForces.gatedControlAuthorityScale(false, 0.0), "the explicit 0.0 (disable this axis) value must also pass through unchanged on an actual wing");
+ }
+
+ @Test void productionPathRegressionBlimpWithPositiveControlSurfaceGeometryAndNonUnitScaleSeesUnchangedTorque() {
+  // The actual production-path regression the review kickback required: a blimp with POSITIVE
+  // control-surface geometry (e.g. stabilizer fins with a real aileronArea) and a non-unit
+  // configured/inherited aileronAuthorityScale must still produce EXACTLY the same torque a
+  // non-blimp fixed wing would get at the documented 1.0 no-op scale - proving the gate, not
+  // merely the gate function's return value in isolation, actually reaches the real production
+  // controlSurfaceForce call this ticket added.
+  double deflection = 0.15, area = 3.0, dynamicPressure = 400.0, controlSurfaceSlope = FlightForces.DEFAULT_CONTROL_SURFACE_SLOPE;
+  double configuredNonUnitScale = 2.5;
+  double blimpEffectiveScale = FlightForces.gatedControlAuthorityScale(true, configuredNonUnitScale);
+  double blimpForce = FlightForces.controlSurfaceForce(deflection, area, dynamicPressure, controlSurfaceSlope, blimpEffectiveScale);
+  double unscaledBaselineForce = FlightForces.controlSurfaceForce(deflection, area, dynamicPressure, controlSurfaceSlope, 1.0);
+  assertEquals(unscaledBaselineForce, blimpForce, 1e-9, "a blimp with positive control-surface geometry and a non-unit configured scale must still see exactly the unscaled baseline torque");
+  double unguardedScaledForce = FlightForces.controlSurfaceForce(deflection, area, dynamicPressure, controlSurfaceSlope, configuredNonUnitScale);
+  assertNotEquals(unguardedScaledForce, blimpForce, 1e-9, "sanity check: the configured non-unit scale must actually differ from 1.0's effect, so this regression is not vacuous");
  }
 
  @Test void thrustIsZeroAtZeroThrottle() {

@@ -36,7 +36,15 @@ each vehicle from IV's own definition at the moment it is needed:
   volume sized to displace the vehicle's mass) and not tied to
   `gravityFactor`, whose own IV runtime default actually resolves to full
   gravity when a pack leaves it unset. A blimp with no configured
-  `ballastVolume` gets ordinary gravity, matching IV. See
+  `ballastVolume` gets ordinary gravity, matching IV. An optional, independent,
+  bounded angular-rate damping torque (`fixedWingAngularDampingCoefficient` -
+  MINECRAFT-542) can additionally be configured on top of the control torques
+  above - a dissipative drag opposing the body's own existing roll/pitch/yaw
+  rate (never the pilot's aileron/elevator/rudder input), off by default,
+  reusing the same inertia-aware, no-reversal model `rotorAngularDampingCoefficient`
+  (MINECRAFT-537) uses but as a wholly separate, never-shared field. Fixed-wing
+  only - a blimp (no wing) is completely unaffected by this field regardless of
+  how it is configured. See
   [`FlightForces`](src/main/java/io/github/brooswitminecraft/div/FlightForces.java)
   for the exact model and its stated simplifications (no post-stall/spin
   behavior, no advance-ratio propeller falloff, no altitude/weather air
@@ -63,7 +71,10 @@ each vehicle from IV's own definition at the moment it is needed:
   angular-rate damping torque (`rotorAngularDampingCoefficient` -
   MINECRAFT-537) can additionally be configured on top of this - a
   dissipative drag opposing the body's own existing roll/pitch/yaw rate
-  (never the pilot's cyclic/yaw input), off by default. See
+  (never the pilot's cyclic/yaw input), off by default. A separate
+  optional, bounded translational (linear) air drag force
+  (`rotorAirDragCoefficient` - MINECRAFT-543) opposes the body's own
+  existing linear velocity instead, also off by default. See
   [`RotorForces`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
   for the exact model and its stated simplifications (no translational-lift
   efficiency gain in forward flight, no retreating-blade stall, no
@@ -519,7 +530,8 @@ after changes.
       "cyclicLimitDegrees": 15.0,
       "cyclicAuthorityScale": 1.3,
       "yawAuthorityScale": 0.8,
-      "rotorAngularDampingCoefficient": 2.5
+      "rotorAngularDampingCoefficient": 2.5,
+      "rotorAirDragCoefficient": 0.6
     },
     "examplepack:ordinary_boat": {
       "massKg": 900.0,
@@ -527,17 +539,32 @@ after changes.
       "waterDrag": 400.0,
       "propellerForce": 6000.0,
       "angularWaterDrag": 0.0,
-      "maxSteerDegrees": 30.0
+      "maxSteerDegrees": 30.0,
+      "marineSteerDegrees": 20.0
     },
     "examplepack:ordinary_plane": {
       "driveForce": 9000.0,
       "stallAngleDegrees": 15.0,
       "liftSlope": 6.283185307179586,
-      "controlSurfaceSlope": 6.283185307179586
+      "controlSurfaceSlope": 6.283185307179586,
+      "aileronAuthorityScale": 1.2,
+      "elevatorAuthorityScale": 1.0,
+      "rudderAuthorityScale": 0.8
     }
   }
 }
 ```
+
+`marineSteerDegrees` (optional, 0-60 degrees) is an independent steering
+limit for water-propeller thrust direction (float-only hulls, and the water
+side of an amphibious vehicle) - a separate bound from `maxSteerDegrees`,
+which continues to govern ground wheel steering only. Leaving it unset
+inherits whichever `maxSteerDegrees` this same vehicle resolves to, so an
+unconfigured vehicle's propeller steering is byte-identical to before this
+option existed; setting it lets a vehicle's water handling (e.g. a tighter
+or wider rudder-propeller swing) diverge from its wheel steering angle
+without touching `maxSteerDegrees` at all. No part-level consumer - rejected
+on a `parts` entry, same as `maxSteerDegrees` itself.
 
 `brakeBiasFront` (optional, 0.0-1.0) splits `brakeForce`'s total budget
 between the front and rear axle, instead of evenly across every wheel. Axle
@@ -615,6 +642,65 @@ actually configured.
 See [Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528)
 below for the full math, the ride-height consequence, and the combined
 stability guard it shares with `suspensionDampingRatio`.
+
+`suspensionSpringMultiplierFront`/`suspensionSpringMultiplierRear` and
+`suspensionDampingRatioFront`/`suspensionDampingRatioRear` (optional, same
+bounds as `suspensionSpringMultiplier`/`suspensionDampingRatio` above) let
+the spring multiplier and damping ratio be set independently per geometric
+front/rear axle group - same axle grouping as `brakeBiasFront`/
+`driveBiasFront`/`toeFrontDegrees`/`toeRearDegrees`. Leaving an axle field
+unset makes that axle INHERIT the vehicle-wide `suspensionSpringMultiplier`/
+`suspensionDampingRatio` value above - not a second independent default -
+so a vehicle that only sets the vehicle-wide fields (or neither) behaves
+exactly as before this option existed on every wheel. An ambiguous layout
+(no distinguishable rear axle - a single-axle or side-by-side-only vehicle)
+falls back to the vehicle-wide value on every wheel too, same as the
+ambiguous-layout fallback `toeFrontDegrees`/`toeRearDegrees` already
+documents. The combined travel-aware stability guard (see
+[Suspension spring stiffness](#suspension-spring-stiffness-minecraft-528))
+is checked per axle too - an axle-specific override that alone would
+destabilize the unconfigured default on that axle is rejected even if the
+vehicle-wide pair and the other axle are both safe. See
+[`AxleSuspensionDistribution`](src/main/java/io/github/brooswitminecraft/div/AxleSuspensionDistribution.java)
+for the implementation.
+
+`suspensionDampingRatioCompression`/`suspensionDampingRatioRebound`
+(MINECRAFT-551, optional, same `(0, 2.0]` bounds as `suspensionDampingRatio`
+above) split the single damping ratio into two independently-configurable
+coefficients, selected per tick by the SIGN of the actual suspension
+anchor's own signed velocity (never by compression depth alone): the anchor
+moving toward the ground - the suspension COMPRESSING further - uses
+`suspensionDampingRatioCompression`; the anchor moving away from the ground
+- REBOUNDING/extending - uses `suspensionDampingRatioRebound`. At exactly
+zero velocity the damping term is zero regardless of which one would be
+picked, so there is no third "at rest" case to configure. Leaving a
+direction unset makes it inherit whichever per-wheel ratio was already
+resolved for that wheel (its own `suspensionDampingRatioFront`/`Rear`
+override if set, else the vehicle-wide `suspensionDampingRatio`) - the same
+"inherit, don't re-default" shape `suspensionDampingRatioFront`/`Rear`
+themselves already use - so a vehicle that never sets either field is
+byte-identical to before this option existed, on every wheel, in both
+directions, and setting both to the same value reproduces the exact
+existing symmetric behavior at that value.
+Unlike `suspensionDampingRatioFront`/`Rear`, this pair is deliberately
+VEHICLE-WIDE: once set, a directional value applies to every wheel
+regardless of axle (a configured compression/rebound value always wins
+over an axle-specific `suspensionDampingRatioFront`/`Rear` for that
+direction - the axle override still matters only as the inherited fallback
+for whichever direction is left unset). A per-axle-AND-per-direction knob
+(four more fields) was deliberately left out of scope for this ticket. The
+same combined travel-aware stability guard checks a configured directional
+value against every axle's own effective spring multiplier (front, rear,
+and the vehicle-wide base), since once configured it is applied uniformly
+regardless of axle. The opt-in experimental effective-mass damping
+candidate (`-Ddiv.experimentalEffectiveMassDamping`) keeps its existing,
+unexpanded semantics: when active it still produces exactly one
+ratio-driven damper (from `suspensionDampingRatio`/axle overrides, same as
+before this ticket), used identically for both directions - the
+compression/rebound split only actually differentiates the damper on the
+default (candidate off) path. See
+[`TireForces.suspension`](src/main/java/io/github/brooswitminecraft/div/TireForces.java)'s
+5-arg overload for the implementation and sign convention.
 
 `toeFrontDegrees`/`toeRearDegrees` (optional, degrees, `-20` to `20`) set a
 static toe alignment angle for the geometric front/rear axle group
@@ -694,6 +780,52 @@ at all). See
 [`RotorForces#angularDampingTorque`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
 for the full model.
 
+`fixedWingAngularDampingCoefficient` (MINECRAFT-542, fixed-wing aircraft
+only - never a blimp, rotorcraft, or ground vehicle - finite, `[0, 1000]`,
+default `0.0` - off) is the same optional, bounded angular-rate damping
+torque as `rotorAngularDampingCoefficient` above, ADDED to (never
+replacing) the aileron/elevator/rudder control torque, reusing that exact
+dissipative viscous-drag, inertia-aware, no-reversal model
+(`RotorForces#angularDampingTorque`) - but as a wholly separate,
+never-shared field, so configuring one vehicle category's damping can
+never silently affect the other's. It is gated on the vehicle actually
+having a wing (`aspectRatio>0`, the same gate `parasiticDragMultiplier`/
+`oswaldEfficiency` below already use) AND on the vehicle not being a
+blimp (the authoritative classification, checked in addition since a
+blimp definition can itself carry a positive `wingArea`/`wingSpan`): a
+blimp's angular motion stays completely unaffected by this field
+regardless of how it OR its wing geometry are configured. `0.0`
+reproduces the model's exact prior behavior (no angular-rate damping term
+at all).
+`rotorAirDragCoefficient` (MINECRAFT-543, rotorcraft only, finite,
+`[0, 5]`, default `0.0` - off) is a bounded MULTIPLIER on a quadratic
+aerodynamic drag force ADDED to (never replacing) the thrust force above -
+the same "multiplier against an existing calibrated/native number" shape
+`parasiticDragMultiplier` already establishes for fixed-wing drag, not a
+raw drag-strength scalar. The underlying force is the standard explicit
+`0.5*airDensity*Cd*A*|v|*v` formulation, built from the SAME native pieces
+`stepFlight`'s own parasitic drag already uses rather than a separate
+model: the existing sea-level-ISA `AIR_DENSITY` constant; IV's own
+`motorized.dragCoefficient`, floored exactly the way a no-wing (blimp)
+vehicle's own parasitic drag already is; and IV's own native reference
+area (`motorized.wingArea>0?wingArea:crossSectionalArea`, the same
+fallback a no-wing vehicle's parasitic drag already uses). It opposes this
+body's own current linear (translational) velocity - never the pilot's
+throttle/cyclic/yaw input, so it is deliberately not reduced thrust and
+cannot substitute for the pilot's own control authority. Per-tick, it is
+clamped so it can slow this body's velocity to exactly zero but never
+reverse its direction ("no-reversal") - the exact translational
+counterpart of `rotorAngularDampingCoefficient`'s own no-reversal clamp
+above - so it stays stable at any `dt` and any multiplier up to the
+documented cap. Orientation-independent by construction: it opposes the
+actual world-frame velocity regardless of the body's attitude, so a
+tumbled/rotated rotorcraft gets the identical force for the identical
+velocity. `0.0` reproduces the model's exact prior behavior (no
+translational drag term at all); a rotorcraft whose native geometry claims
+zero frontal area gets zero drag regardless of the multiplier. See
+[`RotorForces#translationalDragForce`](src/main/java/io/github/brooswitminecraft/div/RotorForces.java)
+for the full model.
+
 A copyable example is also
 available at
 [`docs/dynamic-immersive-vehicles.example.json`](docs/dynamic-immersive-vehicles.example.json).
@@ -721,6 +853,23 @@ cyclic/yaw authority - only on a fixed-wing vehicle's own wing lift and
 control-surface torque. Every field above the documented default (the exact
 prior hardcoded behavior) is omittable independently of the other two.
 
+`aileronAuthorityScale`, `elevatorAuthorityScale`, and
+`rudderAuthorityScale` (MINECRAFT-541, fixed-wing only - same "ignored by a
+ground, blimp, or rotorcraft vehicle" scope as the three fields above) each
+independently multiply the roll/pitch/yaw control torque `controlSurfaceSlope`
+already produces for that one axis, so changing one axis's authority never
+scales the others, the shared `controlSurfaceSlope` baseline, or either
+control surface's own native area/lever-arm geometry. All three are
+non-negative, capped at `5` (unlike `cyclicAuthorityScale`/
+`yawAuthorityScale` below, `0` is explicitly valid here too - there is no
+other per-axis knob to turn off just one axis's authority, e.g. a glider
+with no rudder authority at all), and default to `1.0` - a pure no-op
+reproducing the exact prior shared-`controlSurfaceSlope`-only torque for an
+unconfigured vehicle. `rudderAuthorityScale` scales the yaw torque AFTER the existing
+sideslip-restoring term (`rudderDeflection - sideslip`) is already folded
+in, so it changes that combined torque's magnitude only, never the
+sideslip-restoring term's own semantics.
+
 ### Part overrides, templates, and `extends`
 
 Alongside `vehicles`, the config accepts two more top-level maps:
@@ -728,13 +877,24 @@ Alongside `vehicles`, the config accepts two more top-level maps:
 - `parts`, keyed `partPackID:partSystemName` (the part definition's own
   identity, same shape as a vehicle's `packID:systemName`) - for tuning a
   part independently of any one vehicle it happens to be installed on.
-  Only `driveForce` is currently supported: an installed, running engine
-  part's own `driveForce`, if its part entry sets one, completely replaces
-  (not multiplies) the vehicle's own resolved `driveForce` for that
-  engine. Setting any other field on a `parts` entry - directly, or
-  inherited through `extends` - fails config load/reload loudly (the same
-  as an out-of-range value) rather than being silently accepted and
-  ignored; every other field has no part-level consumer yet.
+  Four fields are currently supported, each completely REPLACING (never
+  multiplying) the vehicle's own resolved value for that one installed
+  part, independently of each other:
+  - `driveForce` - an installed, running engine part's own drive force.
+  - `friction` (MINECRAFT-529) - an installed tire/ground-device part's
+    own overall grip, applied to that one contacted wheel only.
+  - `rollingResistance` (MINECRAFT-534) - that same tire's own rolling
+    drag, independent of `friction`.
+  - `lateralGripMultiplier` (MINECRAFT-552) - that same tire's own
+    LATERAL-only friction-ellipse semi-axis (`normal*friction*
+    lateralGripMultiplier` in `TireForces.frictionAnisotropic`); the
+    longitudinal (drive/brake) semi-axis is untouched by it, same scope
+    as the vehicle-level field of the same name.
+
+  Setting any other field on a `parts` entry - directly, or inherited
+  through `extends` - fails config load/reload loudly (the same as an
+  out-of-range value) rather than being silently accepted and ignored;
+  every other field has no part-level consumer yet.
 - `templates`, an arbitrary-named map of reusable tuning fragments. Any
   `vehicles` or `parts` entry (or another template) can set `"extends":
   "<template name>"` to inherit every field it leaves unset from that
@@ -752,7 +912,8 @@ Alongside `vehicles`, the config accepts two more top-level maps:
     "examplepack:sporty_car": { "extends": "sporty-base", "massKg": 1250.0 }
   },
   "parts": {
-    "examplepack:high_output_engine": { "driveForce": 9500.0 }
+    "examplepack:high_output_engine": { "driveForce": 9500.0 },
+    "examplepack:slick_tire": { "friction": 1.4, "lateralGripMultiplier": 0.5 }
   }
 }
 ```
@@ -770,13 +931,17 @@ break anything already running.
 
 A successful reload only live-updates fields every active vehicle already
 re-reads every tick: `suspensionTravel`, `friction`, `driveForce`,
-`brakeForce`, `maxSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
+`brakeForce`, `maxSteerDegrees`, `marineSteerDegrees`, `lateralGripMultiplier`, `waterDrag`,
 `propellerForce`, `angularWaterDrag`, `antiRollStiffness`, `stallAngleDegrees`, `liftSlope`,
-`controlSurfaceSlope`, `cyclicLimitDegrees`, `cyclicAuthorityScale`,
-`yawAuthorityScale`, `rotorAngularDampingCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
+`controlSurfaceSlope`, `aileronAuthorityScale`, `elevatorAuthorityScale`, `rudderAuthorityScale`,
+`cyclicLimitDegrees`, `cyclicAuthorityScale`,
+`yawAuthorityScale`, `rotorAngularDampingCoefficient`, `rotorAirDragCoefficient`, `brakeBiasFront`, `driveBiasFront`, `suspensionDampingRatio`,
 `suspensionSpringMultiplier`, `longitudinalWaterDragMultiplier`, `lateralWaterDragMultiplier`,
-`verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `toeFrontDegrees`,
-`toeRearDegrees`, `axleDriveForceSharing`. Fields baked in at vehicle construction - `massKg`,
+`verticalWaterDragMultiplier`, `parasiticDragMultiplier`, `oswaldEfficiency`, `fixedWingAngularDampingCoefficient`, `toeFrontDegrees`,
+`toeRearDegrees`, `axleDriveForceSharing`, `suspensionSpringMultiplierFront`,
+`suspensionSpringMultiplierRear`, `suspensionDampingRatioFront`, `suspensionDampingRatioRear`,
+`suspensionDampingRatioCompression`, `suspensionDampingRatioRebound`.
+Fields baked in at vehicle construction - `massKg`,
 `hullFillFactor`, `upperMassFraction`, and every `selfRight*` field - are
 **not** applied to an already-spawned vehicle; re-enter (or otherwise
 respawn) the vehicle to pick up a changed value for one of those. The
@@ -1108,12 +1273,33 @@ full fallback contract.
 
 ## Build
 
-CI uses Java 21 and Gradle 8.8. It resolves the exact official dependency
-artifacts at build time and uploads only this project's jar, checksums, and test
-reports. A second, bounded `runtime-smoke` job boots a headless dedicated
-server with those same pinned dependencies to check NeoForge/Mixin startup
-only; see [VERIFICATION.md](VERIFICATION.md) for what it does and does not
-prove. To run the same tasks locally with Gradle 8.8:
+CI uses Java 21 and Gradle 8.8 and is split across three workflows
+(MINECRAFT-550), each with a different trigger and purpose:
+
+- **`ci.yml`** (every PR and `main` push) - the ordinary regression gate.
+  `build` compiles and runs the full automated test suite; it does not
+  package or upload the addon jar (that is release packaging, not routine
+  validation - see below). `runtime-smoke` boots a headless dedicated
+  server with the same pinned dependencies to check that NeoForge starts
+  and this addon's Mixins apply; see [VERIFICATION.md](VERIFICATION.md) for
+  what it does and does not prove. A newer push to the same PR/branch
+  cancels a still-running older run for it.
+- **`diagnostics.yml`** (manual - `gh workflow run diagnostics.yml`, or the
+  Actions tab) - the investigation-only runtime probes from past reviews
+  (`anchor-frame-probe`, `two-body-impulse-probe`, `ground-support-fixture`).
+  These settle specific past questions by booting a real headless server;
+  they are not ordinary per-PR regression checks, so they run on demand
+  instead of on every push, while staying available rather than being
+  silently dropped. See VERIFICATION.md for what each one proves.
+- **`release.yml`** (manual - `gh workflow run release.yml -f ref=<ref>`) -
+  builds the addon jar and its checksum from a chosen branch/tag/commit and
+  attaches them to the workflow run as a downloadable artifact. It does not
+  create or publish a GitHub Release; every existing release on this repo
+  was hand-created with hand-written notes (`gh release list`), and that
+  review/notes step stays manual - download this run's jar, then
+  `gh release create <tag> <jar> <checksum> --notes ...` as before.
+
+To run the same compile/test task locally with Gradle 8.8:
 
 ```text
 gradle --no-daemon clean build

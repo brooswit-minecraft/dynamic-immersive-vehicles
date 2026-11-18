@@ -86,31 +86,42 @@ public final class MultiContactFrictionSolver {
   * DriveBiasDistribution} already use for brake) - 1.0 (every shorter constructor below's
   * default) is a pure no-op, reproducing today's exact uniform {@code driveForcePerWheel} for
   * every wheel byte-identically; composed by the CALLER the same way brakeMagnitude is, never by
-  * this solver. The shorter constructors below default frictionMultiplier/
-  * rollingResistanceMultiplier to 1.0 (reproducing today's exact pre-surface values byte-
-  * identically), brakeMagnitude to 0.0 (unbraked) where not given, and driveShareRatio to 1.0
-  * (unbiased) in every one of them. */
+  * this solver. {@code lateralGripOverrideRatio} (MINECRAFT-552) is this contact's own installed-
+  * tire-part lateral-grip RATIO against the vehicle-wide {@code lateralGripMultiplier} passed to
+  * {@link #solveFriction} - same "ratio divided back out against the vehicle baseline" shape
+  * {@code frictionMultiplier} already uses for {@code friction} (never carried as the raw
+  * resolved value the way {@code rollingResistanceMultiplier} is, since {@code
+  * lateralGripMultiplier}, like {@code friction}, IS a separate baseline parameter {@link
+  * #solveFriction} multiplies per-contact inside the solver itself - see the CALLER's own {@code
+  * PhysicsBridge.tirePartLateralGripMultiplier} doc for the composition). 1.0 (every shorter
+  * constructor below's default) is a pure no-op, reproducing today's exact vehicle-wide
+  * lateralGripMultiplier for every wheel byte-identically. The shorter constructors below default
+  * frictionMultiplier/rollingResistanceMultiplier to 1.0 (reproducing today's exact pre-surface
+  * values byte-identically), brakeMagnitude to 0.0 (unbraked) where not given, and
+  * driveShareRatio/lateralGripOverrideRatio to 1.0 (unbiased/unconfigured) in every one of them. */
  public record FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
-     double frictionMultiplier, double rollingResistanceMultiplier, double brakeMagnitude, double driveShareRatio) {
+     double frictionMultiplier, double rollingResistanceMultiplier, double brakeMagnitude, double driveShareRatio,
+     double lateralGripOverrideRatio) {
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier) {
-   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, 0.0, 1.0);
+   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, 0.0, 1.0, 1.0);
   }
   /** MINECRAFT-508's own 7-arg shape (explicit surface multipliers, no brake magnitude yet) -
    * defaults brakeMagnitude to 0.0 (unbraked), kept so that ticket's own existing call sites
    * need no changes. */
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
       double frictionMultiplier, double rollingResistanceMultiplier) {
-   this(point, forward, right, normal, skidSteerMultiplier, frictionMultiplier, rollingResistanceMultiplier, 0.0, 1.0);
+   this(point, forward, right, normal, skidSteerMultiplier, frictionMultiplier, rollingResistanceMultiplier, 0.0, 1.0, 1.0);
   }
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier, double brakeMagnitude) {
-   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, brakeMagnitude, 1.0);
+   this(point, forward, right, normal, skidSteerMultiplier, 1.0, 1.0, brakeMagnitude, 1.0, 1.0);
   }
   /** MINECRAFT-524's own 9-arg shape (explicit drive-share ratio alongside the existing surface
    * multipliers/brake magnitude), kept alongside the shorter constructors above so every one of
-   * this ticket's own pre-existing call sites needs no changes. */
+   * this ticket's own pre-existing call sites needs no changes. Defaults the MINECRAFT-552
+   * lateralGripOverrideRatio to 1.0 (no-op) for every caller that predates that ticket. */
   public FrictionContact(Vector3d point, Vector3d forward, Vector3d right, double normal, double skidSteerMultiplier,
-      double frictionMultiplier, double rollingResistanceMultiplier, double brakeMagnitude) {
-   this(point, forward, right, normal, skidSteerMultiplier, frictionMultiplier, rollingResistanceMultiplier, brakeMagnitude, 1.0);
+      double frictionMultiplier, double rollingResistanceMultiplier, double brakeMagnitude, double driveShareRatio) {
+   this(point, forward, right, normal, skidSteerMultiplier, frictionMultiplier, rollingResistanceMultiplier, brakeMagnitude, driveShareRatio, 1.0);
   }
  }
  /** One wheel's accumulated longitudinal/lateral tire force after the bounded solve. */
@@ -218,7 +229,11 @@ public final class MultiContactFrictionSolver {
     // byte-identical to the original circular TireForces.friction (see that method's own doc).
     // MINECRAFT-508: this contact's own ground-surface frictionMultiplier scales the shared mu
     // (1.0 reproduces today's exact `friction` value byte-identically).
-    var tire=TireForces.frictionAnisotropic(longitudinalTarget,candidateLateral,c.normal(),friction*c.frictionMultiplier(),lateralGripMultiplier);
+    // MINECRAFT-552: this contact's own installed-tire-part lateralGripOverrideRatio composes
+    // against the shared lateralGripMultiplier the exact same way c.frictionMultiplier() composes
+    // against friction immediately above - 1.0 (unconfigured) is a true no-op reproducing today's
+    // exact vehicle-wide value byte-identically.
+    var tire=TireForces.frictionAnisotropic(longitudinalTarget,candidateLateral,c.normal(),friction*c.frictionMultiplier(),lateralGripMultiplier*c.lateralGripOverrideRatio());
     double deltaLong=tire.longitudinal()-accLong[i], deltaLat=tire.lateral()-accLat[i];
     accLong[i]=tire.longitudinal(); accLat[i]=tire.lateral();
     Vector3d impulse=new Vector3d(c.forward()).mul(deltaLong*dt).fma(deltaLat*dt,c.right());
