@@ -1953,17 +1953,26 @@ public final class PhysicsBridge {
   });
  }
 
+ /**
+  * MINECRAFT-545/547 (Wroosbit review, comment 55189): the per-body callback below used to call
+  * {@code hitches.release(v)}, {@code b.remove()}, and {@code pendingInheritedVelocity.cleanup(v)}
+  * with no isolation between them - a throwing {@code hitches.release(v)} (itself already
+  * fail-closed internally since the 55104 round, but still capable of re-throwing its own first
+  * failure) skipped the other two steps for that SAME body. Wrapped in the same generic
+  * {@link #removeIndependentResources} helper {@link Body#remove} already uses internally, with
+  * all three "always eligible" (no eligibility gating needed here, unlike the two-body case) -
+  * one throwing step no longer prevents the other two independent steps for this body.
+  */
+ private static void cleanupOneRegisteredBody(EntityVehicleF_Physics v, VehicleBody b) {
+  if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info("[DIV lifecycleDiagnostic] cleanup releasing/removing v=" + v.uniqueUUID);
+  removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true },
+    new Runnable[]{ () -> hitches.release(v), () -> b.remove(), () -> pendingInheritedVelocity.cleanup(v) });
+ }
  public static void cleanup() {
   // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
   // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
-  registry.removeIf((v, b) -> !v.isValid, (v, b) -> {
-   // MINECRAFT-545/547 diagnostic (John's comment 54250) - log-only: the exact tick this sweep
-   // actually releases v's hitch joint and removes its native body, so that tick can be compared
-   // directly against the tick v.isValid first went false and the tick any still-jointed
-   // trailer's own active() last saw v as hitchable (see the active() log line above).
-   if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info("[DIV lifecycleDiagnostic] cleanup releasing/removing v=" + v.uniqueUUID);
-   hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v);
-  });
+  registry.removeIf((v, b) -> !v.isValid, PhysicsBridge::cleanupOneRegisteredBody);
   // Review 53399: the registry.removeIf above only cleans pendingInheritedVelocity for a vehicle
   // STILL present in BodyRegistry - a vehicle already deactivated (e.g. a failed
   // chassisBoundsChanged reconstruction, which deactivates BEFORE attempting to rebuild) is
@@ -1983,7 +1992,7 @@ public final class PhysicsBridge {
   wheelAuxOwner.keySet().removeIf(v -> !v.isValid);
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
+  registry.removeIf((v, b) -> b.level() == level, PhysicsBridge::cleanupOneRegisteredBody);
   // Review 53399: same independent sweep as cleanup() above, matched on the unloading level
   // instead of validity - a vehicle's own level comes directly from v (the same accessor
   // active()'s own lifecycle-refresh path already uses), not from any Body, so this needs no
