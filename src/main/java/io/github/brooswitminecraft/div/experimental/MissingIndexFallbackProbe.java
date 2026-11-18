@@ -41,7 +41,7 @@ import java.util.Set;
  *  {@code towedA.towedByConnection == connection} (same reference) BEFORE invalidating the
  *  anchor via the same supported lifecycle method ({@code towingA.remove()}) the existing
  *  {@code TOWING_UNAVAILABLE} phase already uses. The production sweep
- *  ({@code PhysicsBridge.releaseOrphanedTowingConnections(MinecraftServer)}, already globally wired on {@code
+ *  ({@code PhysicsBridge.releaseOrphanedTowingConnections()}, already globally wired on {@code
  *  ServerTickEvent.Pre}) then runs automatically, with no special invocation from this fixture.</li>
  *  <li><b>Fallback-entry evidence, a real observation, not an inference</b> (corrected per
  *  54862, then corrected AGAIN per 54870): a prior version reasoned "indexOf==-1 before removal,

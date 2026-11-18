@@ -14076,3 +14076,146 @@ tests). **No "all fixed" claim is made here** — the notification mechanism its
 deliberately non-functional, and the actual safe-binding problem remains unsolved pending review
 of the protocol proposal above (or a preferred alternative). No native run performed or
 proposed. No merge/Done transition made or implied.
+
+## 2026-11-18 — Per 55033: server-only extraction
+
+### What the parent directed, and why
+
+Three comments arrived in rapid succession while the 55020 round's per-tracking retry work was
+being finished:
+
+- **55021**: parent steering to STOP further speculative client-protocol iteration once the
+  current path is made safe, and instead assess a bounded SERVER-ONLY shipping split under
+  existing sprint authority — keeping the two 55020 counterexamples/safe no-op interim honestly
+  scoped, but not building another networking protocol on top of them.
+- **55023**: an immediate follow-up asking to read 55021 before finishing the per-tracking retry
+  mentioned in-progress at the time — arrived after the retry work (and the rest of the 55020
+  round) was already implemented, tested, committed (`266cb67`), and posted (comment 55031).
+- **55033**: explicit EXECUTION AUTHORIZATION (not another proposal-only wait) to implement the
+  server-only extraction directly: remove ALL experimental client-protocol code (the
+  `ConnectionGenerationPayload`, the client tracker, the `StartTracking` registration/tracking
+  hooks, and the generation/binding/retry machinery) from the SHIPPING candidate; retain the core
+  server-side hitch lifecycle/timing/fallback fixes; preserve `266cb67` and all prior experiment/
+  native packet history unmodified in git history; record client synchronization as a linked
+  UNRESOLVED follow-up (MINECRAFT-547) rather than a silently waived acceptance item; produce a
+  retained/removed file/hunk summary, an exact-head full test receipt, and an acceptance matrix;
+  get independent review; and make no merge/Done claim until that review is verified.
+
+This entry documents that extraction. **Commit `266cb67` and every prior experiment/native packet
+history remain untouched in git history** — nothing was rewritten, rebased, or force-pushed; this
+round adds a new commit on top that changes what ships going forward, consistent with 55033's own
+"SAME owner/session/branch: preserve 266cb67" instruction.
+
+### Retained — core server-side hitch lifecycle/timing/fallback fixes
+
+All of the following predate, and are independent of, the client-notification/generation-binding
+experiment (rounds 54974 onward); each is part of this ticket's own original scope or an earlier,
+already-reviewed correction to it, and none depends on anything removed below:
+
+- `releaseOrphanedTowingConnections()` (signature reverted to no-arg — its `MinecraftServer`
+  parameter existed for exactly one purpose, draining the now-removed tracker-announce retry
+  queue; nothing else in the method ever used it) — the `ServerTickEvent.Pre` orphan-release
+  sweep itself (John's comments 54742/54730/54727): detects a towed vehicle whose anchor entity
+  became invalid and releases it via the real `disconnectTrailer`/fallback-clear paths, running
+  before that tick's own entity-ticking to close the one-tick dispatch gap documented in this
+  file's own "Corrections per 54727/54730" entry.
+- `releaseOrphanedConnections`/`OrphanedConnectionOps`/`canSafelyDisconnectAtIndex` (the generic,
+  pure collect/re-check/dispatch orchestration) and `fallbackClearConnection`/`FallbackClearOps`
+  (the pure reset-towing/reset-towed/engage-parking-brake/clear-connection ordering) — unchanged,
+  side-agnostic, directly unit-tested, no dependency on anything removed.
+- The missing-index fallback's own diagnostic logging (both the lifecycle-diagnostic info line
+  and the unconditional operator-visible warning naming the standing no-client-notification gap)
+  and `recordFallbackClearConnectionObservation`/`FallbackObserverHandle`/
+  `registerFallbackObserver`/`unregisterFallbackObserver`/`debugFallbackObserverMatchedCount`/
+  `debugFallbackObserverMismatchedCount` (John's comments 54862/54870) — the bounded, opt-in
+  observation mechanism used by `MissingIndexFallbackProbe` for the one actual native run this
+  ticket has performed (`M545-packet-37ba8f0-missingindexprobe-round3`, `NO_LEAK_OBSERVED`).
+  Predates the generation-binding experiment entirely; still has a real caller
+  (`MissingIndexFallbackProbe`) and real tests.
+- Everything else in `PhysicsBridge.java` untouched by any round in this investigation: the
+  hitch-creation/reconciliation logic (`createHitch`/`reconcileHitch`/`isHitchableBody`/
+  `connectionOffsetVehicleLocal`/`connectionRotationVehicleLocal`), the activation/deactivation
+  state machine (`active`/`deactivate`/`ActivationDecision`), the ground/flight/rotor stepping and
+  buoyancy logic, the wheel-aux/H-pattern input tracking, and the full debug-introspection surface
+  — none of this was ever part of the client-protocol experiment and all of it ships unchanged.
+- `MissingIndexFallbackProbe.java`'s own stale Javadoc cross-reference to
+  `releaseOrphanedTowingConnections(MinecraftServer)` reverted to the current no-arg signature
+  (`releaseOrphanedTowingConnections()`).
+
+### Removed — experimental client-protocol/generation-binding machinery
+
+Everything listed in 55033 explicitly, confirmed to have no other caller before removal (a
+repo-wide grep for each symbol, post-removal, returns no matches in `src/main` or `src/test`):
+
+- **Files deleted outright**: `ConnectionGenerationPayload.java` (the `playToClient` packet type
+  and its manual `StreamCodec`), `client/ClientTowingConnectionTracker.java` (the client-side
+  ledger, binding, and stale-disconnect-notification handling, `@EventBusSubscriber(Dist.CLIENT)`).
+- **`DynamicImmersiveVehicles.java`**: the `ConnectionGenerationPayload` registration in the
+  payload registrar; the `PlayerEvent.StartTracking` listener delegating to
+  `announceConnectionGenerationToNewTracker`.
+- **`PhysicsBridge.java`**: `TowingConnectionIdentity` (record), `connectionGenerations`/
+  `nextConnectionGeneration`/`connectionGeneration(Object)`/`forgetConnectionGeneration(Object)`
+  (the generation ledger), `PendingTrackerAnnounce`/`TRACKER_ANNOUNCE_RETRY_TICKS`/
+  `pendingTrackerAnnounces`/`announceConnectionGenerationToNewTracker`/`tryAnnounceToTracker`/
+  `processPendingTrackerAnnounces` (the StartTracking-driven announce and its bounded retry, added
+  in the very round that just preceded this extraction), `shouldBindAnnouncedGeneration` (the
+  always-`false` fail-closed predicate from the 55020 round), `StaleDisconnectAction` (enum),
+  `decideStaleDisconnectAction`, `StaleDisconnectOps`/`applyStaleDisconnectAction` (the
+  disconnect-notification decision/apply pipeline), `toIdentity(TowingConnection)`,
+  `resolveTrackingEntity(AEntityB_Existing)` (the recipient-targeting helper — had no caller left
+  once the two notification-emission call sites inside `releaseOrphanedTowingConnections` were
+  removed). Also removed from the per-tick sweep body: the connect-side generation-assignment/
+  announce loop, the `forgetConnectionGeneration` call inside the real disconnect-at-index path,
+  and the notify-emission block inside the fallback's own `clearConnection()`.
+- **`PhysicsBridgeClassificationTest.java`**: every test exercising the above — the
+  `identity()` helper, all `decideStaleDisconnectAction`/`StaleDisconnectAction` tests, the
+  `ClientModel`/`COUNTING_OPS`/`decideAndApply` production-pipeline harness, the
+  `shouldBindAnnouncedGeneration` scalar-sweep test, and both 55020-round counterexample
+  regression tests (`counterexampleA_bootstrapBindingWouldHaveDestroyedAnUnboundReplacement`,
+  `counterexampleB_equalityBindingWouldHaveDestroyedAnUnboundReplacement`) — none of these exercise
+  any code that still ships. The `FallbackObserverHandle`-related tests immediately preceding this
+  block (registration/matched-count/mismatched-count/stale-handle-no-op) are RETAINED — they test
+  the still-shipping observation mechanism above, not the removed notification protocol.
+
+Nothing was blanket-reverted: each removal above was individually confirmed, by direct reading of
+`PhysicsBridge.java`'s full ~3,900-line body before editing, to have no remaining caller and no
+role in the original ticket's own acceptance criteria (see below) before being deleted.
+
+### Test receipt (new exact head)
+
+Full suite, exclusive Gradle lock, same pattern as every prior round: **936 tests, 0 failures, 0
+errors** (down from the pre-extraction round's 958 — the 22 removed tests are exactly the
+experimental-only tests listed above; no other test count changed). `BUILD SUCCESSFUL`.
+
+### Acceptance matrix
+
+The ticket's own acceptance text (read directly from the Jira issue, not from memory): *"real
+bounded Sable attach/anchor alignment and detach, rotated boat/installed-part anchors, towing body
+unavailable/replacement, despawn/level unload cleanup, no leaked joints or touched dead handles."*
+Client-side disconnect-notification synchronization is **not** one of these five original
+acceptance items — it surfaced later, during review, as a disclosed gap in how a tracking
+client's own local state is (or isn't) corrected when the server's fallback-clear path fires, and
+was always investigated as an extension beyond the original acceptance bullets, never a
+precondition for them.
+
+| Evidence | What it covers | What it does NOT cover |
+|---|---|---|
+| `b6ec50e` candidate-on native run (prior round) | Real Sable-backed attach/anchor/detach behavior with the feature active, on that historical commit | Not re-run against this extraction's exact head; does not speak to anything removed or retained in THIS round |
+| `37ba8f0`-missingindexprobe-round3 native run, default-off, `NO_LEAK_OBSERVED` | The missing-index fallback path (now RETAINED code) under one bounded local-reconnect scenario, on that historical commit | Only "no observed leak" in that one scenario, not a general client-state guarantee; not re-run against this extraction's exact head either |
+| This round's full test suite (936 tests, 0 failures/errors) | Static/unit coverage of the retained server-only hitch lifecycle, fallback-clear orchestration, and fallback-observer mechanism, on the NEW exact head after extraction | **No native run was performed on this exact extracted head** — compile+test only, per 55033's own explicit "no new native run from this direction alone." Test-suite coverage is not a substitute for native validation of this specific commit; stated here explicitly rather than implied |
+
+"Towing body unavailable/replacement" and part of "no leaked joints or touched dead handles" are
+covered by the retained orphan-release/fallback-clear code and its existing tests, unaffected by
+this extraction. "Despawn/level unload cleanup" is covered by `cleanup()`/`unload()`, both
+untouched. Client synchronization remains the one disclosed, **unresolved** follow-up — tracked on
+MINECRAFT-547, not silently waived, and never claimed as satisfied by this or any prior round.
+
+### Disposition
+
+Server-only extraction complete on top of (not replacing) `266cb67`: all experimental generation/
+binding/retry/notification machinery removed from the shipping candidate; all core server-side
+hitch-lifecycle/fallback fixes retained with per-item justification above; full suite green (936
+tests, 0 failures, 0 errors) on the new exact head. No native run performed or proposed this
+round. No merge/Done transition made or implied — independent review is still required per 55033's
+own explicit instruction before any merge. Client synchronization recorded as a linked unresolved
+follow-up on MINECRAFT-547, not a waived acceptance item.
