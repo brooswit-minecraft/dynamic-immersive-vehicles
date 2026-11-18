@@ -755,33 +755,126 @@ class PhysicsBridgeClassificationTest {
   assertEquals(first, second);
  }
 
- /** A minimal synthetic model of client-side state, used ONLY to prove the STATEFUL claim that
-  * applying an already-applied disconnect decision a second time causes no further mutation -
-  * distinct from (and not established by) the pure "same decision twice" test above. */
- private static final class SyntheticClientConnectionState {
-  boolean connected = true;
-  int disconnectCallCount = 0;
-  void applyIfConnected(PhysicsBridge.StaleDisconnectAction action) {
-   if (!connected) return; // already applied - a real client's own towedByConnection would already be null here too.
-   if (action == PhysicsBridge.StaleDisconnectAction.DISCONNECT_BY_CLIENT_OWN_INDEX
-       || action == PhysicsBridge.StaleDisconnectAction.IDEMPOTENT_CLEANUP_ONLY) {
-    disconnectCallCount++;
-    connected = false;
-   }
-  }
+ // MINECRAFT-545/547 (John's comment 54991): a prior round's own stateful test
+ // (SyntheticClientConnectionState.applyIfConnected) was a test-only toy that exercised nothing
+ // but itself, not any production code path. Replaced with the REAL production orchestration
+ // (applyStaleDisconnectAction/StaleDisconnectOps) exercised through the full, real
+ // decide -> apply -> redecide pipeline against a small, honestly-synthetic CLIENT MODEL (the
+ // model's own fields stand in for what a real client's towedByConnection/towingConnections
+ // would be - the DECISION and APPLY functions under test are both the genuine production code,
+ // not reimplemented or stubbed out).
+
+ /** A minimal model of a client's own relevant state - stands in for the real
+  * towedByConnection/towingConnections fields a live client would have; everything that
+  * actually DECIDES and APPLIES below is the real, production
+  * decideStaleDisconnectAction/applyStaleDisconnectAction code, not a reimplementation. */
+ private static final class ClientModel {
+  PhysicsBridge.TowingConnectionIdentity currentConnection;
+  Long currentGeneration;
+  boolean hasValidIndex;
+  int clientOwnIndex;
+  int disconnectByIndexCallCount = 0;
+  int idempotentCleanupCallCount = 0;
  }
 
- @Test void applyingTheSameDecisionTwiceToStatefulClientModelMutatesOnlyOnce() {
+ private static final PhysicsBridge.StaleDisconnectOps<ClientModel> COUNTING_OPS = new PhysicsBridge.StaleDisconnectOps<ClientModel>() {
+  public void disconnectByClientIndex(ClientModel m, int clientOwnIndex) {
+   m.disconnectByIndexCallCount++;
+   m.currentConnection = null; m.currentGeneration = null; // the real effect: the connection is now gone, client-side too.
+  }
+  public void idempotentCleanup(ClientModel m) {
+   m.idempotentCleanupCallCount++;
+   m.currentConnection = null; m.currentGeneration = null;
+  }
+ };
+
+ /** Runs the REAL, full production pipeline once: decide, then apply via the real dispatcher. */
+ private static void decideAndApply(
+     PhysicsBridge.TowingConnectionIdentity notified, long notifiedGeneration, ClientModel m) {
+  var action = PhysicsBridge.decideStaleDisconnectAction(
+    notified, notifiedGeneration, m.currentConnection, m.currentGeneration, m.hasValidIndex);
+  PhysicsBridge.applyStaleDisconnectAction(m, action, m.clientOwnIndex, COUNTING_OPS);
+ }
+
+ @Test void replayedNotificationThroughTheRealPipelineMutatesOnlyOnce() {
+  // The exact scenario John asked for: a valid-index normal disconnect, then a DUPLICATE/
+  // replayed delivery of the identical notification - run through the REAL decide+apply
+  // pipeline, not a toy guard, confirming exactly one real mutation across both deliveries.
   var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
   var notified = identity(towing, towed, 0, 0, 0, 0);
-  var clientCurrent = identity(towing, towed, 0, 0, 0, 0);
-  var action = PhysicsBridge.decideStaleDisconnectAction(notified, 1L, clientCurrent, 1L, true);
-  assertEquals(PhysicsBridge.StaleDisconnectAction.DISCONNECT_BY_CLIENT_OWN_INDEX, action);
-  var state = new SyntheticClientConnectionState();
-  state.applyIfConnected(action);
-  state.applyIfConnected(action); // a replayed/duplicate delivery of the identical notification
-  assertEquals(1, state.disconnectCallCount, "a replayed notification must not cause a second real disconnect/cleanup call");
-  assertFalse(state.connected);
+  var m = new ClientModel();
+  m.currentConnection = identity(towing, towed, 0, 0, 0, 0);
+  m.currentGeneration = 1L;
+  m.hasValidIndex = true; m.clientOwnIndex = 3;
+
+  decideAndApply(notified, 1L, m); // first delivery
+  decideAndApply(notified, 1L, m); // replayed/duplicate delivery of the identical notification
+
+  assertEquals(1, m.disconnectByIndexCallCount, "a replayed notification must not cause a second real disconnect call");
+  assertEquals(0, m.idempotentCleanupCallCount);
+  assertNull(m.currentConnection, "the client's own model must reflect the real disconnect after the first delivery");
+ }
+
+ @Test void missingIndexBoundedBehaviorThroughTheRealPipelineAppliesIdempotentCleanupExactlyOnce() {
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var notified = identity(towing, towed, 0, 0, 0, 0);
+  var m = new ClientModel();
+  m.currentConnection = identity(towing, towed, 0, 0, 0, 0);
+  m.currentGeneration = 1L;
+  m.hasValidIndex = false;
+
+  decideAndApply(notified, 1L, m);
+  decideAndApply(notified, 1L, m); // replay
+
+  assertEquals(0, m.disconnectByIndexCallCount);
+  assertEquals(1, m.idempotentCleanupCallCount, "a replayed notification must not cause a second real cleanup call");
+ }
+
+ @Test void sameTupleDifferentGenerationThroughTheRealPipelineNeverMutatesTheReplacement() {
+  // The critical regression, run through the REAL pipeline this time (not just the pure
+  // decision in isolation): a genuine same-tuple replacement connection must survive a stale
+  // notification about the OLD generation completely untouched - zero calls to either ops
+  // method, and the model's own "current connection" must remain exactly what it was.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var notified = identity(towing, towed, 0, 0, 0, 0);
+  var m = new ClientModel();
+  m.currentConnection = identity(towing, towed, 0, 0, 0, 0); // same tuple as notified...
+  m.currentGeneration = 2L; // ...but a DIFFERENT (newer) generation - a real replacement.
+  m.hasValidIndex = true; m.clientOwnIndex = 5;
+
+  decideAndApply(notified, 1L, m);
+
+  assertEquals(0, m.disconnectByIndexCallCount);
+  assertEquals(0, m.idempotentCleanupCallCount);
+  assertEquals(2L, m.currentGeneration, "the replacement connection's own state must be completely untouched");
+ }
+
+ @Test void outOfOrderDeliveryWhereReplacementArrivesBeforeTheStaleNoticeIsAlsoSafe() {
+  // "Out-of-order generation/disconnect" - model the replacement connection being bound FIRST
+  // (generation 2), then the OLD notification (about generation 1) arriving late - same
+  // assertion as above, phrased explicitly as an ordering case rather than a static snapshot.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var m = new ClientModel();
+  m.currentConnection = identity(towing, towed, 0, 0, 0, 0);
+  m.currentGeneration = 2L; // the replacement already bound before the stale notice arrives.
+  m.hasValidIndex = true; m.clientOwnIndex = 7;
+
+  var staleNotified = identity(towing, towed, 0, 0, 0, 0);
+  decideAndApply(staleNotified, 1L, m); // the late, out-of-order notice about the superseded generation 1
+
+  assertEquals(0, m.disconnectByIndexCallCount);
+  assertEquals(0, m.idempotentCleanupCallCount);
+ }
+
+ @Test void unrelatedEntityThroughTheRealPipelineIsUntouched() {
+  // "Wrong recipient/entity" through the real pipeline - a client that was never tracking the
+  // named connection at all (no current connection) must see zero calls.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var notified = identity(towing, towed, 0, 0, 0, 0);
+  var m = new ClientModel(); // currentConnection left null - never had one.
+  decideAndApply(notified, 1L, m);
+  assertEquals(0, m.disconnectByIndexCallCount);
+  assertEquals(0, m.idempotentCleanupCallCount);
  }
 
  // --- connectionGeneration / forgetConnectionGeneration (the server-side identity ledger) ---

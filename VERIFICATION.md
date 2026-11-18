@@ -13452,3 +13452,111 @@ every notification that would depend on that missing binding fails closed (`AMBI
 rather than ever assuming a match. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on
 success remain two distinct, unblurred records, as before. No live packet, no client/server
 wiring, no new native run in this round. No merge/Done transition made or implied.
+
+## Per 54991: structurally-bounded ledger, real production apply-orchestration, and a
+## precisely-evidenced (not merely asserted) answer on the vanilla recipient wrapper
+
+John's exact-head review of `c0f5707` found two further real gaps, both corrected in this round.
+
+### 1. The generation ledger was not proven bounded
+
+The 54979 round's own `connectionGenerations` was a strongly-held `IdentityHashMap`, whose
+boundedness depended entirely on `forgetConnectionGeneration` being called at EVERY real place a
+connection's lifecycle ends. Confirmed true as John found it: DIV has no hook at all on the
+ordinary disconnect path (player-driven, or MTS's own internal auto-disconnect inside
+`update()`) - only on its own fallback and orphan-release call sites - so once this ledger is
+wired to run on every connect (which it now partially is - see below), a connection disconnected
+through any OTHER path would never have its entry released.
+
+**Fixed structurally, not by chasing every call site**: `connectionGenerations` is now a plain
+`WeakHashMap`. Confirmed safe by direct inspection: `TowingConnection` overrides neither
+`equals()` nor `hashCode()`, so its default `Object` identity semantics make a `WeakHashMap`
+behave exactly as an `IdentityHashMap` would for lookup purposes, while additionally holding
+each key only WEAKLY - once nothing else in the JVM still references a given connection object
+(exactly what "the connection's lifecycle has ended" means at the object level, regardless of
+WHICH code path ended it, DIV-owned or not), the garbage collector reclaims the ledger entry on
+its own. Correctness no longer depends on exhaustive call-site coverage. Explicit
+`forgetConnectionGeneration` calls remain at both of DIV's own real teardown call sites (the
+fallback's own `clearConnection`, and - newly wired this round - `releaseOrphanedConnections`'s
+own `disconnectAtIndex` adapter, which calls the REAL `disconnectTrailer(int)` for the ordinary,
+non-fallback orphan-release case) as a promptness optimization, not the sole correctness
+mechanism.
+
+**Thread confinement and session identity**, both explicitly asked about: the ledger is accessed
+only from the server's own single tick thread, same convention as every other static map in
+this class (never synchronized, matching the existing codebase pattern); `nextConnectionGeneration`
+is a monotonically increasing `long`, reset only by a JVM restart, which also closes every
+network connection a stale cross-session notification could have arrived on - no cross-session
+collision is possible, and a `long` cannot practically overflow within one session.
+
+**A genuine production call site for ASSIGNING generations, not merely tearing them down**:
+`releaseOrphanedTowingConnections()` already iterates every active vehicle on EVERY server tick
+(via its own existing `ServerTickEvent.Pre` listener) - this round adds a lazy
+`connectionGeneration(v.towedByConnection)` call for every currently-live connection at the START
+of that same sweep. This means a brand-new connection gets its own generation within one tick of
+forming, using an EXISTING production call site rather than requiring a new hook into MTS's own
+`connectTrailer` - directly answering "lack of an existing DIV hook is an implementation task,
+not by itself external impossibility" for the SERVER-side half of generation assignment. The
+CLIENT-side half (how the client itself ever learns that generation number) remains the
+disclosed, unresolved piece - see the following section.
+
+### 2. The stateful test was a toy, not production code
+
+`SyntheticClientConnectionState.applyIfConnected` exercised nothing but itself - a hand-written
+guard that happened to mimic the right shape, never the real decision/application code. Fixed
+by extracting the REAL production orchestration: `PhysicsBridge.StaleDisconnectOps<V>`
+(`disconnectByClientIndex`/`idempotentCleanup`) and `applyStaleDisconnectAction(V, action, int,
+ops)` - a pure dispatcher mirroring the exact same interface-plus-dispatcher shape
+`fallbackClearConnection` already established for the server side, calling exactly one `ops`
+method for `DISCONNECT_BY_CLIENT_OWN_INDEX`/`IDEMPOTENT_CLEANUP_ONLY` and neither for
+`IGNORE_NOTIFICATION`/`AMBIGUOUS_NO_OP`, by construction. 5 new tests run the FULL real
+`decideStaleDisconnectAction` -> `applyStaleDisconnectAction` pipeline against a small, honestly-
+synthetic client model (whose own fields stand in for a real client's `towedByConnection`/
+`towingConnections`, but the DECISION and APPLY logic under test is the genuine production code,
+never reimplemented): a replayed valid-index disconnect mutates exactly once; a replayed
+missing-index cleanup mutates exactly once; the critical same-tuple-different-generation
+replacement survives with ZERO calls to either `ops` method (not merely a pure-function
+assertion this time - the actual dispatcher is exercised and confirmed to touch nothing);
+an explicit out-of-order-delivery phrasing of the same guarantee (the replacement already bound
+before the late, superseded notification arrives); and an unrelated/never-tracked client seeing
+zero calls.
+
+### 3. The vanilla recipient wrapper - confirmed unresolved, with precise evidence, not a broad claim
+
+Checked from three independent, concrete angles, not merely re-asserted: (a) `AEntityB_Existing`
+itself exposes no public field or method returning its own backing vanilla entity/builder; (b)
+`WrapperWorld.spawnEntityInternal` - the ONLY place in the real decompiled source that actually
+constructs the `BuilderEntityExisting` for a given business entity and assigns `builder.entity =
+entity` - is `protected`, confirmed by direct inspection, not merely assumed; (c) the builder's
+own vanilla UUID is NOT synchronized with the business entity's own `uniqueUUID` field either -
+`spawnEntityInternal` calls `this.world.addFreshEntity(builder)` with no preceding
+`builder.setUUID(entity.uniqueUUID)` or equivalent, so even `ServerLevel.getEntity(UUID)` (a
+genuinely public, supported vanilla method) cannot be relied upon to find the right entity by
+the business object's own UUID. All three checked directly against the real decompiled source,
+not inferred. This is the smallest-possible precise statement of the gap (not "broad broadcast"
+or "foreclosed"): a public getter (or a UUID-synchronizing change) on MTS's own
+`WrapperWorld`/`BuilderEntityExisting` is the smallest upstream addition that would resolve it;
+none exists today, and DIV cannot add one without either reflection (forbidden) or modifying the
+dependency.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **954 tests** (up from 950 - 1 toy test removed, 5 real
+pipeline tests added), 0 failures, 0 errors.
+
+### Disposition
+
+Two further real gaps from the 54979 round are fixed: the generation ledger is now structurally
+bounded (a `WeakHashMap`, correctness no longer dependent on exhaustive call-site coverage) with
+both of DIV's own real teardown call sites wired explicitly, PLUS a genuine new production call
+site that eagerly assigns generations to every live connection every tick, not merely the
+fallback path; and the stateful idempotency claim is now backed by the REAL production
+apply-orchestration (`StaleDisconnectOps`/`applyStaleDisconnectAction`), run through the full
+decide-then-apply pipeline across 5 new tests, not a disconnected test-only toy. The one
+remaining genuinely open integration question - resolving an `AEntityB_Existing` to its own
+vanilla entity handle for `PacketDistributor` recipient targeting - was re-investigated from
+three independent angles and remains unresolved, with precise source-level evidence for each
+(not a vague "foreclosed" claim), and the smallest upstream addition that would close it. Full
+suite green (954 tests). No live packet, no client/server wiring, no new native run in this
+round. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on success remain distinct,
+unblurred. No merge/Done transition made or implied.

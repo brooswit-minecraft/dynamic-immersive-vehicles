@@ -1524,6 +1524,18 @@ public final class PhysicsBridge {
  public static void releaseOrphanedTowingConnections() {
   var active = new java.util.ArrayList<EntityVehicleF_Physics>();
   registry.forEachActive((v, b) -> active.add(v));
+  // MINECRAFT-545/547 (John's comment 54991): "show the actual production call sites, not
+  // merely available cleanup methods" / "lack of an existing DIV hook is an implementation
+  // task, not by itself external impossibility." DIV has no dedicated hook on MTS's own
+  // connectTrailer, but this sweep already iterates every active vehicle on EVERY tick (via
+  // this same ServerTickEvent.Pre listener) - lazily assigning a generation to every CURRENTLY
+  // live connection here means a brand-new connection gets its own generation within one tick of
+  // forming, with no new MTS-side hook needed. This is itself the production call site that
+  // actually keeps the server-side ledger populated for live connections, not merely the
+  // fallback/orphan-release paths below, which only ever TEAR DOWN an already-assigned entry.
+  for (var v : active) {
+   if (v.towedByConnection != null) connectionGeneration(v.towedByConnection);
+  }
   releaseOrphanedConnections(active, new OrphanedConnectionOps<EntityVehicleF_Physics>() {
    public boolean hasConnection(EntityVehicleF_Physics v) { return v.towedByConnection != null; }
    public boolean anchorIsValid(EntityVehicleF_Physics v) { return v.towedByConnection.towingEntity.isValid; }
@@ -1539,6 +1551,12 @@ public final class PhysicsBridge {
     if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
       "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections releasing orphaned towedByConnection v=" + v.uniqueUUID
         + " removedTowingEntity=" + v.towedByConnection.towingEntity.uniqueUUID + " indexInParentList=" + index);
+    // MINECRAFT-545/547 (John's comment 54991): the second of this class's own two real
+    // connection-teardown call sites - captured BEFORE disconnectTrailer nulls the field, same
+    // promptness-optimization discipline as the fallback's own call (the underlying
+    // WeakHashMap would eventually reclaim this on its own either way, once nothing else still
+    // references the connection object disconnectTrailer itself is about to finish releasing).
+    forgetConnectionGeneration(v.towedByConnection);
     towing.disconnectTrailer(index);
    }
    public void fallbackClearConnection(EntityVehicleF_Physics v) {
@@ -1645,31 +1663,62 @@ public final class PhysicsBridge {
      int hitchGroupIndex, int hitchConnectionIndex,
      int hookupGroupIndex, int hookupConnectionIndex) {}
 
- /** MINECRAFT-545/547 (John's comment 54979): "Server-side reference identity CAN distinguish
-  * same-tuple generations" - a bounded, identity-keyed ledger assigning a monotonically
-  * increasing generation number to each DISTINCT {@code TowingConnection} OBJECT the server ever
-  * sees, lazily on first lookup (no connect-time hook needed to establish correctness: two
-  * different objects are, by definition, never the same key in an {@code IdentityHashMap},
-  * regardless of which one is looked up first or how similar their own field values are).
-  * {@code forget} MUST be called once a connection is torn down (either path) so this does not
-  * grow unbounded for the lifetime of a long-running server - same bounded-opt-in discipline as
-  * {@link #fallbackObservers} (54870's own correction of an earlier unbounded-counter mistake). */
- private static final java.util.Map<Object, Long> connectionGenerations = new java.util.IdentityHashMap<>();
+ /** MINECRAFT-545/547 (John's comment 54979/54991): "Server-side reference identity CAN
+  * distinguish same-tuple generations" - a ledger assigning a monotonically increasing
+  * generation number to each DISTINCT {@code TowingConnection} OBJECT the server ever sees,
+  * lazily on first lookup (no connect-time hook needed to establish IDENTITY correctness: two
+  * different objects are, by definition, never the same key, regardless of which one is looked
+  * up first or how similar their own field values are - {@code TowingConnection}, confirmed by
+  * direct inspection, overrides neither {@code equals()} nor {@code hashCode()}, so its default
+  * {@code Object} identity semantics make it, and the generic {@code Object} connections this
+  * ledger's own tests use, safe keys for a plain {@code WeakHashMap} exactly as they would be
+  * for an {@code IdentityHashMap}).
+  * <p>CORRECTED (54991): the first version used a STRONGLY-held {@code IdentityHashMap}, whose
+  * own boundedness depended entirely on {@link #forgetConnectionGeneration} being called at
+  * EVERY real place a connection's lifecycle ends - John correctly found this not proven: DIV
+  * has no hook at all on the ordinary disconnect path (player-driven, or MTS's own internal
+  * auto-disconnect), only on its own fallback and orphan-release call sites, so a connection
+  * disconnected through any OTHER path would never have its entry released, growing unbounded
+  * over a long server session once this ledger is wired to run on every connect (not merely the
+  * fallback path, as today). Fixed structurally, not by chasing every call site: a
+  * {@code WeakHashMap} holds each key only WEAKLY - once nothing else in the JVM still
+  * references a given {@code TowingConnection} object (which is exactly what "the connection's
+  * lifecycle has ended" means at the object level, regardless of which code path ended it), the
+  * garbage collector reclaims the entry on its own, with NO dependency on this class, or any
+  * caller, remembering to call anything. Explicit {@link #forgetConnectionGeneration} calls at
+  * the two call sites this class DOES own (below) remain in place as a promptness optimization
+  * (releasing the entry immediately rather than waiting for the next GC cycle), not as the sole
+  * correctness mechanism - correctness no longer depends on that coverage being exhaustive.
+  * <p><b>Thread confinement</b> (54991's own ask): accessed ONLY from the server's own single
+  * tick thread, same as every other static map in this class ({@code fallbackObservers} etc.) -
+  * never synchronized, consistent with this class's own existing convention of single-threaded
+  * server-side access; a client-side counterpart (not yet implemented - see VERIFICATION.md's
+  * own "Per 54979"/"Per 54991" entries) would need its OWN separate instance confined to the
+  * client's own thread, never this shared field.
+  * <p><b>Nonreusable session identity</b> (54991's own ask): {@code nextConnectionGeneration} is
+  * a monotonically increasing {@code long}, reset only by a JVM restart (a `static` field with
+  * no persistence) - a prior session's own generation numbers cannot collide with a new
+  * session's, since a restart also closes every network connection a stale cross-session
+  * notification could have arrived on in the first place; within one running session the
+  * counter only ever increases and a `long` cannot practically overflow. */
+ private static final java.util.Map<Object, Long> connectionGenerations = new java.util.WeakHashMap<>();
  private static long nextConnectionGeneration = 0;
 
  /** Returns the existing generation for this exact connection OBJECT if already assigned, else
-  * assigns and returns a fresh one - pure identity, {@code ==} semantics via
-  * {@code IdentityHashMap}, never {@code equals()}. A null {@code connection} has no generation
+  * assigns and returns a fresh one - pure identity semantics (see this field's own doc for why
+  * a plain {@code WeakHashMap} is safe here). A null {@code connection} has no generation
   * (returns null) - callers must treat "no connection" and "no generation" as the same thing. */
  public static Long connectionGeneration(Object connection) {
   if (connection == null) return null;
   return connectionGenerations.computeIfAbsent(connection, c -> nextConnectionGeneration++);
  }
 
- /** Releases this connection's own ledger entry - callers MUST call this once a connection is
-  * actually torn down (either the normal disconnect path or this class's own fallback), so a
-  * LATER, DIFFERENT object that happens to reuse the same tuple gets its own fresh generation
-  * rather than this ledger growing forever. A no-op for a connection with no entry. */
+ /** Releases this connection's own ledger entry PROMPTLY, at the two call sites this class
+  * actually owns (the fallback and the orphan-release's own real disconnect) - a latency
+  * optimization, not the sole correctness mechanism (see this field's own doc: the underlying
+  * {@code WeakHashMap} reclaims any entry on its own once the connection object itself becomes
+  * unreachable, regardless of whether this is ever called for a given connection). A no-op for
+  * a connection with no entry, or for {@code null}. */
  public static void forgetConnectionGeneration(Object connection) {
   if (connection != null) connectionGenerations.remove(connection);
  }
@@ -1728,6 +1777,33 @@ public final class PhysicsBridge {
   if (notifiedGeneration == null || clientCurrentGeneration == null) return StaleDisconnectAction.AMBIGUOUS_NO_OP;
   if (!notifiedGeneration.equals(clientCurrentGeneration)) return StaleDisconnectAction.IGNORE_NOTIFICATION;
   return clientHasValidIndex ? StaleDisconnectAction.DISCONNECT_BY_CLIENT_OWN_INDEX : StaleDisconnectAction.IDEMPOTENT_CLEANUP_ONLY;
+ }
+
+ /** MINECRAFT-545/547 (John's comment 54991): "Extract the real production-used apply path via
+  * injected adapter" - the PRODUCTION orchestration a real client-side adapter would call once
+  * {@link #decideStaleDisconnectAction} has returned an action, mirroring the exact same
+  * interface-plus-pure-dispatcher shape {@link #fallbackClearConnection} already established
+  * for the server side (never a test-only toy like a prior round's own
+  * {@code SyntheticClientConnectionState.applyIfConnected}, which exercised nothing but itself).
+  * Only {@code DISCONNECT_BY_CLIENT_OWN_INDEX}/{@code IDEMPOTENT_CLEANUP_ONLY} ever call into
+  * {@code ops} - {@code IGNORE_NOTIFICATION}/{@code AMBIGUOUS_NO_OP} are both unconditional
+  * no-ops here, by construction, not by caller discipline. */
+ public interface StaleDisconnectOps<V> {
+  void disconnectByClientIndex(V v, int clientOwnIndex);
+  void idempotentCleanup(V v);
+ }
+
+ /** Pure dispatcher: given an already-decided {@link StaleDisconnectAction} and (only when
+  * needed) the client's own real index, calls exactly the one {@code ops} method the action
+  * requires, or neither. No MTS/Minecraft dependency - directly unit-testable with a synthetic
+  * {@code ops} that counts calls, exactly as {@link #fallbackClearConnection}'s own tests do. */
+ public static <V> void applyStaleDisconnectAction(
+     V v, StaleDisconnectAction action, int clientOwnIndexIfKnown, StaleDisconnectOps<V> ops) {
+  switch (action) {
+   case DISCONNECT_BY_CLIENT_OWN_INDEX -> ops.disconnectByClientIndex(v, clientOwnIndexIfKnown);
+   case IDEMPOTENT_CLEANUP_ONLY -> ops.idempotentCleanup(v);
+   case IGNORE_NOTIFICATION, AMBIGUOUS_NO_OP -> { /* no-op by construction - never calls ops */ }
+  }
  }
 
  public static void cleanup() {
