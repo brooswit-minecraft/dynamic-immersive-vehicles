@@ -488,4 +488,48 @@ class PhysicsBridgeClassificationTest {
   // dispatch-time re-check) - two calls confirms the sweep itself ran exactly once this tick.
   assertEquals(2, sweepCalls[0], "the sweep must run exactly once per tick in the fixed model");
  }
+
+ // MINECRAFT-545/547 (John's comment 54823): pure coverage of the missing-index fallback's own
+ // side-effect ORDER - PhysicsBridge.FallbackClearOps/fallbackClearConnection(V, FallbackClearOps).
+ // No real MTS object needed - this seam exists specifically because the real adapter cannot be
+ // constructed in this suite (confirmed elsewhere), but the ORDER its calls happen in can still
+ // be verified here with a plain fake.
+
+ private static final class FakeFallbackCandidate {
+  final java.util.List<String> callOrder = new java.util.ArrayList<>();
+ }
+
+ private static PhysicsBridge.FallbackClearOps<FakeFallbackCandidate> recordingFallbackOps() {
+  return new PhysicsBridge.FallbackClearOps<FakeFallbackCandidate>() {
+   public void resetTowingVariables(FakeFallbackCandidate c) { c.callOrder.add("resetTowing"); }
+   public void resetTowedVariables(FakeFallbackCandidate c) { c.callOrder.add("resetTowed"); }
+   public void engageParkingBrake(FakeFallbackCandidate c) { c.callOrder.add("brake"); }
+   public void clearConnection(FakeFallbackCandidate c) { c.callOrder.add("clear"); }
+  };
+ }
+
+ @Test void fallbackClearConnectionCallsEveryStepExactlyOnce() {
+  var c = new FakeFallbackCandidate();
+  PhysicsBridge.fallbackClearConnection(c, recordingFallbackOps());
+  assertEquals(4, c.callOrder.size());
+ }
+
+ @Test void fallbackClearConnectionClearsConnectionLast() {
+  // The real adapter's own resetTowingVariables reads v.towedByConnection.towingVehicle - it
+  // must run BEFORE clearConnection nulls that field, or it would throw/read nothing. This test
+  // pins "clear is always last" as a real ordering contract, not an incidental detail.
+  var c = new FakeFallbackCandidate();
+  PhysicsBridge.fallbackClearConnection(c, recordingFallbackOps());
+  assertEquals("clear", c.callOrder.get(c.callOrder.size() - 1),
+    "clearConnection must be the LAST step - every other step may still need to read through the connection it clears");
+ }
+
+ @Test void fallbackClearConnectionResetsTowingBeforeTowed() {
+  // Mirrors the real adapter's own exact call order (towing.resetAllVariables() before
+  // v.resetAllVariables()) - pinned here so a reordering in the real adapter would be caught by
+  // this pure test rather than only by re-reading the real adapter's own source.
+  var c = new FakeFallbackCandidate();
+  PhysicsBridge.fallbackClearConnection(c, recordingFallbackOps());
+  assertEquals(java.util.List.of("resetTowing", "resetTowed", "brake", "clear"), c.callOrder);
+ }
 }

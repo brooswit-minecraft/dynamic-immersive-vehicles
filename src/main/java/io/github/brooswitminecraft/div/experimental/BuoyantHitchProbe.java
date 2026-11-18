@@ -183,11 +183,15 @@ public final class BuoyantHitchProbe {
  // nicety. Capturing ONLY, same as towedRemovalSpanSamples - never alters the real phase
  // sequence/timing/physics.
  private static final java.util.List<io.github.brooswitminecraft.div.LifecycleInvariants.Sample> towingReplacementSamples = new java.util.ArrayList<>();
- /** MINECRAFT-545/547 (John's comment 54814): set true whenever a REQUIRED phase's own
-  * invariant check comes back INCONCLUSIVE rather than PASS. The final terminal banner reads
-  * this - an inconclusive required phase must never be folded into an unconditional "all
-  * passed" claim, even though the overall sequence still completes without a FAILED defect. */
- private static boolean anyRequiredPhaseInconclusive = false;
+ /** MINECRAFT-545/547 (John's comment 54814, generalized per 54823): every required phase's own
+  * {@code LifecycleInvariants.Outcome} gets routed through
+  * {@code LifecycleInvariants.classifyRequiredPhaseOutcome} and appended here, in check order -
+  * for BOTH the within-TOWING_UNAVAILABLE check and the TOWING_REPLACEMENT check (54814's own
+  * fix only wired the second one; 54823 found the first one was never recorded at all). The
+  * final terminal banner runs the SAME pure {@code aggregateRequiredPhaseVerdicts} policy over
+  * this list - a single seam every required-phase site routes through, rather than each site
+  * reimplementing (and potentially drifting on) its own ad hoc non-PASS/non-FAIL distinction. */
+ private static final java.util.List<io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict> requiredPhaseVerdicts = new java.util.ArrayList<>();
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -767,12 +771,22 @@ public final class BuoyantHitchProbe {
    // BODY_IDENTITY_CHANGED are deliberately NOT treated as failures here - both mean "the check
    // itself could not be completed," not "checked and found broken" (54603's own distinction);
    // asserting on an incomplete check would misreport a measurement gap as a lifecycle defect.
-   if (withinUnavailableOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_STARVED_TICK
-       || withinUnavailableOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_DUPLICATE_TICK) {
+   // 54823: route through the SAME pure classification/aggregation seam as TOWING_REPLACEMENT
+   // below - this call site previously decided FAIL vs "everything else" with its own inline
+   // check and never recorded a non-FAIL, non-PASS outcome into any aggregate at all, so an
+   // INSUFFICIENT_SAMPLES/BODY_IDENTITY_CHANGED/BODY_ABSENT result here could still reach the
+   // final "all passed" banner with no record of it ever having been inconclusive.
+   var withinUnavailableVerdict = io.github.brooswitminecraft.div.LifecycleInvariants.classifyRequiredPhaseOutcome(withinUnavailableOutcome);
+   if (withinUnavailableVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.FAIL) {
     LOGGER.error("[DIV buoyantHitchProbe] FAILED - lifecycleInvariantCheck withinUnavailableOutcome=" + withinUnavailableOutcome
       + " (a real per-tick stepping defect across the TOWING_UNAVAILABLE span, not a sampling gap)");
     phase = Phase.FAILED;
     return;
+   }
+   requiredPhaseVerdicts.add(withinUnavailableVerdict);
+   if (withinUnavailableVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE) {
+    LOGGER.warn("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE INCONCLUSIVE withinUnavailableOutcome=" + withinUnavailableOutcome
+      + " - the per-tick stepping check could not be completed (not proof of a defect, and not proof of success either)");
    }
   }
   if (!boundedOrFail("towingReplacement/towing2", towing2) || !boundedOrFail("towingReplacement/towed", towed)) return;
@@ -819,19 +833,18 @@ public final class BuoyantHitchProbe {
    //    TOWING_UNAVAILABLE check above already draws, per 54603's own rationale) - does NOT fail
    //    this fixture, but is now logged explicitly as INCONCLUSIVE, never silently as PASS.
    //  - PASS: the only outcome that earns the actual "TOWING_REPLACEMENT PASS" banner.
-   if (replacementOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_STARVED_TICK
-       || replacementOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_DUPLICATE_TICK) {
+   // 54823: routed through the SAME classifyRequiredPhaseOutcome/requiredPhaseVerdicts seam as
+   // the TOWING_UNAVAILABLE check above, instead of this site's own bespoke FAIL_*/PASS checks -
+   // one policy, not two independently-maintained copies of it.
+   var replacementVerdict = io.github.brooswitminecraft.div.LifecycleInvariants.classifyRequiredPhaseOutcome(replacementOutcome);
+   if (replacementVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.FAIL) {
     LOGGER.error("[DIV buoyantHitchProbe] FAILED - TOWING_REPLACEMENT lifecycleInvariantCheck outcome=" + replacementOutcome
       + " (a real per-tick stepping defect across the TOWING_REPLACEMENT settle window, not a sampling gap)");
     phase = Phase.FAILED;
     return;
    }
-   if (replacementOutcome != io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.PASS) {
-    // 54814: this phase being INCONCLUSIVE (not proven PASS, not proven broken) must propagate
-    // to the terminal banner below - the prior version of this branch logged a per-phase
-    // warning and then let the run reach the unconditional "COMPLETE - ... all passed" banner
-    // regardless, silently converting an inconclusive required phase into an overall success.
-    anyRequiredPhaseInconclusive = true;
+   requiredPhaseVerdicts.add(replacementVerdict);
+   if (replacementVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE) {
     LOGGER.warn("[DIV buoyantHitchProbe] TOWING_REPLACEMENT INCONCLUSIVE outcome=" + replacementOutcome
       + " - the per-tick stepping check could not be completed (not proof of a defect, and not"
       + " proof of success either); proceeding past this phase without claiming PASS for it");
@@ -923,11 +936,17 @@ public final class BuoyantHitchProbe {
    // reaching INSTALLED_PART_ATTACH's own completion is only possible after it already ran.
    // MINECRAFT-545/547 (John's comment 54814): that fix was itself incomplete - this banner
    // still unconditionally said "all passed" even on a run where TOWING_REPLACEMENT only
-   // reached INCONCLUSIVE (see anyRequiredPhaseInconclusive's own doc). Branch on it now: a
-   // genuinely all-PASS run keeps the original COMPLETE banner; a run with an inconclusive
-   // required phase gets a DIFFERENT, explicitly non-"all passed" terminal line instead -
-   // never both, and never silently just the COMPLETE one regardless.
-   if (anyRequiredPhaseInconclusive) {
+   // reached INCONCLUSIVE. CORRECTED AGAIN (54823): the 54814 fix only ever recorded
+   // TOWING_REPLACEMENT's own verdict - the within-TOWING_UNAVAILABLE check's own non-PASS,
+   // non-FAIL outcomes were STILL never recorded anywhere, so an inconclusive
+   // TOWING_UNAVAILABLE result could still reach this same "all passed" banner untouched. Fixed
+   // by routing EVERY required-phase check through one shared seam (both sites above now append
+   // to requiredPhaseVerdicts via classifyRequiredPhaseOutcome) and running the SAME pure
+   // aggregateRequiredPhaseVerdicts policy here, over every verdict actually recorded - a
+   // genuinely all-PASS run keeps the original COMPLETE banner; any recorded INCONCLUSIVE
+   // verdict gets a DIFFERENT, explicitly non-"all passed" terminal line instead - never both.
+   var aggregateVerdict = io.github.brooswitminecraft.div.LifecycleInvariants.aggregateRequiredPhaseVerdicts(requiredPhaseVerdicts);
+   if (aggregateVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE) {
     LOGGER.warn("[DIV buoyantHitchProbe] INCONCLUSIVE - every phase ran to its own completion with no FAILED defect, but at least one required phase (see the per-phase INCONCLUSIVE line above) did not reach a proven PASS outcome - this is NOT the same as \"all passed\", and must not be read as full success");
    } else {
     LOGGER.info("[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/TOWING_REPLACEMENT/DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");

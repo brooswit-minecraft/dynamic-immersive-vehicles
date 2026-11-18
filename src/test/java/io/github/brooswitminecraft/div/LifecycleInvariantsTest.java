@@ -182,4 +182,64 @@ class LifecycleInvariantsTest {
  @Test void duplicateSteppingRejectsNegativeElapsedTicks() {
   assertThrows(IllegalArgumentException.class, () -> LifecycleInvariants.duplicateSteppingOccurred(0, 0, -1));
  }
+
+ // MINECRAFT-545/547 (John's comment 54823): the pure required-phase classification/aggregation
+ // seam BuoyantHitchProbe now routes every required-phase check through. No ServerLevel/MTS
+ // dependency at all - exactly the "small pure aggregator/formatter seam with existing JUnit, no
+ // native run/dependency needed" 54823 asked for, covering PASS, both FAIL outcomes, every
+ // INCONCLUSIVE outcome, and mixed-phase aggregation.
+
+ @Test void classifyRequiredPhaseOutcomeMapsPassToPass() {
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.PASS,
+    LifecycleInvariants.classifyRequiredPhaseOutcome(Outcome.PASS));
+ }
+
+ @Test void classifyRequiredPhaseOutcomeMapsBothFailOutcomesToFail() {
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.FAIL,
+    LifecycleInvariants.classifyRequiredPhaseOutcome(Outcome.FAIL_STARVED_TICK));
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.FAIL,
+    LifecycleInvariants.classifyRequiredPhaseOutcome(Outcome.FAIL_DUPLICATE_TICK));
+ }
+
+ @Test void classifyRequiredPhaseOutcomeMapsEveryIncompleteOutcomeToInconclusive() {
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
+    LifecycleInvariants.classifyRequiredPhaseOutcome(Outcome.INSUFFICIENT_SAMPLES));
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
+    LifecycleInvariants.classifyRequiredPhaseOutcome(Outcome.BODY_IDENTITY_CHANGED));
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
+    LifecycleInvariants.classifyRequiredPhaseOutcome(Outcome.BODY_ABSENT));
+ }
+
+ @Test void aggregateRequiredPhaseVerdictsPassWhenEveryPhasePasses() {
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.PASS,
+    LifecycleInvariants.aggregateRequiredPhaseVerdicts(List.of(
+      LifecycleInvariants.RequiredPhaseVerdict.PASS, LifecycleInvariants.RequiredPhaseVerdict.PASS)));
+ }
+
+ @Test void aggregateRequiredPhaseVerdictsVacuouslyPassWithNoPhasesChecked() {
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.PASS,
+    LifecycleInvariants.aggregateRequiredPhaseVerdicts(List.of()));
+ }
+
+ @Test void aggregateRequiredPhaseVerdictsInconclusiveWhenOnePhaseIsInconclusiveAndRestPass() {
+  // MINECRAFT-545/547 (John's comment 54823's own named gap, as a pure regression): a mix of
+  // PASS phases and exactly one INCONCLUSIVE phase must aggregate to INCONCLUSIVE, never PASS -
+  // this is the exact scenario the within-TOWING_UNAVAILABLE check could previously reach
+  // without ever being recorded into any aggregate at all.
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
+    LifecycleInvariants.aggregateRequiredPhaseVerdicts(List.of(
+      LifecycleInvariants.RequiredPhaseVerdict.PASS,
+      LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
+      LifecycleInvariants.RequiredPhaseVerdict.PASS)));
+ }
+
+ @Test void aggregateRequiredPhaseVerdictsFailWhenAnyPhaseFailsRegardlessOfOthers() {
+  // A real defect anywhere must win over an inconclusive result elsewhere - FAIL is never
+  // downgraded to INCONCLUSIVE just because another phase's own check also couldn't complete.
+  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.FAIL,
+    LifecycleInvariants.aggregateRequiredPhaseVerdicts(List.of(
+      LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
+      LifecycleInvariants.RequiredPhaseVerdict.FAIL,
+      LifecycleInvariants.RequiredPhaseVerdict.PASS)));
+ }
 }

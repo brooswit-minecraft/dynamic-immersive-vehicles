@@ -47,6 +47,46 @@ public final class LifecycleInvariants {
   * reported as {@code BODY_IDENTITY_CHANGED} - not folded into {@code BODY_ABSENT}. */
  public enum Outcome { PASS, FAIL_STARVED_TICK, FAIL_DUPLICATE_TICK, INSUFFICIENT_SAMPLES, BODY_IDENTITY_CHANGED, BODY_ABSENT }
 
+ /** MINECRAFT-545/547 (John's comment 54823): a REQUIRED phase's own {@link Outcome} reduces to
+  * exactly one of three verdicts for aggregate-reporting purposes - never more, never fewer, and
+  * {@code PASS} is the ONLY one that may ever contribute to an overall "all passed" claim.
+  * {@code FAIL} is a real defect ({@code FAIL_STARVED_TICK}/{@code FAIL_DUPLICATE_TICK}).
+  * {@code INCONCLUSIVE} is every other non-{@code PASS} outcome
+  * ({@code INSUFFICIENT_SAMPLES}/{@code BODY_IDENTITY_CHANGED}/{@code BODY_ABSENT}) - the check
+  * itself could not be completed, which is neither a proven pass nor a proven defect. This is a
+  * pure, production-used classification with no Minecraft/MTS dependency - every call site for
+  * every required phase routes through the SAME policy here, rather than each site reimplementing
+  * (and potentially drifting on) its own ad hoc non-PASS/non-FAIL distinction. */
+ public enum RequiredPhaseVerdict { PASS, FAIL, INCONCLUSIVE }
+
+ /** The one production-used classification every required-phase check site must route its own
+  * {@link Outcome} through before deciding what to log/aggregate - see {@link RequiredPhaseVerdict}'s
+  * own doc for why this exists as a single seam rather than per-site ad hoc logic. */
+ public static RequiredPhaseVerdict classifyRequiredPhaseOutcome(Outcome outcome) {
+  return switch (outcome) {
+   case PASS -> RequiredPhaseVerdict.PASS;
+   case FAIL_STARVED_TICK, FAIL_DUPLICATE_TICK -> RequiredPhaseVerdict.FAIL;
+   case INSUFFICIENT_SAMPLES, BODY_IDENTITY_CHANGED, BODY_ABSENT -> RequiredPhaseVerdict.INCONCLUSIVE;
+  };
+ }
+
+ /** The aggregate verdict across every required phase a run actually checked, in the order they
+  * were checked: {@code FAIL} if ANY phase was {@code FAIL} (a real defect anywhere ends the
+  * aggregate there, regardless of what came before or would come after); otherwise
+  * {@code INCONCLUSIVE} if ANY phase was {@code INCONCLUSIVE} (an incomplete required check
+  * anywhere means the run as a whole cannot claim "all passed," even if every OTHER phase
+  * genuinely passed); otherwise {@code PASS} only if EVERY phase checked was {@code PASS}. An
+  * empty list (no required phase ever checked) is vacuously {@code PASS} - there is nothing to
+  * have failed or left inconclusive, same spirit as {@link #evaluate}'s own 0/1-sample case. */
+ public static RequiredPhaseVerdict aggregateRequiredPhaseVerdicts(List<RequiredPhaseVerdict> verdicts) {
+  boolean anyInconclusive = false;
+  for (RequiredPhaseVerdict v : verdicts) {
+   if (v == RequiredPhaseVerdict.FAIL) return RequiredPhaseVerdict.FAIL;
+   if (v == RequiredPhaseVerdict.INCONCLUSIVE) anyInconclusive = true;
+  }
+  return anyInconclusive ? RequiredPhaseVerdict.INCONCLUSIVE : RequiredPhaseVerdict.PASS;
+ }
+
  /** True only if EVERY consecutive pair in {@code counts} (one sample per real tick, in tick
   * order) advances by exactly 1 - the genuine per-tick "no starvation, no duplicate stepping"
   * check. Requires at least 2 samples (otherwise there is no transition to check, and this

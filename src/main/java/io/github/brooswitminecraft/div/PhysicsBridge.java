@@ -1325,6 +1325,40 @@ public final class PhysicsBridge {
   void disconnectAtIndex(V v, int index);
   void fallbackClearConnection(V v);
  }
+
+ /** MINECRAFT-545/547 (John's comment 54823: "review minimal production-used side-effect seam
+  * or prepare bounded isolated fixture design"). The missing-index fallback's own real side
+  * effects require a real {@code EntityVehicleF_Physics}/{@code TowingConnection} to construct
+  * (confirmed elsewhere not possible in this suite without new integration-test infrastructure
+  * or forbidden reflection) - but the ORDER those side effects happen in does not. This seam
+  * extracts that order into its own small, generic, pure orchestration, injected as callbacks -
+  * mirroring {@link OrphanedConnectionOps}'s own existing pattern. A fake implementation can
+  * verify call order/count in a plain JUnit test with no MTS dependency at all; the real
+  * adapter's own implementations of each method are single trivial lines (one real MTS call
+  * each), correctness of which is checked by inspection, the same as every other adapter method
+  * in this class (e.g. {@link OrphanedConnectionOps#disconnectAtIndex}). */
+ interface FallbackClearOps<V> {
+  /** The towing vehicle's own {@code resetAllVariables()} - must be called before {@link
+   * #clearConnection}, which nulls the field this reads through. */
+  void resetTowingVariables(V v);
+  /** The towed vehicle's own {@code resetAllVariables()}. */
+  void resetTowedVariables(V v);
+  /** The towed vehicle's own parking-brake engage. */
+  void engageParkingBrake(V v);
+  /** Clears the towed vehicle's own connection field - called LAST, since {@link
+   * #resetTowingVariables} still needs to read through it. */
+  void clearConnection(V v);
+ }
+
+ /** The pure, generic ordering the missing-index fallback must follow - see {@link
+  * FallbackClearOps}'s own doc for why this is its own seam. */
+ static <V> void fallbackClearConnection(V v, FallbackClearOps<V> ops) {
+  ops.resetTowingVariables(v);
+  ops.resetTowedVariables(v);
+  ops.engageParkingBrake(v);
+  ops.clearConnection(v);
+ }
+
  static <V> void releaseOrphanedConnections(Iterable<V> candidates, OrphanedConnectionOps<V> ops) {
   var orphaned = new java.util.ArrayList<V>();
   var collectedIdentities = new java.util.ArrayList<Object>();
@@ -1410,9 +1444,6 @@ public final class PhysicsBridge {
     // `AEntityE_Interactable.connectionGroupsIndexesInUse` is PROTECTED - neither is reachable
     // from this (different-package, non-subclass) code without reflection, which every standing
     // instruction in this investigation forbids. Confirmed by the compiler directly, not assumed.
-    // <p>What IS genuinely reachable and public, and IS reproduced here: both vehicles' real
-    // {@code resetAllVariables()} and the child's real parking-brake engage - the same calls the
-    // real {@code disconnectTrailer} itself makes, needing no index and no private access.
     // <p>Precise, tested unsupported case (not glossed over): {@code connectionGroupsIndexesInUse}
     // is NOT released on either side in this fallback path - a real, standing resource-leak risk
     // for this one edge case (connection object present on the child but already absent from the
@@ -1422,15 +1453,28 @@ public final class PhysicsBridge {
     // The parent list removal and client {@code PacketEntityTowingChange} notification remain
     // unsupported for the same reasons already documented (nothing left to remove; no real index
     // to send).
-    var connection = v.towedByConnection;
-    var towing = connection.towingVehicle;
-    towing.resetAllVariables();
-    v.resetAllVariables();
-    v.parkingBrakeVar.setTo(1.0, false);
-    if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
-      "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back (connection missing from parent's own list) v=" + v.uniqueUUID
-        + " - reproduced resetAllVariables/parkingBrake (both public); UNSUPPORTED (private/protected access, no reflection): connectionGroupsIndexesInUse release on either side, parent list removal (already absent), client PacketEntityTowingChange (needs a real index)");
-    v.towedByConnection = null;
+    // 54823: the ORDER these calls happen in is now its own pure, tested orchestration
+    // (fallbackClearConnection(V, FallbackClearOps) below) - this adapter wires it to the real,
+    // genuinely-public MTS calls, each a single trivial line checked by inspection; the ORDER
+    // itself (reset towing, reset towed, brake, THEN clear - never clear first, which would lose
+    // v.towedByConnection before the other three ever read it) is what the pure test actually
+    // exercises, without needing to construct a real EntityVehicleF_Physics at all.
+    // Qualified with the outer class name: an unqualified call here resolves ONLY against this
+    // anonymous class's own 1-arg fallbackClearConnection (confirmed by the compiler - Java's
+    // member lookup stops at the first matching simple name and never merges in the outer
+    // class's own same-named static overload), so the 2-arg orchestration below needs
+    // PhysicsBridge.-qualification to actually be found.
+    PhysicsBridge.fallbackClearConnection(v, new FallbackClearOps<EntityVehicleF_Physics>() {
+     public void resetTowingVariables(EntityVehicleF_Physics v) { v.towedByConnection.towingVehicle.resetAllVariables(); }
+     public void resetTowedVariables(EntityVehicleF_Physics v) { v.resetAllVariables(); }
+     public void engageParkingBrake(EntityVehicleF_Physics v) { v.parkingBrakeVar.setTo(1.0, false); }
+     public void clearConnection(EntityVehicleF_Physics v) {
+      if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+        "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back (connection missing from parent's own list) v=" + v.uniqueUUID
+          + " - reproduced resetAllVariables/parkingBrake (both public); UNSUPPORTED (private/protected access, no reflection): connectionGroupsIndexesInUse release on either side, parent list removal (already absent), client PacketEntityTowingChange (needs a real index)");
+      v.towedByConnection = null;
+     }
+    });
    }
   });
  }

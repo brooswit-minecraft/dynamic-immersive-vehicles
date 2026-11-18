@@ -11939,3 +11939,147 @@ infrastructure (requires either new integration-test infrastructure or forbidden
 reflection/mocking) - precisely documented, not glossed over, not claimed fixed. Candidate-flag
 coverage gap in the evidence packets identified and addressed with a matching flag-on variant.
 No native run performed. No merge/Done transition made or implied.
+
+## Per 54823: one shared required-phase outcome policy (not two independently-drifting copies),
+## a pure unit-tested aggregator/classifier, the wrapper's own machine-readable PROBE_RESULT
+## (distinct from clean-process-exit evidence), a synthetic-log parser test, and a minimal pure
+## side-effect-order seam for the missing-index fallback
+
+John's comment 54823 is another same-owner continuation review, this time of `3fc16cf` (the
+54814 fix). It found the 54814 fix was itself incomplete in one more way, and gave four further
+concrete, directly actionable instructions rather than deferring again.
+
+### The remaining real gap: TOWING_UNAVAILABLE's own inconclusive outcomes were never recorded at all
+
+54814's own fix added `anyRequiredPhaseInconclusive`, but ONLY ever set it from
+`TOWING_REPLACEMENT`'s own check site. The PRE-EXISTING `withinUnavailableOutcome` check (the
+`TOWING_UNAVAILABLE` phase) had its own separate inline `FAIL_STARVED_TICK`/`FAIL_DUPLICATE_TICK`
+check, decided independently, and never touched `anyRequiredPhaseInconclusive` at all - so an
+`INSUFFICIENT_SAMPLES`/`BODY_IDENTITY_CHANGED`/`BODY_ABSENT` outcome from THAT check could still
+reach the final "all passed" banner completely unrecorded. Two independently-maintained copies
+of "is this outcome a failure" is exactly how this kept drifting.
+
+**Fix**: added `LifecycleInvariants.RequiredPhaseVerdict` (`PASS`/`FAIL`/`INCONCLUSIVE`) and two
+PURE, Minecraft/MTS-free functions: `classifyRequiredPhaseOutcome(Outcome)` (the one place that
+decides which `Outcome` values are which verdict) and `aggregateRequiredPhaseVerdicts(List<RequiredPhaseVerdict>)`
+(FAIL wins over everything; INCONCLUSIVE wins over PASS; empty list is vacuously PASS). BOTH
+`BuoyantHitchProbe` check sites (`TOWING_UNAVAILABLE`'s `withinUnavailableOutcome` and
+`TOWING_REPLACEMENT`'s `replacementOutcome`) now route through `classifyRequiredPhaseOutcome` and
+append their own verdict to a single `requiredPhaseVerdicts` list (replacing the single
+`anyRequiredPhaseInconclusive` boolean, which could only ever represent one phase's own
+contribution). The final banner runs `aggregateRequiredPhaseVerdicts` over the WHOLE list - one
+shared policy, not two.
+
+### A small pure aggregator/formatter seam, unit-tested with plain JUnit - per 54823's own instruction
+
+54823: "Lack of existing probe unit tests is not a blocker to a small pure aggregator/formatter
+seam with existing JUnit; no native run/dependency needed." Added 7 new tests to
+`LifecycleInvariantsTest` covering: each `Outcome` mapping to its correct `RequiredPhaseVerdict`
+(`PASS`→`PASS`; both `FAIL_*`→`FAIL`; all three incomplete outcomes→`INCONCLUSIVE`); aggregation
+PASS-when-all-PASS; vacuous PASS for an empty list; the EXACT scenario 54823 itself named -
+INCONCLUSIVE when one phase is inconclusive and the rest pass; and FAIL winning over an
+INCONCLUSIVE phase elsewhere in the same run. None of this needs `ServerLevel`/MTS/a native run -
+confirmed directly, these are plain `List<RequiredPhaseVerdict>` inputs to pure functions.
+
+### The wrapper's own exit code vs. a real machine-readable verdict
+
+54823: "Actual wrapper recognizes third terminal marker but returns CHILD_EXIT_CODE (often 0
+even failed/inconclusive): preserve clean-process-exit evidence separately and produce
+unambiguous machine-readable test verdict/non-success for incomplete/failed outcomes... Do not
+confuse orderly shutdown with test PASS." Confirmed directly in `launch-wrapper.sh`: the
+script's own final `exit "$CHILD_EXIT_CODE"` is the JVM's own exit code from an orderly `stop`
+command - which is 0 regardless of whether the probe itself logged `COMPLETE`, `FAILED`, or
+`INCONCLUSIVE`. A caller checking only this wrapper's own `$?` would see a clean exit on every
+run, success or not.
+
+**Fix**: added a `PROBE_RESULT` variable, computed by a `case` statement parsing the SAME
+`$TERMINAL` text already captured (not re-derived from `CHILD_EXIT_CODE`, which carries no
+probe-level information at all) into one of `PASS`/`FAIL`/`INCONCLUSIVE`/`TIMEOUT`/
+`STARTUP_FAILURE`/`PROCESS_EXITED_EARLY`/`UNRECOGNIZED_TERMINAL`. Echoed to stdout and appended
+to the owner-file's own `RELEASED by ...` receipt line (`PROBE_RESULT=...`), alongside, NOT
+replacing, the existing `rc=$CHILD_EXIT_CODE` clean-process-exit evidence - both are preserved,
+distinctly labeled, exactly as 54823 asked.
+
+### Testing the parser itself with synthetic log fixtures - no Minecraft launch
+
+54823: "test parser with retained/synthetic log fixtures without launching Minecraft." Wrote a
+small standalone script (`/tmp/test_terminal_parser.sh`, archived into both new packets' own
+`receipts/`) that runs the EXACT SAME `TERMINAL_PATTERN` regex and `PROBE_RESULT` `case`
+statement against four fixture lines: a real `COMPLETE` line (from this ticket's own retained
+`b6ec50e-flagon` receipt), a real `FAILED` line, this cycle's own NEW `INCONCLUSIVE` line, and a
+pre-fix-era `COMPLETE` banner text (regression check that old output still classifies correctly
+today). All four: regex matched, classified exactly as expected. No `java`/Minecraft process
+involved at any point.
+
+### Missing-index fallback: a minimal production-used side-effect-order seam, per the explicit instruction
+
+54823: "missing current real-MTS unit construction is infrastructure limitation, not proof all
+supported adapter/isolated-fixture coverage impossible. Review minimal production-used
+side-effect seam..." Re-examined `fallbackClearConnection`'s real adapter: it is three trivial,
+single-line MTS calls (`towing.resetAllVariables()`, `v.resetAllVariables()`,
+`v.parkingBrakeVar.setTo(1.0, false)`), plus clearing the field - the SIDE EFFECTS themselves
+genuinely require a real MTS object (confirmed elsewhere, unchanged), but the ORDER those four
+steps happen in does not. Extracted that order into a new, generic, pure seam mirroring
+`OrphanedConnectionOps`'s own existing pattern exactly:
+
+```java
+interface FallbackClearOps<V> {
+ void resetTowingVariables(V v);
+ void resetTowedVariables(V v);
+ void engageParkingBrake(V v);
+ void clearConnection(V v); // must run LAST - resetTowingVariables still reads through the field this clears
+}
+static <V> void fallbackClearConnection(V v, FallbackClearOps<V> ops) {
+ ops.resetTowingVariables(v); ops.resetTowedVariables(v); ops.engageParkingBrake(v); ops.clearConnection(v);
+}
+```
+
+The real adapter now implements `FallbackClearOps<EntityVehicleF_Physics>` with the same four
+single-line calls as before (unchanged logic, correctness checked by inspection like every
+other adapter method in this class), and calls the new generic `fallbackClearConnection(v, ops)`
+instead of inlining the sequence itself. **Real compile error caught and fixed along the way**:
+calling the 2-arg static `PhysicsBridge.fallbackClearConnection(v, ops)` unqualified from
+inside the anonymous `OrphanedConnectionOps` implementation resolved ONLY against that
+anonymous class's own 1-arg `fallbackClearConnection(EntityVehicleF_Physics v)` interface method
+- confirmed by the compiler that Java's member lookup stops at the first matching simple name in
+the current class and does not also consider the outer class's own same-named static overload.
+Fixed by qualifying the call as `PhysicsBridge.fallbackClearConnection(v, ops)`.
+
+**Test coverage** (3 new tests in `PhysicsBridgeClassificationTest`, a `FakeFallbackCandidate`
+with no MTS dependency): all four steps called exactly once; `clearConnection` is always last
+(the real ordering CONSTRAINT - `resetTowingVariables` reads through the field `clearConnection`
+nulls); and the exact real adapter's own order (`resetTowing, resetTowed, brake, clear`) is
+pinned so a future reordering of the REAL adapter would be caught here, not only by re-reading
+its source.
+
+This closes the gap precisely as instructed - a "minimal production-used side-effect seam," not
+a new fixture or isolated-world design, and not a claim that the real adapter's own individual
+calls are now unit-tested (they still are not, and still cannot be without a real MTS object -
+only their ORDER is).
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **901 tests** (up from 891 - 7 new pure
+`LifecycleInvariantsTest` cases, 3 new pure `PhysicsBridgeClassificationTest` cases), 0
+failures, 0 errors.
+
+### Packets
+
+`M545-packet-3fc16cf`/`M545-packet-3fc16cf-flagon` (prepared immediately before this round of
+findings) are now STALE - left in place unmodified as the historical record, same convention as
+every prior superseded packet. New packets for the corrected commit follow, both carrying the
+`PROBE_RESULT`/synthetic-parser-test additions in their own `launch-wrapper.sh`/`receipts/`.
+
+### Disposition
+
+One more real gap closed with a single shared pure policy (not two independently-drifting
+copies) covering BOTH required-phase check sites, not just the one 54814 touched; added 7 pure
+unit tests for that policy exactly as instructed, needing no native run; fixed the wrapper's own
+exit-code-vs-verdict conflation with a distinct machine-readable `PROBE_RESULT`, preserving the
+existing clean-process-exit evidence rather than replacing it; verified the parser itself against
+real and synthetic log fixtures without launching Minecraft; and extracted a minimal,
+production-used, pure side-effect-ORDER seam for the missing-index fallback (3 new tests) -
+precisely scoped to what's actually pure (the order), not overclaiming testability of the real
+MTS calls themselves, which remain confirmed untestable without new integration infrastructure
+or forbidden reflection. Full suite green (901 tests). No native run performed. No merge/Done
+transition made or implied.
