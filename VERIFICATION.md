@@ -16681,3 +16681,89 @@ CI would pass was wrong, and is corrected here. GitHub Actions CI will be re-tri
 commit's push and should now actually pass; this will be confirmed, not assumed, before any
 further claim is made about CI status. No native run performed or proposed. No merge/Done
 transition made or implied.
+
+## 2026-11-18 — Per 55071/55072: evidence reconciliation, already-active fallback found stale (already fixed), TOWING_REPLACEMENT crash config gap identified
+
+### What John asked
+
+Comment 55071 authorized active source investigation (not standing by for scope approval) toward
+fixing the two PR #39-disclosed gaps, explicitly without an immediate native launch. Comment 55072
+followed with his own independent code-reading evidence on the exact current head (`9732b32`):
+`deferToNativeHitch` (line 1015-1016) already returns `towed && !towingVehicleActive &&
+(!alreadyActive || unsafeLock)` — the `|| unsafeLock` branch means the PR body's own "already-
+active always re-activates" framing is not an accurate description of current code. He asked for
+this to be reconciled against the retained "fallback probe run4" native evidence rather than either
+dismissed or assumed-fixed, and for the TOWING_REPLACEMENT crash to be investigated for a precise
+remaining gap rather than re-patched speculatively.
+
+### Already-active fallback (PR #39's "Known, OPEN gaps" bullet #2): confirmed STALE, not a
+### residual code gap
+
+Independently confirmed, by direct diff: `git diff 5cb21fb HEAD -- PhysicsBridge.java` shows
+`deferToNativeHitch`/`decide`/`unsafeBuoyantAngularLock` byte-identical since commit **5cb21fb**
+("strengthen already-active fallback probe", 54262). That exact commit is the one natively verified
+by **`M545-fallbackprobe-run4-20261116T160229Z`** (already in this file, above): a SUSTAINED
+100-tick native PASS with direct observation (not inference) of (a) `debugIsJointed=false` — the
+preexisting joint actually released, (b) the captured native box's own `isActive()` transitioning
+to `false` — the same object actually destroyed, (c) `towed.towedByConnection != null` persisting
+throughout — IV's own native authority taking over cleanly, and (d) a stable, finite resting state
+for the full window. This is exactly the scenario PR #39's bullet #2 describes as broken
+(`towingVehicleActive=false`+`alreadyActive=true`) — and it was already fixed and already
+natively verified, before this PR's current head existed. **PR #39's own "Known, OPEN gaps" bullet
+#2 is stale documentation left over from an earlier point in this PR's own history, not an
+accurate description of `9732b32`.** No code change was needed or made here — this is a
+documentation-currency finding, not a defect. (Per an earlier round's own standing instruction
+against repeated PR-description edit attempts, the PR body text itself is not being edited here;
+this correction is recorded in VERIFICATION.md and reported to Jira instead.)
+
+### TOWING_REPLACEMENT crash: a genuine, specific, previously-unexamined configuration gap
+
+Reconciling every prior native attempt against its own exact configuration surfaces a real 3-way
+gap: the five original native crashes all ran with the per-tick timing fix absent AND the
+`-Ddiv.sequentialDragBound` candidate flag off; the ONE historical `TOWING_REPLACEMENT` PASS
+(`M545-packet-b6ec50e-flagon`, 140 ticks, already recorded above at the "Candidate-flag coverage of
+the evidence packets" section) ran with the timing fix present AND the candidate flag ON —
+confounded, never isolated from each other. Confirmed by direct diff
+(`git diff b6ec50e HEAD -- BuoyantForces.java`): the candidate code path itself is unchanged since
+then. Confirmed by source read: `BuoyantForces.java`'s own
+`SEQUENTIAL_DRAG_BOUND_ENABLED = Boolean.getBoolean("div.sequentialDragBound")` defaults `false`
+whenever the system property is unset — so the CURRENT shipping default (`9732b32`: timing fix
+permanently present, candidate flag off) is a configuration that has **never actually been
+natively run**. This is not a new Java-side or Rust/Sable-side defect discovery - prior rounds
+already traced the underlying mechanism toward Rapier's native solver internals, outside DIV/
+Sable's own Java source and outside what this round's investigation could further narrow. No
+source fix is made this round because no specific, confidently-identified code-level defect
+(distinct from "an untested configuration" or "a possible fixture confound already flagged by
+specialist review") was found — fabricating one would repeat exactly the pattern this ticket's
+history has already corrected multiple times.
+
+### Packet prepared for review, NOT launched
+
+`/home/booswrit/div-evidence/MINECRAFT-545-547/M545-packet-9732b32-replacementprobe/` - boots
+`BuoyantHitchProbe`'s `TOWING_REPLACEMENT` phase on the exact current head (`9732b32`), candidate
+flag deliberately absent (testing the genuinely-untested default configuration identified above),
+full preflight/manifest convention matching this ticket's own established rigor, a
+purpose-built `probe-result.sh` to extract the `TOWING_REPLACEMENT`-specific verdict and any NPE
+stack trace. Confirmed by direct inspection: `receipts/` contains only a
+`preflight-dry-run.log`; `rundir/` contains only pre-boot scaffolding (eula.txt, empty
+config/mods/whitelist files, `server.properties`) with no `server.log` or world-save evidence of
+an actual boot. **This packet has not been launched.** Awaiting independent review and a new
+coordinator release before any native launch, per 55071's own explicit "no immediate native
+launch."
+
+### Test receipt
+
+No source/test changes made this round (worktree confirmed clean at `9732b32` throughout) - the
+existing 1164-test receipt from the prior round stands unchanged.
+
+### Disposition
+
+The already-active fallback gap PR #39 discloses is resolved — not by a new fix, but by
+discovering, with a direct diff and the retained run4 native evidence, that it was already fixed
+and already natively verified by an earlier commit this exact head already contains; PR #39's own
+text describing it as open is stale. The TOWING_REPLACEMENT crash remains genuinely open, with a
+newly precise characterization: the exact shipping-default configuration (timing fix + candidate
+off) has never been natively tested, distinct from the confounded historical pass (timing fix +
+candidate on) and the confounded historical failures (no timing fix, candidate off). No guessed
+fix was made. A packet to close that specific gap is prepared and awaiting review/coordination, not
+launched. No native run performed. No merge/Done transition made or implied.
