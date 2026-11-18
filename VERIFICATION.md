@@ -11844,3 +11844,98 @@ distinct `INCONCLUSIVE` outcome for those, matching the existing, deliberate
 Also corrected overclaiming "accepted limitation" language back to "open, pending review." Full
 suite green (891 tests). No native run performed. `M545-packet-a6b0fc5` is stale; a corrected
 packet follows.
+
+## Per 54814: the aggregate-outcome bug - INCONCLUSIVE required phase still reached the
+## unconditional "all passed" COMPLETE banner; wrapper's own terminal-marker parser never
+## updated to recognize a third outcome; missing-index side-effect testability investigated;
+## candidate-flag coverage of the new packets raised
+
+John's comment 54814 is an independent, SAME-owner continuation review of `b737fe9` (the 54790
+fix), not a new worker. It found one more real defect in that same area, plus three process
+points needing a direct answer rather than another round of generic deferral.
+
+### The real defect: INCONCLUSIVE still became "COMPLETE - ... all passed"
+
+54790's own fix (previous entry) correctly stopped claiming `PASS` for `TOWING_REPLACEMENT` when
+the outcome was only `INCONCLUSIVE` - but that fix only affected the PER-PHASE log line. The
+run's own FINAL banner, several phases later (`INSTALLED_PART_ATTACH`'s own completion point),
+was never touched: it unconditionally logged `"COMPLETE - ATTACH/DETACH/.../all passed"`
+regardless of whether every required phase actually reached `PASS` or only reached
+`INCONCLUSIVE` somewhere along the way - silently folding an inconclusive required phase back
+into an overall-success claim one banner later, exactly the failure mode 54790 had just been
+fixed to stop.
+
+**Fix**: added `anyRequiredPhaseInconclusive` (a static boolean), set `true` at the exact site
+where `TOWING_REPLACEMENT`'s own `INCONCLUSIVE` branch fires. The terminal banner at
+`INSTALLED_PART_ATTACH`'s own completion now branches on it: if any required phase was
+inconclusive, logs a DIFFERENT line (`"INCONCLUSIVE - every phase ran to its own completion with
+no FAILED defect, but at least one required phase ... did not reach a proven PASS outcome - this
+is NOT the same as 'all passed'"`) instead of the `COMPLETE` banner - never both, never silently
+just `COMPLETE` regardless.
+
+**Also fixed, per 54814's own explicit instruction to inspect "actual existing wrapper/result
+consumer... not warning text alone"**: `launch-wrapper.sh`'s `TERMINAL_PATTERN` was
+`\[DIV buoyantHitchProbe\] (COMPLETE|FAILED)` - a literal two-way regex. Before this fix, the new
+`INCONCLUSIVE` line would have matched NEITHER alternative, and the wrapper would have spun in
+its polling loop until `NO_PROGRESS_TIMEOUT` (900s) on any run that actually hit this path - a
+real, confirmed consumer-side gap, not merely a cosmetic log-text issue. Updated the pattern (in
+the next packet's own copy, the canonical template going forward) to
+`\[DIV buoyantHitchProbe\] (COMPLETE|FAILED|INCONCLUSIVE)`.
+
+### Missing-index fallback side effects: confirmed, not glossed over, genuinely not unit-testable with existing infra
+
+54814: "finish supported-public-path/side-effect contract review/tests... test actual fallback
+orchestration side effects rather than only predicates." Investigated directly: EVERY existing
+test of `releaseOrphanedConnections`/`fallbackClearConnection` in
+`PhysicsBridgeClassificationTest` goes through the `OrphanedConnectionOps<FakeOrphanCandidate>`
+fake interface - none of them exercise the REAL adapter
+(`releaseOrphanedTowingConnections()`'s own `fallbackClearConnection(EntityVehicleF_Physics v)`,
+the one that actually calls `resetAllVariables()`/`parkingBrakeVar.setTo(...)`). Confirmed, by
+searching the ENTIRE test tree, that no test anywhere in this suite constructs a real MTS
+`EntityVehicleF_Physics`/`AEntityG_Towable`/`TowingConnection` object - there is no existing
+pattern or infrastructure for this. Confirmed why, from the real decompiled constructor:
+`public EntityVehicleF_Physics(AWrapperWorld world, IWrapperPlayer placingPlayer, ItemVehicle
+item, IWrapperNBT data)` - every parameter is itself a real MTS/Minecraft wrapper type requiring
+a live world/game instance to construct meaningfully; this is not a plain-Java-constructible
+object apart from either (a) a genuine integration test running inside a real Minecraft/NeoForge
+runtime (no such test infrastructure exists in this suite at all - a new category of test
+infrastructure, not a small addition to this one), or (b) reflection/mocking of final MTS
+internals, which every standing instruction in this investigation forbids. This stands as a
+confirmed, precisely-scoped gap in the SAME category as the `connectionGroupsIndexesInUse`
+accessibility finding itself - not fixed, not glossed over, genuinely not closeable within this
+suite's existing unit-test infrastructure without new scope this comment does not authorize.
+
+### Candidate-flag coverage of the evidence packets
+
+54814: "prepare revised immutable packet for review only, with real isolated candidate=true flag
+and checks if retained candidate is intended (prior nine-check packets are not evidence flag is
+enabled)." Confirmed: neither `M545-packet-a6b0fc5` nor `M545-packet-b737fe9` carried the
+`-Ddiv.sequentialDragBound=true` candidate flag (both are plain 9-check packets) - yet the ONE
+historical `TOWING_REPLACEMENT` success this investigation has ever recorded
+(`M545-packet-b6ec50e-flagon`'s own run) was under the COMBINED candidate-flag-on + timing-fix
+configuration, not the plain one. Neither of this cycle's own two commits (`a6b0fc5`, `b737fe9`)
+TOUCHES `BuoyantForces`/the drag-bounding candidate path at all - they are
+`PhysicsBridge`/`BuoyantHitchProbe` orchestration-only changes - so a plain packet is not WRONG
+evidence for what it covers, but it is also not the SAME configuration as the one historical
+success, and nothing in the prior two packets' own notes said so explicitly. A flag-on variant
+for the corrected commit is prepared alongside the plain one, so whichever configuration is
+actually released gets matching, explicitly-labeled evidence - see the packet notes below.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **891 tests** (unchanged - this fix touches only
+`BuoyantHitchProbe`, which has no existing unit-test coverage of any kind, confirmed above), 0
+failures, 0 errors.
+
+### Disposition
+
+One more real, independently-found defect fixed: an INCONCLUSIVE required phase was silently
+folded back into the final "all passed" `COMPLETE` banner one phase later - fixed with an
+explicit aggregate flag and a genuinely distinct terminal log line, plus the wrapper's own
+terminal-pattern regex (a real consumer-side gap, not cosmetic) updated to recognize the new
+outcome rather than hanging until timeout. Missing-index fallback side-effect testing
+investigated and confirmed genuinely not closeable with this suite's existing unit-test
+infrastructure (requires either new integration-test infrastructure or forbidden
+reflection/mocking) - precisely documented, not glossed over, not claimed fixed. Candidate-flag
+coverage gap in the evidence packets identified and addressed with a matching flag-on variant.
+No native run performed. No merge/Done transition made or implied.

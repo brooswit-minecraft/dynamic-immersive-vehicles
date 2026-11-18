@@ -183,6 +183,11 @@ public final class BuoyantHitchProbe {
  // nicety. Capturing ONLY, same as towedRemovalSpanSamples - never alters the real phase
  // sequence/timing/physics.
  private static final java.util.List<io.github.brooswitminecraft.div.LifecycleInvariants.Sample> towingReplacementSamples = new java.util.ArrayList<>();
+ /** MINECRAFT-545/547 (John's comment 54814): set true whenever a REQUIRED phase's own
+  * invariant check comes back INCONCLUSIVE rather than PASS. The final terminal banner reads
+  * this - an inconclusive required phase must never be folded into an unconditional "all
+  * passed" claim, even though the overall sequence still completes without a FAILED defect. */
+ private static boolean anyRequiredPhaseInconclusive = false;
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -822,6 +827,11 @@ public final class BuoyantHitchProbe {
     return;
    }
    if (replacementOutcome != io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.PASS) {
+    // 54814: this phase being INCONCLUSIVE (not proven PASS, not proven broken) must propagate
+    // to the terminal banner below - the prior version of this branch logged a per-phase
+    // warning and then let the run reach the unconditional "COMPLETE - ... all passed" banner
+    // regardless, silently converting an inconclusive required phase into an overall success.
+    anyRequiredPhaseInconclusive = true;
     LOGGER.warn("[DIV buoyantHitchProbe] TOWING_REPLACEMENT INCONCLUSIVE outcome=" + replacementOutcome
       + " - the per-tick stepping check could not be completed (not proof of a defect, and not"
       + " proof of success either); proceeding past this phase without claiming PASS for it");
@@ -911,7 +921,17 @@ public final class BuoyantHitchProbe {
    // and reported its own PASS above). Corrected to list every phase this method sequence
    // actually runs through to reach here, unconditionally - TOWING_REPLACEMENT included, since
    // reaching INSTALLED_PART_ATTACH's own completion is only possible after it already ran.
-   LOGGER.info("[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/TOWING_REPLACEMENT/DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");
+   // MINECRAFT-545/547 (John's comment 54814): that fix was itself incomplete - this banner
+   // still unconditionally said "all passed" even on a run where TOWING_REPLACEMENT only
+   // reached INCONCLUSIVE (see anyRequiredPhaseInconclusive's own doc). Branch on it now: a
+   // genuinely all-PASS run keeps the original COMPLETE banner; a run with an inconclusive
+   // required phase gets a DIFFERENT, explicitly non-"all passed" terminal line instead -
+   // never both, and never silently just the COMPLETE one regardless.
+   if (anyRequiredPhaseInconclusive) {
+    LOGGER.warn("[DIV buoyantHitchProbe] INCONCLUSIVE - every phase ran to its own completion with no FAILED defect, but at least one required phase (see the per-phase INCONCLUSIVE line above) did not reach a proven PASS outcome - this is NOT the same as \"all passed\", and must not be read as full success");
+   } else {
+    LOGGER.info("[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/TOWING_REPLACEMENT/DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");
+   }
   }
  }
 
