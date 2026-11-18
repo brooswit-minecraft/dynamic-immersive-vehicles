@@ -1615,6 +1615,14 @@ public final class PhysicsBridge {
       // connection object captured here is reference-identical to what that caller registered.
       // Captured BEFORE nulling - the field this reads would otherwise already be gone.
       recordFallbackClearConnectionObservation(v.uniqueUUID, v.towedByConnection);
+      // MINECRAFT-545/547 (John's comment 54979): the connection is actually gone now - its own
+      // ledger entry MUST be released, so a LATER, DIFFERENT TowingConnection object that
+      // happens to reuse the same vehicle/slot tuple gets its own fresh generation rather than
+      // this ledger growing forever OR (worse) a future lookup for the new object coincidentally
+      // never happening to collide with the old one anyway (it can't - IdentityHashMap keys on
+      // reference - but forgetting it here still keeps this ledger bounded to actually-live
+      // connections, same bounded discipline as the fallback observer map).
+      forgetConnectionGeneration(v.towedByConnection);
       v.towedByConnection = null;
      }
     });
@@ -1622,68 +1630,103 @@ public final class PhysicsBridge {
   });
  }
 
- /** MINECRAFT-545/547 (John's comment 54974): a PROPOSAL, not yet wired to any real packet -
-  * the pure identity-safety DECISION LOGIC a future DIV-owned server-to-client disconnect
-  * notification would need before this fixture's own client-side policy may safely act. Design
-  * rationale (full detail in VERIFICATION.md's own "Per 54974" entry):
-  * <p>The server missing a valid index into {@code towingConnections} does NOT imply the
-  * CLIENT also lacks one - the client's own copy may still be fully intact, in which case the
-  * real, public {@code disconnectTrailer(int)} should be used with the CLIENT's OWN index, not
-  * skipped. Only if the client ALSO lacks a valid index does this fall back to the same
-  * idempotent, public-only cleanup {@link #fallbackClearConnection} already performs server-side.
-  * <p>Critical safety requirement (54974's own explicit correction): the same vehicle-UUID pair
-  * can legitimately disconnect and reconnect - an old, late/replayed notification about a
-  * now-superseded connection must NEVER tear down a genuine REPLACEMENT connection to the same
-  * pair. {@link TowingConnectionIdentity} captures every field {@code TowingConnection} actually
-  * exposes that could distinguish one connection from another (both vehicle UUIDs plus all four
-  * group/connection-slot indices) - a notification is only ever acted on if the client's OWN
-  * current connection for that towed vehicle matches it in EVERY one of those fields.
-  * <p><b>Disclosed, not glossed over</b>: {@code TowingConnection} has no generation/session/
-  * timestamp field of its own, and DIV cannot add one to a dependency class it does not own
-  * without reflection (forbidden). A reconnect to the EXACT SAME hitch/hookup points for the
-  * EXACT SAME vehicle pair would therefore produce a byte-identical {@link
-  * TowingConnectionIdentity} to the one it replaced - genuinely indistinguishable through any
-  * API this investigation has found to be supported. This residual ambiguity is the smallest
-  * upstream (MTS-side) addition that would fully close it: a connection generation/session
-  * counter in {@code TowingConnection} itself. Until/unless that exists upstream, this policy's
-  * own match requirement is the closest supported mitigation - it still correctly preserves the
-  * overwhelmingly common case (any replacement that differs in EVEN ONE field: a different
-  * vehicle, a different hitch/hookup point, etc.), and still never fabricates an index or
-  * touches private/protected state to narrow the remaining gap further. */
+ /** MINECRAFT-545/547 (John's comment 54979): CORRECTED - the 54974 round's own tuple-only
+  * {@code TowingConnectionIdentity.equals()} match was NOT actually safe: the same vehicle UUID
+  * pair reconnecting at the EXACT SAME hitch/hookup slot produces a byte-identical tuple to the
+  * connection it replaced, which the 54974 round's own policy would have torn down anyway -
+  * exactly the hazard it claimed to guard against, not merely a disclosed residual edge case.
+  * Tuple equality alone can never distinguish two DIFFERENT {@code TowingConnection} OBJECTS
+  * that happen to describe the same pair/slot - only real identity can. Fixed by requiring an
+  * actual GENERATION match, never a tuple-only guess, and FAILING CLOSED (never disconnecting)
+  * whenever that generation cannot be established on both ends - per 54979's own explicit
+  * instruction. */
  public record TowingConnectionIdentity(
      java.util.UUID towingVehicleUuid, java.util.UUID towedVehicleUuid,
      int hitchGroupIndex, int hitchConnectionIndex,
      int hookupGroupIndex, int hookupConnectionIndex) {}
 
+ /** MINECRAFT-545/547 (John's comment 54979): "Server-side reference identity CAN distinguish
+  * same-tuple generations" - a bounded, identity-keyed ledger assigning a monotonically
+  * increasing generation number to each DISTINCT {@code TowingConnection} OBJECT the server ever
+  * sees, lazily on first lookup (no connect-time hook needed to establish correctness: two
+  * different objects are, by definition, never the same key in an {@code IdentityHashMap},
+  * regardless of which one is looked up first or how similar their own field values are).
+  * {@code forget} MUST be called once a connection is torn down (either path) so this does not
+  * grow unbounded for the lifetime of a long-running server - same bounded-opt-in discipline as
+  * {@link #fallbackObservers} (54870's own correction of an earlier unbounded-counter mistake). */
+ private static final java.util.Map<Object, Long> connectionGenerations = new java.util.IdentityHashMap<>();
+ private static long nextConnectionGeneration = 0;
+
+ /** Returns the existing generation for this exact connection OBJECT if already assigned, else
+  * assigns and returns a fresh one - pure identity, {@code ==} semantics via
+  * {@code IdentityHashMap}, never {@code equals()}. A null {@code connection} has no generation
+  * (returns null) - callers must treat "no connection" and "no generation" as the same thing. */
+ public static Long connectionGeneration(Object connection) {
+  if (connection == null) return null;
+  return connectionGenerations.computeIfAbsent(connection, c -> nextConnectionGeneration++);
+ }
+
+ /** Releases this connection's own ledger entry - callers MUST call this once a connection is
+  * actually torn down (either the normal disconnect path or this class's own fallback), so a
+  * LATER, DIFFERENT object that happens to reuse the same tuple gets its own fresh generation
+  * rather than this ledger growing forever. A no-op for a connection with no entry. */
+ public static void forgetConnectionGeneration(Object connection) {
+  if (connection != null) connectionGenerations.remove(connection);
+ }
+
  /** What a client receiving a (proposed, not-yet-implemented) stale-disconnect notification
   * should do, given its OWN current state - never a blind instruction from the server alone. */
  public enum StaleDisconnectAction {
-  /** The client's own current connection for this towed vehicle matches the notification
-   * exactly, AND the client's own towingConnections list still contains it at a real index -
-   * use that REAL, CLIENT-OWN index with the actual public {@code disconnectTrailer(int)}. */
+  /** The client's own current connection for this towed vehicle is a CONFIRMED generation match
+   * (not merely a tuple match) for the notified connection, AND the client's own
+   * towingConnections list still contains it at a real index - use that REAL, CLIENT-OWN index
+   * with the actual public {@code disconnectTrailer(int)}. */
   DISCONNECT_BY_CLIENT_OWN_INDEX,
-  /** The client's own current connection matches, but the client ALSO has no valid index for
-   * it (same structural gap as the server's own fallback) - apply the same idempotent,
-   * public-only cleanup, never fabricating an index. */
+  /** Confirmed generation match, but the client ALSO has no valid index for it (same structural
+   * gap as the server's own fallback) - apply the same idempotent, public-only cleanup, never
+   * fabricating an index. */
   IDEMPOTENT_CLEANUP_ONLY,
-  /** The client has no current connection for this towed vehicle at all, OR has a DIFFERENT
-   * one (a genuine replacement, or simply never had one) - the notification does not apply;
-   * taking any action here would risk tearing down a connection this notification was never
-   * actually about. Always the safe default. */
-  IGNORE_NOTIFICATION
+  /** The client has no current connection for this towed vehicle at all, or has a DIFFERENT one
+   * (confirmed by generation mismatch, a genuine replacement) - the notification does not apply;
+   * acting here would tear down a connection this notification was never about. */
+  IGNORE_NOTIFICATION,
+  /** MINECRAFT-545/547 (John's comment 54979): the tuple matches, but a trustworthy GENERATION
+   * could not be established for one or both sides (the client never received a generation
+   * binding for its own current connection, or the notification itself carries none) - per
+   * 54979's own explicit instruction, an ambiguous notification MUST fail closed, never
+   * disconnect on a tuple-only guess. This is a standing, disclosed acceptance gap, not a
+   * silently-accepted risk - see VERIFICATION.md's own "Per 54979" entry for why client-side
+   * generation binding is not yet implemented (it requires a connect-time hook DIV does not yet
+   * have, not merely a disconnect-time one). */
+  AMBIGUOUS_NO_OP
  }
 
  /** Pure, MTS/Minecraft-free: decides what a client should do with a stale-disconnect
-  * notification, given only comparable identity data - no live object references, no network
-  * I/O, directly unit-testable with synthetic values. {@code notified} is the identity of the
-  * connection the SERVER cleared via the fallback path; {@code clientCurrent} is null if the
-  * client currently has no connection at all for the named towed vehicle, else the identity of
-  * whatever connection it currently has; {@code clientHasValidIndex} is only consulted when
-  * {@code clientCurrent} is non-null and matches - whether the client's OWN towingConnections
-  * list still contains that exact connection at a real index. */
+  * notification, given comparable identity data AND a real generation match - no live object
+  * references, no network I/O, directly unit-testable with synthetic values.
+  * <p>{@code notified} is the identity of the connection the SERVER cleared;
+  * {@code notifiedGeneration} is that connection's own generation number as the SERVER assigned
+  * it (null if the server itself never established one - should not happen in practice once
+  * wired, but the policy must still fail closed rather than assume).
+  * {@code clientCurrent}/{@code clientCurrentGeneration} are the client's OWN current connection
+  * for the same towed vehicle and ITS generation as the CLIENT bound it (null for either if the
+  * client has no current connection, or never received a generation binding for it - the two
+  * nulls are deliberately not distinguished, since either way nothing trustworthy is known).
+  * {@code clientHasValidIndex} is only consulted once a generation match is confirmed - whether
+  * the client's own {@code towingConnections} list still contains that exact connection at a
+  * real index. */
  public static StaleDisconnectAction decideStaleDisconnectAction(
-     TowingConnectionIdentity notified, TowingConnectionIdentity clientCurrent, boolean clientHasValidIndex) {
-  if (clientCurrent == null || !clientCurrent.equals(notified)) return StaleDisconnectAction.IGNORE_NOTIFICATION;
+     TowingConnectionIdentity notified, Long notifiedGeneration,
+     TowingConnectionIdentity clientCurrent, Long clientCurrentGeneration,
+     boolean clientHasValidIndex) {
+  if (clientCurrent == null) return StaleDisconnectAction.IGNORE_NOTIFICATION;
+  if (!clientCurrent.equals(notified)) return StaleDisconnectAction.IGNORE_NOTIFICATION;
+  // Tuple matches - but per 54979, that alone proves nothing about identity. Only a CONFIRMED
+  // generation match on both sides may proceed; either side missing a generation, or the two
+  // generations actually differing (same tuple, different object - the exact replacement
+  // scenario this fixture exists to protect), fails closed.
+  if (notifiedGeneration == null || clientCurrentGeneration == null) return StaleDisconnectAction.AMBIGUOUS_NO_OP;
+  if (!notifiedGeneration.equals(clientCurrentGeneration)) return StaleDisconnectAction.IGNORE_NOTIFICATION;
   return clientHasValidIndex ? StaleDisconnectAction.DISCONNECT_BY_CLIENT_OWN_INDEX : StaleDisconnectAction.IDEMPOTENT_CLEANUP_ONLY;
  }
 

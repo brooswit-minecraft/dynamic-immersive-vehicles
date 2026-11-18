@@ -13335,3 +13335,120 @@ matrix requested (942 tests, 0 failures). No live packet, no client/server wirin
 run in this round - per John's own explicit instruction, that follows only after this proposal
 and its safety logic are reviewed. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on
 success remain two distinct, unblurred records. No merge/Done transition made or implied.
+
+## Per 54979: the 54974 round's own tuple-only match was NOT actually safe - a real
+## identity-generation ledger, and a corrected policy that fails closed on ambiguity
+
+John's exact-head review of the 54974 round's own commit found a real, confirmed-live bug: the
+original `decideStaleDisconnectAction` matched purely on `TowingConnectionIdentity.equals()` -
+field-value equality of both vehicle UUIDs plus all four hitch/hookup indices. But the SAME
+vehicle pair reconnecting at the EXACT SAME slot produces a byte-identical tuple to the
+connection it replaced - the original policy would have torn down that REPLACEMENT, which is
+precisely the hazard it claimed to defend against. The prior round's own prose correctly
+IDENTIFIED this as a disclosed limitation, but the actual CODE did not fail closed for it - a
+real gap between the stated design intent and what was implemented, not merely a residual edge
+case accepted on the record. Also corrected: a "different hitch/hookup slot" test does not, and
+never did, establish SAME-slot generation safety (a different claim entirely); the prior
+`repeatedDelivery` test checked that the PURE function returns the same output twice, which says
+nothing about whether applying that output twice to real, mutable state is actually safe
+(a stateful idempotency claim the prior round's own wording implied but never tested).
+
+### The fix: real reference identity, not tuple-value equality
+
+`PhysicsBridge` now maintains `connectionGenerations`, a bounded, identity-keyed
+(`IdentityHashMap`) ledger assigning a monotonically increasing generation number to each
+DISTINCT `TowingConnection` OBJECT the server ever looks up - lazily, on first touch, via
+`connectionGeneration(Object)`. Because `IdentityHashMap` keys on `==`, never `equals()`, two
+different connection objects can NEVER collide into the same generation regardless of how
+similar their own field values are - this is the actual, correct mechanism for "server-side
+reference identity CAN distinguish same-tuple generations," per John's own framing.
+`forgetConnectionGeneration(Object)` releases an entry once a connection is actually torn down
+(wired into the real fallback `clearConnection` call site, captured in the same place/order as
+the existing identity-matched fallback observer) - bounded, same discipline as every other
+observer/ledger this investigation has already built (`fallbackObservers`, 54870's own
+correction of an earlier unbounded-counter mistake).
+
+### The corrected policy - fails closed on ambiguity, never on a tuple-only guess
+
+`decideStaleDisconnectAction` now takes the notified connection's own generation AND the
+client's own current-connection generation (both nullable), in addition to the two
+`TowingConnectionIdentity` tuples:
+- Tuple mismatch (wrong vehicle, or any of the four slot indices differs) -> `IGNORE_NOTIFICATION`
+  - unambiguous, unchanged from before.
+- Tuple MATCHES, but either side's generation is `null` (never established) -> **new**
+  `AMBIGUOUS_NO_OP` - per John's own explicit instruction ("ambiguous notification MUST no-op/
+  fail closed... remain explicit acceptance gap, never disconnect replacement"), this is a
+  standing, disclosed gap, not a silently-accepted risk.
+- Tuple matches AND both generations are known but DIFFER -> `IGNORE_NOTIFICATION` - the exact
+  same-tuple-different-generation regression case this round exists to fix. Confirmed by a new
+  test (`sameTupleButDifferentGenerationIsASafeReplacementNeverDisconnected`) using the precise
+  scenario John described: server notifies about generation 1 (the connection it cleared); by
+  the time the notification is processed, the client's current connection for the identical
+  tuple is generation 2 (a genuine, later replacement) - the policy correctly refuses to act.
+- Tuple matches AND generations match -> proceeds exactly as the 54974 round described
+  (`DISCONNECT_BY_CLIENT_OWN_INDEX` if the client's own list still has a valid index,
+  `IDEMPOTENT_CLEANUP_ONLY` otherwise).
+
+### What full client-side generation binding would still require - disclosed, not glossed over
+
+The server-side ledger above answers "can the SERVER tell two connection objects apart" (yes).
+It does NOT by itself answer "how does the CLIENT ever learn a connection's own generation
+number in the first place," which is the other half John explicitly asked to be established:
+every relevant create/remove/reconnect, initial tracking, late-join/retracking, and world/
+session reset would need to advance or (re)bind identity consistently, with documented ordering
+between MTS's own connect packets and any DIV-owned generation message.
+
+This is NOT yet implemented, and is disclosed precisely rather than worked around: DIV currently
+has NO hook at all on the normal connect path (`connectTrailer` is called entirely by MTS's own
+code; DIV only ever intercepts the orphan-release/fallback path). Establishing client-side
+binding would require DIV to add a NEW hook observing every connect (not just the disconnect
+fallback this investigation has worked on so far) and propagate a generation tag to the client
+at that time - most plausibly as a second, DIV-owned "connection generation announcement"
+packet sent alongside (after) MTS's own existing connect-sync packet, since MTS's own packet
+format cannot be extended with an extra field without modifying the dependency. The client would
+then need to store that binding keyed by its own local connection object (again by reference,
+mirroring the server-side ledger design) until that connection is itself superseded or torn
+down locally. Open, undecided questions this would still need to resolve: what happens on a
+late-joining player who was never present for the original connect-sync (no binding to receive);
+whether a world/session reload should invalidate every existing binding; and the exact ordering
+guarantee between MTS's own connect packet and DIV's own companion generation packet (NeoForge/
+Netty preserves per-channel ordering, but two logically-related packets sent from two different
+registration points still need an explicit contract, not an assumed one). Per John's own
+instruction, until this binding is actually established, every notification that depends on it
+MUST continue to resolve to `AMBIGUOUS_NO_OP` (as implemented) rather than ever being allowed to
+assume a match - this is the disclosed, standing acceptance gap, not a silently-accepted risk.
+
+### Tests
+
+11 new/corrected `PhysicsBridgeClassificationTest` cases: the critical same-tuple-different-
+generation regression; tuple-matches-but-generation-unknown (both sides, either side alone) all
+correctly `AMBIGUOUS_NO_OP`; the two existing ignore cases (no connection, wrong vehicle, wrong
+slot) re-verified under the new 5-argument signature; both corrected exact-match cases
+(valid-index disconnect, idempotent cleanup) now requiring a genuine generation match, not a
+tuple guess; the PURE replay-stability test (same inputs, same output - honestly scoped to what
+it actually proves, not implying statefulness); a NEW, separate STATEFUL idempotency test
+(`applyingTheSameDecisionTwiceToStatefulClientModelMutatesOnlyOnce`) using a minimal synthetic
+client-state model to actually confirm a replayed notification causes no second real mutation,
+not merely that the pure decision repeats; and 5 direct tests of the `connectionGeneration`/
+`forgetConnectionGeneration` ledger itself (distinct objects never collide, repeated lookup is
+stable, forgetting then reassigning never reuses the old value, null handling on both methods).
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **950 tests** (up from 942), 0 failures, 0 errors.
+
+### Disposition
+
+A real, confirmed-live safety bug from the 54974 round's own implementation is fixed: tuple-only
+matching is replaced with an actual identity-generation requirement that fails closed whenever a
+trustworthy match cannot be established, never on a value-equality guess. The server-side half
+of the identity mechanism (a bounded, reference-identity-keyed generation ledger) is implemented
+and tested now. The client-side half (generation binding over the normal connect path) is
+explicitly NOT yet implemented, with the exact reason (no existing DIV hook on connect),
+the concrete design it would need (a companion generation-announcement packet, binding keyed by
+the client's own connection object), and the open ordering/binding questions it still needs to
+resolve, all disclosed precisely rather than glossed over - and, per John's own instruction,
+every notification that would depend on that missing binding fails closed (`AMBIGUOUS_NO_OP`)
+rather than ever assuming a match. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on
+success remain two distinct, unblurred records, as before. No live packet, no client/server
+wiring, no new native run in this round. No merge/Done transition made or implied.
