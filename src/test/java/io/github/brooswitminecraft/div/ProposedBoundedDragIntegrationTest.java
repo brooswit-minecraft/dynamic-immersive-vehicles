@@ -173,4 +173,144 @@ class ProposedBoundedDragIntegrationTest {
   assertTrue(totalEnergyChange <= 1e-6,
    "three floats' clamped drag impulses, applied sequentially against live state, must keep the true combined energy change non-positive");
  }
+
+ // MINECRAFT-545/547 (John's comments 55116/55129/55133): the failing-before/passing-after
+ // demonstration tying this already-reviewed bound math directly to the ticket's OWN observed
+ // divergence, using REALISTIC values drawn from the actual native log rather than an arbitrary
+ // synthetic magnitude (the existing tests above already use a deliberately-huge synthetic
+ // drag force to test the bound math in isolation; this one instead runs the REAL
+ // Buoyancy.directionalDragForce formula with the real fixture's own mass/half-extents and a
+ // point speed matching what M545-packet-9732b32-replacementprobe-round2's own log actually
+ // recorded at the tick the divergence began (gameTime=204: towed point speed ~17 m/s,
+ // tuning.waterDrag's real default of 400.0, fraction=1.0 - fully submerged, matching that run).
+
+ @Test void theRealUnboundedDragFormulaAtTheActualDivergenceTickWouldExceedTheNonReversingBound() {
+  // "BEFORE": the OLD unconditional path's own real formula, fed the REAL high-speed value this
+  // ticket's own native run actually produced - confirms the raw force's own implied impulse
+  // genuinely WOULD overshoot past a non-reversing bound (the mechanism, not an assumption).
+  double speed = 17.0; // m/s, matching the magnitude observed at the actual divergence tick
+  double dragCoefficient = 400.0; // Overrides.FALLBACK.waterDrag's own real default
+  double rawDragForceMagnitude = -Buoyancy.directionalDragForce(speed, speed, 1.0, dragCoefficient, 1.0);
+  // (directionalDragForce returns a signed, opposing value; magnitude of interest is positive)
+  assertTrue(rawDragForceMagnitude > 100_000, "sanity check: this must reproduce the same ~10^5 N order of magnitude the real log recorded at gameTime=204, not an arbitrary number");
+
+  double mass = 400.0; // this fixture's own real configured massKg
+  MassData massData = TestMassData.solidBox(mass, new Vector3d(0.6, 0.3, 1.0)); // this fixture's own real half-extents
+  Vector3d arm = new Vector3d(0.5, -0.2, 0.0); // this fixture's own real floatLocalOffset
+  Vector3d direction = new Vector3d(0, -1, 0); // drag opposing a +y point velocity component
+  Vector3d linearVelocity = new Vector3d(0, speed, 0);
+  Vector3d angularVelocity = new Vector3d(0, 0, 0);
+  Vector3d position = new Vector3d(arm).add(massData.getCenterOfMass());
+  Vector3d pointVelocity = new Vector3d(angularVelocity).cross(arm, new Vector3d()).add(new Vector3d(linearVelocity));
+  double s = pointVelocity.dot(direction); // negative - direction opposes the point velocity
+  double k = massData.getInverseNormalMass(position, direction);
+  double nonReversingBound = Buoyancy.maxNonReversingImpulseMagnitude(s, k);
+  double rawImpulseMagnitude = rawDragForceMagnitude * DT;
+
+  assertTrue(rawImpulseMagnitude > nonReversingBound,
+    "the REAL unbounded formula's own impulse at this realistic high speed must genuinely exceed the non-reversing bound - this IS the actual instability mechanism, not a hypothetical");
+
+  // "AFTER": the SAME real inputs, through the already-reviewed bounded path - must not exceed
+  // the bound, and must still point the same direction (never reversed, never boosted).
+  Vector3d rawDragForceVector = new Vector3d(direction).mul(rawDragForceMagnitude);
+  Vector3d bounded = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, rawDragForceVector, linearVelocity, angularVelocity, DT);
+  double boundedImpulseMagnitude = bounded.length() * DT;
+  assertTrue(boundedImpulseMagnitude <= nonReversingBound + 1e-9,
+    "the bounded path, given the EXACT SAME realistic high-speed inputs that broke the unconditional path, must never exceed the non-reversing bound");
+  assertTrue(bounded.length() < rawDragForceMagnitude,
+    "the bound must actually have engaged (scaled down), not merely returned the raw force unchanged, for these realistic high-speed inputs");
+ }
+
+ @Test void theRealDragFormulaAtOrdinaryLowSpeedIsUnaffectedByBounding() {
+  // Preserves correct low-speed behavior (John's comment 55133, item 2): at the modest speeds
+  // this fixture's own log shows BEFORE the divergence began (gameTime=203: ~0.3-0.5 m/s), the
+  // bound must be a genuine no-op - the fix must change nothing where nothing was ever unstable.
+  double speed = 0.4; // m/s, matching the real pre-divergence magnitude from the actual log
+  double dragCoefficient = 400.0;
+  double rawDragForceMagnitude = -Buoyancy.directionalDragForce(speed, speed, 1.0, dragCoefficient, 1.0);
+  assertTrue(rawDragForceMagnitude < 100, "sanity check: low speed must give a small, ordinary force, matching the real log's own pre-divergence values");
+
+  double mass = 400.0;
+  MassData massData = TestMassData.solidBox(mass, new Vector3d(0.6, 0.3, 1.0));
+  Vector3d arm = new Vector3d(0.5, -0.2, 0.0);
+  Vector3d direction = new Vector3d(0, -1, 0);
+  Vector3d linearVelocity = new Vector3d(0, speed, 0);
+  Vector3d angularVelocity = new Vector3d(0, 0, 0);
+  Vector3d rawDragForceVector = new Vector3d(direction).mul(rawDragForceMagnitude);
+
+  Vector3d bounded = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, rawDragForceVector, linearVelocity, angularVelocity, DT);
+
+  assertEquals(0, new Vector3d(rawDragForceVector).sub(bounded).length(), 1e-9,
+    "at ordinary low speed the bounded result must be IDENTICAL to the raw unconditional force - zero behavior change where nothing was ever unstable");
+ }
+
+ @Test void theBoundScalesCorrectlyAcrossMassVariation() {
+  // Mass variation (John's comment 55133, item 3): a heavier body has a smaller inverse
+  // effective mass (k), so the SAME point velocity yields a LARGER non-reversing bound (more
+  // inertia resists the same velocity change) - confirmed directly, not merely asserted.
+  Vector3d arm = new Vector3d(0.5, -0.2, 0.0);
+  Vector3d direction = new Vector3d(0, -1, 0);
+  Vector3d position = new Vector3d(arm);
+  double s = -17.0;
+  double kLight = TestMassData.solidBox(100.0, new Vector3d(0.6, 0.3, 1.0)).getInverseNormalMass(position, direction);
+  double kHeavy = TestMassData.solidBox(1600.0, new Vector3d(0.6, 0.3, 1.0)).getInverseNormalMass(position, direction);
+  assertTrue(kHeavy < kLight, "a 16x heavier body must have a smaller inverse effective mass");
+  double boundLight = Buoyancy.maxNonReversingImpulseMagnitude(s, kLight);
+  double boundHeavy = Buoyancy.maxNonReversingImpulseMagnitude(s, kHeavy);
+  assertTrue(boundHeavy > boundLight, "a heavier body must tolerate a LARGER impulse before reversing the same velocity component - more inertia, not less");
+ }
+
+ @Test void theBoundScalesCorrectlyAcrossDtVariation() {
+  // dt/substep variation (John's comment 55133, item 3): the bound itself (an impulse budget,
+  // in N*s) does not depend on dt at all - only how much of a given FORCE's own impulse
+  // (force*dt) that budget actually permits does. Confirmed: a smaller dt means the SAME force
+  // produces a SMALLER impulse, so it is relatively less likely to exceed the SAME bound.
+  double mass = 400.0;
+  MassData massData = TestMassData.solidBox(mass, new Vector3d(0.6, 0.3, 1.0));
+  Vector3d arm = new Vector3d(0.5, -0.2, 0.0);
+  Vector3d direction = new Vector3d(0, -1, 0);
+  Vector3d linearVelocity = new Vector3d(0, 17.0, 0);
+  Vector3d angularVelocity = new Vector3d(0, 0, 0);
+  double rawDragForceMagnitude = -Buoyancy.directionalDragForce(17.0, 17.0, 1.0, 400.0, 1.0);
+  Vector3d rawDragForceVector = new Vector3d(direction).mul(rawDragForceMagnitude);
+
+  Vector3d boundedFullDt = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, rawDragForceVector, linearVelocity, angularVelocity, DT);
+  Vector3d boundedHalfDt = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, rawDragForceVector, linearVelocity, angularVelocity, DT / 2.0);
+  // A smaller dt raises the SAME force's own allowed headroom (same budget, smaller per-step
+  // impulse demand) - the half-dt result must be AT LEAST as large in magnitude (never smaller).
+  assertTrue(boundedHalfDt.length() >= boundedFullDt.length() - 1e-6,
+    "a smaller dt must never result in a MORE aggressively clamped force than a larger one, for the same physical force");
+ }
+
+ @Test void theBoundRespectsAnisotropicPerAxisMultipliers() {
+  // Anisotropic drag (John's comment 55133, item 3): a different per-axis multiplier changes
+  // the RAW force fed into the bound, but the bound math itself treats whatever magnitude it is
+  // given identically regardless of which axis multiplier produced it - confirmed by feeding
+  // two different multiplier-scaled raw forces through the same bound and checking each is
+  // still correctly capped relative to its OWN magnitude, not silently ignored.
+  double speed = 17.0;
+  double mass = 400.0;
+  MassData massData = TestMassData.solidBox(mass, new Vector3d(0.6, 0.3, 1.0));
+  Vector3d arm = new Vector3d(0.5, -0.2, 0.0);
+  Vector3d direction = new Vector3d(0, -1, 0);
+  Vector3d linearVelocity = new Vector3d(0, speed, 0);
+  Vector3d angularVelocity = new Vector3d(0, 0, 0);
+
+  double rawLowMultiplier = -Buoyancy.directionalDragForce(speed, speed, 1.0, 400.0, 0.5); // half-strength axis
+  double rawHighMultiplier = -Buoyancy.directionalDragForce(speed, speed, 1.0, 400.0, 2.0); // double-strength axis
+  Vector3d boundedLow = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, new Vector3d(direction).mul(rawLowMultiplier), linearVelocity, angularVelocity, DT);
+  Vector3d boundedHigh = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, new Vector3d(direction).mul(rawHighMultiplier), linearVelocity, angularVelocity, DT);
+
+  assertTrue(boundedLow.length() <= rawLowMultiplier, "the lower-multiplier axis must still be correctly bounded relative to its own (smaller) raw force");
+  assertTrue(boundedHigh.length() <= rawHighMultiplier, "the higher-multiplier axis must still be correctly bounded relative to its own (larger) raw force");
+  // Both must respect the SAME underlying non-reversing bound (the bound depends on velocity/
+  // mass/arm, not on which axis multiplier produced the raw force magnitude).
+  Vector3d position = new Vector3d(arm).add(massData.getCenterOfMass());
+  Vector3d pointVelocity = new Vector3d(angularVelocity).cross(arm, new Vector3d()).add(new Vector3d(linearVelocity));
+  double s = pointVelocity.dot(direction);
+  double k = massData.getInverseNormalMass(position, direction);
+  double bound = Buoyancy.maxNonReversingImpulseMagnitude(s, k);
+  assertTrue(boundedLow.length() * DT <= bound + 1e-9);
+  assertTrue(boundedHigh.length() * DT <= bound + 1e-9);
+ }
 }

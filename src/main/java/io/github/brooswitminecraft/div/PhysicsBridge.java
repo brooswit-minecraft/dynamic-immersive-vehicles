@@ -2932,16 +2932,17 @@ public final class PhysicsBridge {
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
     case ROTOR -> stepRotor(v,q,up,installedPropellers);
    };
-   // MINECRAFT-545/547 (John's comments 54706/54709): this Body's own `box` is a plain
-   // BoxPhysicsObject (not the shape-aware variant) - its getMassTracker() would silently give
-   // Sable's shape-ignorant mass/6 fallback, so a correct solid-box MassData is built directly
-   // from this Body's own mass/halfExtents fields instead, ONLY when the candidate flag is
-   // actually enabled (54709: a prior version built this - a Matrix3d inversion plus a new
-   // MassData instance - unconditionally, every tick, even with the flag off, contradicting the
-   // "passing it costs nothing when disabled" claim; this Body has no stored field to reuse the
-   // way BuoyantBody's own box.getMassTracker() does, so gate the construction itself instead).
-   MassData candidateMassData = BuoyantForces.SEQUENTIAL_DRAG_BOUND_ENABLED ? BoxInertia.solidBoxMassData(mass,halfExtents) : null;
-   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle,candidateMassData);
+   // MINECRAFT-545/547 (John's comments 54706/54709, gate updated for 55129): this Body's own
+   // `box` is a plain BoxPhysicsObject (not the shape-aware variant) - its getMassTracker()
+   // would silently give Sable's shape-ignorant mass/6 fallback, so a correct solid-box MassData
+   // is built directly from this Body's own mass/halfExtents fields instead. Built whenever the
+   // bounded-drag path is actually going to read it (now the default - skipped only when
+   // BuoyantForces.UNBOUNDED_DRAG_OVERRIDE is set, never in any shipped/default configuration -
+   // 54709's own point stands: building this - a Matrix3d inversion plus a new MassData
+   // instance - unconditionally regardless of whether it will ever be read would be wasted work,
+   // so the gate mirrors BuoyantForces.apply's own condition exactly, not a separate decision).
+   MassData boundedDragMassData = BuoyantForces.UNBOUNDED_DRAG_OVERRIDE ? null : BoxInertia.solidBoxMassData(mass,halfExtents);
+   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle,boundedDragMassData);
    if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));

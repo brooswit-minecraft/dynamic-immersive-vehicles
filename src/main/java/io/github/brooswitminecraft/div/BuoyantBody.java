@@ -135,9 +135,10 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
   // large angular velocity (vs. the tick it first appears) is visible directly, not inferred.
   if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
     "[DIV lifecycleDiagnostic] BuoyantBody.step entry v=" + v.uniqueUUID + " linearVelocity=" + velocity + " angularVelocity=" + angular);
-  // MINECRAFT-545/547 (John's comment 54706): box is already a ShapeAwareBoxPhysicsObject, so
-  // its own getMassTracker() already reports the correct solid-box tensor - used only by
-  // BuoyantForces.SEQUENTIAL_DRAG_BOUND_ENABLED (off by default; see that field's own doc).
+  // MINECRAFT-545/547 (John's comment 54706, usage updated for 55129): box is already a
+  // ShapeAwareBoxPhysicsObject, so its own getMassTracker() already reports the correct
+  // solid-box tensor - used by BuoyantForces' now-default bounded-drag path (see
+  // BuoyantForces.UNBOUNDED_DRAG_OVERRIDE's own doc).
   boolean awake = BuoyantForces.apply(level, v, tuning, center, hullVolume, pose, q, inverse, velocity, angular, handle, box.getMassTracker());
   if (awake) box.wakeUp();
   // Sable is authoritative. The pose here is the most recent completed simulation step.

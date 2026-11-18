@@ -56,33 +56,66 @@ final class BuoyantForces {
  private BuoyantForces() {}
 
  /**
-  * MINECRAFT-545/547 (John's comments 54700/54703/54706): UNWIRED-BY-DEFAULT candidate for
-  * bounding each float's drag impulse via {@link ProposedFreshVelocityDragCallSite}'s virtual-
-  * buoyancy-first scheme, using FRESH per-float velocity (via {@code handle.getLinearVelocity}/
-  * {@code getAngularVelocity}, addressing the confirmed stale-once-per-tick-snapshot finding -
-  * see VERIFICATION.md "Corrections per 54700") instead of this method's own cached
-  * {@code velocity}/{@code angular} parameters. OFF by default - set
-  * {@code -Ddiv.sequentialDragBound=true} to enable; never set in any shipped/default
-  * configuration. When {@code false} (always, today), the per-float force computed and applied
-  * below is IDENTICAL to the code path that existed before this flag was added - zero behavior
-  * change. Production activation/native execution remain gated per every standing instruction
-  * in this investigation; this exists as a reviewable patch artifact, not an activated feature.
+  * MINECRAFT-545/547 (John's comments 55116/55129/55133): BOUNDED BY DEFAULT as of this change -
+  * the opt-in candidate flag ({@code div.sequentialDragBound}) is retired; this is now an
+  * explicit opt-OUT kill-switch for emergency rollback to the OLD unconditional integration only
+  * ({@code -Ddiv.unboundedDragOverride=true}), never set in any shipped/default configuration.
+  *
+  * <p><b>Why this is safe to make the default (the derivation, not merely "the candidate passed
+  * a native run"):</b> {@code Buoyancy.directionalDragForce} is a quadratic drag law,
+  * {@code F = -fraction*coefficient*multiplier*speed*v}, applied via a single explicit (forward-
+  * Euler) impulse per tick - {@code impulse = F*dt}, added directly to velocity via
+  * {@code v' = v + impulse*k} where {@code k} is the effective inverse mass along the impulse
+  * direction at the application point ({@code MassData.getInverseNormalMass(position,
+  * direction)}, already accounting for the lever-arm/rotational coupling). Such a step is
+  * linearly stable (does not overshoot the point-velocity component it opposes past zero, i.e.
+  * does not REVERSE it) exactly when {@code |impulse|*k <= |s|} where {@code s} is that
+  * component's own CURRENT value (this is the textbook explicit-Euler bound for
+  * {@code dv/dt=-k'*v}, already documented adjacent to {@code directionalDragForce} itself).
+  * {@code Buoyancy.maxNonReversingImpulseMagnitude(s,k) = |s|/k} is exactly this threshold -
+  * ALREADY DERIVED (and independently re-verified here, not merely copied) directly from
+  * mass (via {@code k}), the CURRENT predicted velocity ({@code s}), and the force actually
+  * about to be applied this step - not a heuristic safety margin. Below that threshold, drag
+  * never overshoots past zero regardless of speed, so the fix is EXACTLY the dissipative bound
+  * the physics itself requires, no more aggressive and no less.
+  *
+  * <p><b>Why ordinary (low-speed) behavior is unaffected:</b> the bound only ever engages
+  * ({@link ProposedBoundedDragIntegration#boundedDragForce} only ever returns something OTHER
+  * than the raw force) when the raw force's own impulse would already exceed {@code |s|/k} -
+  * at the speeds this hull sees in ordinary floating/towing (confirmed directly in
+  * {@code ProposedBoundedDragIntegrationTest.theRealDragFormulaAtOrdinaryLowSpeedIsUnaffectedByBounding},
+  * using this exact ticket's own real pre-divergence log values), this never triggers; the fix
+  * is a true no-op there, not a general damping change.
+  *
+  * <p><b>Why this generalizes beyond the float-only towing scenario this ticket is about:</b>
+  * the bound depends only on {@code massData}/{@code arm}/the CURRENT velocity/the force already
+  * computed - the SAME quadratic drag law applies uniformly to every float on every buoyant
+  * body (ground vehicles that float, boats, amphibious craft - anything routing through
+  * {@code BuoyantForces.apply}), not specially to this ticket's own fixture. It never touches
+  * {@code stepGround}/{@code stepFlight}/{@code stepRotor} at all (those are separate methods,
+  * confirmed unchanged) - only the water-drag contribution inside THIS method's own per-float
+  * loop. Buoyancy itself ({@code buoyancyOnlyForce}) is never touched, scaled, or bounded by
+  * any of this - only the SEPARATE drag contribution.
+  *
+  * <p>{@code massData} is now always built at both real call sites ({@code BuoyantBody} already
+  * did unconditionally; {@code PhysicsBridge.Body}'s own construction gate is updated alongside
+  * this flag) rather than only when the old opt-in flag was set.
   */
- static final boolean SEQUENTIAL_DRAG_BOUND_ENABLED = Boolean.getBoolean("div.sequentialDragBound");
+ static final boolean UNBOUNDED_DRAG_OVERRIDE = Boolean.getBoolean("div.unboundedDragOverride");
 
  /** Applies this tick's forces to handle and returns whether anything was submerged/thrusting
   * (the caller's cue to wake the Sable body). */
  /**
-  * {@code massData} (MINECRAFT-545/547, John's comment 54706): the body's own solid-box
-  * {@code MassData}, needed ONLY by the {@link #SEQUENTIAL_DRAG_BOUND_ENABLED} candidate branch
-  * below - both real call sites (BuoyantBody, PhysicsBridge.Body) already have what they need to
-  * build one correctly (BuoyantBody's own {@code box} is already a {@code ShapeAwareBoxPhysicsObject}
-  * with a correct {@code getMassTracker()}; PhysicsBridge.Body's own {@code box} is a plain
-  * {@code BoxPhysicsObject}, whose {@code getMassTracker()} would silently give Sable's
-  * shape-ignorant {@code mass/6} fallback - so it builds one directly from its own
-  * {@code mass}/{@code halfExtents} fields via {@link BoxInertia#solidBoxMassData} instead).
-  * When the flag above is {@code false} (always, today), this parameter is read NOWHERE below -
-  * passing it costs nothing and changes nothing.
+  * {@code massData} (MINECRAFT-545/547, John's comment 54706, usage updated for 55129): the
+  * body's own solid-box {@code MassData}, needed by the bounded-drag path below (now the
+  * DEFAULT, not an opt-in candidate) - both real call sites (BuoyantBody, PhysicsBridge.Body)
+  * build one correctly (BuoyantBody's own {@code box} is already a
+  * {@code ShapeAwareBoxPhysicsObject} with a correct {@code getMassTracker()}; PhysicsBridge.Body's
+  * own {@code box} is a plain {@code BoxPhysicsObject}, whose {@code getMassTracker()} would
+  * silently give Sable's shape-ignorant {@code mass/6} fallback - so it builds one directly from
+  * its own {@code mass}/{@code halfExtents} fields via {@link BoxInertia#solidBoxMassData}
+  * instead). Only read below when {@link #UNBOUNDED_DRAG_OVERRIDE} is set (never in any
+  * shipped/default configuration) is this parameter unused.
   */
  static boolean apply(ServerLevel level, EntityVehicleF_Physics v, Overrides.Tuning tuning, Vector3d center,
      double hullVolume, Pose3d pose, Quaterniond q, Quaterniond inverse, Vector3d velocity, Vector3d angular,
@@ -170,10 +203,11 @@ final class BuoyantForces {
    // Buoyancy.directionalDragForce's own doc for why.
    // MINECRAFT-545/547 (John's comment 54706): extracted into a reusable lambda, taking an
    // arbitrary WORLD-frame point velocity rather than always `localVelocity`, SOLELY so the
-   // SEQUENTIAL_DRAG_BOUND_ENABLED candidate branch below can recompute drag fresh from a
+   // bounded-drag branch below (now the default, per 55129) can recompute drag fresh from a
    // virtual post-buoyancy point velocity instead of reusing this (pre-buoyancy) one - the
-   // DEFAULT call immediately below still passes `localVelocity`, so the unconditional result is
-   // byte-for-byte identical to before this refactor.
+   // UNCONDITIONAL call immediately below still passes `localVelocity`, so that raw value stays
+   // byte-for-byte identical to before this file's own candidate-era refactor (it is still
+   // computed and logged for comparison, only no longer what gets APPLIED by default).
    java.util.function.Function<org.joml.Vector3dc, Vector3d> dragWorldForceFrom = (pointVelocityWorld) -> {
     double spd = pointVelocityWorld.length();
     Vector3d result = new Vector3d(0, 0, 0);
@@ -188,17 +222,21 @@ final class BuoyantForces {
    };
    if (speed > 1e-6) force.add(dragWorldForceFrom.apply(localVelocity));
 
-   // MINECRAFT-545/547 (John's comments 54700/54703/54706): UNWIRED-BY-DEFAULT candidate. When
-   // SEQUENTIAL_DRAG_BOUND_ENABLED is false (always, today), forceToApply stays IDENTICAL to
-   // `force` above - zero behavior change. When enabled: reads FRESH per-float velocity from
-   // the handle (not this method's own once-per-tick `velocity`/`angular` parameters - the
-   // confirmed staleness gap, VERIFICATION.md "Corrections per 54700"), converts to LOCAL frame
-   // (matching massData's own body-local tensor frame), recomputes drag fresh from a VIRTUAL
-   // post-buoyancy state (buoyancy's own impulse applied to a COPY of velocity, never the real
-   // body - VERIFICATION.md "Corrections per 54706"), and bounds that recomputed drag against
-   // that same virtual state - buoyancy itself is never touched/scaled.
+   // MINECRAFT-545/547 (John's comments 55116/55129/55133): BOUNDED BY DEFAULT now - see
+   // UNBOUNDED_DRAG_OVERRIDE's own doc for the full derivation of why this is safe as the
+   // default, not merely "the candidate passed one native run". `forceToApply` stays IDENTICAL
+   // to the raw unconditional `force` above ONLY if the override kill-switch is set (never in
+   // any shipped/default configuration) or massData is unexpectedly unavailable (should not
+   // happen from either real call site - see BuoyantBody.remove()'s own doc and the construction
+   // site in PhysicsBridge.Body.step). Otherwise: reads FRESH per-float velocity from the handle
+   // (not this method's own once-per-tick `velocity`/`angular` parameters - the confirmed
+   // staleness gap, VERIFICATION.md "Corrections per 54700"), converts to LOCAL frame (matching
+   // massData's own body-local tensor frame), recomputes drag fresh from a VIRTUAL post-buoyancy
+   // state (buoyancy's own impulse applied to a COPY of velocity, never the real body -
+   // VERIFICATION.md "Corrections per 54706"), and bounds that recomputed drag against that same
+   // virtual state - buoyancy itself is never touched/scaled, only ever the drag contribution.
    Vector3d forceToApply = force;
-   if (SEQUENTIAL_DRAG_BOUND_ENABLED && massData != null) {
+   if (!UNBOUNDED_DRAG_OVERRIDE && massData != null) {
     Vector3d localArm = anchor; // anchor is already body-local, pre-q-transform - no extra conversion needed
     Vector3d freshLocalLinear = inverse.transform(handle.getLinearVelocity(new Vector3d()));
     Vector3d freshLocalAngular = inverse.transform(handle.getAngularVelocity(new Vector3d()));
@@ -212,22 +250,22 @@ final class BuoyantForces {
     Vector3d combinedLocal = ProposedFreshVelocityDragCallSite.virtualBuoyancyFirstCombinedForce(
       massData, localArm, localBuoyancyOnly, recomputeDragLocal, freshLocalLinear, freshLocalAngular, PhysicsBridge.DT);
     forceToApply = q.transform(combinedLocal);
-    // MINECRAFT-545/547 (John's comment 54709): gated with contextActive too (matching the
-    // neighboring fixture/window-gated diagnostics in this method - a prior version checked
-    // only GroundContactDiagnostics.ENABLED, emitting unscoped evidence). Also now reports the
-    // candidate's OWN buoyancy/bounded-drag breakdown explicitly (not just the combined
-    // force), since the general diagnostic block below still reports the OLD/unconditional
-    // model's own breakdown - a reviewer needs both, separately labeled, not just the combined
-    // totals, to actually evaluate the new scheme.
+    // MINECRAFT-545/547 (John's comment 54709, field names updated for 55129 - this is now the
+    // DEFAULT path, not a candidate): gated with contextActive too (matching the neighboring
+    // fixture/window-gated diagnostics in this method - a prior version checked only
+    // GroundContactDiagnostics.ENABLED, emitting unscoped evidence). Reports THIS (now default)
+    // path's own buoyancy/bounded-drag breakdown explicitly (not just the combined force),
+    // since the diagnostic block below still separately reports the OLD/unconditional model's
+    // own breakdown for comparison - a reviewer needs both, separately labeled.
     if (GroundContactDiagnostics.ENABLED && contextActive) {
-     Vector3d candidateBuoyancyWorld = q.transform(new Vector3d(localBuoyancyOnly));
-     Vector3d candidateBoundedDragWorld = new Vector3d(forceToApply).sub(candidateBuoyancyWorld);
+     Vector3d defaultBuoyancyWorld = q.transform(new Vector3d(localBuoyancyOnly));
+     Vector3d defaultBoundedDragWorld = new Vector3d(forceToApply).sub(defaultBuoyancyWorld);
      com.mojang.logging.LogUtils.getLogger().info(
       "[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID + " gameTime=" + level.getGameTime()
-        + " sequentialDragBoundCandidate=true floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
+        + " sequentialDragBoundDefault=true floatLocalOffset=(" + flt.localOffset.x + "," + flt.localOffset.y + "," + flt.localOffset.z + ")"
         + " unconditionalForce=" + force
-        + " candidateBuoyancyOnlyForce=" + candidateBuoyancyWorld + " candidateBoundedDragForce=" + candidateBoundedDragWorld
-        + " candidateForceToApply=" + forceToApply);
+        + " defaultBuoyancyOnlyForce=" + defaultBuoyancyWorld + " defaultBoundedDragForce=" + defaultBoundedDragWorld
+        + " defaultForceToApply=" + forceToApply);
     }
    }
    // MINECRAFT-545/547 (John's comment 54357) - diagnostic-only, gated behind the existing
@@ -255,9 +293,10 @@ final class BuoyantForces {
    if (GroundContactDiagnostics.ENABLED) {
     // MINECRAFT-545/547 (John's comment 54709): explicitly labeled "unconditional" - this is
     // ALWAYS the OLD/unconditional model's own buoyancy/drag breakdown (computed above
-    // regardless of SEQUENTIAL_DRAG_BOUND_ENABLED), not the candidate's. When the candidate is
-    // active, appliedImpulse below reflects ITS OWN result (forceToApply), not this breakdown -
-    // see the candidate's own separate diagnostic line above for ITS buoyancy/drag breakdown.
+    // regardless of UNBOUNDED_DRAG_OVERRIDE), kept purely for comparison - it is no longer what
+    // gets applied by default (see 55129). appliedImpulse below reflects the DEFAULT bounded
+    // result (forceToApply) whenever the override is not set - see the default path's own
+    // separate diagnostic line above for ITS OWN buoyancy/drag breakdown.
     Vector3d unconditionalDragOnlyForce = new Vector3d(force).sub(buoyancyOnlyForce);
     com.mojang.logging.LogUtils.getLogger().info("[DIV buoyantForcesDiagnostic] v=" + v.uniqueUUID
       + " gameTime=" + level.getGameTime()
