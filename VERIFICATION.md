@@ -12485,3 +12485,73 @@ other-connections, identity, client-packet) and found safe only as bounded test 
 non-snap connections, never as production remediation - stated at the correct confidence level
 throughout, with every claim traced to specific decompiled source rather than asserted. No
 native run performed. No merge/Done transition made or implied.
+
+## Per 54849: the public state change itself is the real oracle, not the chat packet -
+## positive-control requirement, and two confidence corrections
+
+54849 confirmed commit `e07e056` as received, asked one narrow question, and corrected two
+places where the prior entry's confidence was pitched higher than the underlying tracing
+actually supports.
+
+### A better oracle was already sitting in the same traced code: public state, not the chat packet
+
+54849: "does actual public connection/list state after a bounded normal request expose
+successful same-group connection creation even when ALREADY_TOWED reason chat is
+unobservable?" Yes - re-reading `connectTrailer`'s own body (already quoted in the prior
+entry): on SUCCESS it does `this.towingConnections.add(connection);
+connection.towedVehicle.towedByConnection = connection;` - both are the SAME public fields the
+fault-injection step already reads and mutates. So the real oracle does not need the chat
+packet at all: after driving the normal request via `towingConnectionVar`, inspect
+`hookupEntity.towedByConnection` (or `towingVehicle.towingConnections`'s own size/contents)
+directly. If the leak is real (index still marked in-use), the request is rejected and NEITHER
+field changes; if not, a new connection appears in both. This resolves the "oracle result
+is unobservable" limitation from the prior entry for the SUCCESS/no-new-connection signal
+specifically - no bot/client, no new Mixin needed for THIS part.
+
+**The required positive control, exactly as 54849 names it**: absence of a new connection, by
+itself, does NOT prove rejection was due to `ALREADY_TOWED` specifically - `checkIfTrailerCanConnect`
+has several other rejection outcomes (`FEEDBACK_LOOP`, `NOTFOUND`, `TOOFAR`, `WRONGHITCH`,
+`MISMATCH`) that produce the exact same "no new connection" signal for unrelated reasons (wrong
+geometry, wrong type, out of range). A correct fixture therefore needs a MATCHED control run -
+identical group/geometry/eligibility, but with a PROPER prior disconnect (the real
+`disconnectTrailer`, index genuinely valid, no fault injection) instead of the leak-inducing
+setup - confirming a new connection DOES form in that control case. Only then does "no new
+connection" in the leak scenario become attributable to the leak specifically, rather than an
+unrelated eligibility failure. Not yet built or run - the requirement is stated precisely, not
+implemented (54849 did not authorize instrumentation/native/CI work this round either).
+
+### Two confidence corrections, not restatements of the same claims
+
+54849 named two places where the prior entry overstated what source-reading alone establishes:
+
+- **"Safe" was a hypothesis, not a proven runtime fact.** The restore-then-disconnect
+  teardown analysis in the prior entry is grounded in real source tracing, but remains
+  exactly that - a hypothesis consistent with what the decompiled source shows, NOT something
+  confirmed by actually running it. Restated precisely: it would need real fixture validation
+  (a native run) before being relied on as anything stronger than "the source, as read, does
+  not show an obvious problem."
+- **The "no other connection can race in" claim rests on ONE check, not exhaustive proof.**
+  The prior entry's reasoning cited `checkIfTrailerCanConnect`'s own `ALREADY_TOWED`/
+  `connectionGroupsIndexesInUse.contains(...)` check as blocking a competing connection from
+  claiming the same slot. That is one real, traced guard - it is NOT a claim that this
+  investigation has exhaustively verified every alternate path into a connection (e.g. whatever
+  NBT-load-time reconciliation paths exist, traced only partially in the entry two rounds back)
+  cannot somehow bypass it, nor that `connectionGroupsIndexesInUse`'s own bookkeeping has been
+  shown complete/exhaustive on every code path that touches it. Restated at the correct,
+  narrower scope: this one check, as read, blocks this one entry point - not a general proof
+  about every path into the connection system.
+
+The separate client-notification gap remains exactly as stated before - untouched by this
+entry, still open, still unverified.
+
+### Disposition
+
+One real improvement to the fixture design: the oracle does not need the unobservable chat
+packet at all for the SUCCESS/no-new-connection signal - the same public `towingConnections`/
+`towedByConnection` fields already used for fault injection serve directly, provided a matched
+positive-control run is also built to rule out unrelated rejection reasons (not yet built). Two
+overstated confidence claims from the prior entry corrected to their actual, narrower,
+source-reading-only scope - "safe" is a hypothesis pending real validation, and "no race"
+rests on one traced check, not an exhaustive proof. No instrumentation, native run, or CI job
+added - none was authorized this round, and the question asked did not require one. No
+merge/Done transition made or implied.
