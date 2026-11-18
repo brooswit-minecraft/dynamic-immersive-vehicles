@@ -55,11 +55,35 @@ final class BodyRegistry<K, B> {
   * progress on unrelated entries. Each entry is visited and (if matching) removed/attempted at
   * most once per call, so a second call naturally cannot double-touch an entry this call
   * already removed - there is nothing left in {@code active} for it to match again.
+  *
+  * <p>MINECRAFT-545/547 (Wroosbit review, comment 55214): {@code predicate.test(...)} ITSELF was
+  * still evaluated outside any per-entry isolation - production predicates read {@code
+  * v.isValid} (cleanup) or {@code b.level() == level} (unload), either of which can itself throw
+  * (e.g. a corrupted/partially-torn-down entity). A throwing predicate hits the exact same
+  * underlying problem {@code onRemove} already had: the collection view's own {@code removeIf}
+  * aborts its entire iteration immediately, so every entry after the one whose PREDICATE threw
+  * is never even tested. Now individually try/caught per entry, same as {@code onRemove}.
+  *
+  * <p>The disposition is deliberately the OPPOSITE of {@code onRemove} throwing, though: when
+  * {@code onRemove} throws, the predicate has ALREADY confirmed this entry meets the removal
+  * criterion, so removing it anyway reflects "every attempt was made, its fate is decided." When
+  * the PREDICATE ITSELF throws, eligibility was never actually established - this entry's own
+  * removal criterion is genuinely UNKNOWN, not confirmed-but-partially-failed. Removing it here
+  * would act on a criterion that was never proven true; the entry is instead RETAINED, left for
+  * a future sweep to correctly evaluate once whatever transient condition caused the throw has
+  * resolved. The exception is still captured as a first-failure candidate and re-thrown at the
+  * end, same as any other step's own failure - never swallowed, just not grounds for removal.
   */
  void removeIf(BiPredicate<K, B> predicate, BiConsumer<K, B> onRemove) {
   RuntimeException[] firstFailure = new RuntimeException[1];
   active.entrySet().removeIf(e -> {
-   if (!predicate.test(e.getKey(), e.getValue())) return false;
+   boolean matches;
+   try { matches = predicate.test(e.getKey(), e.getValue()); }
+   catch (RuntimeException ex) {
+    if (firstFailure[0] == null) firstFailure[0] = ex;
+    return false; // eligibility unknown - retain, do not act on an unproven criterion
+   }
+   if (!matches) return false;
    try { onRemove.accept(e.getKey(), e.getValue()); }
    catch (RuntimeException ex) { if (firstFailure[0] == null) firstFailure[0] = ex; }
    return true;

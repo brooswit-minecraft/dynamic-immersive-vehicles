@@ -974,6 +974,83 @@ class PhysicsBridgeClassificationTest {
   assertEquals(1, stepAfterLaterFailureRan[0], "the step after the SECOND (later) failure must still run too - a later failure must not block anything after IT either");
  }
 
+ /**
+  * MINECRAFT-545/547 (Wroosbit review, comment 55214): one more layer of the same bug class.
+  * {@code BodyRegistry.removeIf}'s own {@code predicate.test(...)} call was still evaluated
+  * OUTSIDE any per-entry isolation - production predicates read {@code v.isValid} (cleanup) or
+  * {@code b.level() == level} (unload), either of which can itself throw. A throwing predicate
+  * hit the exact same underlying problem {@code onRemove} already had: the collection's own
+  * {@code removeIf} aborts its entire iteration immediately, so every entry after the one whose
+  * PREDICATE threw was never even tested.
+  *
+  * <p>The disposition here is the OPPOSITE of an {@code onRemove} failure: when the predicate
+  * itself throws, eligibility was never actually established, so the entry is RETAINED (not
+  * removed) - acting on an unproven criterion would be wrong; a future sweep gets a fresh chance
+  * once whatever transient condition caused the throw has resolved. See {@code BodyRegistry}'s
+  * own doc comment for the full reasoning.
+  *
+  * <p>Uses the same live-order-determination technique as the {@code onRemove}-failure test
+  * above (no prediction): of two entries whose predicate COULD throw, whichever the real sweep
+  * actually visits first throws; a THIRD entry's own predicate never throws and always returns
+  * false (deterministic, independent of the shared flag), so it can never accidentally become
+  * "the one that throws" regardless of where it falls in the real iteration order.
+  */
+ @Test void predicateThatThrowsRetainsTheEntryAndStillLetsLaterMatchingBodiesRun() {
+  var bodies = new BodyRegistry<String, FakeVehicleBody>();
+  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
+  var bodyA = new FakeVehicleBody(); var bodyB = new FakeVehicleBody(); var nonMatchingBody = new FakeVehicleBody();
+  bodies.activate("bodyA", bodyA);
+  bodies.activate("bodyB", bodyB);
+  bodies.activate("nonMatching", nonMatchingBody);
+  pending.stage("bodyA", new Object());
+  pending.stage("bodyB", new Object());
+
+  boolean[] alreadyThrown = {false};
+  List<String> actualPredicateVisitOrder = new ArrayList<>();
+  RuntimeException[] originalException = new RuntimeException[1];
+  java.util.function.BiPredicate<String, FakeVehicleBody> predicate = (k, b) -> {
+   if (k.equals("nonMatching")) return false; // deterministic - never throws, never matches
+   actualPredicateVisitOrder.add(k);
+   if (!alreadyThrown[0]) {
+    alreadyThrown[0] = true;
+    originalException[0] = new RuntimeException("predicate eligibility check failure for " + k);
+    throw originalException[0];
+   }
+   return true; // the subsequently-visited eligible entry genuinely matches
+  };
+
+  boolean[] jointReleased = {false};
+  RuntimeException thrown = assertThrows(RuntimeException.class, () ->
+    bodies.removeIf(predicate, (k, b) -> PhysicsBridge.cleanupOneBodyThreeActions(
+      () -> jointReleased[0] = true, b::remove, () -> pending.cleanup(k))));
+
+  assertEquals(2, actualPredicateVisitOrder.size(), "both eligible entries' predicates must actually be evaluated");
+  String firstKey = actualPredicateVisitOrder.get(0), secondKey = actualPredicateVisitOrder.get(1);
+  var firstBody = firstKey.equals("bodyA") ? bodyA : bodyB;
+  var secondBody = secondKey.equals("bodyA") ? bodyA : bodyB;
+
+  assertSame(originalException[0], thrown, "the exact predicate-throwing exception object must be the one ultimately propagated");
+  assertTrue(bodies.isActive(firstKey), "the entry whose own eligibility check threw must be RETAINED - eligibility unknown, not confirmed-but-failed");
+  assertEquals(0, firstBody.removeCallCount, "no removal was ever attempted on it - eligibility was never established");
+  assertFalse(bodies.isActive(secondKey), "a LATER, genuinely-matching entry must still be fully processed despite the earlier predicate failure");
+  assertEquals(1, secondBody.removeCallCount);
+  assertNull(pending.get(secondKey));
+  assertTrue(jointReleased[0], "the later matching entry's own joint-release action must have run");
+  assertTrue(bodies.isActive("nonMatching"), "a non-matching entry (predicate correctly false, no throw) is left untouched");
+  assertEquals(0, nonMatchingBody.removeCallCount);
+
+  // Repeat-call check: the retained entry's predicate gets a fresh, successful chance; the
+  // already-removed matching entry and the still-non-matching entry are correctly unaffected.
+  boolean[] secondCallJointReleased = {false};
+  assertDoesNotThrow(() -> bodies.removeIf((k, b) -> !k.equals("nonMatching"),
+    (k, b) -> PhysicsBridge.cleanupOneBodyThreeActions(() -> secondCallJointReleased[0] = true, b::remove, () -> pending.cleanup(k))),
+    "second call: the retained entry's predicate must get a fresh, successful evaluation and must not throw again");
+  assertFalse(bodies.isActive(firstKey), "second call: the previously-retained entry is now removed");
+  assertEquals(1, firstBody.removeCallCount);
+  assertTrue(secondCallJointReleased[0]);
+  assertTrue(bodies.isActive("nonMatching"), "still untouched after the repeat call");
+ }
+
  @Test void aMissingEntryIsSimplyAbsentNotAnError() {
   var registry = new BodyRegistry<String, FakeVehicleBody>();
   var hitches = new HitchRegistry<String>();
