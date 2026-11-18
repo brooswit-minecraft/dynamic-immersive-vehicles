@@ -853,6 +853,62 @@ class PhysicsBridgeClassificationTest {
   assertEquals(1, lowerAttempts[0], "second call must not attempt the lower box again");
  }
 
+ /**
+  * MINECRAFT-545/547 (John's comment 55194, gap 2): PhysicsBridge.cleanup()/unload() now run
+  * their own registry sweep AND every independent sweep (pendingInheritedVelocity, the
+  * handbrake/H-pattern/wheel-aux maps) through this SAME {@link PhysicsBridge#removeIndependentResources}
+  * method, as one flat list of equally-independent steps (per the 55194 fix immediately above
+  * this test file's own production source) - exactly mirroring the real production composition,
+  * not a reimplementation. The registry-sweep step itself is built from the real {@link
+  * BodyRegistry#removeIf}/{@link HitchRegistry#release} (the same pair {@code
+  * cleanupOneRegisteredBody} uses), with a genuinely failing joint on exactly ONE body - by
+  * design, only that one body can ever be the thrower, so this test's own assertions do not
+  * depend on {@code BodyRegistry}'s underlying {@code IdentityHashMap} iteration order (per
+  * John's own explicit caution: sorting results after the fact does not establish real temporal
+  * order - this test instead ensures there is only ONE possible cause of the failure, so order
+  * never matters). Confirms: the OTHER body within the same registry sweep still gets its own
+  * joint removed; every unrelated independent sweep (modeled here as simple counters, since the
+  * real sweeps are themselves just {@code Collection.removeIf} calls on unrelated maps, already
+  * covered by this file's and {@code HitchRegistryTest}'s own existing validity-predicate tests)
+  * still runs despite the registry sweep's own failure; a non-matching registry entry is left
+  * untouched; and the exact first exception is the one ultimately reported.
+  */
+ @Test void outerSweepRunsEveryIndependentStepDespiteARegistryLevelFailureAndLeavesNonMatchingEntries() {
+  var hitches = new HitchRegistry<String>();
+  var bodies = new BodyRegistry<String, Object>();
+  bodies.activate("failingBody", new Object());
+  bodies.activate("okBody", new Object());
+  bodies.activate("nonMatchingBody", new Object()); // never meets the sweep's own removal predicate
+  hitches.reconcile("failingBody", "truckA", PhysicsBridgeClassificationTest::fakeJointThatThrowsOnRemove);
+  boolean[] okRemoved = {false};
+  hitches.reconcile("okBody", "truckB", () -> fakeJoint(okRemoved));
+
+  int[] pendingOnlySweepRan = {0}, handbrakeSweepRan = {0}, wheelSweepRan = {0};
+
+  RuntimeException thrown = assertThrows(RuntimeException.class, () -> PhysicsBridge.removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true, () -> true },
+    new Runnable[]{
+      // Mirrors the real registry-sweep step: only "failingBody" and "okBody" match (true), the
+      // same predicate shape cleanup()/unload() use (!v.isValid / b.level()==level), never
+      // touching "nonMatchingBody".
+      () -> bodies.removeIf((k, b) -> !k.equals("nonMatchingBody"), (k, b) -> hitches.release(k)),
+      // Mirrors pendingInheritedVelocity.removeIf - independent of BodyRegistry entirely (e.g. a
+      // vehicle already deactivated before being fully registered).
+      () -> pendingOnlySweepRan[0]++,
+      () -> handbrakeSweepRan[0]++,
+      () -> wheelSweepRan[0]++ }));
+
+  assertEquals("Sable-level removal failure", thrown.getMessage(),
+    "the first (and only possible) exception, from the registry sweep, must still be the one ultimately reported");
+  assertTrue(okRemoved[0], "the OTHER body's own joint, within the SAME registry sweep, must still be removed despite failingBody's own failure");
+  assertFalse(bodies.isActive("failingBody"), "the failing entry is still removed from the registry (attempted, not proof of native release - see BodyRegistry's own doc)");
+  assertFalse(bodies.isActive("okBody"));
+  assertTrue(bodies.isActive("nonMatchingBody"), "an entry that never matched the sweep's own predicate is left untouched, not removed");
+  assertEquals(1, pendingOnlySweepRan[0], "the independent pending-only sweep must still run despite the registry sweep's own failure");
+  assertEquals(1, handbrakeSweepRan[0], "the independent handbrake/H-pattern sweep must still run despite the registry sweep's own failure");
+  assertEquals(1, wheelSweepRan[0], "the independent wheel-aux sweep must still run despite the registry sweep's own failure");
+ }
+
  @Test void aMissingEntryIsSimplyAbsentNotAnError() {
   var registry = new BodyRegistry<String, FakeVehicleBody>();
   var hitches = new HitchRegistry<String>();

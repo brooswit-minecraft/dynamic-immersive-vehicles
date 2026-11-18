@@ -1969,41 +1969,60 @@ public final class PhysicsBridge {
     new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true },
     new Runnable[]{ () -> hitches.release(v), () -> b.remove(), () -> pendingInheritedVelocity.cleanup(v) });
  }
+ /**
+  * MINECRAFT-545/547 (John's comment 55194 - the same bug class one level further out): {@code
+  * registry.removeIf(...)} is now internally resilient (captures its own first failure, visits
+  * every entry, rethrows at the end) - but a caller that invokes it as a bare statement with no
+  * try/catch around THAT call still lets its rethrown failure propagate straight out of {@code
+  * cleanup()}/{@code unload()}, skipping every statement after it - specifically the sweeps
+  * below that are explicitly independent of {@code BodyRegistry} (they catch an entity already
+  * deactivated before being fully registered, e.g. a failed {@code chassisBoundsChanged}
+  * reconstruction - Review 53399/ticket MINECRAFT-504). Both methods now run the registry sweep
+  * and every independent sweep through {@link #removeIndependentResources} as one flat list of
+  * equally-independent steps: one sweep throwing no longer prevents any of the others from
+  * running, and only the FIRST exception encountered across the WHOLE method is reported, after
+  * every step has been attempted - not swallowed, not allowed to block unrelated progress.
+  */
  public static void cleanup() {
-  // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
-  // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
-  registry.removeIf((v, b) -> !v.isValid, PhysicsBridge::cleanupOneRegisteredBody);
-  // Review 53399: the registry.removeIf above only cleans pendingInheritedVelocity for a vehicle
-  // STILL present in BodyRegistry - a vehicle already deactivated (e.g. a failed
-  // chassisBoundsChanged reconstruction, which deactivates BEFORE attempting to rebuild) is
-  // absent from BodyRegistry by the time cleanup() runs, so that callback never fires for it.
-  // This sweep is independent of BodyRegistry, keyed only by pendingInheritedVelocity's own
-  // staged entries, so it still finds and removes that exact orphan case.
-  pendingInheritedVelocity.removeIf(v -> !v.isValid);
-  // Ticket MINECRAFT-504: same leak shape as pendingInheritedVelocity above, for the wheel
-  // handbrake/H-pattern state - independent of BodyRegistry, swept directly against validity
-  // (in addition to advanceWheelAuxInputs's own staleness-timeout sweep, which only covers a
-  // client that goes quiet, not an entity invalidated some other way).
-  handbrakeMagnitude.keySet().removeIf(v -> !v.isValid);
-  handbrakeLastUpdateTick.keySet().removeIf(v -> !v.isValid);
-  hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid);
-  hPatternLastUpdateTick.keySet().removeIf(engine -> !engine.isValid);
-  hPatternTrackers.keySet().removeIf(engine -> !engine.isValid);
-  wheelAuxOwner.keySet().removeIf(v -> !v.isValid);
+  removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true, () -> true, () -> true, () -> true, () -> true, () -> true },
+    new Runnable[]{
+      // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these
+      // two removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
+      () -> registry.removeIf((v, b) -> !v.isValid, PhysicsBridge::cleanupOneRegisteredBody),
+      // Review 53399: the registry sweep above only cleans pendingInheritedVelocity for a
+      // vehicle STILL present in BodyRegistry - a vehicle already deactivated is absent from
+      // BodyRegistry by the time cleanup() runs, so that callback never fires for it. This sweep
+      // is independent of BodyRegistry, keyed only by pendingInheritedVelocity's own staged
+      // entries, so it still finds and removes that exact orphan case.
+      () -> pendingInheritedVelocity.removeIf(v -> !v.isValid),
+      // Ticket MINECRAFT-504: same leak shape as pendingInheritedVelocity above, for the wheel
+      // handbrake/H-pattern state - independent of BodyRegistry, swept directly against validity
+      // (in addition to advanceWheelAuxInputs's own staleness-timeout sweep, which only covers a
+      // client that goes quiet, not an entity invalidated some other way).
+      () -> handbrakeMagnitude.keySet().removeIf(v -> !v.isValid),
+      () -> handbrakeLastUpdateTick.keySet().removeIf(v -> !v.isValid),
+      () -> hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid),
+      () -> hPatternLastUpdateTick.keySet().removeIf(engine -> !engine.isValid),
+      () -> hPatternTrackers.keySet().removeIf(engine -> !engine.isValid),
+      () -> wheelAuxOwner.keySet().removeIf(v -> !v.isValid) });
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level() == level, PhysicsBridge::cleanupOneRegisteredBody);
-  // Review 53399: same independent sweep as cleanup() above, matched on the unloading level
-  // instead of validity - a vehicle's own level comes directly from v (the same accessor
-  // active()'s own lifecycle-refresh path already uses), not from any Body, so this needs no
-  // BodyRegistry lookup at all.
-  pendingInheritedVelocity.removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
-  handbrakeMagnitude.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
-  handbrakeLastUpdateTick.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
-  hPatternTargetByEngine.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
-  hPatternLastUpdateTick.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
-  hPatternTrackers.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
-  wheelAuxOwner.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true, () -> true, () -> true, () -> true, () -> true, () -> true },
+    new Runnable[]{
+      () -> registry.removeIf((v, b) -> b.level() == level, PhysicsBridge::cleanupOneRegisteredBody),
+      // Review 53399: same independent sweep as cleanup() above, matched on the unloading level
+      // instead of validity - a vehicle's own level comes directly from v (the same accessor
+      // active()'s own lifecycle-refresh path already uses), not from any Body, so this needs no
+      // BodyRegistry lookup at all.
+      () -> pendingInheritedVelocity.removeIf(v -> ((WorldAccessor)v.world).div$level() == level),
+      () -> handbrakeMagnitude.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level),
+      () -> handbrakeLastUpdateTick.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level),
+      () -> hPatternTargetByEngine.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level),
+      () -> hPatternLastUpdateTick.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level),
+      () -> hPatternTrackers.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level),
+      () -> wheelAuxOwner.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level) });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**
