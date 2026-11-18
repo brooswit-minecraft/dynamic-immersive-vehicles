@@ -608,4 +608,36 @@ class PhysicsBridgeClassificationTest {
  @Test void unregisterWithNullHandleIsASafeNoOp() {
   PhysicsBridge.unregisterFallbackObserver(null);
  }
+
+ // MINECRAFT-545/547 (John's comment 54929): a duplicate registration for the SAME vehicle UUID
+ // must not let the FIRST (now-stale) handle read or remove the SECOND registration's own state.
+
+ @Test void duplicateRegistrationForSameUuidMakesThePriorHandleStale() {
+  var vehicleUuid = java.util.UUID.randomUUID();
+  var firstConnection = new Object();
+  var secondConnection = new Object();
+  var firstHandle = PhysicsBridge.registerFallbackObserver(vehicleUuid, firstConnection);
+  var secondHandle = PhysicsBridge.registerFallbackObserver(vehicleUuid, secondConnection);
+  // An observation matching the SECOND registration's own connection.
+  assertTrue(PhysicsBridge.recordFallbackClearConnectionObservation(vehicleUuid, secondConnection));
+  assertEquals(1, PhysicsBridge.debugFallbackObserverMatchedCount(secondHandle),
+    "the second (live) handle must see its own matched observation");
+  assertEquals(0, PhysicsBridge.debugFallbackObserverMatchedCount(firstHandle),
+    "the first (now-stale) handle must NOT see the second registration's own matched count");
+  PhysicsBridge.unregisterFallbackObserver(firstHandle);
+ }
+
+ @Test void unregisteringAStaleHandleDoesNotRemoveTheNewerRegistration() {
+  var vehicleUuid = java.util.UUID.randomUUID();
+  var firstConnection = new Object();
+  var secondConnection = new Object();
+  var firstHandle = PhysicsBridge.registerFallbackObserver(vehicleUuid, firstConnection);
+  var secondHandle = PhysicsBridge.registerFallbackObserver(vehicleUuid, secondConnection);
+  PhysicsBridge.unregisterFallbackObserver(firstHandle);
+  // The SECOND registration must still be live - a stale handle's own unregister must be a no-op.
+  assertTrue(PhysicsBridge.recordFallbackClearConnectionObservation(vehicleUuid, secondConnection),
+    "the second registration must still be live after the first (stale) handle's own unregister");
+  assertEquals(1, PhysicsBridge.debugFallbackObserverMatchedCount(secondHandle));
+  PhysicsBridge.unregisterFallbackObserver(secondHandle);
+ }
 }

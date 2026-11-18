@@ -12959,3 +12959,138 @@ native run performed. No merge/Done transition made or implied. The rejection on
 `M545-packet-5304341-missingindexprobe/launch-wrapper.sh`'s own edit, and the client-notification
 gap (rejection reason reaching only a client-targeted chat packet, never server-logged), both
 remain separately open and unaddressed by this round, as before.
+
+## Per 54929: eligibility-gated verdict, fail-closed invariants, observer-handle identity,
+## chunk-force assertion, and a confirmed-broken packet wiring bug
+
+Independent review of commit c4a53df / comment 54928 (M545-packet-c4a53df and
+M545-packet-c4a53df-missingindexprobe) found the 54870 round NOT RELEASE-READY: one confirmed
+packet-wiring bug that would have silently prevented the probe from ever actually running if
+launched, and five independent source-level gaps. All five source-level items are fixed in this
+round; the packet-wiring bug is fixed in a brand-new packet (never by editing the two packets
+already declared in comment 54928 - the same standing rule from 54839/54921, now applying to
+packets this very session declared, not just older ones).
+
+### Confirmed packet-wiring bug: the probe flag was never actually going to be read
+
+`M545-packet-c4a53df-missingindexprobe/runServer.sh`'s own `cd` target correctly pointed at this
+packet's own isolated `rundir` - but its three `@`-referenced argument files
+(`serverRunClasspath.txt`/`serverRunVmArgs.txt`/`serverRunProgramArgs.txt`) still pointed at
+`$WORKTREE/build/moddev/...`, NOT this packet's own local copies - an artifact of copying
+`gradle createServerLaunchScript`'s own generated `runServer.sh` verbatim: that task always
+writes its own `@`-references pointing at its own output location (`build/moddev`), regardless
+of where the caller later copies the generated files. The packet's own local
+`serverRunVmArgs.txt` (the one with the actual candidate flag appended) was therefore NEVER
+going to be the file actually read at launch - only the SHARED file would be, which carried no
+such flag. The 12/12 preflight dry-run success never caught this because preflight's own check 1
+only ever compares the packet's own local files against THEMSELVES (`cd "$PACKET_DIR"`) - a
+self-referential check that can never detect that `runServer.sh`'s own internal `@`-paths point
+somewhere else entirely. **Confirmed, not merely suspected**: `cat`-ing the archived
+`runServer.sh` directly showed the `@/home/.../build/moddev/...` paths verbatim.
+
+**Fix (in the brand-new packet built for THIS round's own commit, never on the two already
+declared)**: the new packet's own `runServer.sh` is hand-written (not a verbatim copy of the
+generated one) to reference its OWN three local argument files by their own packet-local paths,
+with every other argument (classpath contents, program args, the `-Dfml.modFolders=...` build-
+output paths) left exactly as `createServerLaunchScript` generated them - only the three
+`@`-reference paths themselves are redirected. A new preflight check confirms the live
+`runServer.sh`'s own `@`-references actually resolve to the packet's own local files, not the
+shared ones - closing exactly the gap that let 12/12 pass vacuously before.
+
+### Five source-level fixes
+
+**1. `classifyLeakVerdict` had no eligibility input at all.** The real anchor-to-anchor distance
+(computed via `anchorWorldPoint`, added in the 54870 round) was only ever LOGGED - never fed into
+the verdict. A reconnect attempt that happened to succeed or fail for a purely geometric reason
+(a non-finite distance, or one genuinely outside the connection's own `JSONConnection.distance`
+eligibility radius of 4.0) could silently masquerade as a real `LEAK_CONFIRMED`/
+`LEAK_NOT_OBSERVED`/`NO_NEW_CONNECTION` result, without ever actually testing the group-index-
+reuse defect this fixture targets. Fixed via a new `AnchorEligibility` enum (`ELIGIBLE`/
+`INELIGIBLE`), a pure `classifyAnchorEligibility(double anchorDistance)` (ineligible iff
+non-finite or `> 4.0`), and a new `ReconnectAttempt(ReconnectOutcome, AnchorEligibility)` record.
+`classifyLeakVerdict` now takes two `ReconnectAttempt`s and gained a new `LeakVerdict` value,
+`INCONCLUSIVE_INELIGIBLE_ANCHOR`, checked immediately after `REQUEST_NOT_CONSUMED` (still highest
+priority) but ahead of the control-failure check - an ineligible anchor on EITHER side escalates
+regardless of what outcome it produced. `controlReconnectRequest`/`leakReconnectRequest` now
+compute and store `controlEligibility`/`leakEligibility` from the already-computed anchor
+distance; `controlDisconnect`'s own anomaly branch (no request ever issued) sets `INELIGIBLE` as
+an honest default rather than fabricating `ELIGIBLE` for geometry that was never measured (moot
+either way, since `REQUEST_NOT_CONSUMED` is checked first). 9 new
+`MissingIndexFallbackProbeTest` cases cover the new verdict's priority ordering against both
+other checks, plus `classifyAnchorEligibility`'s own boundary (exactly `4.0` is still eligible),
+above-threshold, and non-finite (`NaN`/`+Infinity`/`-Infinity`) cases.
+
+**2. `boundedOrFail` silently accepted an unexpectedly null/invalid entity as a PASS.** The
+original rationale ("already despawned/invalidated on purpose") does not actually describe any
+real call site: every one of this fixture's own `boundedOrFail` calls targets an entity that is
+supposed to remain valid for the full duration it is checked (the one entity this fixture
+deliberately invalidates, `towingA`, is never checked via this method again after its own
+`faultInject`-phase removal). The silent-pass branch therefore only ever fired for a genuinely
+UNEXPECTED invalidation - exactly the kind of anomaly this method exists to catch, not wave
+through. Fixed: `boundedOrFail` now fails closed (logs `FAILURE_DETECTED`, sets `phase = FAILED`,
+returns `false`) for any null/invalid entity, with no exception.
+
+**3. `awaitLeakFallback` accepted `matchedCount > 0` regardless of `mismatchedCount`.** A run
+that recorded, say, 1 matched AND 3 mismatched observations for the same registered vehicle
+would still have passed as confirmed fallback-entry, even though 3 unexplained mismatched
+invocations are themselves a real anomaly this fixture should surface, not silently tolerate.
+Fixed: now requires EXACTLY `matchedCount == 1 && mismatchedCount == 0` - any other combination
+falls through to the existing `FAILURE_DETECTED` anomaly branch, whose message already generically
+reports whatever the actual counts were.
+
+**4. `FallbackObserverHandle` identified only by vehicle UUID - duplicate registration was
+unsafe.** A second `registerFallbackObserver` call for the SAME `vehicleUuid` silently overwrote
+the first registration's own state in the shared map; a caller still holding the FIRST (now
+stale) handle could later call `unregisterFallbackObserver` and remove the SECOND registration's
+own live entry - an unrelated stale handle corrupting a newer, still-active registration it has
+no relationship to. Fixed in `PhysicsBridge`: `FallbackObserverState` and `FallbackObserverHandle`
+both now carry a unique, monotonically-increasing `token` assigned at registration time; both
+`unregisterFallbackObserver` and the `debugFallbackObserverMatchedCount`/
+`debugFallbackObserverMismatchedCount` readers now check the handle's own token against the
+currently-stored state's token (via a new `liveStateFor` helper) before acting - a stale handle
+reads zero and its own unregister is a safe no-op, never touching a newer registration. 2 new
+`PhysicsBridgeClassificationTest` cases (`duplicateRegistrationForSameUuidMakesThePriorHandleStale`,
+`unregisteringAStaleHandleDoesNotRemoveTheNewerRegistration`) confirm both directions.
+
+**5. Chunk cleanup unforced every tracked coordinate with no check that it hadn't been forced
+by something else first.** Blindly unforcing a chunk some OTHER system had already force-loaded
+for its own reasons would silently take away that system's own forced state - this fixture has
+no business doing that, and the prior code had no way to even detect it was happening. Fixed:
+`requestChunkGrid` now checks `ServerLevel.setChunkForced(...)`'s own return value (confirmed via
+the real decompiled source: `true` iff the call actually changed the forced set, i.e. the chunk
+was NOT already forced; `false` means it was already forced, no change made) and throws
+(caught by the existing try/catch, failing the fixture closed) if any chunk in this fixture's own
+grid was already forced before it touched it. This does NOT attempt general restoration of
+arbitrary pre-existing force state - it only ever asserts no pre-existing force state exists for
+THIS isolated fixture's own chunks, consistent with the fresh-world guarantee preflight's own
+check 4 already requires. The doc comment is explicit about this limited scope, per John's own
+"do not claim general restoration" instruction.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **936 tests** (up from 927 - 9 new `classifyLeakVerdict`/
+`classifyAnchorEligibility` cases + 2 new `PhysicsBridgeClassificationTest` observer-identity
+cases), 0 failures, 0 errors.
+
+### Disposition
+
+One confirmed, serious packet-wiring bug (the probe's own candidate flag was never actually
+going to be read at launch, despite 12/12 preflight passing) - fixed in a brand-new packet built
+for this round's own commit, never by editing either packet already declared in comment 54928.
+Five independent source-level gaps fixed: an uninformative verdict policy with no eligibility
+input at all (now eligibility-gated, with a new `INCONCLUSIVE_INELIGIBLE_ANCHOR` verdict checked
+in documented priority order); a bounds check that silently accepted an unexpectedly invalid
+entity (now fails closed); a fallback-entry check that ignored mismatched observations (now
+requires exactly one matched, zero mismatched); an observer-handle API with an unsafe identity
+hazard under duplicate registration (now token-scoped); and a chunk-cleanup routine with no check
+against taking over someone else's forced chunk (now asserts, fails closed, explicitly scoped to
+this fixture's own fresh-world guarantee, not general restoration). Full suite green (936 tests).
+No native run performed. No merge/Done transition made or implied. Packet-level documentation
+corrections (the plain packet's own false claim of exercising `BuoyantHitchProbe`, despite the
+shared VM-args this round confirmed carry no such flag at all; `div.sequentialDragBound`'s
+intentionally-absent/default-off state recorded explicitly rather than left unremarked; the
+support/parser scripts themselves now covered by the manifest, not just the four launch files;
+the synthetic self-test's own execution log kept distinct from mere script presence) are
+addressed in the same brand-new packet. The b6ec50e native lifecycle evidence remains the
+distinct, separately-preserved record it always was - this round claims nothing about it. The
+client-notification gap remains open, unaddressed, as before.

@@ -1238,33 +1238,56 @@ public final class PhysicsBridge {
   * and how it is counted separately rather than silently ignored or silently accepted). */
  private static final java.util.Map<java.util.UUID, FallbackObserverState> fallbackObservers = new java.util.HashMap<>();
 
+ /** MINECRAFT-545/547 (John's comment 54929): a {@code FallbackObserverState} now carries its
+  * OWN registration token - the first version keyed state purely by {@code vehicleUuid}, so a
+  * SECOND registration for the same UUID silently overwrote the first registration's state, and
+  * a caller holding the FIRST (now-stale) handle could later call {@code unregisterFallbackObserver}
+  * and remove the SECOND registration's own live entry - an unsafe API that lets an unrelated
+  * stale handle corrupt a newer, still-active registration it has no relationship to. */
  private static final class FallbackObserverState {
   final Object expectedConnection;
+  final long token;
   int matchedCount = 0;
   int mismatchedCount = 0;
-  FallbackObserverState(Object expectedConnection) { this.expectedConnection = expectedConnection; }
+  FallbackObserverState(Object expectedConnection, long token) { this.expectedConnection = expectedConnection; this.token = token; }
  }
 
+ private static long nextFallbackObserverToken = 0;
+
  /** Opaque handle to one registration - pass to {@link #unregisterFallbackObserver} to stop
-  * observing and release the (otherwise permanently retained) map entry. */
+  * observing and release the (otherwise permanently retained) map entry. Carries both the
+  * vehicle UUID AND a unique per-registration {@code token} (54929 fix) - a handle only ever
+  * matches the registration it was actually issued for, never a later, different registration
+  * that happens to share the same vehicle UUID. */
  public static final class FallbackObserverHandle {
   final java.util.UUID vehicleUuid;
-  private FallbackObserverHandle(java.util.UUID vehicleUuid) { this.vehicleUuid = vehicleUuid; }
+  final long token;
+  private FallbackObserverHandle(java.util.UUID vehicleUuid, long token) { this.vehicleUuid = vehicleUuid; this.token = token; }
  }
 
  /** Begins observing {@code vehicleUuid} for a real fallback-adapter invocation on EXACTLY
   * {@code expectedConnection} (compared by reference, {@code ==}, never {@code equals} - same
   * identity discipline as {@link OrphanedConnectionOps#connectionIdentity}'s own doc). Nothing
-  * is retained for any vehicle that is never registered - bounded, opt-in, no default growth. */
+  * is retained for any vehicle that is never registered - bounded, opt-in, no default growth.
+  * A second registration for an already-registered {@code vehicleUuid} is allowed (the caller
+  * may legitimately re-register across runs) but issues a NEW token, so the PRIOR handle becomes
+  * stale and can no longer read or remove this new registration's own state (54929 fix). */
  public static FallbackObserverHandle registerFallbackObserver(java.util.UUID vehicleUuid, Object expectedConnection) {
-  fallbackObservers.put(vehicleUuid, new FallbackObserverState(expectedConnection));
-  return new FallbackObserverHandle(vehicleUuid);
+  long token = nextFallbackObserverToken++;
+  fallbackObservers.put(vehicleUuid, new FallbackObserverState(expectedConnection, token));
+  return new FallbackObserverHandle(vehicleUuid, token);
  }
 
  /** Stops observing and releases the map entry - callers MUST call this on every terminal/error
-  * path for every handle they ever registered; a no-op if {@code handle} is null. */
+  * path for every handle they ever registered; a no-op if {@code handle} is null OR if a NEWER
+  * registration for the same vehicle UUID has since replaced the one this handle was issued for
+  * (54929 fix) - a stale handle must never remove a live, unrelated registration. */
  public static void unregisterFallbackObserver(FallbackObserverHandle handle) {
-  if (handle != null) fallbackObservers.remove(handle.vehicleUuid);
+  if (handle == null) return;
+  var state = fallbackObservers.get(handle.vehicleUuid);
+  if (state != null && state.token == handle.token) {
+   fallbackObservers.remove(handle.vehicleUuid);
+  }
  }
 
  /** The pure, Minecraft/MTS-free recording logic the real adapter routes every invocation
@@ -1284,14 +1307,23 @@ public final class PhysicsBridge {
   return false;
  }
 
+ /** Returns 0 for a null handle, for a vehicle with no live registration, AND (54929 fix) for a
+  * STALE handle whose own registration has since been replaced by a newer one for the same
+  * vehicle UUID - a stale handle must never read a newer, unrelated registration's own counts. */
  public static int debugFallbackObserverMatchedCount(FallbackObserverHandle handle) {
-  var state = handle != null ? fallbackObservers.get(handle.vehicleUuid) : null;
+  var state = liveStateFor(handle);
   return state != null ? state.matchedCount : 0;
  }
 
  public static int debugFallbackObserverMismatchedCount(FallbackObserverHandle handle) {
-  var state = handle != null ? fallbackObservers.get(handle.vehicleUuid) : null;
+  var state = liveStateFor(handle);
   return state != null ? state.mismatchedCount : 0;
+ }
+
+ private static FallbackObserverState liveStateFor(FallbackObserverHandle handle) {
+  if (handle == null) return null;
+  var state = fallbackObservers.get(handle.vehicleUuid);
+  return (state != null && state.token == handle.token) ? state : null;
  }
  /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
   * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL

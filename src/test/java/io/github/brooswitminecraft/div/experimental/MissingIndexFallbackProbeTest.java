@@ -22,26 +22,42 @@ class MissingIndexFallbackProbeTest {
    MissingIndexFallbackProbe.ReconnectOutcome.NO_NEW_CONNECTION_REQUEST_CONSUMED;
  private static final MissingIndexFallbackProbe.ReconnectOutcome NOT_CONSUMED =
    MissingIndexFallbackProbe.ReconnectOutcome.REQUEST_NOT_CONSUMED;
+ private static final MissingIndexFallbackProbe.AnchorEligibility ELIGIBLE =
+   MissingIndexFallbackProbe.AnchorEligibility.ELIGIBLE;
+ private static final MissingIndexFallbackProbe.AnchorEligibility INELIGIBLE =
+   MissingIndexFallbackProbe.AnchorEligibility.INELIGIBLE;
 
- // --- classifyLeakVerdict ---
+ private static MissingIndexFallbackProbe.ReconnectAttempt attempt(
+     MissingIndexFallbackProbe.ReconnectOutcome outcome, MissingIndexFallbackProbe.AnchorEligibility eligibility) {
+  return new MissingIndexFallbackProbe.ReconnectAttempt(outcome, eligibility);
+ }
+
+ private static MissingIndexFallbackProbe.LeakVerdict verdict(
+     MissingIndexFallbackProbe.ReconnectOutcome controlOutcome, MissingIndexFallbackProbe.AnchorEligibility controlEligibility,
+     MissingIndexFallbackProbe.ReconnectOutcome leakOutcome, MissingIndexFallbackProbe.AnchorEligibility leakEligibility) {
+  return MissingIndexFallbackProbe.classifyLeakVerdict(attempt(controlOutcome, controlEligibility), attempt(leakOutcome, leakEligibility));
+ }
+
+ // --- classifyLeakVerdict --- (every case below uses ELIGIBLE on both sides unless the case is
+ // specifically testing eligibility itself, isolating each check from the other)
 
  @Test void controlFailureIsAlwaysInconclusiveRegardlessOfLeakProbeResult() {
   // 54849/54856: "Failed control => INCONCLUSIVE, no cause claim." - checked for BOTH possible
   // leak-probe outcomes, since a failed (but genuinely consumed) control must override either.
   assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_CONTROL_FAILED,
-    MissingIndexFallbackProbe.classifyLeakVerdict(NO_NEW_CONNECTION, NEW_CONNECTION));
+    verdict(NO_NEW_CONNECTION, ELIGIBLE, NEW_CONNECTION, ELIGIBLE));
   assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_CONTROL_FAILED,
-    MissingIndexFallbackProbe.classifyLeakVerdict(NO_NEW_CONNECTION, NO_NEW_CONNECTION));
+    verdict(NO_NEW_CONNECTION, ELIGIBLE, NO_NEW_CONNECTION, ELIGIBLE));
  }
 
  @Test void controlSuccessWithNoNewConnectionConfirmsTheLeak() {
   assertEquals(MissingIndexFallbackProbe.LeakVerdict.LEAK_CONFIRMED,
-    MissingIndexFallbackProbe.classifyLeakVerdict(NEW_CONNECTION, NO_NEW_CONNECTION));
+    verdict(NEW_CONNECTION, ELIGIBLE, NO_NEW_CONNECTION, ELIGIBLE));
  }
 
  @Test void controlSuccessWithNewConnectionMeansLeakNotObserved() {
   assertEquals(MissingIndexFallbackProbe.LeakVerdict.LEAK_NOT_OBSERVED,
-    MissingIndexFallbackProbe.classifyLeakVerdict(NEW_CONNECTION, NEW_CONNECTION));
+    verdict(NEW_CONNECTION, ELIGIBLE, NEW_CONNECTION, ELIGIBLE));
  }
 
  // MINECRAFT-545/547 (John's comment 54870): REQUEST_NOT_CONSUMED is its own distinct outcome,
@@ -50,9 +66,9 @@ class MissingIndexFallbackProbeTest {
 
  @Test void controlRequestNotConsumedIsInconclusiveRegardlessOfLeakProbeResult() {
   assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_REQUEST_NOT_CONSUMED,
-    MissingIndexFallbackProbe.classifyLeakVerdict(NOT_CONSUMED, NEW_CONNECTION));
+    verdict(NOT_CONSUMED, ELIGIBLE, NEW_CONNECTION, ELIGIBLE));
   assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_REQUEST_NOT_CONSUMED,
-    MissingIndexFallbackProbe.classifyLeakVerdict(NOT_CONSUMED, NO_NEW_CONNECTION));
+    verdict(NOT_CONSUMED, ELIGIBLE, NO_NEW_CONNECTION, ELIGIBLE));
  }
 
  @Test void leakRequestNotConsumedIsInconclusiveEvenWithASuccessfulControl() {
@@ -60,14 +76,66 @@ class MissingIndexFallbackProbeTest {
   // own request was never consumed, the verdict must still be INCONCLUSIVE_REQUEST_NOT_CONSUMED,
   // never LEAK_CONFIRMED or LEAK_NOT_OBSERVED, since the leak probe's own result is meaningless.
   assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_REQUEST_NOT_CONSUMED,
-    MissingIndexFallbackProbe.classifyLeakVerdict(NEW_CONNECTION, NOT_CONSUMED));
+    verdict(NEW_CONNECTION, ELIGIBLE, NOT_CONSUMED, ELIGIBLE));
  }
 
  @Test void requestNotConsumedTakesPriorityOverControlFailure() {
   // Both anomalies present at once - REQUEST_NOT_CONSUMED must still win, per the policy's own
   // documented check ordering (checked first, before the control-failure check).
   assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_REQUEST_NOT_CONSUMED,
-    MissingIndexFallbackProbe.classifyLeakVerdict(NOT_CONSUMED, NOT_CONSUMED));
+    verdict(NOT_CONSUMED, ELIGIBLE, NOT_CONSUMED, ELIGIBLE));
+ }
+
+ // MINECRAFT-545/547 (John's comment 54929): classifyLeakVerdict previously had NO eligibility
+ // input at all - the anchor distance was logged only, never actually fed into the verdict. An
+ // ineligible anchor on EITHER side must now escalate to its own INCONCLUSIVE verdict, taking
+ // priority over the control-failure check but never over REQUEST_NOT_CONSUMED (checked first).
+
+ @Test void controlIneligibleAnchorIsInconclusiveRegardlessOfLeakProbeResult() {
+  assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_INELIGIBLE_ANCHOR,
+    verdict(NEW_CONNECTION, INELIGIBLE, NEW_CONNECTION, ELIGIBLE));
+  assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_INELIGIBLE_ANCHOR,
+    verdict(NEW_CONNECTION, INELIGIBLE, NO_NEW_CONNECTION, ELIGIBLE));
+ }
+
+ @Test void leakIneligibleAnchorIsInconclusiveEvenWithAnEligibleSuccessfulControl() {
+  assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_INELIGIBLE_ANCHOR,
+    verdict(NEW_CONNECTION, ELIGIBLE, NEW_CONNECTION, INELIGIBLE));
+  assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_INELIGIBLE_ANCHOR,
+    verdict(NEW_CONNECTION, ELIGIBLE, NO_NEW_CONNECTION, INELIGIBLE));
+ }
+
+ @Test void ineligibleAnchorTakesPriorityOverControlFailure() {
+  // A failed control AND an ineligible anchor at once - ineligibility must still win, per the
+  // policy's own documented check ordering (checked before the control-failure check).
+  assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_INELIGIBLE_ANCHOR,
+    verdict(NO_NEW_CONNECTION, INELIGIBLE, NEW_CONNECTION, ELIGIBLE));
+ }
+
+ @Test void requestNotConsumedTakesPriorityOverIneligibleAnchor() {
+  // Both anomalies present at once - REQUEST_NOT_CONSUMED must still win over ineligibility too,
+  // since it is checked FIRST, ahead of every other check including eligibility.
+  assertEquals(MissingIndexFallbackProbe.LeakVerdict.INCONCLUSIVE_REQUEST_NOT_CONSUMED,
+    verdict(NOT_CONSUMED, INELIGIBLE, NEW_CONNECTION, ELIGIBLE));
+ }
+
+ // --- classifyAnchorEligibility ---
+
+ @Test void anchorDistanceAtOrBelowThresholdIsEligible() {
+  assertEquals(ELIGIBLE, MissingIndexFallbackProbe.classifyAnchorEligibility(0.0));
+  assertEquals(ELIGIBLE, MissingIndexFallbackProbe.classifyAnchorEligibility(3.9999));
+  assertEquals(ELIGIBLE, MissingIndexFallbackProbe.classifyAnchorEligibility(4.0), "exactly at the connection's own distance threshold must still be eligible");
+ }
+
+ @Test void anchorDistanceAboveThresholdIsIneligible() {
+  assertEquals(INELIGIBLE, MissingIndexFallbackProbe.classifyAnchorEligibility(4.0001));
+  assertEquals(INELIGIBLE, MissingIndexFallbackProbe.classifyAnchorEligibility(100.0));
+ }
+
+ @Test void nonFiniteAnchorDistanceIsIneligible() {
+  assertEquals(INELIGIBLE, MissingIndexFallbackProbe.classifyAnchorEligibility(Double.NaN));
+  assertEquals(INELIGIBLE, MissingIndexFallbackProbe.classifyAnchorEligibility(Double.POSITIVE_INFINITY));
+  assertEquals(INELIGIBLE, MissingIndexFallbackProbe.classifyAnchorEligibility(Double.NEGATIVE_INFINITY));
  }
 
  // --- runAllIndependently ---

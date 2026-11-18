@@ -145,22 +145,58 @@ public final class MissingIndexFallbackProbe {
   * INCONCLUSIVE verdict rather than being folded into "no new connection" as if it were a
   * meaningful rejection signal. */
  public enum ReconnectOutcome { NEW_CONNECTION_OBSERVED, NO_NEW_CONNECTION_REQUEST_CONSUMED, REQUEST_NOT_CONSUMED }
- public enum LeakVerdict { LEAK_CONFIRMED, LEAK_NOT_OBSERVED, INCONCLUSIVE_CONTROL_FAILED, INCONCLUSIVE_REQUEST_NOT_CONSUMED }
+ /** MINECRAFT-545/547 (John's comment 54929): whether a reconnect attempt's own anchor-point
+  * geometry (see {@link #anchorWorldPoint}) was actually within the connection's own eligibility
+  * range. Previously the anchor distance was only ever LOGGED - never fed into the verdict at
+  * all - so a reconnect attempt that failed (or succeeded) for a purely geometric reason
+  * (a non-finite distance, or one genuinely outside the connection's own eligibility radius)
+  * could silently masquerade as a real LEAK_CONFIRMED/LEAK_NOT_OBSERVED/NO_NEW_CONNECTION
+  * result, when it was never actually testing the group-index-reuse defect this fixture targets
+  * at all. */
+ public enum AnchorEligibility { ELIGIBLE, INELIGIBLE }
+ public enum LeakVerdict { LEAK_CONFIRMED, LEAK_NOT_OBSERVED, INCONCLUSIVE_CONTROL_FAILED, INCONCLUSIVE_REQUEST_NOT_CONSUMED, INCONCLUSIVE_INELIGIBLE_ANCHOR }
 
- /** 54849/54870: a request that was never actually consumed (on EITHER side) makes BOTH this
-  * fixture's own methodology and its target unverifiable - escalates ahead of every other check.
-  * A control that was genuinely processed but still failed to form a new connection makes the
+ /** The connection's own {@code JSONConnection.distance} (see {@link #connectionGroup}) - a
+  * reconnect attempt whose own anchor-to-anchor distance exceeds this is NOT eligible, regardless
+  * of what {@code towingConnectionVar}/{@code towedByConnection} end up showing. */
+ private static final double CONNECTION_ELIGIBILITY_DISTANCE = 4.0;
+
+ /** Pure classification of one already-computed anchor distance - {@code NaN}/infinite or a
+  * distance strictly greater than {@link #CONNECTION_ELIGIBILITY_DISTANCE} is INELIGIBLE. */
+ public static AnchorEligibility classifyAnchorEligibility(double anchorDistance) {
+  if (!Double.isFinite(anchorDistance) || anchorDistance > CONNECTION_ELIGIBILITY_DISTANCE) {
+   return AnchorEligibility.INELIGIBLE;
+  }
+  return AnchorEligibility.ELIGIBLE;
+ }
+
+ /** One side's full reconnect attempt result - the {@link ReconnectOutcome} AND the
+  * {@link AnchorEligibility} it was actually attempted under. Both are required for an
+  * informative leak verdict (54929): an ineligible anchor makes the attempt's own outcome
+  * unusable as evidence either way, exactly like an unconsumed request. */
+ public record ReconnectAttempt(ReconnectOutcome outcome, AnchorEligibility eligibility) {}
+
+ /** 54849/54870/54929: a request that was never actually consumed (on EITHER side) makes BOTH
+  * this fixture's own methodology and its target unverifiable - escalates ahead of every other
+  * check. An ineligible anchor (on EITHER side) is checked next - a reconnect attempted outside
+  * the connection's own eligibility range was never actually testing the group-index-reuse
+  * defect this fixture targets, regardless of what outcome it produced. A control that was
+  * genuinely processed, genuinely eligible, but still failed to form a new connection makes the
   * leak probe's own result meaningless, per 54849's own "no cause claim" instruction - checked
-  * next. Only once the control is confirmed genuinely successful does the leak probe's own
-  * (also confirmed-processed) outcome get to decide LEAK_CONFIRMED vs LEAK_NOT_OBSERVED. */
- public static LeakVerdict classifyLeakVerdict(ReconnectOutcome controlOutcome, ReconnectOutcome leakOutcome) {
-  if (controlOutcome == ReconnectOutcome.REQUEST_NOT_CONSUMED || leakOutcome == ReconnectOutcome.REQUEST_NOT_CONSUMED) {
+  * next. Only once the control is confirmed genuinely successful (processed, eligible, and
+  * connected) does the leak probe's own (also confirmed-processed-and-eligible) outcome get to
+  * decide LEAK_CONFIRMED vs LEAK_NOT_OBSERVED. */
+ public static LeakVerdict classifyLeakVerdict(ReconnectAttempt control, ReconnectAttempt leak) {
+  if (control.outcome() == ReconnectOutcome.REQUEST_NOT_CONSUMED || leak.outcome() == ReconnectOutcome.REQUEST_NOT_CONSUMED) {
    return LeakVerdict.INCONCLUSIVE_REQUEST_NOT_CONSUMED;
   }
-  if (controlOutcome != ReconnectOutcome.NEW_CONNECTION_OBSERVED) {
+  if (control.eligibility() == AnchorEligibility.INELIGIBLE || leak.eligibility() == AnchorEligibility.INELIGIBLE) {
+   return LeakVerdict.INCONCLUSIVE_INELIGIBLE_ANCHOR;
+  }
+  if (control.outcome() != ReconnectOutcome.NEW_CONNECTION_OBSERVED) {
    return LeakVerdict.INCONCLUSIVE_CONTROL_FAILED;
   }
-  return leakOutcome == ReconnectOutcome.NO_NEW_CONNECTION_REQUEST_CONSUMED ? LeakVerdict.LEAK_CONFIRMED : LeakVerdict.LEAK_NOT_OBSERVED;
+  return leak.outcome() == ReconnectOutcome.NO_NEW_CONNECTION_REQUEST_CONSUMED ? LeakVerdict.LEAK_CONFIRMED : LeakVerdict.LEAK_NOT_OBSERVED;
  }
 
  /** MINECRAFT-545/547 (John's comment 54870): the pure, generic cleanup orchestration every
@@ -325,16 +361,31 @@ public final class MissingIndexFallbackProbe {
   return actions;
  }
 
+ /** MINECRAFT-545/547 (John's comment 54929): cleanup unconditionally unforces every coordinate
+  * in {@link #forcedChunkCoords} - correct ONLY if every one of those chunks was actually
+  * UNFORCED before this fixture touched it; blindly unforcing a chunk some OTHER system had
+  * already force-loaded for its own reasons would silently take away that other system's own
+  * forced state, which this fixture has no business doing. {@code ServerLevel.setChunkForced}'s
+  * own return value already tells us exactly this - {@code true} means the call actually changed
+  * the forced set (this chunk was NOT already forced), {@code false} means it was already forced
+  * (no change). This fixture's own preflight already requires a fresh, pristine isolated world
+  * (no pre-existing {@code rundir/world} at all) - a chunk that is somehow already forced before
+  * this runs is therefore an anomaly in that assumption, not a case this fixture can safely take
+  * over. Fails closed instead of risking an unwitnessed take-over of someone else's forced state;
+  * this does NOT attempt general restoration of arbitrary pre-existing force state - only ever
+  * asserts it does not exist for THIS isolated fixture's own chunks. */
  private static void requestChunkGrid(ServerLevel level) {
-  // MINECRAFT-545/547 (John's comment 54870): "Partial request loop only sets forced flag at
-  // end." Each chunk is now appended to forcedChunkCoords IMMEDIATELY after its own successful
-  // setChunkForced call - if this loop were to throw partway through, every chunk ALREADY
-  // forced is still tracked and will still be released during cleanup, rather than being lost
-  // because the flag marking "any chunks forced at all" was never reached.
   for (int dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++) {
    for (int dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++) {
-    level.setChunkForced(CHUNK_X + dx, CHUNK_Z + dz, true);
-    forcedChunkCoords.add(new int[]{CHUNK_X + dx, CHUNK_Z + dz});
+    int x = CHUNK_X + dx, z = CHUNK_Z + dz;
+    boolean newlyForced = level.setChunkForced(x, z, true);
+    if (!newlyForced) {
+     throw new IllegalStateException("chunk " + x + "," + z + " was ALREADY force-loaded before this fixture touched it -"
+       + " this fixture only ever unforces chunks it itself newly forced, and assumes a fresh isolated world with no"
+       + " pre-existing force state; refusing to proceed rather than silently taking over (and later clearing) some other"
+       + " system's own forced chunk");
+    }
+    forcedChunkCoords.add(new int[]{x, z});
    }
   }
  }
@@ -416,8 +467,19 @@ public final class MissingIndexFallbackProbe {
   return true;
  }
 
+ /** MINECRAFT-545/547 (John's comment 54929): the prior version treated a {@code null}/invalid
+  * {@code v} as an automatic PASS ("already despawned/invalidated on purpose") - but NONE of
+  * this fixture's own call sites ever invoke this on an entity that is actually expected to be
+  * invalid at that point (towingA, the one entity this fixture deliberately invalidates in
+  * {@code faultInject}, is never checked via this method again afterward). That silent-pass
+  * branch therefore only ever fires for a genuinely UNEXPECTED invalidation - which is exactly
+  * the kind of anomaly this method exists to catch, not wave through. Now fails closed. */
  private static boolean boundedOrFail(String tag, EntityVehicleF_Physics v) {
-  if (v == null || !v.isValid) return true; // already despawned/invalidated on purpose - not a bounds failure
+  if (v == null || !v.isValid) {
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - unexpectedly null/invalid entity tag=" + tag + " phase=" + phase + " tick=" + ticksInPhase);
+   phase = Phase.FAILED;
+   return false;
+  }
   if (!finite(v)) {
    LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - non-finite state tag=" + tag + " phase=" + phase + " tick=" + ticksInPhase + " position=" + v.position);
    phase = Phase.FAILED;
@@ -493,19 +555,22 @@ public final class MissingIndexFallbackProbe {
   if (!boundedOrFail("awaitLeakFallback/towedA", towedA) || !boundedOrFail("awaitLeakFallback/towingB", towingB)
     || !boundedOrFail("awaitLeakFallback/towedB", towedB)) return;
   if (towedA.towedByConnection == null) {
-   // MINECRAFT-545/547 (John's comments 54862/54870): the prior version of this check INFERRED
-   // fallback-entry from the postcondition alone, then an always-on unbounded counter - 54870
-   // is correct that the counter leaked forever. Now checks the bounded, opt-in,
-   // identity-matched observer registered in faultInject above - only an actual MATCHED
-   // observation (same vehicle UUID AND the same connection reference) confirms fallback-entry;
-   // a mismatch or no observation at all is reported as a genuine, surfaced anomaly.
+   // MINECRAFT-545/547 (John's comments 54862/54870/54929): the prior version of this check
+   // INFERRED fallback-entry from the postcondition alone, then an always-on unbounded counter
+   // (54870's own fix), then accepted ANY matchedCount>0 regardless of mismatchedCount (54929's
+   // own finding) - a run that recorded, say, 1 matched AND 3 mismatched observations would
+   // still have passed, even though 3 unexplained mismatched invocations for this exact vehicle
+   // are themselves a real anomaly this fixture should surface, not silently ignore. Now requires
+   // EXACTLY ONE matched observation AND ZERO mismatched ones - identity-matched observer
+   // registered in faultInject above.
    int matchedCount = PhysicsBridge.debugFallbackObserverMatchedCount(fallbackObserverHandle);
    int mismatchedCount = PhysicsBridge.debugFallbackObserverMismatchedCount(fallbackObserverHandle);
-   if (matchedCount > 0) {
+   if (matchedCount == 1 && mismatchedCount == 0) {
     LOGGER.info("[DIV missingIndexFallbackProbe] FALLBACK-ENTRY EVIDENCE CONFIRMED (real, identity-matched observation, not"
       + " inference) - towedA.towedByConnection is null after " + ticksInPhase + " ticks AND the registered observer for"
-      + " towedA's own UUID recorded " + matchedCount + " matched invocation(s) of the exact injectedConnection - the"
-      + " production fallback callback genuinely ran for this exact vehicle AND connection.");
+      + " towedA's own UUID recorded exactly 1 matched invocation of the exact injectedConnection and 0 mismatched ones - the"
+      + " production fallback callback genuinely ran for this exact vehicle AND connection, exactly once, with no unexplained"
+      + " extra invocations.");
     phase = Phase.CONTROL_DISCONNECT; ticksInPhase = 0;
     return;
    }
@@ -538,7 +603,11 @@ public final class MissingIndexFallbackProbe {
      + " - this is a genuine anomaly, not fabricating an index to proceed anyway");
    // No reconnect request was ever issued for this anomaly - REQUEST_NOT_CONSUMED is the correct
    // classification (never a meaningful "no new connection" rejection, since no request existed).
+   // No anchor geometry was ever computed either - eligibility is moot here (classifyLeakVerdict
+   // checks REQUEST_NOT_CONSUMED first, ahead of eligibility), but INELIGIBLE is the honest
+   // default rather than fabricating an ELIGIBLE value for geometry that was never measured.
    controlOutcome = ReconnectOutcome.REQUEST_NOT_CONSUMED;
+   controlEligibility = AnchorEligibility.INELIGIBLE;
    phase = Phase.LEAK_RECONNECT_REQUEST; ticksInPhase = 0;
    return;
   }
@@ -579,14 +648,20 @@ public final class MissingIndexFallbackProbe {
   var hitchAnchor = anchorWorldPoint(towingD, HITCH_POS);
   var hookupAnchor = anchorWorldPoint(towedB, HOOKUP_POS);
   double anchorDistance = hitchAnchor.distanceTo(hookupAnchor);
+  // MINECRAFT-545/547 (John's comment 54929): previously LOGGED only, never fed into the
+  // verdict - classifyLeakVerdict now requires this via controlEligibility, so an attempt made
+  // outside the connection's own eligibility range (or with non-finite geometry) can never
+  // masquerade as a real LEAK_CONFIRMED/LEAK_NOT_OBSERVED/INCONCLUSIVE_CONTROL_FAILED result.
+  controlEligibility = classifyAnchorEligibility(anchorDistance);
   LOGGER.info("[DIV missingIndexFallbackProbe] CONTROL - spawned fresh towingD=" + towingD.uniqueUUID + " towingD.isValid=" + towingD.isValid
     + " hitchAnchorWorld=" + hitchAnchor + " hookupAnchorWorld=" + hookupAnchor + " anchorDistance=" + anchorDistance
-    + " (eligible if <= 4.0, the connection's own JSONConnection.distance) requestedGroupIndex=0 - requested normal reconnect to"
-    + " towedB via towingConnectionVar");
+    + " eligibility=" + controlEligibility + " (eligible if <= " + CONNECTION_ELIGIBILITY_DISTANCE + ", the connection's own"
+    + " JSONConnection.distance) requestedGroupIndex=0 - requested normal reconnect to towedB via towingConnectionVar");
   phase = Phase.AWAIT_CONTROL_RESULT; ticksInPhase = 0;
  }
 
  private static ReconnectOutcome controlOutcome;
+ private static AnchorEligibility controlEligibility;
 
  private static void awaitControlResult() {
   ticksInPhase++;
@@ -631,13 +706,16 @@ public final class MissingIndexFallbackProbe {
   var hitchAnchor = anchorWorldPoint(towingC, HITCH_POS);
   var hookupAnchor = anchorWorldPoint(towedA, HOOKUP_POS);
   double anchorDistance = hitchAnchor.distanceTo(hookupAnchor);
+  leakEligibility = classifyAnchorEligibility(anchorDistance);
   LOGGER.info("[DIV missingIndexFallbackProbe] LEAK PROBE - spawned fresh towingC=" + towingC.uniqueUUID + " towingC.isValid=" + towingC.isValid
     + " hitchAnchorWorld=" + hitchAnchor + " hookupAnchorWorld=" + hookupAnchor + " anchorDistance=" + anchorDistance
-    + " (eligible if <= 4.0) requestedGroupIndex=0 - requested normal reconnect to towedA (whose own hookupGroupIndex bit was"
-    + " never released by the fallback) via towingConnectionVar - identical mechanism and geometry pattern as the control,"
-    + " different target");
+    + " eligibility=" + leakEligibility + " (eligible if <= " + CONNECTION_ELIGIBILITY_DISTANCE + ") requestedGroupIndex=0 -"
+    + " requested normal reconnect to towedA (whose own hookupGroupIndex bit was never released by the fallback) via"
+    + " towingConnectionVar - identical mechanism and geometry pattern as the control, different target");
   phase = Phase.AWAIT_LEAK_RESULT; ticksInPhase = 0;
  }
+
+ private static AnchorEligibility leakEligibility;
 
  /** MINECRAFT-545/547 (John's comment 54862): stored, never logged as a terminal banner HERE -
   * the actual terminal line is emitted from {@link #finishTickIfTerminal}, AFTER the centralized
@@ -656,8 +734,9 @@ public final class MissingIndexFallbackProbe {
      ? ReconnectOutcome.NO_NEW_CONNECTION_REQUEST_CONSUMED : ReconnectOutcome.REQUEST_NOT_CONSUMED;
   }
   if (leakOutcome == null) return;
-  finalVerdict = classifyLeakVerdict(controlOutcome, leakOutcome);
-  LOGGER.info("[DIV missingIndexFallbackProbe] RESULT - controlOutcome=" + controlOutcome + " leakProbeOutcome=" + leakOutcome
+  finalVerdict = classifyLeakVerdict(new ReconnectAttempt(controlOutcome, controlEligibility), new ReconnectAttempt(leakOutcome, leakEligibility));
+  LOGGER.info("[DIV missingIndexFallbackProbe] RESULT - controlOutcome=" + controlOutcome + " controlEligibility=" + controlEligibility
+    + " leakProbeOutcome=" + leakOutcome + " leakEligibility=" + leakEligibility
     + " verdict=" + finalVerdict + " - behavioral signal only, NOT direct proof of the ALREADY_TOWED rejection reason specifically"
     + " (that reason is delivered only via a client-targeted chat packet, unobservable in this player-less fixture - see this"
     + " class's own doc). Local-group-reuse evidence here does NOT verify client notification - that remains a SEPARATE,"
