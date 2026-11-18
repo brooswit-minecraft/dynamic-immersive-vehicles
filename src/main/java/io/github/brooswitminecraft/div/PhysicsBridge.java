@@ -1219,6 +1219,20 @@ public final class PhysicsBridge {
  public static Object debugRegistryBodyIdentity(EntityVehicleF_Physics v) {
   return registry.get(v);
  }
+ /** MINECRAFT-545/547 (John's comment 54862): a real, always-on OBSERVATION of the missing-
+  * index fallback's own real adapter actually running for a SPECIFIC vehicle - keyed by that
+  * vehicle's own entity UUID, incremented exactly once per real invocation of the production
+  * {@code clearConnection} callback inside {@code releaseOrphanedTowingConnections}'s own
+  * fallback adapter. Exists because a prior fixture's own reasoning ("the pre-injection state
+  * made the ordinary path structurally unreachable, so towedByConnection becoming null MUST
+  * have come from the fallback") is an INFERENCE from a postcondition, not a direct observation
+  * - this counter is the direct observation 54862 asked for instead. Diagnostic/test-only, never
+  * read from any production decision path; the increment itself is a single cheap map operation,
+  * always on (not gated behind a flag) since it never alters any teardown decision. */
+ private static final java.util.Map<java.util.UUID, Integer> debugFallbackClearConnectionCallCounts = new java.util.HashMap<>();
+ public static int debugFallbackClearConnectionCallCount(java.util.UUID towedVehicleUuid) {
+  return debugFallbackClearConnectionCallCounts.getOrDefault(towedVehicleUuid, 0);
+ }
  /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
   * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL
   * anchor-world position at ANY bracket by rotating a connection's own authored local offset by
@@ -1472,6 +1486,10 @@ public final class PhysicsBridge {
       if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
         "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back (connection missing from parent's own list) v=" + v.uniqueUUID
           + " - reproduced resetAllVariables/parkingBrake (both public); UNSUPPORTED (private/protected access, no reflection): connectionGroupsIndexesInUse release on either side, parent list removal (already absent), client PacketEntityTowingChange (needs a real index)");
+      // 54862: the real, direct observation - incremented exactly once per real invocation of
+      // this exact callback for this exact vehicle, keyed by its own UUID. See this field's own
+      // doc for why an inference from indexOf==-1 is not the same as actually observing this.
+      debugFallbackClearConnectionCallCounts.merge(v.uniqueUUID, 1, Integer::sum);
       v.towedByConnection = null;
      }
     });

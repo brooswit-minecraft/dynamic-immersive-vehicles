@@ -43,13 +43,17 @@ import java.util.Set;
  *  {@code TOWING_UNAVAILABLE} phase already uses. The production sweep
  *  ({@code PhysicsBridge.releaseOrphanedTowingConnections()}, already globally wired on {@code
  *  ServerTickEvent.Pre}) then runs automatically, with no special invocation from this fixture.</li>
- *  <li><b>Fallback-entry evidence, not setup alone</b>: once {@code towedA.towedByConnection}
- *  becomes null, that MUST have gone through {@code fallbackClearConnection}, never
- *  {@code disconnectAtIndex} - the fault injection already made the index lookup return -1, so
- *  the ordinary path is structurally unreachable. Logged explicitly with that reasoning, not
- *  merely observed. (Launching with {@code -Ddiv.debugGroundContact=true} additionally surfaces
- *  {@code fallbackClearConnection}'s own existing diagnostic log line as corroborating evidence -
- *  not required for this fixture's own pass/fail verdict.)</li>
+ *  <li><b>Fallback-entry evidence, a real observation, not an inference</b> (corrected per
+ *  John's comment 54862 - a prior version of this reasoned "indexOf==-1 before removal, so this
+ *  null MUST have come from the fallback," which is an INFERENCE from a postcondition, not a
+ *  direct observation): {@code PhysicsBridge.debugFallbackClearConnectionCallCount}, a real,
+ *  always-on counter keyed to the exact vehicle UUID, incremented exactly once per real
+ *  invocation of the production {@code clearConnection} callback inside
+ *  {@code fallbackClearConnection}'s own real adapter. This fixture snapshots it immediately
+ *  before invalidating the anchor and compares it against the same counter once
+ *  {@code towedA.towedByConnection} becomes null - only an actual observed increment confirms
+ *  fallback-entry; a null field with NO counter increment is reported as a genuine anomaly and
+ *  fails the fixture, never silently accepted.</li>
  *  <li><b>Matched positive control</b> (54849/54856's own explicit requirement - absence of a
  *  new connection alone does NOT prove the leak caused it, since {@code checkIfTrailerCanConnect}
  *  has several other rejection outcomes producing the identical signal): an independent
@@ -81,8 +85,11 @@ import java.util.Set;
  * <p>Opt-in via {@code -Ddiv.experimentalMissingIndexFallbackProbe=true} - OFF by default, never
  * runs during normal play, never touches any real vehicle, Zippy, or world content. Runs ONCE
  * per server lifetime, for a bounded window, then stops. Same {@code massKg} config-override
- * requirement as {@code BuoyantHitchProbe} (seeded for every one of this fixture's own five
- * vehicle keys - {@code divtest:missingindex-towing{a,b,c,d}}, {@code divtest:missingindex-towed{a,b}}).
+ * requirement as {@code BuoyantHitchProbe} (seeded for every one of this fixture's own four
+ * distinct vehicle keys - {@code towingA}/{@code towingB} share {@code divtest:missingindex-towing-shared};
+ * {@code towedA}/{@code towedB} share {@code divtest:missingindex-towed-shared}; the two fresh
+ * reconnect entities each get their own, {@code divtest:missingindex-towingC} and
+ * {@code divtest:missingindex-towingD}).
  */
 public final class MissingIndexFallbackProbe {
  private MissingIndexFallbackProbe() {}
@@ -137,12 +144,23 @@ public final class MissingIndexFallbackProbe {
  private static JSONVehicle towingDefinition, towedDefinition;
  private static TowingConnection injectedConnection;
 
+ private static boolean cleanedUp = false, cleanupFailed = false;
+
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
   if (!configured) {
-   configured = true;
-   requestChunkGrid(level);
-   LOGGER.info("[DIV missingIndexFallbackProbe] requested terrain chunk grid");
+   // MINECRAFT-545/547 (John's comment 54862): the terrain request previously ran OUTSIDE any
+   // try/catch - an exception here would have propagated uncaught, crashing the whole tick
+   // listener instead of failing this fixture closed like every other phase does.
+   try {
+    configured = true;
+    requestChunkGrid(level);
+    LOGGER.info("[DIV missingIndexFallbackProbe] requested terrain chunk grid");
+   } catch (RuntimeException ex) {
+    LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - unexpected exception requesting terrain chunk grid", ex);
+    phase = Phase.FAILED;
+   }
+   finishTickIfTerminal(level);
    return;
   }
   try {
@@ -160,14 +178,77 @@ public final class MissingIndexFallbackProbe {
     case DONE, FAILED -> {}
    }
   } catch (RuntimeException ex) {
-   LOGGER.error("[DIV missingIndexFallbackProbe] FAILED - unexpected exception in phase " + phase, ex);
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - unexpected exception in phase " + phase, ex);
    phase = Phase.FAILED;
   }
-  if ((phase == Phase.DONE || phase == Phase.FAILED) && !chunkGridUnforced) {
-   chunkGridUnforced = true;
-   unforceChunkGrid(level);
-   LOGGER.info("[DIV missingIndexFallbackProbe] released terrain chunk grid");
+  finishTickIfTerminal(level);
+ }
+
+ /** MINECRAFT-545/547 (John's comment 54862): previously, only the FAILED/exception path's own
+  * chunk-grid release ran on every terminal path - entity cleanup (towedA/towingB/towedB/
+  * towingC/towingD, and towingA if a failure happened before FAULT_INJECT ever invalidated it)
+  * only ever ran on the ONE successful completion path inside awaitLeakResult, meaning any
+  * FAILED exit (bounds/non-finite/timeout/exception, at any phase) leaked every fixture-owned
+  * entity into the world forever. This is now the SINGLE centralized, idempotent teardown point
+  * for every terminal path - DONE or FAILED, no matter how it was reached - run exactly once
+  * (guarded by {@code cleanedUp}), with its own failure isolated (a cleanup exception is caught
+  * and reported as {@code CLEANUP_INCOMPLETE}, never allowed to mask or be masked by the
+  * experiment's own verdict). The chunk-grid release is deliberately ordered AFTER entity
+  * cleanup - entities should not briefly exist in now-unforced, potentially-unloading chunks. */
+ private static void finishTickIfTerminal(ServerLevel level) {
+  if (phase != Phase.DONE && phase != Phase.FAILED) return;
+  boolean firstTerminalTick = !cleanedUp;
+  if (!cleanedUp) {
+   cleanedUp = true;
+   try {
+    cleanupAllFixtureEntities();
+    LOGGER.info("[DIV missingIndexFallbackProbe] cleanup complete - every fixture-owned entity despawned");
+   } catch (RuntimeException ex) {
+    cleanupFailed = true;
+    LOGGER.error("[DIV missingIndexFallbackProbe] CLEANUP_INCOMPLETE - cleanup itself threw; some fixture-owned entities may remain", ex);
+   }
   }
+  // MINECRAFT-545/547 (John's comment 54862): "Terminal success/result must follow completed
+  // cleanup or explicit CLEANUP_INCOMPLETE - not emit matching COMPLETE/FAILED marker early and
+  // let wrapper stop before cleanup." The actual terminal banner is emitted HERE, after the
+  // cleanup attempt immediately above - never inside awaitLeakResult/any FAILED call site
+  // itself. Also separates EXPERIMENT COMPLETION (did the sequence run without crashing) from
+  // the CORRECTNESS VERDICT (LEAK_CONFIRMED/LEAK_NOT_OBSERVED/INCONCLUSIVE_CONTROL_FAILED) -
+  // never a single blanket "COMPLETE" covering every verdict value, so a log/wrapper consumer
+  // cannot mistake "the experiment ran" for "a defect either was or was not observed."
+  if (firstTerminalTick) {
+   if (phase == Phase.DONE) {
+    String cleanupSuffix = cleanupFailed ? " CLEANUP_INCOMPLETE" : "";
+    LOGGER.info("[DIV missingIndexFallbackProbe] COMPLETE verdict=" + finalVerdict + cleanupSuffix
+      + " (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");
+   } else {
+    String cleanupSuffix = cleanupFailed ? " CLEANUP_INCOMPLETE" : "";
+    LOGGER.error("[DIV missingIndexFallbackProbe] FAILED" + cleanupSuffix + " - see the specific FAILED line above for the real cause");
+   }
+  }
+  if (!chunkGridUnforced) {
+   chunkGridUnforced = true;
+   try {
+    unforceChunkGrid(level);
+    LOGGER.info("[DIV missingIndexFallbackProbe] released terrain chunk grid");
+   } catch (RuntimeException ex) {
+    LOGGER.error("[DIV missingIndexFallbackProbe] failed to release terrain chunk grid", ex);
+   }
+  }
+ }
+
+ /** Idempotent - every despawn is individually guarded by its own null/isValid check, so a
+  * partial-construction failure (an exception mid-{@link #spawn}, leaving some fields still
+  * null) is handled the same as full teardown. Covers {@code towingA} too (normally already
+  * invalidated by {@link #faultInject} itself, but guarded here in case a failure happened
+  * BEFORE that ever ran). */
+ private static void cleanupAllFixtureEntities() {
+  if (towingA != null && towingA.isValid) towingA.remove();
+  if (towedA != null && towedA.isValid) towedA.remove();
+  if (towingB != null && towingB.isValid) towingB.remove();
+  if (towedB != null && towedB.isValid) towedB.remove();
+  if (towingC != null && towingC.isValid) towingC.remove();
+  if (towingD != null && towingD.isValid) towingD.remove();
  }
 
  private static void requestChunkGrid(ServerLevel level) {
@@ -193,7 +274,7 @@ public final class MissingIndexFallbackProbe {
   terrainWaitTicksElapsed++;
   if (!chunkGridLoaded(level)) {
    if (terrainWaitTicksElapsed > MAX_TERRAIN_WAIT_TICKS) {
-    LOGGER.error("[DIV missingIndexFallbackProbe] FAILED - terrain chunk grid never finished loading");
+    LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - terrain chunk grid never finished loading");
     phase = Phase.FAILED;
    }
    return;
@@ -256,14 +337,14 @@ public final class MissingIndexFallbackProbe {
  private static boolean boundedOrFail(String tag, EntityVehicleF_Physics v) {
   if (v == null || !v.isValid) return true; // already despawned/invalidated on purpose - not a bounds failure
   if (!finite(v)) {
-   LOGGER.error("[DIV missingIndexFallbackProbe] FAILED - non-finite state tag=" + tag + " phase=" + phase + " tick=" + ticksInPhase + " position=" + v.position);
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - non-finite state tag=" + tag + " phase=" + phase + " tick=" + ticksInPhase + " position=" + v.position);
    phase = Phase.FAILED;
    return false;
   }
   double dx = v.position.x - spawnX, dz = v.position.z - spawnZ;
   double horizontal = Math.sqrt(dx * dx + dz * dz), vertical = Math.abs(v.position.y - spawnSurfaceY);
   if (horizontal > PLATFORM_BOUND_HORIZONTAL || vertical > PLATFORM_BOUND_VERTICAL) {
-   LOGGER.error("[DIV missingIndexFallbackProbe] FAILED - left bounded area tag=" + tag + " phase=" + phase + " tick=" + ticksInPhase
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - left bounded area tag=" + tag + " phase=" + phase + " tick=" + ticksInPhase
      + " horizontal=" + horizontal + " vertical=" + vertical + " position=" + v.position);
    phase = Phase.FAILED;
    return false;
@@ -277,7 +358,7 @@ public final class MissingIndexFallbackProbe {
     || !boundedOrFail("settle/towingB", towingB) || !boundedOrFail("settle/towedB", towedB)) return;
   if (ticksInPhase >= SETTLE_TICKS) {
    if (towedA.towedByConnection == null || towedB.towedByConnection == null) {
-    LOGGER.error("[DIV missingIndexFallbackProbe] FAILED - initial connection never formed on one or both pairs after SETTLE"
+    LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - initial connection never formed on one or both pairs after SETTLE"
       + " towedA.towedByConnection=" + towedA.towedByConnection + " towedB.towedByConnection=" + towedB.towedByConnection);
     phase = Phase.FAILED;
     return;
@@ -294,7 +375,7 @@ public final class MissingIndexFallbackProbe {
   // removal alone (the ORIGINAL, now-corrected proposal) does not reach this path.
   injectedConnection = towedA.towedByConnection;
   if (injectedConnection == null || !towingA.towingConnections.contains(injectedConnection)) {
-   LOGGER.error("[DIV missingIndexFallbackProbe] FAILED - pre-injection sanity check failed: injectedConnection=" + injectedConnection
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - pre-injection sanity check failed: injectedConnection=" + injectedConnection
      + " towingA.towingConnections.contains=" + (injectedConnection != null && towingA.towingConnections.contains(injectedConnection)));
    phase = Phase.FAILED;
    return;
@@ -307,46 +388,80 @@ public final class MissingIndexFallbackProbe {
     + " indexAfterInjection=" + indexAfterInjection + " sameChildReference=" + sameChildReference
     + " - this is a DELIBERATELY injected inconsistent state, not a natural reproduction of any real lifecycle.");
   if (!removed || indexAfterInjection != -1 || !sameChildReference) {
-   LOGGER.error("[DIV missingIndexFallbackProbe] FAILED - fault injection did not produce the expected asymmetric state");
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - fault injection did not produce the expected asymmetric state");
    phase = Phase.FAILED;
    return;
   }
+  // 54862: snapshot the REAL observation counter now, BEFORE invalidating the anchor - the
+  // baseline this fixture compares against once the sweep has had its chance to run.
+  fallbackCallCountBeforeInjection = PhysicsBridge.debugFallbackClearConnectionCallCount(towedA.uniqueUUID);
   LOGGER.info("[DIV missingIndexFallbackProbe] invalidating towingA via the same supported lifecycle method (remove()) the existing"
     + " TOWING_UNAVAILABLE phase already uses");
   towingA.remove();
   phase = Phase.AWAIT_LEAK_FALLBACK; ticksInPhase = 0;
  }
 
+ private static int fallbackCallCountBeforeInjection;
+
  private static void awaitLeakFallback() {
   ticksInPhase++;
   if (!boundedOrFail("awaitLeakFallback/towedA", towedA) || !boundedOrFail("awaitLeakFallback/towingB", towingB)
     || !boundedOrFail("awaitLeakFallback/towedB", towedB)) return;
   if (towedA.towedByConnection == null) {
-   // 54856: "actual fallback-entry evidence (not setup alone)." towedA.towedByConnection can
-   // only have become null via fallbackClearConnection's own explicit v.towedByConnection = null
-   // line - disconnectAtIndex was structurally unreachable, since the fault injection already
-   // made towingA.towingConnections.indexOf(injectedConnection) return -1 before the sweep ever
-   // ran (asserted above, in FAULT_INJECT, before towingA.remove() was even called).
-   LOGGER.info("[DIV missingIndexFallbackProbe] FALLBACK-ENTRY EVIDENCE CONFIRMED - towedA.towedByConnection is now null after"
-     + " " + ticksInPhase + " ticks. The pre-injection assertion already proved indexOf==-1 before towingA.remove() ran, so the"
-     + " ordinary disconnectAtIndex path was structurally unreachable - this null MUST have come from fallbackClearConnection."
-     + " (Launching with -Ddiv.debugGroundContact=true additionally surfaces that method's own diagnostic log line as"
-     + " corroborating evidence - not required for this conclusion.)");
-   phase = Phase.CONTROL_DISCONNECT; ticksInPhase = 0;
+   // MINECRAFT-545/547 (John's comment 54862): the prior version of this check INFERRED
+   // fallback-entry from the postcondition alone ("indexOf==-1 before removal, so this null
+   // MUST have come from the fallback") - a real inference, not a direct observation, and
+   // 54862 is correct that this is not the same thing. Now checks the REAL, always-on
+   // PhysicsBridge.debugFallbackClearConnectionCallCount observation instead - keyed to this
+   // exact vehicle's own UUID, incremented exactly once per real invocation of the production
+   // clearConnection callback. If the count did NOT increment, that is reported as a genuine,
+   // surfaced anomaly - never silently treated as confirmed fallback-entry anyway.
+   int fallbackCallCountAfter = PhysicsBridge.debugFallbackClearConnectionCallCount(towedA.uniqueUUID);
+   boolean fallbackObserved = fallbackCallCountAfter > fallbackCallCountBeforeInjection;
+   if (fallbackObserved) {
+    LOGGER.info("[DIV missingIndexFallbackProbe] FALLBACK-ENTRY EVIDENCE CONFIRMED (real observation, not inference) -"
+      + " towedA.towedByConnection is null after " + ticksInPhase + " ticks AND"
+      + " debugFallbackClearConnectionCallCount for towedA went from " + fallbackCallCountBeforeInjection + " to "
+      + fallbackCallCountAfter + " - the production fallback callback genuinely ran for this exact vehicle.");
+    phase = Phase.CONTROL_DISCONNECT; ticksInPhase = 0;
+    return;
+   }
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - towedA.towedByConnection is null, but"
+     + " debugFallbackClearConnectionCallCount for towedA did NOT increment (" + fallbackCallCountBeforeInjection + " -> "
+     + fallbackCallCountAfter + ") - a genuine anomaly: something other than the expected fallbackClearConnection callback"
+     + " nulled this field. Treated as a failure, never silently accepted as confirmed fallback-entry.");
+   phase = Phase.FAILED;
    return;
   }
   if (ticksInPhase >= FALLBACK_WAIT_TICKS) {
-   LOGGER.error("[DIV missingIndexFallbackProbe] FAILED - towedA.towedByConnection never became null within " + FALLBACK_WAIT_TICKS
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - towedA.towedByConnection never became null within " + FALLBACK_WAIT_TICKS
      + " ticks of invalidating towingA - the orphan was never cleared at all (a more basic defect than the leak this fixture targets)");
    phase = Phase.FAILED;
   }
  }
 
  private static void controlDisconnect() {
+  // MINECRAFT-545/547 (John's comment 54862): the prior version called disconnectTrailer(0)
+  // with a HARDCODED index, merely assuming the connection sits at index 0 - never actually
+  // verified. Capture the real connection reference and compute its REAL current index instead;
+  // if identity/list consistency has drifted from what SETTLE already confirmed, this is itself
+  // an anomaly - treat it as a control failure (never fabricate an index to paper over it).
+  var connectionB = towedB.towedByConnection;
+  int indexB = (connectionB != null) ? towingB.towingConnections.indexOf(connectionB) : -1;
+  boolean consistent = connectionB != null && towingB.towingConnections.contains(connectionB) && indexB >= 0;
+  if (!consistent) {
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - CONTROL setup inconsistency before disconnect:"
+     + " towedB.towedByConnection=" + connectionB + " computedIndex=" + indexB
+     + " - this is a genuine anomaly, not fabricating an index to proceed anyway");
+   controlOutcome = ControlOutcome.FAILURE;
+   phase = Phase.LEAK_RECONNECT_REQUEST; ticksInPhase = 0;
+   return;
+  }
   // The REAL, proper disconnect path - never fault injection - genuinely releasing
   // connectionGroupsIndexesInUse on both sides, establishing the matched positive control.
-  towingB.disconnectTrailer(0);
-  LOGGER.info("[DIV missingIndexFallbackProbe] CONTROL - properly disconnected towingB/towedB via the real disconnectTrailer(0)");
+  towingB.disconnectTrailer(indexB);
+  LOGGER.info("[DIV missingIndexFallbackProbe] CONTROL - properly disconnected towingB/towedB via the real disconnectTrailer("
+    + indexB + ") (the actual computed index, not assumed)");
   phase = Phase.CONTROL_RECONNECT_REQUEST; ticksInPhase = 0;
  }
 
@@ -364,8 +479,16 @@ public final class MissingIndexFallbackProbe {
   // 54844/54849/54856: the REAL normal selection path - towingConnectionVar's own public setter
   // - never connectTrailer directly, which would bypass the ALREADY_TOWED check entirely.
   towingD.towingConnectionVar.setTo(1.0, false); // group index 0 + 1
-  LOGGER.info("[DIV missingIndexFallbackProbe] CONTROL - spawned fresh towingD=" + towingD.uniqueUUID
-    + " and requested normal reconnect to towedB via towingConnectionVar");
+  // MINECRAFT-545/547 (John's comment 54862 - "verify matching eligibility, group, relative
+  // anchor geometry/orientation/validity... before interpreting absence"): logged explicitly so
+  // a reviewer can sanity-check eligibility BEFORE this request's own outcome is interpreted,
+  // not just after. Does not itself confirm the request was processed (the real
+  // towingConnectionVar always resets to 0 the same tick it's read, success or not, so that
+  // alone carries no extra signal) - this is eligibility visibility, not a processing proof.
+  double distance = towingD.position.distanceTo(towedB.position);
+  LOGGER.info("[DIV missingIndexFallbackProbe] CONTROL - spawned fresh towingD=" + towingD.uniqueUUID + " towingD.isValid=" + towingD.isValid
+    + " towingD.position=" + towingD.position + " towedB.position=" + towedB.position + " distance=" + distance
+    + " requestedGroupIndex=0 - requested normal reconnect to towedB via towingConnectionVar");
   phase = Phase.AWAIT_CONTROL_RESULT; ticksInPhase = 0;
  }
 
@@ -395,11 +518,20 @@ public final class MissingIndexFallbackProbe {
  private static void leakReconnectRequest(ServerLevel level) {
   towingC = spawnFreshTowing(level, towedA, "missingindex-towingC");
   towingC.towingConnectionVar.setTo(1.0, false);
-  LOGGER.info("[DIV missingIndexFallbackProbe] LEAK PROBE - spawned fresh towingC=" + towingC.uniqueUUID
-    + " and requested normal reconnect to towedA (whose own hookupGroupIndex bit was never released by the fallback) via"
-    + " towingConnectionVar - identical mechanism and geometry pattern as the control, different target");
+  // Same eligibility-visibility logging as the control's own request - see that method's doc.
+  double distance = towingC.position.distanceTo(towedA.position);
+  LOGGER.info("[DIV missingIndexFallbackProbe] LEAK PROBE - spawned fresh towingC=" + towingC.uniqueUUID + " towingC.isValid=" + towingC.isValid
+    + " towingC.position=" + towingC.position + " towedA.position=" + towedA.position + " distance=" + distance
+    + " requestedGroupIndex=0 - requested normal reconnect to towedA (whose own hookupGroupIndex bit was never released by the"
+    + " fallback) via towingConnectionVar - identical mechanism and geometry pattern as the control, different target");
   phase = Phase.AWAIT_LEAK_RESULT; ticksInPhase = 0;
  }
+
+ /** MINECRAFT-545/547 (John's comment 54862): stored, never logged as a terminal banner HERE -
+  * the actual terminal line is emitted from {@link #finishTickIfTerminal}, AFTER the centralized
+  * cleanup attempt, so a reader can never see a "COMPLETE"-shaped line appear before cleanup has
+  * actually been attempted. See that method's own doc. */
+ private static LeakVerdict finalVerdict;
 
  private static void awaitLeakResult() {
   ticksInPhase++;
@@ -411,26 +543,13 @@ public final class MissingIndexFallbackProbe {
    leakOutcome = LeakProbeOutcome.NO_NEW_CONNECTION;
   }
   if (leakOutcome == null) return;
-  var verdict = classifyLeakVerdict(controlOutcome, leakOutcome);
+  finalVerdict = classifyLeakVerdict(controlOutcome, leakOutcome);
   LOGGER.info("[DIV missingIndexFallbackProbe] RESULT - controlOutcome=" + controlOutcome + " leakProbeOutcome=" + leakOutcome
-    + " verdict=" + verdict + " - behavioral signal only, NOT direct proof of the ALREADY_TOWED rejection reason specifically"
+    + " verdict=" + finalVerdict + " - behavioral signal only, NOT direct proof of the ALREADY_TOWED rejection reason specifically"
     + " (that reason is delivered only via a client-targeted chat packet, unobservable in this player-less fixture - see this"
     + " class's own doc). Local-group-reuse evidence here does NOT verify client notification - that remains a SEPARATE,"
     + " still-open, still-unverified gap, not addressed by this fixture.");
-  LOGGER.info("[DIV missingIndexFallbackProbe] COMPLETE - verdict=" + verdict
-    + " (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");
-  towingA_cleanup();
   phase = Phase.DONE;
- }
-
- private static void towingA_cleanup() {
-  // No restore-then-disconnect reliance, per 54844/54849/54856 - simply despawn every
-  // fixture-owned entity; the leaked bookkeeping disappears with the garbage-collected objects.
-  if (towedA != null && towedA.isValid) towedA.remove();
-  if (towingB != null && towingB.isValid) towingB.remove();
-  if (towedB != null && towedB.isValid) towedB.remove();
-  if (towingC != null && towingC.isValid) towingC.remove();
-  if (towingD != null && towingD.isValid) towingD.remove();
  }
 
  private static JSONVehicle buildHullDefinition(String systemName, boolean hitch, boolean hookup) {

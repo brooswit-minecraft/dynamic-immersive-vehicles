@@ -12643,3 +12643,150 @@ registration matching every existing probe's own convention. Compiles and passes
 on the first attempt (912 tests, 0 failures). No native run performed - this fixture's own real
 correctness remains unconfirmed by execution, stated as such. A new packet follows. No merge/
 Done transition made or implied.
+
+## Per 54862: independent source review of 2bc4bb3 found six real, concrete defects in the new
+## fixture - all fixed; a real, always-on production observation counter added; the packet's
+## own stale buoyant-probe flag found and will be overridden
+
+John's comment 54862 independently reviewed the actual pushed source of `2bc4bb3` and found six
+concrete problems, not process points - all addressed in a follow-up commit.
+
+### 1. No cleanup on any FAILED path - a real resource leak
+
+Confirmed: `maybeRun`'s only terminal-path action on the FAILED/exception branch was releasing
+the chunk-force grid - `cleanupAllFixtureEntities` (then still named `towingA_cleanup`) was only
+ever called from the ONE successful-completion call site inside `awaitLeakResult`. Any FAILED
+exit at ANY earlier phase (bounds exceeded, non-finite, timeout, exception) left every fixture-
+owned entity in the world forever.
+
+**Fix**: extracted a single centralized `finishTickIfTerminal(level)`, called unconditionally at
+the end of `maybeRun` (and after the terrain-request branch too), guarded by one `cleanedUp`
+boolean so it runs exactly once regardless of which terminal path reached it - DONE or FAILED,
+any phase. `cleanupAllFixtureEntities()` is idempotent (every despawn individually null/isValid-
+guarded) and now also covers `towingA` (normally already invalidated by `faultInject`, but
+guarded here for a failure that happens BEFORE that ever runs). A cleanup exception is caught,
+reported as `CLEANUP_INCOMPLETE` in the terminal banner, and never allowed to mask or be masked
+by the experiment's own verdict.
+
+### 2. The terrain-chunk request ran outside any try/catch
+
+Confirmed: `requestChunkGrid(level)` in the `if (!configured)` branch had no exception handling
+at all - an exception there would have propagated uncaught, crashing the whole
+`ServerTickEvent.Post` listener instead of failing this fixture closed. Wrapped in its own
+try/catch, same `FAILURE_DETECTED`-then-terminal-banner pattern as every other phase.
+
+### 3. Fallback-entry "evidence" was an inference, not an observation
+
+54862: "index==-1 setup plus later null pointer does NOT prove actual production fallback ran.
+Add tightly fixture-scoped fallback observation/counter keyed to exact connection+vehicle
+identity." Confirmed correct: the prior reasoning ("the pre-injection state made the ordinary
+path structurally unreachable, so this null MUST have come from the fallback") is a real
+inference from a postcondition, not a direct observation of the production code path actually
+executing.
+
+**Fix**: added a real, always-on production observation to `PhysicsBridge` itself -
+`debugFallbackClearConnectionCallCount(UUID)`, a `Map<UUID, Integer>` incremented exactly once
+per real invocation of the production `clearConnection` callback inside
+`releaseOrphanedTowingConnections`'s own real fallback adapter, keyed by the exact towed
+vehicle's own UUID. Diagnostic/test-only, never read from any production decision path, minimal
+overhead (one map `merge` call, always on since it never alters any teardown decision - 54862's
+own "disabled/default overhead minimal; don't alter production teardown decisions" is satisfied
+by making it unconditional and decision-free, not by gating it). The fixture now snapshots this
+counter immediately before invalidating the anchor and compares it against the same counter once
+`towedA.towedByConnection` becomes null - only an actual observed increment confirms fallback-
+entry; a null field with NO counter increment is now reported as a genuine anomaly and FAILS the
+fixture, never silently accepted as confirmed fallback-entry anyway.
+
+### 4. COMPLETE conflated experiment-completion with the correctness verdict
+
+54862: "COMPLETE currently covers LEAK_CONFIRMED and INCONCLUSIVE_CONTROL_FAILED. Separate
+experiment completion from correctness verdict... never all PASS from Java rc0 or COMPLETE
+alone." Confirmed: the prior terminal banner unconditionally said `"COMPLETE verdict=..."`
+regardless of which of the three verdicts actually resulted, and was logged BEFORE cleanup even
+ran (per point 1).
+
+**Fix, structural**: the verdict is now computed and STORED (`finalVerdict`) inside
+`awaitLeakResult`, never logged as a terminal banner there. The actual terminal banner - still
+naming the verdict explicitly in its own text (`"COMPLETE verdict=LEAK_CONFIRMED"` /
+`"...verdict=LEAK_NOT_OBSERVED"` / `"...verdict=INCONCLUSIVE_CONTROL_FAILED"`, plus a
+` CLEANUP_INCOMPLETE` suffix when cleanup itself failed) - is emitted from
+`finishTickIfTerminal`, AFTER the cleanup attempt. Every individual failure site's own
+pre-existing `LOGGER.error("...FAILED - <specific reason>")` line was renamed to
+`FAILURE_DETECTED` - the literal word "FAILED" is now reserved EXCLUSIVELY for the one banner
+line `finishTickIfTerminal` emits after cleanup, so a consumer polling the log for "FAILED"
+cannot react before cleanup has actually been attempted (a real, confirmed risk: the prior
+per-site "FAILED" lines would have matched a naive terminal-pattern grep immediately, regardless
+of where the banner itself was moved to).
+
+**Fix, parser**: added a probe-SPECIFIC result classifier (`missing-index-probe-result.sh`,
+packet-local, does not alter the shared `probe-result.sh` other probes' own packets still use
+unchanged) mapping the verdict text itself into `OBSERVED_DEFECT` / `NO_LEAK_OBSERVED` /
+`INCONCLUSIVE` (each with a `_CLEANUP_INCOMPLETE` variant), `FAIL` (with its own
+`_CLEANUP_INCOMPLETE` variant), and the existing `TIMEOUT`/`STARTUP_FAILURE`/
+`PROCESS_EXITED_EARLY`/`UNRECOGNIZED_TERMINAL` cases - a bare "COMPLETE" line with no recognized
+verdict text classifies as `UNRECOGNIZED_COMPLETE_SHAPE`, never a silent PASS. Self-tested
+against 10 representative synthetic lines (all expected verdict/cleanup/non-COMPLETE
+combinations) before wiring into any packet - all 10 pass.
+
+### 5. `controlDisconnect` hardcoded index 0 instead of computing the real one
+
+54862: "capture exact connection reference, verify current child/parent consistency and
+nonnegative current index, call genuine index not hardcoded 0." Confirmed: `towingB.disconnectTrailer(0)`
+assumed, never verified, that the connection sat at index 0.
+
+**Fix**: captures `towedB.towedByConnection`, computes the REAL current index via
+`towingB.towingConnections.indexOf(connectionB)`, and verifies consistency
+(`towingB.towingConnections.contains(connectionB)`, index `>= 0`) before calling
+`disconnectTrailer` with that real index. An inconsistency is reported as a genuine anomaly and
+treated as a control failure - never fabricating an index to proceed anyway.
+
+### 6. Timing/eligibility visibility for the two reconnect requests
+
+54862: "verify matching eligibility, group, relative anchor geometry/orientation/validity and
+request processing before interpreting absence." Investigated what signal is actually available:
+the real `towingConnectionVar` always resets to 0 the same tick it is read, success or
+rejection alike, so "did it get reset" carries no extra signal distinguishing those two cases -
+confirmed from the real `update()` source, not assumed. What IS added: explicit, logged
+eligibility visibility at request time (`towingD`/`towingC`'s own validity, position, and the
+computed distance to their target, plus the requested group index) for BOTH reconnect requests -
+so a reviewer can sanity-check eligibility BEFORE this request's own outcome gets interpreted,
+not only after. Stated precisely as eligibility visibility, not a processing-confirmation signal
+that does not actually exist in the real game loop.
+
+### Packet-level finding: the shared VM-args already carry an unrelated probe's own flag
+
+54862 also asked to confirm "only intended probe opt-in, buoyant probe OFF." Checked directly:
+the SHARED `build/moddev/serverRunVmArgs.txt` already carries `-Ddiv.experimentalBuoyantHitch=true`
+(left set from earlier work this session) - the prior `M545-packet-2bc4bb3-missingindexprobe`
+would have run BOTH probes simultaneously if ever launched. This packet is being corrected to
+explicitly override it (`-Ddiv.experimentalBuoyantHitch=false`, appended after the inherited
+`=true` line - JVM system-property semantics mean the LAST `-D` for the same key wins) rather
+than relying on it being absent. Also re-confirmed, precisely as asked: the packet's own config
+keys DO already match the actual systemName strings exactly
+(`missingindex-towing-shared`/`missingindex-towed-shared`/`missingindex-towingC`/
+`missingindex-towingD`) - this was correct already, not a bug, confirmed by direct comparison
+rather than assumed correct a second time.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **912 tests** (unchanged - every fix above is either
+MTS-dependent, confirmed untestable the same way as every other MTS-adapter code in this
+investigation, or pure logging/visibility with no new branch to unit-test), 0 failures, 0
+errors.
+
+### Disposition
+
+Six real, independently-found defects fixed, not merely acknowledged: a genuine resource leak
+on every failure path (centralized, idempotent cleanup added); an unguarded exception path
+(wrapped); an inference presented as evidence (replaced with a real, always-on, UUID-keyed
+production observation counter); a conflated completion/verdict banner emitted before cleanup
+(restructured so the verdict-naming terminal banner is the ONLY "FAILED"/verdict-bearing line,
+emitted strictly after cleanup, with a new probe-specific parser that never collapses a real
+verdict into a bare PASS); a hardcoded index (replaced with a computed, verified one, failing
+rather than fabricating on inconsistency); and added eligibility-visibility logging for both
+reconnect requests, correctly scoped as visibility rather than a processing-confirmation signal
+the real game loop does not actually provide. Also confirmed, with evidence either way: a real
+stale-flag hazard in the shared VM-args (to be corrected in the new packet), and that the
+packet's own config keys were already correct (not a bug). Full suite green (912 tests). No
+native run performed. A new, corrected packet follows. No merge/Done transition made or
+implied.
