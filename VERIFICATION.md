@@ -16642,3 +16642,42 @@ justification, not guessed through. No removed client-protocol machinery was res
 confirmed by direct search. Full suite green (1164 tests, 0 failures/errors) on the merge commit
 itself. No native run performed or proposed. No merge/Done transition made or implied —
 independent review (still request-only as of the 55037 round) remains the outstanding gate.
+
+## 2026-11-18 — Correction: the duplicate-method fix from the 55043 merge was never actually committed
+
+### What was wrong
+
+The "Per 55043" entry above and the Jira comment reporting it (55050) claimed a clean 1164-test
+receipt tied to commit 24bb360/4cf3b73 and a `gh pr view 39` result of `mergeable: "MERGEABLE"`.
+Both were based on a LOCAL working-tree state that included the `debugReadLinearVelocity`
+duplicate-method fix described in that entry — but that fix was never actually `git add`ed before
+the merge/documentation commits were made. The real pushed commit (4cf3b73) still contained BOTH
+definitions of `debugReadLinearVelocity`. GitHub Actions CI (triggered by that push, run
+44333790158, both the `build` and `runtime-smoke` jobs) failed with the exact compile error this
+would produce: `PhysicsBridge.java:1548: error: method debugReadLinearVelocity(EntityVehicleF_Physics)
+is already defined in class PhysicsBridge`. The local Gradle daemon's own build never caught this
+because it was run against the (correct, but uncommitted) working tree, not the actual committed/
+pushed tree — so the test receipt reported was real, but did not correspond to what was pushed.
+
+This is a real process defect, not a disputed finding: `git status` confirmed the file was
+modified-but-unstaged at the time this was discovered, and `git show <pushed-SHA>:<path> | grep`
+confirmed the duplicate was present in the actual committed blob.
+
+### Fix
+
+The already-correct working-tree fix (removing the duplicate definition, keeping this branch's own
+strict-superset version, matching the comment already written to explain the resolution) is now
+actually staged and committed. A fresh, non-cached test run (`gradle test --rerun`) was performed
+under the exclusive lock before committing, to generate a receipt genuinely tied to the state about
+to be pushed, not reused from the earlier (uncommitted-fix) run: **1164 tests, 0 failures, 0
+errors** - the same count as before, now actually backed by what ships.
+
+### Disposition
+
+No new logic change - this is a repair of a commit/push omission, not a new source decision. The
+"Per 55043" entry's own technical content (which files conflicted, how each was resolved, the
+resurrection check) remains accurate; only the claim that the fix was actually committed and that
+CI would pass was wrong, and is corrected here. GitHub Actions CI will be re-triggered by this
+commit's push and should now actually pass; this will be confirmed, not assumed, before any
+further claim is made about CI status. No native run performed or proposed. No merge/Done
+transition made or implied.

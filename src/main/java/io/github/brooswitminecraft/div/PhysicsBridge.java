@@ -1539,15 +1539,10 @@ public final class PhysicsBridge {
    if (body.twoBodyActive) body.upperHandle.addLinearAndAngularVelocity(linearVelocity, new Vector3d());
   }
  }
- /**
-  * Diagnostic/test-only companion to {@link #debugInjectLinearVelocity} - reads back this
-  * vehicle's CURRENT actual native linear velocity directly from its live Sable handle, the
-  * translational twin of {@link #debugReadAngularVelocity}. Returns null if there is no active
-  * Body.
-  */
- public static Vector3d debugReadLinearVelocity(EntityVehicleF_Physics v) {
-  return registry.get(v) instanceof Body body ? body.handle.getLinearVelocity(new Vector3d()) : null;
- }
+ // debugReadLinearVelocity (main's own MINECRAFT-526 version, Body-only) is already defined
+ // above as the MINECRAFT-545/547 branch's own strict superset (same Body-case behavior, plus a
+ // BuoyantBody case) - merge conflict resolution (per 55043) kept that definition and dropped
+ // this duplicate rather than the other way around.
  /**
   * Diagnostic/test-only snapshot (MINECRAFT-526 review 53897/53905/53907) bundling everything a
   * test needs to assert real dispatch/retention without re-deriving any of it: {@code
