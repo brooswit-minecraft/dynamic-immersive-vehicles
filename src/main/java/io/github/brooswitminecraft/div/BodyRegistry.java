@@ -37,13 +37,58 @@ final class BodyRegistry<K, B> {
   * deactivate}, a bulk sweep (cleanup/unload) is also where PhysicsBridge must release any hitch
   * joint keyed by that same entity (either as the towed side's own joint, or as a towing
   * vehicle whose trailers' joints must be released), which needs the key, not just the body.
+  *
+  * <p>MINECRAFT-545/547 (Wroosbit review, comment 55189): a throwing {@code onRemove} used to
+  * propagate straight out of the underlying {@code Map.Entry} collection's own {@code
+  * removeIf} - since that collection view's {@code removeIf} aborts its ENTIRE iteration on the
+  * first exception from its own predicate lambda, every entry after the throwing one (in
+  * iteration order) was never even visited, and the throwing entry itself was never removed
+  * (its own predicate lambda never returned normally). {@code onRemove} is now individually
+  * try/caught per entry, so one entry's own failure can never prevent any other matching
+  * entry's own {@code onRemove} from still running. The failing entry IS still removed despite
+  * its own {@code onRemove} throwing: the predicate above already confirmed this entry meets
+  * the caller's own removal criterion (e.g. {@code !v.isValid}), so retaining it would only
+  * repeat the identical failure on every future sweep, for no benefit - removing it reflects
+  * "every attempt was made, the entry's own fate is decided," while the exception is still
+  * re-thrown (the FIRST one encountered across the whole sweep, never swallowed) only after
+  * every matching entry has been attempted, so the failure is reported but does not block
+  * progress on unrelated entries. Each entry is visited and (if matching) removed/attempted at
+  * most once per call, so a second call naturally cannot double-touch an entry this call
+  * already removed - there is nothing left in {@code active} for it to match again.
+  *
+  * <p>MINECRAFT-545/547 (Wroosbit review, comment 55214): {@code predicate.test(...)} ITSELF was
+  * still evaluated outside any per-entry isolation - production predicates read {@code
+  * v.isValid} (cleanup) or {@code b.level() == level} (unload), either of which can itself throw
+  * (e.g. a corrupted/partially-torn-down entity). A throwing predicate hits the exact same
+  * underlying problem {@code onRemove} already had: the collection view's own {@code removeIf}
+  * aborts its entire iteration immediately, so every entry after the one whose PREDICATE threw
+  * is never even tested. Now individually try/caught per entry, same as {@code onRemove}.
+  *
+  * <p>The disposition is deliberately the OPPOSITE of {@code onRemove} throwing, though: when
+  * {@code onRemove} throws, the predicate has ALREADY confirmed this entry meets the removal
+  * criterion, so removing it anyway reflects "every attempt was made, its fate is decided." When
+  * the PREDICATE ITSELF throws, eligibility was never actually established - this entry's own
+  * removal criterion is genuinely UNKNOWN, not confirmed-but-partially-failed. Removing it here
+  * would act on a criterion that was never proven true; the entry is instead RETAINED, left for
+  * a future sweep to correctly evaluate once whatever transient condition caused the throw has
+  * resolved. The exception is still captured as a first-failure candidate and re-thrown at the
+  * end, same as any other step's own failure - never swallowed, just not grounds for removal.
   */
  void removeIf(BiPredicate<K, B> predicate, BiConsumer<K, B> onRemove) {
+  RuntimeException[] firstFailure = new RuntimeException[1];
   active.entrySet().removeIf(e -> {
-   if (!predicate.test(e.getKey(), e.getValue())) return false;
-   onRemove.accept(e.getKey(), e.getValue());
+   boolean matches;
+   try { matches = predicate.test(e.getKey(), e.getValue()); }
+   catch (RuntimeException ex) {
+    if (firstFailure[0] == null) firstFailure[0] = ex;
+    return false; // eligibility unknown - retain, do not act on an unproven criterion
+   }
+   if (!matches) return false;
+   try { onRemove.accept(e.getKey(), e.getValue()); }
+   catch (RuntimeException ex) { if (firstFailure[0] == null) firstFailure[0] = ex; }
    return true;
   });
+  if (firstFailure[0] != null) throw firstFailure[0];
  }
  /**
   * Read-only visit of every currently-active (key, body) pair (ticket 53518/MINECRAFT-505's

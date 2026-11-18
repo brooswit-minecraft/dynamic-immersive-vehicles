@@ -3,6 +3,7 @@ package io.github.brooswitminecraft.div;
 import dev.ryanhcode.sable.api.physics.constraint.GenericConstraintConfiguration;
 import dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
+import dev.ryanhcode.sable.api.physics.mass.MassData;
 import dev.ryanhcode.sable.api.physics.object.box.BoxPhysicsObject;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.Pose3d;
@@ -31,6 +32,7 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3d;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
+import org.joml.Vector3dc;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -795,10 +797,10 @@ public final class PhysicsBridge {
   var installedPropellers = installedPropellers(v);
   TowingConnection towedByConnection = v.towedByConnection;
   boolean towed = towedByConnection != null, optedOut = Overrides.isOptedOut(key);
-  // Hitch coupling (and the ordering wait/rollback it needs) applies only to the ground/flight/
-  // rotor domain - all three share one Body implementation. A float-only hull's activelyTowed
-  // gate stays exactly as floatEligible already enforces it (see Classification's class doc for
-  // why: BuoyantBody has no pose/anchor API for a joint to connect to).
+  // Hitch coupling (and the ordering wait/rollback it needs) now applies to the float-only
+  // domain too (MINECRAFT-545): BuoyantBody implements HitchAnchor exactly like the ground/
+  // flight/rotor Body does, so floatEligible no longer excludes an actively-towed hull - see
+  // Classification's class doc.
   boolean ground = Classification.eligible(definition, installedGroundDevices, installedPropellers, optedOut);
   boolean floating = !ground && Classification.floatEligible(definition, installedGroundDevices, installedPropellers, towed, optedOut);
   if (brokenDefinitions.contains(definition)) { GroundContactDiagnostics.logEarlyReturn(v.uniqueUUID, isClient, "brokenDefinition:"+key); return deactivate(v); }
@@ -816,10 +818,39 @@ public final class PhysicsBridge {
    if (old != null) { hitches.release(v); old.remove(); }
   }
   boolean alreadyActive = registry.isActive(v);
-  boolean towingVehicleActive = ground && towed && isHitchableBody(towedByConnection.towingVehicle);
-  var decision = ground
-    ? decide(true, isClient, towed, alreadyActive, towingVehicleActive)
-    : (isClient ? ActivationDecision.CLIENT_ACTIVE : ActivationDecision.ACTIVATE);
+  // No `ground &&` gate any more (MINECRAFT-545): a towed float-only hull now waits for its
+  // towing vehicle's own hitchable body exactly like a towed ground/flight/rotor vehicle does.
+  // `ground || floating` is always true here (the deactivate return above already excludes
+  // neither), so `decide` alone (its own isClient/towed handling already matches the previous
+  // per-branch ternary exactly) replaces it.
+  // MINECRAFT-545/547 (John's comment 54237/54256): `towingHasHitchableBody` alone used to BE
+  // `towingVehicleActive` - but that conflated two different reasons a trailer's joint can't
+  // reconcile right now: the towing vehicle simply has no Sable body yet/anymore (transient -
+  // MINECRAFT-498's own regression fix below is exactly about THIS reason, and still applies to
+  // it), versus the towing vehicle DOES have a body but `unsafeBuoyantAngularLock` refuses this
+  // specific pair. For an already-active trailer, `deferToNativeHitch` previously never deferred
+  // for EITHER reason - correct for the first (free-floating on Sable while waiting for a body to
+  // reappear is the intended, reviewed behavior), but wrong for the second: `unsafeBuoyantAngularLock`'s
+  // own doc says it "falls back to IV's native hitch for that pair" - the SAME native fallback a
+  // first-activation wait gets - not "stay Sable-authoritative, unjointed, with towedByConnection
+  // still pointing at a pair this bridge itself judged unsafe." `unsafeLock` is split out so
+  // `deferToNativeHitch` can defer for this reason regardless of `alreadyActive`, while still
+  // never deferring an already-active trailer merely because its towing vehicle has no body at all.
+  boolean towingHasHitchableBody = towed && isHitchableBody(towedByConnection.towingVehicle);
+  boolean unsafeLock = towingHasHitchableBody && unsafeBuoyantAngularLock(registry.get(towedByConnection.towingVehicle) instanceof BuoyantBody, floating,
+      towedByConnection.hitchConnection.mounted, towedByConnection.hitchConnection.restricted);
+  boolean towingVehicleActive = towingHasHitchableBody && !unsafeLock;
+  // MINECRAFT-545/547 diagnostic (John's comment 54250: trace actual tick-relative cleanup/
+  // remove/joint-release/step ordering, not just a before/after sample) - log-only, every tick a
+  // towed vehicle's own active() recomputes this decision, so the exact tick `isHitchableBody`
+  // starts/stops seeing a just-invalidated towing vehicle's still-registered body is visible
+  // directly, rather than inferred from cleanup()'s own registration order.
+  if (towed && GroundContactDiagnostics.ENABLED) {
+   com.mojang.logging.LogUtils.getLogger().info("[DIV lifecycleDiagnostic] v=" + v.uniqueUUID + " towingVehicle=" + towedByConnection.towingVehicle.uniqueUUID
+     + " towingValid=" + towedByConnection.towingVehicle.isValid + " isHitchableBody=" + isHitchableBody(towedByConnection.towingVehicle)
+     + " alreadyActive=" + alreadyActive + " towingVehicleActive=" + towingVehicleActive + " unsafeLock=" + unsafeLock);
+  }
+  var decision = decide(true, isClient, towed, alreadyActive, towingVehicleActive, unsafeLock);
   GroundContactDiagnostics.logClassification(v.uniqueUUID, isClient, key, ground, floating, decision.toString());
   if (decision == ActivationDecision.DEFER_TO_NATIVE) return deactivate(v);
   if (decision == ActivationDecision.CLIENT_ACTIVE) return true;
@@ -832,7 +863,8 @@ public final class PhysicsBridge {
     ? () -> new Body(server,v,tuning(definition))
     : () -> new BuoyantBody(server,v,tuning(definition));
   boolean activated = activateOrClassify(registry, brokenDefinitions, v, definition, GroundContactDiagnostics.instrumentedConstruct(construct, v.uniqueUUID, isClient, key));
-  if (!activated || !ground) return activated;
+  // MINECRAFT-545: hitch reconciliation now runs for a float-only hull too, not just `ground`.
+  if (!activated) return activated;
   // Evaluated BEFORE reconcileHitch runs: HitchRegistry.reconcile already clears any existing
   // entry - valid/matching or not - before attempting to (re)create one, so this is the only
   // point that can still tell whether the trailer entered this attempt coherently jointed to its
@@ -844,10 +876,34 @@ public final class PhysicsBridge {
   EntityVehicleF_Physics desired = towingVehicleActive ? towedByConnection.towingVehicle : null;
   return reconcileOrRollBack(registry, hitches, v, hitches.isCoherentlyJointedTo(v, desired), () -> reconcileHitch(v, towedByConnection), VehicleBody::remove);
  }
- /** Whether the given towing vehicle's own active VehicleBody is a Body (ground/flight/rotor) -
-  * the only domain a hitch joint can connect to - rather than a BuoyantBody or no body at all. */
+ /** Whether the given towing vehicle's own active VehicleBody exposes {@link HitchAnchor} - a
+  * ground/flight/rotor {@code Body} or (MINECRAFT-545) a float-only {@link BuoyantBody} - rather
+  * than no body at all. */
  private static boolean isHitchableBody(EntityVehicleF_Physics towingVehicle) {
-  return registry.get(towingVehicle) instanceof Body;
+  return registry.get(towingVehicle) instanceof HitchAnchor;
+ }
+ /**
+  * MINECRAFT-545 safety gate: a {@code mounted} or {@code restricted} angular lock between TWO
+  * independently-buoyant hulls is a confirmed-live runaway instability, not a hypothesis -
+  * {@code BuoyantHitchProbe}'s own earlier live run settled cleanly to a sub-0.003-block anchor
+  * distance, then diverged to 35+ blocks within ~10 ticks and crashed {@code BuoyantBody.step}
+  * with a {@code NullPointerException} once the ejected body left Sable's own active region (see
+  * VERIFICATION.md's "Float-only hull hitch support" section and MINECRAFT-547).
+  * Each float's own independent righting torque fights a partial or full angular lock against
+  * the OTHER float's independent righting torque - a resonance a ground vehicle's own fixed-to-
+  * the-world suspension does not have, and that root cause is unrelated to which side is towing
+  * vs towed. Refusing this one combination - exactly the two conditions {@code lockedAxes} ever
+  * reads ({@code mounted}/{@code restricted}) AND both active bodies being {@code BuoyantBody} -
+  * falls back to IV's native hitch for that pair specifically, precisely the SAME behavior every
+  * towed float had before this ticket, rather than silently sending a known-unsafe configuration
+  * into production merely because the generalized {@code HitchAnchor} surface now compiles for
+  * it. An ordinary (unmounted, unrestricted) connection between two floats, or ANY connection
+  * where at least one side is not a {@code BuoyantBody} (ground/flight/rotor Body towing or
+  * being towed by a float), is unaffected - both are proven safe by this ticket's own live
+  * evidence.
+  */
+ static boolean unsafeBuoyantAngularLock(boolean towingIsBuoyant, boolean towedIsBuoyant, boolean mounted, boolean restricted) {
+  return towingIsBuoyant && towedIsBuoyant && (mounted || restricted);
  }
  /**
   * The exact reconcile-then-rollback composition {@code active()} performs once its body is
@@ -923,10 +979,10 @@ public final class PhysicsBridge {
   * This was a real regression found by external review: an earlier revision evaluated the
   * hitch-ordering wait before the client/server branch instead of after it.
   */
- static ActivationDecision decide(boolean eligible, boolean isClient, boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
+ static ActivationDecision decide(boolean eligible, boolean isClient, boolean towed, boolean alreadyActive, boolean towingVehicleActive, boolean unsafeLock) {
   if (!eligible) return ActivationDecision.INELIGIBLE;
   if (isClient) return ActivationDecision.CLIENT_ACTIVE;
-  if (deferToNativeHitch(towed, alreadyActive, towingVehicleActive)) return ActivationDecision.DEFER_TO_NATIVE;
+  if (deferToNativeHitch(towed, alreadyActive, towingVehicleActive, unsafeLock)) return ActivationDecision.DEFER_TO_NATIVE;
   return ActivationDecision.ACTIVATE;
  }
  /**
@@ -942,9 +998,22 @@ public final class PhysicsBridge {
   * self-review before this ticket's first external review: an earlier revision applied this wait
   * unconditionally, deactivating (destroying) an already-active trailer's body the moment its
   * towing vehicle's body disappeared.
+  *
+  * <p>MINECRAFT-545/547 (John's comment 54237/54256): {@code unsafeLock} is a SEPARATE reason
+  * {@code towingVehicleActive} can be false - the towing vehicle DOES have a body, but
+  * {@code PhysicsBridge.unsafeBuoyantAngularLock} refuses this specific pair - and unlike "the
+  * towing vehicle simply has no body (yet/anymore)", that gate's own doc says it should fall back
+  * to IV's native hitch for the pair, exactly like a first-activation wait does. Without this,
+  * an ALREADY-active trailer caught by the gate stayed Sable-authoritative and unjointed forever
+  * (the {@code !alreadyActive} half above still true), with {@code towedByConnection} still
+  * pointing at a pair this bridge itself judged unsafe and IV's own native hitch code never
+  * getting a chance to run - the real gap this fixes. {@code unsafeLock} on its own, independent
+  * of {@code alreadyActive}, now also triggers the defer (and so the {@code deactivate(v)} path
+  * in {@code active()}, which actually removes the Sable body and releases the joint - the SAME
+  * native-fallback mechanism a first-activation wait already uses, not a new one).
   */
- static boolean deferToNativeHitch(boolean towed, boolean alreadyActive, boolean towingVehicleActive) {
-  return towed && !alreadyActive && !towingVehicleActive;
+ static boolean deferToNativeHitch(boolean towed, boolean alreadyActive, boolean towingVehicleActive, boolean unsafeLock) {
+  return towed && !towingVehicleActive && (!alreadyActive || unsafeLock);
  }
  /**
   * Brings this trailer's hitch joint in line with {@code connection}: builds one against its
@@ -964,9 +1033,14 @@ public final class PhysicsBridge {
   * every tick, unlike a chassis definition's fixed geometry.
   */
  private static boolean reconcileHitch(EntityVehicleF_Physics v, TowingConnection connection) {
-  EntityVehicleF_Physics desired = connection != null && isHitchableBody(connection.towingVehicle) ? connection.towingVehicle : null;
+  EntityVehicleF_Physics desired = connection != null && isHitchableBody(connection.towingVehicle)
+    && !unsafeBuoyantAngularLock(registry.get(connection.towingVehicle) instanceof BuoyantBody, registry.get(v) instanceof BuoyantBody,
+        connection.hitchConnection.mounted, connection.hitchConnection.restricted)
+    ? connection.towingVehicle : null;
   try {
-   hitches.reconcile(v, desired, () -> createHitch((Body)registry.get(desired), (Body)registry.get(v), connection));
+   // MINECRAFT-545: either side can now be a ground/flight/rotor Body or a float-only
+   // BuoyantBody - createHitch only needs each side's HitchAnchor surface.
+   hitches.reconcile(v, desired, () -> createHitch((HitchAnchor)registry.get(desired), (HitchAnchor)registry.get(v), connection));
    return true;
   } catch (RuntimeException transientFailure) {
    return false;
@@ -1012,16 +1086,71 @@ public final class PhysicsBridge {
   * fields for that case, collapsing to exactly the raw {@code pos}/{@code rot} this method
   * always used.
   */
- private static PhysicsConstraintHandle createHitch(Body towing, Body trailer, TowingConnection connection) {
-  var hitchOffset = HitchJoint.anchorLocalOffset(towing.center,
+ private static PhysicsConstraintHandle createHitch(HitchAnchor towing, HitchAnchor trailer, TowingConnection connection) {
+  var hitchOffset = HitchJoint.anchorLocalOffset(towing.center(),
     connectionOffsetVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.pos), new Vector3d());
-  var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center,
+  var hookupOffset = HitchJoint.anchorLocalOffset(trailer.center(),
     connectionOffsetVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.pos), new Vector3d());
+  // MINECRAFT-545/547 diagnostic logging only (John's own directive, comment 54230) - NOT a
+  // behavior change. Logs each side's real Sable-level linear/angular velocity (not MTS's own
+  // v.motion, which has no angular component) and the computed local anchor offsets right
+  // before the joint is created, so an ATTACH-time log line and a REPLACEMENT-time log line can
+  // be compared directly for whatever actually differs between the two live scenarios. Gated on
+  // the existing GroundContactDiagnostics.ENABLED flag (-Ddiv.debugGroundContact=true), the same
+  // opt-in this codebase already uses for per-tick diagnostic logging - never active otherwise.
+  if (GroundContactDiagnostics.ENABLED) {
+   // Logger fetched lazily, HERE only (never as a static field on this outer class) - a class-
+   // level `LogUtils.getLogger()` field was tried and reverted: it eagerly runs at
+   // PhysicsBridge's own static-init time, which plain unit tests also trigger just by
+   // referencing the class, and LogUtils needs Minecraft/Mojang bootstrap that is not present
+   // in that context - confirmed live (144 unrelated unit tests failed with
+   // ExceptionInInitializerError the moment that field was added).
+   Logger diagnosticLogger = LogUtils.getLogger();
+   RigidBodyHandle towingHandle = towing instanceof Body b ? b.handle : towing instanceof BuoyantBody bb ? bb.handle() : null;
+   RigidBodyHandle trailerHandle = trailer instanceof Body b ? b.handle : trailer instanceof BuoyantBody bb ? bb.handle() : null;
+   // MINECRAFT-545/547 (John's comments 54359/54365): pose is the box's own CACHED Pose3d, last
+   // refreshed by that body's own PRIOR step() call (box.updatePose()) - this createHitch call
+   // itself never refreshes it. Call-ordering alone (active() precedes step() in
+   // VehicleMovementMixin.div$move) is NOT itself proof of exactly when the native impulse that
+   // produced this cached pose was applied - it only places createHitch's own KNOWN event phase
+   // (before this tick's own step()); it is NOT an assertion about which native substep produced
+   // the cached value. Per 54365's correction, those two facts are now logged SEPARATELY rather
+   // than merged into one inferred staleness label:
+   //  - lastPoseUpdateGameTime: the REAL, independently-checkable tick at which this body's own
+   //    step() last ran box.updatePose() (debugLastPoseUpdateGameTime/field set there directly,
+   //    not inferred from ordering).
+   //  - sampleGameTime/knownEventPhase: this read's own tick and the one ordering fact that IS
+   //    actually known (createHitch runs before this tick's own step()).
+   //  - substepIndex: explicitly UNAVAILABLE - no accessor exposes which of
+   //    config.substepsPerTick native substeps last touched this value.
+   var towingPose = towing instanceof Body b ? b.box.getPose() : towing instanceof BuoyantBody bb ? bb.box().getPose() : null;
+   var trailerPose = trailer instanceof Body b ? b.box.getPose() : trailer instanceof BuoyantBody bb ? bb.box().getPose() : null;
+   var towingAnchorWorld = towingPose != null ? new Vector3d(hitchOffset).rotate(new Quaterniond(towingPose.orientation())).add(towingPose.position()) : null;
+   var trailerAnchorWorld = trailerPose != null ? new Vector3d(hookupOffset).rotate(new Quaterniond(trailerPose.orientation())).add(trailerPose.position()) : null;
+   long towingSampleGameTime = towing.level().getGameTime();
+   long trailerSampleGameTime = trailer.level().getGameTime();
+   diagnosticLogger.info("[DIV createHitchDiagnostic] towing=" + connection.towingVehicle.uniqueUUID + " class=" + towing.getClass().getSimpleName()
+     + " sampleGameTime=" + towingSampleGameTime
+     + " lastPoseUpdateGameTime=" + debugLastPoseUpdateGameTime(connection.towingVehicle)
+     + " knownEventPhase=createHitch(before-this-ticks-step) substepIndex=UNAVAILABLE"
+     + " center=" + towing.center() + " hitchLocalOffset=" + hitchOffset
+     + " cachedPose=" + towingPose + " hitchAnchorWorld(fromCachedPose)=" + towingAnchorWorld
+     + " linearVelocity=" + (towingHandle != null ? towingHandle.getLinearVelocity(new Vector3d()) : "n/a")
+     + " angularVelocity=" + (towingHandle != null ? towingHandle.getAngularVelocity(new Vector3d()) : "n/a"));
+   diagnosticLogger.info("[DIV createHitchDiagnostic] trailer=" + connection.towedVehicle.uniqueUUID + " class=" + trailer.getClass().getSimpleName()
+     + " sampleGameTime=" + trailerSampleGameTime
+     + " lastPoseUpdateGameTime=" + debugLastPoseUpdateGameTime(connection.towedVehicle)
+     + " knownEventPhase=createHitch(before-this-ticks-step) substepIndex=UNAVAILABLE"
+     + " center=" + trailer.center() + " hookupLocalOffset=" + hookupOffset
+     + " cachedPose=" + trailerPose + " hookupAnchorWorld(fromCachedPose)=" + trailerAnchorWorld
+     + " linearVelocity=" + (trailerHandle != null ? trailerHandle.getLinearVelocity(new Vector3d()) : "n/a")
+     + " angularVelocity=" + (trailerHandle != null ? trailerHandle.getAngularVelocity(new Vector3d()) : "n/a"));
+  }
   var config = new GenericConstraintConfiguration(hitchOffset, hookupOffset,
     connectionRotationVehicleLocal(connection.towingVehicle.orientation, connection.towingEntity, connection.hitchConnection.rot),
     connectionRotationVehicleLocal(connection.towedVehicle.orientation, connection.towedEntity, connection.hookupConnection.rot).invert(),
     HitchJoint.lockedAxes(connection.hitchConnection.mounted, connection.hitchConnection.restricted));
-  return SubLevelContainer.getContainer(towing.level).physicsSystem().getPipeline().addConstraint(towing.box, trailer.box, config);
+  return SubLevelContainer.getContainer(towing.level()).physicsSystem().getPipeline().addConstraint(towing.box(), trailer.box(), config);
  }
  /**
   * A hitch/hookup connection's own {@code pos}, converted to vehicle-root-local: unchanged when
@@ -1121,7 +1250,125 @@ public final class PhysicsBridge {
    return false;
   }
  }
- public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
+ /**
+  * MINECRAFT-545/547 (John's comment 55126 - "Four survivor tests reimplement removal in
+  * FakeVehicleBody.remove, proving model not actual Body.remove"): the exact branching logic
+  * {@code Body.remove()}'s own partial-two-body-survivor path uses, extracted so it can be
+  * exercised directly by a test with injected (fake) leaf operations, instead of a test double
+  * reimplementing this same decision logic in parallel (which would only prove the fake's own
+  * logic self-consistent, never that production actually behaves this way). {@code Body.remove()}
+  * is the ONLY production caller, passing the real {@code isActive()}/{@code isValid()} results
+  * and real {@code removeObject}/{@code joint.remove()} calls; a test passes synthetic suppliers
+  * and {@code Runnable} spies instead - same method, same control flow, different leaves.
+  *
+  * <p>MINECRAFT-545/547 (John's comment 55139 - "Put eligibility reads inside failure-isolated
+  * production orchestration... not only precomputed booleans if claiming failure isolation"):
+  * {@code activeChecks[i]} is a {@code BooleanSupplier}, NOT a precomputed {@code boolean} -
+  * the ELIGIBILITY check itself (e.g. {@code twoBodyJoint.isValid()}) is now evaluated INSIDE
+  * this same failure-isolated loop, not by the caller beforehand. The original version of this
+  * method took precomputed {@code boolean[]} flags; {@code Body.remove()}'s own caller code
+  * computed {@code twoBodyJoint.isValid()} BEFORE calling in, outside any try/catch - a throwing
+  * validity query would have propagated immediately and skipped every resource's own removal
+  * attempt, the exact same "one throw skips everything" failure this method exists to prevent,
+  * just moved one step earlier. If a given eligibility check itself throws, that resource is
+  * treated as not-safely-removable this call (skipped, not attempted) and the failure is
+  * captured exactly like a throwing removal would be - every OTHER resource's own eligibility
+  * check and removal still proceed independently. Each resource at index {@code i} is attempted
+  * ONLY if {@code activeChecks[i]} returns {@code true}, independently try/caught end to end, with
+  * the FIRST exception encountered (from either an eligibility check or a removal) re-thrown at
+  * the end (never swallowed). Pure/generic (plain {@code BooleanSupplier}s and {@code Runnable}s,
+  * no entity/Sable/world dependency) - directly unit-testable with no native construction needed.
+  */
+ static void removeIndependentResources(java.util.function.BooleanSupplier[] activeChecks, Runnable[] removeOps) {
+  RuntimeException firstFailure = null;
+  for (int i = 0; i < activeChecks.length; i++) {
+   boolean active;
+   try {
+    active = activeChecks[i].getAsBoolean();
+   } catch (RuntimeException ex) {
+    if (firstFailure == null) firstFailure = ex;
+    continue; // eligibility unknown - do not attempt removal, but do not block the others either
+   }
+   if (active) {
+    try {
+     removeOps[i].run();
+    } catch (RuntimeException ex) {
+     if (firstFailure == null) firstFailure = ex;
+    }
+   }
+  }
+  if (firstFailure != null) throw firstFailure;
+ }
+ /**
+  * MINECRAFT-545/547 (John's comment 55098): the real root cause of the native crash a
+  * `BuoyantHitchProbe` `TOWING_UNAVAILABLE` FAILED run surfaced - traced to the actual log
+  * (`BoxPhysicsObject.updatePose:61` NPE, "this.handle is null", inside `BuoyantBody.step:125`,
+  * two ticks after a `FAILED` bounded-area verdict for the SAME vehicle). Returns the key's
+  * active body, but FIRST reclaims (and returns {@code null} for) a STALE entry whose own
+  * {@link VehicleBody#isActive} already reports {@code false} - meaning the returned Java object
+  * would otherwise still look live while its underlying native resources were ALREADY removed by
+  * some other path (e.g. a chunk-unload-driven invalidation) that never cleared this registry
+  * entry. {@code PhysicsBridge.step} previously called {@code registry.get(vehicle).step(vehicle)}
+  * unconditionally and crashed inside that stale body's own step call, never at the lookup.
+  * Reclaims via the SAME registry-removal path {@code cleanup()}/{@code unload()} already use -
+  * not a new, second teardown mechanism: {@code deactivate} plus the identical companion
+  * cleanup. This does NOT suppress or alter any probe's own FAILED verdict - that fires
+  * independently, earlier, from {@code BuoyantHitchProbe}'s own bounded-area check; this guard
+  * only prevents the SEPARATE crash that was following it. Generic and pure (no entity/Sable/
+  * world dependency) - directly unit-testable with fake keys/a fake body, the same seam-testing
+  * pattern {@link #activateOrClassify} already uses for registry-dependent logic that can't
+  * construct a real {@code EntityVehicleF_Physics}.
+  *
+  * <p>MINECRAFT-545/547 (John's comment 55104): the ORIGINAL version of this method called
+  * {@code hitches.release(key)} before {@code pendingInheritedVelocity.cleanup(key)} with no
+  * guard between them - a throwing {@code release} (itself now hardened against the same
+  * partial-cleanup gap, see {@link HitchRegistry#release}'s own doc) would still have skipped
+  * this method's own SECOND, independent cleanup step. {@code cleanup(key)} now always runs
+  * regardless of whether {@code release(key)} throws; the exception itself (if any) is still
+  * re-thrown afterward, not swallowed.
+  *
+  * <p>MINECRAFT-545/547 (John's comment 55116 - "partial two-body survivor cleanup"): the
+  * ORIGINAL version of this method never called {@code body.remove()} at all in this branch -
+  * reasoned (correctly, for the single-body case) that the native object was already fully
+  * gone, so calling {@code remove()} again would be a pointless or unsafe double-removal.
+  * That reasoning missed the TWO-BODY case: {@code isActive()} can be {@code false} because
+  * only ONE half died, leaving the SURVIVING half's own native resource never released - a real
+  * leak, not merely a missed optimization. Fixed at the root instead of special-cased here: every
+  * {@code VehicleBody.remove()} implementation ({@code Body}, {@code BuoyantBody}) is now
+  * itself idempotent (checks its own {@code isActive()} before touching anything), so calling
+  * {@code remove()} unconditionally here is now always safe - a no-op for an already-fully-dead
+  * single body, and a genuine partial-survivor cleanup for a partially-dead two-body one.
+  * {@code remove()} is now called BEFORE {@code hitches.release}/{@code cleanup}, with the same
+  * first-failure-captured-rethrown-at-end pattern already established for the other two steps -
+  * a throw from any one of the three never prevents the other two from still running.
+  */
+ static <K, B extends VehicleBody> B activeOrReclaimStale(
+     BodyRegistry<K, B> registry, HitchRegistry<K> hitches, PendingReplacementState<K, ?> pendingInheritedVelocity, K key) {
+  B body = registry.get(key);
+  if (body == null) return null;
+  if (!body.isActive()) {
+   registry.deactivate(key);
+   RuntimeException firstFailure = null;
+   try {
+    body.remove();
+   } catch (RuntimeException ex) {
+    firstFailure = ex;
+   }
+   try {
+    hitches.release(key);
+   } catch (RuntimeException ex) {
+    if (firstFailure == null) firstFailure = ex;
+   }
+   pendingInheritedVelocity.cleanup(key);
+   if (firstFailure != null) throw firstFailure;
+   return null;
+  }
+  return body;
+ }
+ public static void step(EntityVehicleF_Physics vehicle) {
+  VehicleBody body = activeOrReclaimStale(registry, hitches, pendingInheritedVelocity, vehicle);
+  if (body != null) body.step(vehicle);
+ }
  /**
   * Ticket MINECRAFT-546 (tuning-provenance diagnostic): the live {@code Overrides.Tuning} the
   * currently-active body for {@code v} was actually constructed with - see {@code
@@ -1160,7 +1407,241 @@ public final class PhysicsBridge {
   * inferring preservation from a yaw-rate proxy. Returns null if there is no active Body.
   */
  public static Vector3d debugReadAngularVelocity(EntityVehicleF_Physics v) {
-  return registry.get(v) instanceof Body body ? body.handle.getAngularVelocity(new Vector3d()) : null;
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.handle.getAngularVelocity(new Vector3d());
+  // MINECRAFT-545/547 diagnostic (John's comment 54237: trace actual pose/velocity BEFORE
+  // connectTrailer is called, not just inside createHitch): extends this existing debug-only
+  // reader to BuoyantBody too, so a probe can read the SAME real native state right before
+  // calling connectTrailer that createHitch's own log line reads moments later, inside it.
+  if (body instanceof BuoyantBody bb) return bb.handle().getAngularVelocity(new Vector3d());
+  return null;
+ }
+ /** Diagnostic/test-only companion to {@link #debugReadAngularVelocity} - the same real native
+  * state, linear component. See that method's own doc. */
+ public static Vector3d debugReadLinearVelocity(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.handle.getLinearVelocity(new Vector3d());
+  if (body instanceof BuoyantBody bb) return bb.handle().getLinearVelocity(new Vector3d());
+  return null;
+ }
+ /**
+  * Diagnostic/test-only (MINECRAFT-545/547, John's comment 54262: "this does not establish
+  * release of a preexisting joint" - {@code debugReadLinearVelocity} returning {@code null} only
+  * proves DIV's OWN registry no longer holds a body for {@code trailer}; it says nothing about
+  * whether {@code hitches} itself ever held - and then actually released - a real joint entry).
+  * Direct, live OBSERVATION of {@link HitchRegistry#isJointed}, not an inference from source
+  * reading. Never called from any production code path.
+  */
+ public static boolean debugIsJointed(EntityVehicleF_Physics trailer) {
+  return hitches.isJointed(trailer);
+ }
+ /**
+  * Diagnostic/test-only (MINECRAFT-545/547, John's comment 54262: "native-object destruction" -
+  * {@code debugReadLinearVelocity} returning {@code null} only proves DIV's own Java-side
+  * registry entry is gone, not that the underlying native Sable {@code BoxPhysicsObject}/handle
+  * was actually destroyed). Captures the CURRENT active body for {@code v}, as an opaque
+  * reference a caller can hold across the exact tick a fallback is expected to remove it, then
+  * pass to {@link #debugCapturedBoxIsActive} afterward - a live OBSERVATION of the SAME native
+  * object's own {@code BoxPhysicsObject.isActive()} transitioning false, not an inference from
+  * {@code deactivate}/{@code remove}'s own source. Returns {@code null} if there is no active
+  * body right now. Never called from any production code path.
+  */
+ public static Object debugCaptureBody(EntityVehicleF_Physics v) {
+  return registry.get(v);
+ }
+ /** Diagnostic/test-only companion to {@link #debugCaptureBody} - reads the captured body's OWN
+  * native {@code BoxPhysicsObject.isActive()} directly, live, regardless of whether THIS vehicle
+  * is still the registry's current entry for anything. {@code null} input (no body was captured)
+  * returns {@code null}. Never called from any production code path. */
+ public static Boolean debugCapturedBoxIsActive(Object capturedBody) {
+  if (capturedBody instanceof Body b) return b.box.isActive();
+  if (capturedBody instanceof BuoyantBody bb) return bb.box().isActive();
+  return null;
+ }
+ /**
+  * Diagnostic/test-only (MINECRAFT-545/547, John's comments 54290/54337/54359/54365: pose/
+  * orientation was a named missing quantity, and any sample must explicitly state whether it
+  * reflects a fresh native read or a cached Java value, not leave that implicit). Returns
+  * {@code box().getPose()} - the box's own cached {@code Pose3d}, refreshed ONLY by that body's
+  * own {@code step()} call (via {@code box.updatePose()}), NOT by this accessor itself.
+  * CORRECTED (54359): call-ordering alone ({@code active()} running before {@code step()} in
+  * {@code VehicleMovementMixin.div$move}) shows only that a {@code createHitch}-time sample
+  * predates THIS tick's own {@code step()} - it is NOT independent proof of exactly when the
+  * native impulse behind this cached pose was applied, so callers must NOT assert a precise
+  * "one tick stale" age from this reasoning alone. Use {@link #debugLastPoseUpdateGameTime} for
+  * the real, independently-checkable freshness marker instead. Returns {@code null} if there is
+  * no active body right now. Never called from any production code path.
+  */
+ public static dev.ryanhcode.sable.companion.math.Pose3dc debugReadPose(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.box.getPose();
+  if (body instanceof BuoyantBody bb) return bb.box().getPose();
+  return null;
+ }
+ /** Diagnostic/test-only companion to {@link #debugReadPose} (John's comment 54365: "record the
+  * tick/event of each body's last box.updatePose... associate sampled pose with it"). Returns the
+  * Minecraft {@code gameTime} at which this body's own {@code step()} last actually called
+  * {@code box.updatePose()} - the real freshness marker for whatever {@link #debugReadPose}
+  * returns, not an age inferred from call-ordering. Returns {@code -1} if there is no active body
+  * right now, or if that body has never run {@code step()} yet (hitch created on its very first
+  * tick, before its own step has run). Never called from any production code path. */
+ public static long debugLastPoseUpdateGameTime(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.debugLastPoseUpdateGameTime;
+  if (body instanceof BuoyantBody bb) return bb.debugLastPoseUpdateGameTime;
+  return -1;
+ }
+ /** Diagnostic/test-only companion to {@link #debugLastPoseUpdateGameTime} (John's comment
+  * 54595/54596): the real COUNT of times this body's own {@code step()} has actually been
+  * invoked - distinct from the gameTime marker above, which cannot tell "stepped once this tick"
+  * apart from "stepped twice in the same tick" (both would write the identical gameTime). Returns
+  * {@code 0} if there is no active body right now, or it has never run {@code step()} yet. Never
+  * called from any production code path. */
+ public static long debugStepInvocationCount(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.debugStepInvocationCount;
+  if (body instanceof BuoyantBody bb) return bb.debugStepInvocationCount;
+  return 0;
+ }
+ /** Diagnostic/test-only companion to {@link #debugStepInvocationCount} (John's comments
+  * 54616/54635, bug 2): {@code v.uniqueUUID} is the ENTITY's own identity, unchanged even when
+  * THIS registry's own body for {@code v} disappears or is replaced by a fresh instance (e.g. a
+  * reconnect that tears down and reconstructs the native body under the same entity) - a real
+  * body swap, not the same still-live body genuinely failing to advance.
+  * {@link #debugStepInvocationCount} returning {@code 0} is indistinguishable, from the entity
+  * UUID alone, between "this body genuinely never stepped" and "there is currently no body at
+  * all / a different body now." CORRECTED (54635): the first version of this returned
+  * {@code System.identityHashCode(body)}, documented as never colliding across distinct live
+  * instances - that claim was simply false, {@code identityHashCode} is a hash, not a guaranteed-
+  * unique id, and two distinct live objects CAN collide. Returns the actual {@code VehicleBody}
+  * reference itself instead (as a plain {@code Object}, since {@code VehicleBody}/{@code Body}/
+  * {@code BuoyantBody} are package-private) - {@code null} if {@code registry.get(v)} is
+  * currently absent. Neither {@code Body} nor {@code BuoyantBody} overrides {@code equals()}, so
+  * the default reference-identity {@code equals()}/{@code ==} genuinely distinguishes any two
+  * distinct instances with no collision risk, for as long as this diagnostic's own bounded
+  * capture window holds the reference (a {@code List<Sample>} kept only for this one fixture
+  * run) - never called from any production code path, never persisted/serialized/compared across
+  * JVM runs or GC epochs where a raw reference could otherwise be reused or become stale. */
+ public static Object debugRegistryBodyIdentity(EntityVehicleF_Physics v) {
+  return registry.get(v);
+ }
+ /** MINECRAFT-545/547 (John's comment 54862, corrected per 54870): a real OBSERVATION of the
+  * missing-index fallback's own real adapter actually running for a SPECIFIC vehicle AND a
+  * SPECIFIC connection object - exists because a prior fixture's own reasoning ("the
+  * pre-injection state made the ordinary path structurally unreachable, so towedByConnection
+  * becoming null MUST have come from the fallback") is an INFERENCE from a postcondition, not a
+  * direct observation.
+  * <p>CORRECTED (54870): the first version of this was an always-on, unbounded
+  * {@code Map<UUID, Integer>} that retained one entry forever for every orphan this production
+  * code EVER processes across a long-running server's own lifetime - a real, if slow, memory
+  * leak, and never actually gated by anything. This is now BOUNDED and OPT-IN: nothing is
+  * retained at all unless a caller explicitly {@link #registerFallbackObserver registers} one,
+  * and every registration MUST be explicitly {@link #unregisterFallbackObserver unregistered} -
+  * the fixture that uses this does so on every terminal/error path, never leaving one behind.
+  * Keyed to the EXACT vehicle UUID AND the EXACT expected connection reference - an invocation
+  * for a registered vehicle with a DIFFERENT connection object does NOT count as a match (see
+  * {@link #recordFallbackClearConnectionObservation}'s own doc for why that distinction matters
+  * and how it is counted separately rather than silently ignored or silently accepted). */
+ private static final java.util.Map<java.util.UUID, FallbackObserverState> fallbackObservers = new java.util.HashMap<>();
+
+ /** MINECRAFT-545/547 (John's comment 54929): a {@code FallbackObserverState} now carries its
+  * OWN registration token - the first version keyed state purely by {@code vehicleUuid}, so a
+  * SECOND registration for the same UUID silently overwrote the first registration's state, and
+  * a caller holding the FIRST (now-stale) handle could later call {@code unregisterFallbackObserver}
+  * and remove the SECOND registration's own live entry - an unsafe API that lets an unrelated
+  * stale handle corrupt a newer, still-active registration it has no relationship to. */
+ private static final class FallbackObserverState {
+  final Object expectedConnection;
+  final long token;
+  int matchedCount = 0;
+  int mismatchedCount = 0;
+  FallbackObserverState(Object expectedConnection, long token) { this.expectedConnection = expectedConnection; this.token = token; }
+ }
+
+ private static long nextFallbackObserverToken = 0;
+
+ /** Opaque handle to one registration - pass to {@link #unregisterFallbackObserver} to stop
+  * observing and release the (otherwise permanently retained) map entry. Carries both the
+  * vehicle UUID AND a unique per-registration {@code token} (54929 fix) - a handle only ever
+  * matches the registration it was actually issued for, never a later, different registration
+  * that happens to share the same vehicle UUID. */
+ public static final class FallbackObserverHandle {
+  final java.util.UUID vehicleUuid;
+  final long token;
+  private FallbackObserverHandle(java.util.UUID vehicleUuid, long token) { this.vehicleUuid = vehicleUuid; this.token = token; }
+ }
+
+ /** Begins observing {@code vehicleUuid} for a real fallback-adapter invocation on EXACTLY
+  * {@code expectedConnection} (compared by reference, {@code ==}, never {@code equals} - same
+  * identity discipline as {@link OrphanedConnectionOps#connectionIdentity}'s own doc). Nothing
+  * is retained for any vehicle that is never registered - bounded, opt-in, no default growth.
+  * A second registration for an already-registered {@code vehicleUuid} is allowed (the caller
+  * may legitimately re-register across runs) but issues a NEW token, so the PRIOR handle becomes
+  * stale and can no longer read or remove this new registration's own state (54929 fix). */
+ public static FallbackObserverHandle registerFallbackObserver(java.util.UUID vehicleUuid, Object expectedConnection) {
+  long token = nextFallbackObserverToken++;
+  fallbackObservers.put(vehicleUuid, new FallbackObserverState(expectedConnection, token));
+  return new FallbackObserverHandle(vehicleUuid, token);
+ }
+
+ /** Stops observing and releases the map entry - callers MUST call this on every terminal/error
+  * path for every handle they ever registered; a no-op if {@code handle} is null OR if a NEWER
+  * registration for the same vehicle UUID has since replaced the one this handle was issued for
+  * (54929 fix) - a stale handle must never remove a live, unrelated registration. */
+ public static void unregisterFallbackObserver(FallbackObserverHandle handle) {
+  if (handle == null) return;
+  var state = fallbackObservers.get(handle.vehicleUuid);
+  if (state != null && state.token == handle.token) {
+   fallbackObservers.remove(handle.vehicleUuid);
+  }
+ }
+
+ /** The pure, Minecraft/MTS-free recording logic the real adapter routes every invocation
+  * through (see the real call site in {@code releaseOrphanedTowingConnections}'s own fallback
+  * adapter) - takes a plain {@code UUID} and a plain {@code Object} connection reference, so
+  * this is directly unit-testable with synthetic values, no MTS object construction needed.
+  * Returns {@code true} only when a registration exists for {@code vehicleUuid} AND
+  * {@code actualConnection} is reference-identical to the registered expectation - a mismatched
+  * connection (registered vehicle, but a DIFFERENT connection object) is counted separately as
+  * a mismatch, not silently folded into the match count and not silently ignored either. A
+  * vehicle with no registration at all is a complete no-op - nothing is created or retained. */
+ public static boolean recordFallbackClearConnectionObservation(java.util.UUID vehicleUuid, Object actualConnection) {
+  var state = fallbackObservers.get(vehicleUuid);
+  if (state == null) return false;
+  if (state.expectedConnection == actualConnection) { state.matchedCount++; return true; }
+  state.mismatchedCount++;
+  return false;
+ }
+
+ /** Returns 0 for a null handle, for a vehicle with no live registration, AND (54929 fix) for a
+  * STALE handle whose own registration has since been replaced by a newer one for the same
+  * vehicle UUID - a stale handle must never read a newer, unrelated registration's own counts. */
+ public static int debugFallbackObserverMatchedCount(FallbackObserverHandle handle) {
+  var state = liveStateFor(handle);
+  return state != null ? state.matchedCount : 0;
+ }
+
+ public static int debugFallbackObserverMismatchedCount(FallbackObserverHandle handle) {
+  var state = liveStateFor(handle);
+  return state != null ? state.mismatchedCount : 0;
+ }
+
+ private static FallbackObserverState liveStateFor(FallbackObserverHandle handle) {
+  if (handle == null) return null;
+  var state = fallbackObservers.get(handle.vehicleUuid);
+  return (state != null && state.token == handle.token) ? state : null;
+ }
+ /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
+  * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL
+  * anchor-world position at ANY bracket by rotating a connection's own authored local offset by
+  * whichever pose sample it already has, via {@code HitchJoint.anchorLocalOffset}, instead of
+  * hardcoding or re-deriving the offset a different way. Returns {@code null} if there is no
+  * active body right now. Never called from any production code path. */
+ public static Vector3dc debugReadCenter(EntityVehicleF_Physics v) {
+  var body = registry.get(v);
+  if (body instanceof Body b) return b.center();
+  if (body instanceof BuoyantBody bb) return bb.center();
+  return null;
  }
  /**
   * Diagnostic/test-only (MINECRAFT-543, {@code RotorAirDragRuntimeProbe}): the translational
@@ -1176,15 +1657,10 @@ public final class PhysicsBridge {
    if (body.twoBodyActive) body.upperHandle.addLinearAndAngularVelocity(linearVelocity, new Vector3d());
   }
  }
- /**
-  * Diagnostic/test-only companion to {@link #debugInjectLinearVelocity} - reads back this
-  * vehicle's CURRENT actual native linear velocity directly from its live Sable handle, the
-  * translational twin of {@link #debugReadAngularVelocity}. Returns null if there is no active
-  * Body.
-  */
- public static Vector3d debugReadLinearVelocity(EntityVehicleF_Physics v) {
-  return registry.get(v) instanceof Body body ? body.handle.getLinearVelocity(new Vector3d()) : null;
- }
+ // debugReadLinearVelocity (main's own MINECRAFT-526 version, Body-only) is already defined
+ // above as the MINECRAFT-545/547 branch's own strict superset (same Body-case behavior, plus a
+ // BuoyantBody case) - merge conflict resolution (per 55043) kept that definition and dropped
+ // this duplicate rather than the other way around.
  /**
   * Diagnostic/test-only snapshot (MINECRAFT-526 review 53897/53905/53907) bundling everything a
   * test needs to assert real dispatch/retention without re-deriving any of it: {@code
@@ -1214,41 +1690,349 @@ public final class PhysicsBridge {
     ? new DebugExecutedStepSnapshot(body, body.lastExecutedStepper == null ? null : body.lastExecutedStepper.name(), body.executedStepCount, body.tuning())
     : null;
  }
+ /** True only if a towed vehicle's own {@code towedByConnection} should be released because its
+  * ANCHOR entity ({@code towedByConnection.towingEntity} - the vehicle itself, or an installed
+  * part on it) is no longer valid. This is the SAME condition
+  * {@code AEntityG_Towable.update()}'s own auto-disconnect check uses - {@code towingEntity}, not
+  * {@code towingVehicle} (which always resolves to the containing vehicle, and so can differ from
+  * the real anchor when the connection is anchored to a part rather than the vehicle itself). That
+  * check cannot run for an orphaned towed vehicle - {@code blockMainUpdateCall()} blocks
+  * {@code update()}, the only place it lives, for as long as {@code towedByConnection} stays
+  * non-null - so {@link #cleanup}'s own independent per-tick sweep is where this condition must
+  * be evaluated instead. MINECRAFT-545/547: history of this seam's own corrections (54656/54659)
+  * is in VERIFICATION.md, not repeated here. */
+ static boolean shouldReleaseOrphanedTowingConnection(boolean towedByConnectionNonNull, boolean towingEntityIsValid) {
+  return towedByConnectionNonNull && !towingEntityIsValid;
+ }
+ /** True only if {@code index} ({@code towingVehicle.towingConnections.indexOf(connection)}) is
+  * safe to pass to the real {@code disconnectTrailer(int)} - {@code List.remove(int)} throws for
+  * a negative index, and {@code indexOf} returns {@code -1} when the connection is not actually
+  * present in the parent's own list. */
+ static boolean canSafelyDisconnectAtIndex(int index) {
+  return index >= 0;
+ }
+ /** The real collect-then-dispatch orchestration {@link #cleanup}'s own sweep calls -
+  * generalized over {@code V} so a test can supply lightweight fakes instead of live MTS
+  * entities; this is not a parallel reimplementation, it is the orchestration itself.
+  * <p>{@code candidates} is iterated ONCE, read-only, to collect every vehicle whose connection
+  * anchor is currently invalid - no {@code ops} mutation happens during that pass, so a caller
+  * iterating a live, structurally-sensitive collection (like {@code BodyRegistry}'s own backing
+  * map, via {@link BodyRegistry#forEachActive}) never sees a modification during its own
+  * iteration. The actual disconnect/fallback calls happen in a separate pass afterward, and
+  * RE-CHECK {@code hasConnection}/{@code anchorIsValid} fresh immediately before acting on each
+  * candidate - an earlier candidate's own disconnect must never be trusted to leave a later
+  * candidate's own eligibility unchanged; the phase-1 list is a set of candidates to re-verify,
+  * never a decision already made.
+  * <p>CORRECTED (John's comment 54782, reversing the prior 54665 framing): this is now an
+  * IDENTITY-PRESERVING teardown, not merely a current-eligibility re-check. The prior version's
+  * re-check asked only "is whatever connection {@code v} has right now still orphaned," and
+  * explicitly allowed disconnecting a DIFFERENT (but also currently-invalid) connection than the
+  * one collected in phase 1 - reasoned as "correct under the current invariant." 54782 found
+  * that reasoning unsafe: if {@code v}'s connection changed between collection and dispatch
+  * (e.g. a brand-new, intended replacement connection that is merely transiently invalid during
+  * its own setup window - exactly the shape of {@code TOWING_REPLACEMENT}'s own reconnect), this
+  * sweep must never tear down THAT different connection just because something ELSE made it
+  * eligible by the old (current-state-only) rule. Teardown now targets ONLY the EXACT connection
+  * object collected in phase 1 - if {@code v}'s connection has changed identity by dispatch time
+  * (to anything, valid or invalid), this candidate is SKIPPED, never disconnected, regardless of
+  * the new connection's own state. */
+ interface OrphanedConnectionOps<V> {
+  boolean hasConnection(V v);
+  /** Only ever called when {@link #hasConnection} is currently true for the same {@code v}. */
+  boolean anchorIsValid(V v);
+  /** A stable identity for whatever connection {@code v} CURRENTLY has (the real adapter uses
+   * the real {@code TowingConnection} object reference itself). Compared by the orchestration
+   * using {@code ==} (true reference identity), NEVER {@code equals} - two distinct connection
+   * objects that happen to compare equal-by-value must still be treated as a changed identity
+   * (John's comment 54790: {@code Objects.equals} silently permits exactly that, which is not
+   * what "identity-preserving" means). Called once during phase-1 collection and again, fresh,
+   * immediately before dispatch - teardown proceeds only if both reads are the same reference. */
+  Object connectionIdentity(V v);
+  /** Only ever called when {@link #hasConnection} is true, {@link #anchorIsValid} is false, and
+   * {@link #connectionIdentity} still matches its own phase-1 value, for the same {@code v},
+   * immediately before use - the real {@code towingVehicle.towingConnections.indexOf(connection)}. */
+  int indexInParentList(V v);
+  void disconnectAtIndex(V v, int index);
+  void fallbackClearConnection(V v);
+ }
+
+ /** MINECRAFT-545/547 (John's comment 54823: "review minimal production-used side-effect seam
+  * or prepare bounded isolated fixture design"). The missing-index fallback's own real side
+  * effects require a real {@code EntityVehicleF_Physics}/{@code TowingConnection} to construct
+  * (confirmed elsewhere not possible in this suite without new integration-test infrastructure
+  * or forbidden reflection) - but the ORDER those side effects happen in does not. This seam
+  * extracts that order into its own small, generic, pure orchestration, injected as callbacks -
+  * mirroring {@link OrphanedConnectionOps}'s own existing pattern. A fake implementation can
+  * verify call order/count in a plain JUnit test with no MTS dependency at all; the real
+  * adapter's own implementations of each method are single trivial lines (one real MTS call
+  * each), correctness of which is checked by inspection, the same as every other adapter method
+  * in this class (e.g. {@link OrphanedConnectionOps#disconnectAtIndex}). */
+ interface FallbackClearOps<V> {
+  /** The towing vehicle's own {@code resetAllVariables()} - must be called before {@link
+   * #clearConnection}, which nulls the field this reads through. */
+  void resetTowingVariables(V v);
+  /** The towed vehicle's own {@code resetAllVariables()}. */
+  void resetTowedVariables(V v);
+  /** The towed vehicle's own parking-brake engage. */
+  void engageParkingBrake(V v);
+  /** Clears the towed vehicle's own connection field - called LAST, since {@link
+   * #resetTowingVariables} still needs to read through it. */
+  void clearConnection(V v);
+ }
+
+ /** The pure, generic ordering the missing-index fallback must follow - see {@link
+  * FallbackClearOps}'s own doc for why this is its own seam. */
+ static <V> void fallbackClearConnection(V v, FallbackClearOps<V> ops) {
+  ops.resetTowingVariables(v);
+  ops.resetTowedVariables(v);
+  ops.engageParkingBrake(v);
+  ops.clearConnection(v);
+ }
+
+ static <V> void releaseOrphanedConnections(Iterable<V> candidates, OrphanedConnectionOps<V> ops) {
+  var orphaned = new java.util.ArrayList<V>();
+  var collectedIdentities = new java.util.ArrayList<Object>();
+  for (V v : candidates) {
+   if (ops.hasConnection(v) && shouldReleaseOrphanedTowingConnection(true, ops.anchorIsValid(v))) {
+    orphaned.add(v);
+    collectedIdentities.add(ops.connectionIdentity(v));
+   }
+  }
+  for (int i = 0; i < orphaned.size(); i++) {
+   V v = orphaned.get(i);
+   // Re-check fresh, immediately before acting - see this method's own doc (54662's own race
+   // guard, 54782's own identity-preservation correction). Phase 1's snapshot is a CANDIDATE
+   // list, never a decision already made - and identity, not merely current eligibility, is
+   // now part of what gets re-verified.
+   if (!ops.hasConnection(v) || ops.anchorIsValid(v)) continue;
+   // Reference identity (==), NOT equals - see connectionIdentity's own doc (John's 54790).
+   if (ops.connectionIdentity(v) != collectedIdentities.get(i)) continue;
+   int index = ops.indexInParentList(v);
+   if (canSafelyDisconnectAtIndex(index)) ops.disconnectAtIndex(v, index);
+   else ops.fallbackClearConnection(v);
+  }
+ }
+ /**
+  * MINECRAFT-545/547 (John's comments 54742/54730/54727): the orphan-connection-release sweep,
+  * EXTRACTED out of {@link #cleanup()} into its own method so it can run on
+  * {@code ServerTickEvent.Pre} instead of {@code cleanup()}'s own {@code ServerTickEvent.Post} -
+  * fixing the confirmed, structurally-bounded one-tick dispatch gap documented in
+  * VERIFICATION.md ("Corrections per 54727/54730"): with the release on Post, a connection
+  * orphaned mid-tick (inside some OTHER, later-registered Post listener - e.g. a towing
+  * vehicle's own removal) cannot be detected until the FOLLOWING tick's Post phase, by which
+  * point that tick's own entity-ticking (which happens strictly BEFORE any Post listener, every
+  * tick) has already run blocked - costing one whole tick of starved dispatch. Running this
+  * sweep on Pre instead (confirmed via NeoForge's own source doc comment - {@code
+  * EventHooks.onPreServerTick}: "Called from the HEAD of {@code
+  * MinecraftServer#tickServer(BooleanSupplier)}", i.e. before ANY of that tick's own level/
+  * entity ticking) means the very next tick's Pre phase sees and releases an orphan created at
+  * the end of the PRIOR tick's Post phase, BEFORE that next tick's own entity-ticking runs -
+  * eliminating the gap structurally, not by weakening any invariant or reordering the fixture.
+  * <p>This targets a towed vehicle orphaned by its anchor entity's removal (not ordinary
+  * disconnection): its own towedByConnection.towingEntity.isValid is false, but
+  * AEntityG_Towable.blockMainUpdateCall() prevents its update() - the only place MTS's own
+  * auto-disconnect check lives - from ever running again while towedByConnection stays
+  * non-null. Calls the REAL disconnectTrailer (same target/index computation
+  * AEntityG_Towable.update() itself uses), not a partial reimplementation - see
+  * releaseOrphanedConnections's own doc for the collect/re-check/dispatch orchestration, and
+  * VERIFICATION.md for why a direct field null was rejected (does not reproduce
+  * disconnectTrailer's own connectionGroupsIndexesInUse/parking-brake/client-packet effects).
+  * Calling disconnectTrailer on an already-invalid entity is not new risk this introduces -
+  * MTS's own update() already does exactly that in the ordinary (unblocked) case. This adapter
+  * only binds releaseOrphanedConnections's own generic orchestration to the real
+  * BodyRegistry/EntityVehicleF_Physics/TowingConnection types.
+  * <p>Called from EXACTLY ONE place (a new {@code ServerTickEvent.Pre} listener in
+  * {@code DynamicImmersiveVehicles}) - {@link #cleanup()} no longer performs this sweep at all,
+  * so this never runs twice in the same tick (no duplicate dispatch).
+  */
+ public static void releaseOrphanedTowingConnections() {
+  var active = new java.util.ArrayList<EntityVehicleF_Physics>();
+  registry.forEachActive((v, b) -> active.add(v));
+  releaseOrphanedConnections(active, new OrphanedConnectionOps<EntityVehicleF_Physics>() {
+   public boolean hasConnection(EntityVehicleF_Physics v) { return v.towedByConnection != null; }
+   public boolean anchorIsValid(EntityVehicleF_Physics v) { return v.towedByConnection.towingEntity.isValid; }
+   // 54782: the real TowingConnection object reference itself - null when there is no current
+   // connection, so a candidate that lost its connection entirely (hasConnection now false) is
+   // already excluded by the orchestration's own re-check before this is ever compared.
+   public Object connectionIdentity(EntityVehicleF_Physics v) { return v.towedByConnection; }
+   public int indexInParentList(EntityVehicleF_Physics v) {
+    return v.towedByConnection.towingVehicle.towingConnections.indexOf(v.towedByConnection);
+   }
+   public void disconnectAtIndex(EntityVehicleF_Physics v, int index) {
+    var towing = v.towedByConnection.towingVehicle;
+    if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+      "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections releasing orphaned towedByConnection v=" + v.uniqueUUID
+        + " removedTowingEntity=" + v.towedByConnection.towingEntity.uniqueUUID + " indexInParentList=" + index);
+    towing.disconnectTrailer(index);
+   }
+   public void fallbackClearConnection(EntityVehicleF_Physics v) {
+    // MINECRAFT-545/547 (John's comment 54782 - "smallest supported consistent recovery... OR
+    // state precise unsupported case/risk with tested contract"): attempted the fuller recovery
+    // first (reproducing the real snap/non-snap connectionGroupsIndexesInUse branch directly
+    // from the connection object, no index needed) - CONFIRMED UNSUPPORTED, not merely
+    // undesirable: `AEntityG_Towable.disconnectedTowingConnections` is PRIVATE and
+    // `AEntityE_Interactable.connectionGroupsIndexesInUse` is PROTECTED - neither is reachable
+    // from this (different-package, non-subclass) code without reflection, which every standing
+    // instruction in this investigation forbids. Confirmed by the compiler directly, not assumed.
+    // <p>Precise, tested unsupported case (not glossed over): {@code connectionGroupsIndexesInUse}
+    // is NOT released on either side in this fallback path - a real, standing resource-leak risk
+    // for this one edge case (connection object present on the child but already absent from the
+    // parent's own list). Documenting this precisely is NOT an acceptance waiver of the risk
+    // itself (John's comment 54790) - this remains an OPEN gap pending further review, not a
+    // closed/accepted one; "documented" and "accepted" are not the same thing here.
+    // The parent list removal and client {@code PacketEntityTowingChange} notification remain
+    // unsupported for the same reasons already documented (nothing left to remove; no real index
+    // to send).
+    // 54823: the ORDER these calls happen in is now its own pure, tested orchestration
+    // (fallbackClearConnection(V, FallbackClearOps) below) - this adapter wires it to the real,
+    // genuinely-public MTS calls, each a single trivial line checked by inspection; the ORDER
+    // itself (reset towing, reset towed, brake, THEN clear - never clear first, which would lose
+    // v.towedByConnection before the other three ever read it) is what the pure test actually
+    // exercises, without needing to construct a real EntityVehicleF_Physics at all.
+    // Qualified with the outer class name: an unqualified call here resolves ONLY against this
+    // anonymous class's own 1-arg fallbackClearConnection (confirmed by the compiler - Java's
+    // member lookup stops at the first matching simple name and never merges in the outer
+    // class's own same-named static overload), so the 2-arg orchestration below needs
+    // PhysicsBridge.-qualification to actually be found.
+    PhysicsBridge.fallbackClearConnection(v, new FallbackClearOps<EntityVehicleF_Physics>() {
+     public void resetTowingVariables(EntityVehicleF_Physics v) { v.towedByConnection.towingVehicle.resetAllVariables(); }
+     public void resetTowedVariables(EntityVehicleF_Physics v) { v.resetAllVariables(); }
+     public void engageParkingBrake(EntityVehicleF_Physics v) { v.parkingBrakeVar.setTo(1.0, false); }
+     public void clearConnection(EntityVehicleF_Physics v) {
+      if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
+        "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back (connection missing from parent's own list) v=" + v.uniqueUUID
+          + " - reproduced resetAllVariables/parkingBrake (both public); UNSUPPORTED (private/protected access, no reflection): connectionGroupsIndexesInUse release on either side, parent list removal (already absent), client PacketEntityTowingChange (needs a real index)");
+      // MINECRAFT-545/547 (John's comment 54966): confirmed via direct trace of MTS's real
+      // PacketEntityTowingChange/AEntityG_Towable.disconnectTrailer source that this fallback
+      // path has NO supported way to notify any tracking client - PacketEntityTowingChange's
+      // int-connectionIndex constructor requires a real index still present in the PARENT's own
+      // towingConnections list (exactly what is absent here, by definition of reaching this
+      // fallback at all); its OTHER constructor is reserved for CONNECT, not disconnect
+      // (constructing it with connectionIndex=-1 would hit the receiving handle()'s "connect"
+      // branch with a null connectionData and fail/crash - confirmed by reading
+      // PacketEntityTowingChange.handle() directly, which is exactly why an index-(-1) call is
+      // forbidden, not merely discouraged). MTS's own built-in auto-disconnect check (inside
+      // AEntityG_Towable.update(), the ONLY other place this could self-heal) is unconditionally
+      // blocked by blockMainUpdateCall() (returns true whenever towedByConnection != null) on
+      // EVERY side, client included - confirmed NOT server-only, NOT DIV-specific, and never
+      // overridden by DIV. There is therefore no supported code path ON THIS EXISTING MTS
+      // INDEX-PACKET MECHANISM, on either side, by which a tracking client's own local
+      // towedByConnection/towingConnections/parking-brake state is ever corrected once this
+      // fallback fires - a real, standing state-propagation gap, distinct from the
+      // separately-documented, purely-cosmetic ALREADY_TOWED chat-notification gap. A DIV-owned
+      // alternative notification path was separately investigated and found (see
+      // InterfaceInterface.toExternal/toInternal, MINECRAFT-547's 54998 round) - but the
+      // generation/binding safety logic needed to use it safely was found exploitable in later
+      // rounds and has been deliberately removed pending a reviewed protocol design; see
+      // MINECRAFT-547 for the current state of that deferred work. Since no correction via the
+      // existing MTS packet mechanism exists, and no DIV-owned alternative currently ships
+      // either, this is instead surfaced operationally: UNCONDITIONAL (not gated behind the
+      // opt-in GroundContactDiagnostics flag) so a server operator has visibility into exactly
+      // when this known gap may be affecting a live client, without this ever being silently
+      // invisible by default.
+      // MINECRAFT-545/547 (John's comment 54974): the prior wording of this log claimed a
+      // specific resolution path ("until it reconnects or leaves render distance") that was
+      // never actually verified at runtime - a source-predicted guess, not observed behavior.
+      // Narrowed to state only what is actually confirmed: the server-side clear happened with
+      // no notification sent, full stop, with no speculation about if/when/how any affected
+      // client's own state is ever corrected.
+      com.mojang.logging.LogUtils.getLogger().warn(
+        "[DIV] missing-index fallback fired for towed vehicle " + v.uniqueUUID + " - this vehicle's own towing connection was cleared"
+          + " server-side with NO client notification packet sent (none of MTS's existing client-sync mechanisms is supported for this"
+          + " exact case - see MINECRAFT-547). Whether, or how, any client already tracking this vehicle ever has its own local state"
+          + " corrected is NOT established by this log line alone.");
+      // 54862/54870: the real, direct, bounded observation - a complete no-op unless a caller
+      // has explicitly registered for this exact vehicle UUID, and only counts a match if the
+      // connection object captured here is reference-identical to what that caller registered.
+      // Captured BEFORE nulling - the field this reads would otherwise already be gone.
+      recordFallbackClearConnectionObservation(v.uniqueUUID, v.towedByConnection);
+      v.towedByConnection = null;
+     }
+    });
+   }
+  });
+ }
+
+ /**
+  * MINECRAFT-545/547 (John's comment 55196): the actual production per-body three-action
+  * composition, extracted to a package-visible, fully generic seam so a test can exercise this
+  * EXACT control-flow (not a reimplementation with a reduced/trimmed signature) with injected
+  * fake joint/body/pending operations, instead of only being reachable through
+  * {@link #cleanupOneRegisteredBody}'s own hardwired statics. Still the same
+  * {@link #removeIndependentResources} composition as before this extraction - this is a pure
+  * refactor of {@code cleanupOneRegisteredBody}'s own body, not a behavior change.
+  */
+ static void cleanupOneBodyThreeActions(Runnable releaseJoint, Runnable removeBody, Runnable cleanupPending) {
+  removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true },
+    new Runnable[]{ releaseJoint, removeBody, cleanupPending });
+ }
+ /**
+  * MINECRAFT-545/547 (Wroosbit review, comment 55189): the per-body callback below used to call
+  * {@code hitches.release(v)}, {@code b.remove()}, and {@code pendingInheritedVelocity.cleanup(v)}
+  * with no isolation between them - a throwing {@code hitches.release(v)} (itself already
+  * fail-closed internally since the 55104 round, but still capable of re-throwing its own first
+  * failure) skipped the other two steps for that SAME body. Now delegates to
+  * {@link #cleanupOneBodyThreeActions}, the same real composition a test can exercise directly.
+  */
+ private static void cleanupOneRegisteredBody(EntityVehicleF_Physics v, VehicleBody b) {
+  if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info("[DIV lifecycleDiagnostic] cleanup releasing/removing v=" + v.uniqueUUID);
+  cleanupOneBodyThreeActions(() -> hitches.release(v), b::remove, () -> pendingInheritedVelocity.cleanup(v));
+ }
+ /**
+  * MINECRAFT-545/547 (John's comment 55194 - the same bug class one level further out): {@code
+  * registry.removeIf(...)} is now internally resilient (captures its own first failure, visits
+  * every entry, rethrows at the end) - but a caller that invokes it as a bare statement with no
+  * try/catch around THAT call still lets its rethrown failure propagate straight out of {@code
+  * cleanup()}/{@code unload()}, skipping every statement after it - specifically the sweeps
+  * below that are explicitly independent of {@code BodyRegistry} (they catch an entity already
+  * deactivated before being fully registered, e.g. a failed {@code chassisBoundsChanged}
+  * reconstruction - Review 53399/ticket MINECRAFT-504). Both methods now run the registry sweep
+  * and every independent sweep through {@link #removeIndependentResources} as one flat list of
+  * equally-independent steps: one sweep throwing no longer prevents any of the others from
+  * running, and only the FIRST exception encountered across the WHOLE method is reported, after
+  * every step has been attempted - not swallowed, not allowed to block unrelated progress.
+  */
  public static void cleanup() {
-  // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these two
-  // removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
-  registry.removeIf((v, b) -> !v.isValid, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
-  // Review 53399: the registry.removeIf above only cleans pendingInheritedVelocity for a vehicle
-  // STILL present in BodyRegistry - a vehicle already deactivated (e.g. a failed
-  // chassisBoundsChanged reconstruction, which deactivates BEFORE attempting to rebuild) is
-  // absent from BodyRegistry by the time cleanup() runs, so that callback never fires for it.
-  // This sweep is independent of BodyRegistry, keyed only by pendingInheritedVelocity's own
-  // staged entries, so it still finds and removes that exact orphan case.
-  pendingInheritedVelocity.removeIf(v -> !v.isValid);
-  // Ticket MINECRAFT-504: same leak shape as pendingInheritedVelocity above, for the wheel
-  // handbrake/H-pattern state - independent of BodyRegistry, swept directly against validity
-  // (in addition to advanceWheelAuxInputs's own staleness-timeout sweep, which only covers a
-  // client that goes quiet, not an entity invalidated some other way).
-  handbrakeMagnitude.keySet().removeIf(v -> !v.isValid);
-  handbrakeLastUpdateTick.keySet().removeIf(v -> !v.isValid);
-  hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid);
-  hPatternLastUpdateTick.keySet().removeIf(engine -> !engine.isValid);
-  hPatternTrackers.keySet().removeIf(engine -> !engine.isValid);
-  wheelAuxOwner.keySet().removeIf(v -> !v.isValid);
+  removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true, () -> true, () -> true, () -> true, () -> true, () -> true },
+    new Runnable[]{
+      // Review 53388: same leak this ticket's own deactivate(v) above now guards against - these
+      // two removal paths bypass deactivate(v) entirely, so they need the identical cleanup.
+      () -> registry.removeIf((v, b) -> !v.isValid, PhysicsBridge::cleanupOneRegisteredBody),
+      // Review 53399: the registry sweep above only cleans pendingInheritedVelocity for a
+      // vehicle STILL present in BodyRegistry - a vehicle already deactivated is absent from
+      // BodyRegistry by the time cleanup() runs, so that callback never fires for it. This sweep
+      // is independent of BodyRegistry, keyed only by pendingInheritedVelocity's own staged
+      // entries, so it still finds and removes that exact orphan case.
+      () -> pendingInheritedVelocity.removeIf(v -> !v.isValid),
+      // Ticket MINECRAFT-504: same leak shape as pendingInheritedVelocity above, for the wheel
+      // handbrake/H-pattern state - independent of BodyRegistry, swept directly against validity
+      // (in addition to advanceWheelAuxInputs's own staleness-timeout sweep, which only covers a
+      // client that goes quiet, not an entity invalidated some other way).
+      () -> handbrakeMagnitude.keySet().removeIf(v -> !v.isValid),
+      () -> handbrakeLastUpdateTick.keySet().removeIf(v -> !v.isValid),
+      () -> hPatternTargetByEngine.keySet().removeIf(engine -> !engine.isValid),
+      () -> hPatternLastUpdateTick.keySet().removeIf(engine -> !engine.isValid),
+      () -> hPatternTrackers.keySet().removeIf(engine -> !engine.isValid),
+      () -> wheelAuxOwner.keySet().removeIf(v -> !v.isValid) });
  }
  public static void unload(Object level) {
-  registry.removeIf((v, b) -> b.level() == level, (v, b) -> { hitches.release(v); b.remove(); pendingInheritedVelocity.cleanup(v); });
-  // Review 53399: same independent sweep as cleanup() above, matched on the unloading level
-  // instead of validity - a vehicle's own level comes directly from v (the same accessor
-  // active()'s own lifecycle-refresh path already uses), not from any Body, so this needs no
-  // BodyRegistry lookup at all.
-  pendingInheritedVelocity.removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
-  handbrakeMagnitude.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
-  handbrakeLastUpdateTick.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
-  hPatternTargetByEngine.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
-  hPatternLastUpdateTick.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
-  hPatternTrackers.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level);
-  wheelAuxOwner.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level);
+  removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true, () -> true, () -> true, () -> true, () -> true, () -> true },
+    new Runnable[]{
+      () -> registry.removeIf((v, b) -> b.level() == level, PhysicsBridge::cleanupOneRegisteredBody),
+      // Review 53399: same independent sweep as cleanup() above, matched on the unloading level
+      // instead of validity - a vehicle's own level comes directly from v (the same accessor
+      // active()'s own lifecycle-refresh path already uses), not from any Body, so this needs no
+      // BodyRegistry lookup at all.
+      () -> pendingInheritedVelocity.removeIf(v -> ((WorldAccessor)v.world).div$level() == level),
+      () -> handbrakeMagnitude.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level),
+      () -> handbrakeLastUpdateTick.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level),
+      () -> hPatternTargetByEngine.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level),
+      () -> hPatternLastUpdateTick.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level),
+      () -> hPatternTrackers.keySet().removeIf(engine -> ((WorldAccessor)engine.world).div$level() == level),
+      () -> wheelAuxOwner.keySet().removeIf(v -> ((WorldAccessor)v.world).div$level() == level) });
  }
  private static Vec3 vec(Vector3d v) { return new Vec3(v.x,v.y,v.z); }
  /**
@@ -1635,7 +2419,7 @@ public final class PhysicsBridge {
   double torqueForward = RotorForces.angularDampingTorque(angularVelocity.dot(forward), inertiaBody.z, rollCoefficient, dt);
   return new Vector3d(right).mul(torqueRight).fma(torqueUp, up).fma(torqueForward, forward);
  }
- private static final class Body implements VehicleBody {
+ private static final class Body implements VehicleBody, HitchAnchor {
   private static final Vector3d WORLD_UP = new Vector3d(0,1,0);
   private static final double AIR_DENSITY = 1.225; // sea-level ISA; no altitude/weather model
   // Opt-in, self-limiting wheel-contact trace for the still-open initial-placement/asymmetric-
@@ -2095,16 +2879,76 @@ public final class PhysicsBridge {
     handle=h;
    }
   }
-  public Object level() { return level; }
+  public ServerLevel level() { return level; }
   public Overrides.Tuning tuning() { return tuning; }
+  // HitchAnchor (MINECRAFT-545): box/center already existed for this body's own wheel/joint
+  // geometry above - exposed here, read-only, so createHitch can treat this side of a joint the
+  // same way it now treats a BuoyantBody.
+  public BoxPhysicsObject box() { return box; }
+  public Vector3dc center() { return center; }
+  /**
+   * MINECRAFT-545/547 (John's comment 55116 - "partial two-body survivor cleanup"): made
+   * idempotent and partial-survivor-safe. The single-body branch now skips the native call
+   * entirely once {@code box} already reports inactive - calling {@code removeObject} a second
+   * time on an already-removed box is never attempted, not merely tolerated.
+   * {@code TwoBodyLifecycle.remove} is still used for the common case (both halves genuinely
+   * alive) UNCHANGED - that file's own existing {@code removeBoth}/{@code removeJoint} already
+   * independently try/catch each half and the joint, matching this class's own established
+   * per-step-guarded pattern ({@link HitchRegistry#release}). The NEW case this method now
+   * handles is PARTIAL survival (exactly one half already inactive, confirmed via
+   * {@link #isActive} no longer being the only caller that distinguishes this): delegated to
+   * {@link #removeIndependentResources} (NOT {@code TwoBodyLifecycle.remove}, which always calls
+   * removeObject on BOTH boxes unconditionally) - only the box(es) still genuinely active, and
+   * the joint only if still valid, are actually touched; a throwing removal never prevents the
+   * other resource's own removal attempt. If BOTH halves are already inactive and the joint is
+   * already invalid too, this is a true no-op - nothing left to remove. {@code
+   * removeIndependentResources} is extracted as its own generic, directly-testable method
+   * (John's comment 55126) so a test exercises this EXACT branching logic with injected fake
+   * leaf operations, rather than a parallel reimplementation.
+   */
   public void remove() {
    var c=SubLevelContainer.getContainer(level);
    if (c==null) return;
-   if (twoBodyActive) TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
-   else c.physicsSystem().removeObject(box);
+   if (twoBodyActive) {
+    boolean boxActive=box.isActive(), upperActive=upperBox.isActive();
+    if (boxActive && upperActive) {
+     TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
+     return;
+    }
+    removeIndependentResources(
+      new java.util.function.BooleanSupplier[]{ () -> twoBodyJoint!=null && twoBodyJoint.isValid(), () -> boxActive, () -> upperActive },
+      new Runnable[]{ () -> twoBodyJoint.remove(), () -> c.physicsSystem().removeObject(box), () -> c.physicsSystem().removeObject(upperBox) });
+   }
+   else if (box.isActive()) c.physicsSystem().removeObject(box);
   }
+  /**
+   * MINECRAFT-545/547 (John's comment 55103 - "Body.isActive currently lower-box only"): for a
+   * two-body vehicle, {@code step()} (see the {@code upperHandle.getLinearVelocity}/
+   * {@code getAngularVelocity} calls below, gated on {@code twoBodyActive}) touches BOTH boxes'
+   * own native handles, not just the primary {@code box} - a partial-invalidity state (one box
+   * removed, the other not) is exactly as crashable as the single-body case this guard was
+   * originally built for. Both boxes must report active for this body to be considered safely
+   * steppable; for a non-two-body vehicle ({@code twoBodyActive == false}), {@code upperBox} is
+   * always {@code null} (see this constructor's own else-branch) and irrelevant, so this
+   * correctly reduces to the original single-box check.
+   */
+  public boolean isActive() { return box.isActive() && (!twoBodyActive || upperBox.isActive()); }
+  // MINECRAFT-545/547 (John's comment 54365): a real, independently-checkable freshness marker
+  // for box.getPose()'s cached value - the Minecraft gameTime at which THIS body's own
+  // box.updatePose() last actually ran, set immediately below it. Diagnostic bookkeeping only
+  // (a plain field write every tick); does not change what step() computes or applies.
+  long debugLastPoseUpdateGameTime = -1;
+  // MINECRAFT-545/547 (John's comment 54595/54596): see BuoyantBody's own identical field doc -
+  // a real invocation count, independent of gameTime, for an "exactly-once per tick" invariant
+  // the timestamp alone cannot support. Diagnostic bookkeeping only.
+  long debugStepInvocationCount = 0;
+
   public void step(EntityVehicleF_Physics v) {
+   // MINECRAFT-545/547 (John's comment 54600): incremented first - see BuoyantBody's own
+   // identical fix/doc - a true entry count, not a post-updatePose count.
+   debugStepInvocationCount++;
    box.updatePose();
+   debugLastPoseUpdateGameTime = level.getGameTime();
    Pose3d pose=new Pose3d(box.getPose());
    if (twoBodyActive) {
     // box/pose here is the LOWER half-body's own pose (its own center), NOT G - every other
@@ -2145,7 +2989,25 @@ public final class PhysicsBridge {
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
     case ROTOR -> stepRotor(v,q,up,installedPropellers);
    };
-   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle);
+   // MINECRAFT-545/547 (John's comments 54706/54709, gate updated for 55129, construction site
+   // fixed for 55138 - "eager massData construction affects ground/flight/two-body paths even
+   // when no buoyancy call"): the ORIGINAL version of this line built boundedDragMassData
+   // BEFORE the `!twoBodyActive && plan.appliesBuoyancy()` check below - a Matrix3d inversion
+   // plus a new MassData instance, done on EVERY Body.step() call regardless of vehicle type,
+   // even for ground/flight/two-body vehicles that never call BuoyantForces.apply at all this
+   // tick. Moved inside the short-circuit (as the LAST argument expression of the apply() call
+   // itself) so Java's own && short-circuit evaluation means this is now constructed ONLY when
+   // this Body is actually buoyancy-eligible AND not two-body-active - the same work, now done
+   // only when it is actually needed. This Body's own `box` is a plain BoxPhysicsObject (not the
+   // shape-aware variant) - its getMassTracker() would silently give Sable's shape-ignorant
+   // mass/6 fallback, so a correct solid-box MassData is built directly from this Body's own
+   // mass/halfExtents fields instead, unless BuoyantForces.UNBOUNDED_DRAG_OVERRIDE is set (never
+   // in any shipped/default configuration), in which case null is passed deliberately -
+   // BuoyantForces.apply itself recognizes that exact combination (override set, massData null)
+   // as the intentional old-path selection, not a contract violation (see that method's own
+   // updated doc, 55138 item 3).
+   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle,
+     BuoyantForces.UNBOUNDED_DRAG_OVERRIDE ? null : BoxInertia.solidBoxMassData(mass,halfExtents));
    if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));

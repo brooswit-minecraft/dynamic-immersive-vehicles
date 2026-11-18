@@ -41,6 +41,23 @@ neoForge {
   server {
    server()
    programArgument('nogui')
+   // MINECRAFT-545/547 (John's comment 54357): opt-in ISOLATED run-directory override for the
+   // one still-pending diagnostic rerun gate review - OFF for every normal `gradle runServer`
+   // (including the existing runtime-smoke CI job and every prior probe run in this ticket,
+   // which all used the shared `run/` directory unchanged). Only takes effect when
+   // DIV_ISOLATED_RUN_DIR is set to an absolute path to a FRESH, prepared directory (config/
+   // eula.txt/server.properties pre-populated, no world/ present) - never the shared `run/`
+   // itself. A world generated under that directory can never alias the shared one; nothing in
+   // `run/world`/`run/config` is read or written for an isolated run.
+   // CORRECTED: ModDevGradle's RunModel has no `workingDirectory` property - the first version
+   // of this override set an unknown property and failed configuration for EVERY gradle
+   // invocation once DIV_ISOLATED_RUN_DIR was set (confirmed via a live `prepareServerRun` dry
+   // run: "Could not set unknown property 'workingDirectory' for Run[server]"). The real,
+   // decompiled-confirmed property (javap on moddev-gradle-2.0.148.jar's RunModel.class) is
+   // `gameDirectory` (a DirectoryProperty).
+   if (System.getenv('DIV_ISOLATED_RUN_DIR') != null) {
+    gameDirectory = project.file(System.getenv('DIV_ISOLATED_RUN_DIR'))
+   }
    // Opt-in anchor-frame probe (ticket comment 53243/53244) - OFF for every normal
    // `gradle runServer` (including the existing runtime-smoke CI job); only a dedicated
    // CI job that sets DIV_ANCHOR_FRAME_PROBE=true before invoking this task turns it on.
@@ -177,6 +194,29 @@ neoForge {
    if (System.getenv('DIV_INSTALLED_PART_HITCH_FRAME_PROBE') == 'true') {
     jvmArgument('-Ddiv.experimentalInstalledPartHitchFrameProbe=true')
    }
+   // MINECRAFT-545: opt-in float-only-hull hitch lifecycle probe (attach/anchor-alignment,
+   // rotated hookup connection, towing-unavailable/replacement, despawn/level-unload cleanup) -
+   // same gating pattern as every other probe above; OFF for every normal `gradle runServer`.
+   // See BuoyantHitchProbe's own doc for the config-file massKg entries this requires before
+   // running.
+   if (System.getenv('DIV_BUOYANT_HITCH_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalBuoyantHitch=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+   }
+   // MINECRAFT-545 (John's own directive, comment 54217): opt-in ground-vehicle hitch-
+   // replacement comparison probe - same gating pattern as every other probe above; OFF for
+   // every normal `gradle runServer`. See GroundHitchReplacementProbe's own doc.
+   if (System.getenv('DIV_GROUND_HITCH_REPLACEMENT_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalGroundHitchReplacement=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+   }
+   // MINECRAFT-545/547 (John's comment 54259): opt-in already-active unsafe-fallback lifecycle
+   // probe - same gating pattern as every other probe above; OFF for every normal
+   // `gradle runServer`. See AlreadyActiveUnsafeFallbackProbe's own doc.
+   if (System.getenv('DIV_ALREADY_ACTIVE_UNSAFE_FALLBACK_PROBE') == 'true') {
+    jvmArgument('-Ddiv.experimentalAlreadyActiveUnsafeFallback=true')
+    jvmArgument('-Ddiv.debugGroundContact=true')
+   }
    // MINECRAFT-543 review (comments 54188/54189): opt-in real-Sable-handle rotor translational
    // air drag probe - same gating pattern as every other probe above; OFF for every normal
    // `gradle runServer`.
@@ -192,6 +232,18 @@ neoForge {
   }
  }
  mods { dynamicimmersivevehicles { sourceSet sourceSets.main } }
+ // MINECRAFT-545/547 (John's comments 54411/54419): the plain `test` source set has no
+ // Minecraft/NeoForge classes on its classpath at all (confirmed: constructing Sable's own
+ // Pose3d throws NoClassDefFoundError: net/minecraft/core/Position on class load). This is the
+ // moddev plugin's own official, documented mechanism for exactly that gap - the same narrow
+ // pattern this project's own history already used once for MINECRAFT-546's
+ // TuningCommandRegistrationTest (commit 0ce3285, not currently on this branch) - not a custom
+ // classpath hack or a new dependency. What this actually enables, scoped to what has been
+ // tried: constructing real Sable value objects (Pose3d, BoxPhysicsObject) and reading their
+ // plain Java methods (e.g. getMassTracker()) in a test. It does NOT add a live native physics
+ // pipeline or dedicated server to the test runtime - no such attempt has been made under this
+ // setup, and whether one is possible at all is simply untested here, not established as
+ // impossible for every conceivable unit test.
  // Ticket MINECRAFT-546 review (comment 54202): the plain `test` source set has no Minecraft/
  // NeoForge classes on its classpath at all (confirmed: merely referencing a class that imports
  // net.minecraft.* from a test throws NoClassDefFoundError on class load - see

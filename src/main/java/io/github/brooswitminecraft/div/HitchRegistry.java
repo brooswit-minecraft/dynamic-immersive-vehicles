@@ -73,15 +73,34 @@ final class HitchRegistry<K> {
   * currently jointed TO {@code key} if it is (also) a towing vehicle - without touching any
   * body. Safe (a no-op) if {@code key} holds no joint in either role.
   */
+ /**
+  * MINECRAFT-545/547 (John's comment 55104, confirmed by direct source+bytecode reading): the
+  * ORIGINAL version of this method called {@code own.remove()} before clearing
+  * {@code partners.remove(key)} and before the sweep below that releases every OTHER trailer
+  * jointed TO {@code key} - a throwing {@code remove()}/{@code joint.remove()} (own or any
+  * individual partnered trailer's) skipped every remaining, otherwise-independent cleanup step,
+  * including releasing UNRELATED trailers' joints that have nothing to do with the one that
+  * actually threw. Each removal below is now individually guarded so one throwing release can
+  * never prevent any of the others - own, the partner-map clear, and every other partnered
+  * trailer's own release all still happen regardless. The ORIGINAL exception (the first one
+  * encountered, if any) is still re-thrown at the end, not swallowed - this fixes WHICH cleanup
+  * still runs despite a failure, not whether the failure is still reported.
+  */
  void release(K key) {
+  RuntimeException[] firstFailure = new RuntimeException[1];
   PhysicsConstraintHandle own = joints.remove(key);
-  if (own != null) own.remove();
+  if (own != null) {
+   try { own.remove(); } catch (RuntimeException ex) { firstFailure[0] = ex; }
+  }
   partners.remove(key);
   partners.entrySet().removeIf(e -> {
    if (!Objects.equals(e.getValue(), key)) return false;
    PhysicsConstraintHandle joint = joints.remove(e.getKey());
-   if (joint != null) joint.remove();
+   if (joint != null) {
+    try { joint.remove(); } catch (RuntimeException ex) { if (firstFailure[0] == null) firstFailure[0] = ex; }
+   }
    return true;
   });
+  if (firstFailure[0] != null) throw firstFailure[0];
  }
 }

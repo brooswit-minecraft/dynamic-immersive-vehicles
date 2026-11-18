@@ -6,6 +6,18 @@ import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
 interface VehicleBody {
  void step(EntityVehicleF_Physics v);
  void remove();
+ /**
+  * MINECRAFT-545/547 (John's comment 55098): {@code true} exactly when this body's own native
+  * physics object is still registered with the physics system - {@code false} once {@link
+  * #remove()} has actually run for it, whether that happened through this registry's own
+  * {@code cleanup()}/{@code unload()} sweep or through some OTHER removal path that reached the
+  * same native object without going through this registry at all (the actual gap this guards
+  * against - see {@code PhysicsBridge.step}'s own doc for the exact crash this closes). Reads
+  * the SAME {@code BoxPhysicsObject.isActive()} signal {@code debugCapturedBoxIsActive} already
+  * exposes as a live observation elsewhere in this file - not a new liveness mechanism, the
+  * existing one, now also consulted before stepping rather than only from diagnostics.
+  */
+ boolean isActive();
  PhysicsBridge.InheritedRigidBodyVelocity captureReplacementState(EntityVehicleF_Physics v);
  /** Identity of the level this body lives in, for PhysicsBridge.unload()'s level-unload sweep. */
  Object level();

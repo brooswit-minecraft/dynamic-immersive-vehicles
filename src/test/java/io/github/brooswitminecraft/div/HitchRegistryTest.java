@@ -369,6 +369,53 @@ class HitchRegistryTest {
   assertFalse(hitches.isJointed("trailer"));
  }
 
+ /** A joint whose own remove() throws, standing in for a real Sable-level removal failure -
+  * same fakeJoint shape, deliberately misbehaving on this one call. */
+ private static PhysicsConstraintHandle fakeJointThatThrowsOnRemove() {
+  return new GenericConstraintHandle() {
+   @Override public void setFrame1(Vector3dc pos, Quaterniondc orientation) {}
+   @Override public void setFrame2(Vector3dc pos, Quaterniondc orientation) {}
+   @Override public void setLimit(ConstraintJointAxis axis, double lower, double upper) {}
+   @Override public void lockAxes(ConstraintJointAxis... axes) {}
+   @Override public void getJointImpulses(Vector3d linear, Vector3d angular) {}
+   @Override public void setContactsEnabled(boolean enabled) {}
+   @Override public void setMotor(ConstraintJointAxis axis, double target, double stiffness, double damping, boolean limited, double maxForce) {}
+   @Override public void remove() { throw new RuntimeException("Sable-level removal failure"); }
+   @Override public boolean isValid() { return true; }
+  };
+ }
+
+ @Test void aThrowingOwnJointRemovalStillClearsPartnerMapAndReleasesOtherTrailers() {
+  // MINECRAFT-545/547 (John's comment 55104, confirmed by direct source+bytecode reading): the
+  // ORIGINAL release(key) called own.remove() BEFORE partners.remove(key) and BEFORE the sweep
+  // releasing every OTHER trailer jointed TO key - a throwing own.remove() skipped ALL of that
+  // remaining, otherwise-independent cleanup. "truck" here is BOTH a trailer (jointed to
+  // "flatbed") AND a towing vehicle (towing "car") - exactly the combined dead-anchor scenario
+  // 55103 asked for: releasing truck must release its own INCOMING joint (to flatbed) and its
+  // OUTGOING joint (car's, to truck), even though truck's own joint-removal itself throws.
+  var hitches = new HitchRegistry<String>();
+  hitches.reconcile("truck", "flatbed", () -> fakeJointThatThrowsOnRemove()); // truck's own incoming joint - throws on remove
+  boolean[] carJointRemoved = {false};
+  hitches.reconcile("car", "truck", () -> fakeJoint(carJointRemoved)); // car's outgoing joint, pointed at truck
+  assertThrows(RuntimeException.class, () -> hitches.release("truck"), "the throw itself must still propagate, not be swallowed");
+  assertNull(hitches.partnerOf("truck"), "truck's own partner entry must still be cleared despite its own joint's throw");
+  assertTrue(carJointRemoved[0], "car's own joint (an UNRELATED release, pointed at truck) must still be released despite truck's own joint throwing first");
+  assertFalse(hitches.isJointed("car"), "car must no longer be jointed after its own joint was released");
+ }
+
+ @Test void aThrowingPartneredTrailerReleaseStillReleasesOtherPartneredTrailers() {
+  // The plural case: TWO different trailers both jointed to the SAME towing vehicle; one's own
+  // joint throws on remove(), the other's does not - releasing the towing vehicle must still
+  // release the SECOND trailer's joint, not stop after the first one throws.
+  var hitches = new HitchRegistry<String>();
+  hitches.reconcile("trailer-a", "truck", () -> fakeJointThatThrowsOnRemove());
+  boolean[] trailerBRemoved = {false};
+  hitches.reconcile("trailer-b", "truck", () -> fakeJoint(trailerBRemoved));
+  assertThrows(RuntimeException.class, () -> hitches.release("truck"));
+  assertTrue(trailerBRemoved[0], "trailer-b's own joint must still be released even though trailer-a's own release threw first");
+  assertFalse(hitches.isJointed("trailer-b"));
+ }
+
  @Test void releasingAKeyWithNoJointInEitherRoleIsANoOp() {
   var hitches = new HitchRegistry<String>();
   assertDoesNotThrow(() -> hitches.release("nothing-here"));
@@ -409,6 +456,71 @@ class HitchRegistryTest {
   assertEquals(List.of("trailer", "truck"), destroyedOrder.stream().sorted().toList());
   assertFalse(bodies.isActive("trailer"));
   assertFalse(bodies.isActive("truck"));
+ }
+
+ /**
+  * MINECRAFT-545/547 (Wroosbit review, comment 55189): the ORIGINAL {@code BodyRegistry.removeIf}
+  * let a throwing {@code onRemove} propagate straight out of the underlying entry-set's own
+  * {@code removeIf} - which aborts its ENTIRE iteration on the first exception, so every entry
+  * after the throwing one (in iteration order) was never even visited. Through the real production
+  * {@code BodyRegistry.removeIf} directly (not a reimplementation): the first matching key's own
+  * joint-removal throws; the second matching key must still get its own full cleanup regardless.
+  */
+ @Test void aThrowingFirstBodysJointRemovalStillCleansUpALaterMatchingBody() {
+  var hitches = new HitchRegistry<String>();
+  var bodies = new BodyRegistry<String, Object>();
+  bodies.activate("firstTrailer", new Object());
+  bodies.activate("secondTrailer", new Object());
+  hitches.reconcile("firstTrailer", "truckA", () -> fakeJointThatThrowsOnRemove());
+  boolean[] secondRemoved = {false};
+  hitches.reconcile("secondTrailer", "truckB", () -> fakeJoint(secondRemoved));
+  List<String> entriesVisited = new ArrayList<>();
+  RuntimeException thrown = assertThrows(RuntimeException.class, () ->
+    bodies.removeIf((k, b) -> true, (k, b) -> { entriesVisited.add(k); hitches.release(k); }));
+  assertEquals("Sable-level removal failure", thrown.getMessage(),
+    "the first exception encountered across the whole sweep must still be reported, not swallowed");
+  assertTrue(secondRemoved[0], "the second (later) matching body's own joint must still be removed despite the first body's own failure");
+  assertEquals(List.of("firstTrailer", "secondTrailer"), entriesVisited.stream().sorted().toList(),
+    "both bodies' own onRemove callback must have been INVOKED - the first body's own throw must not have prevented the sweep from reaching the second");
+  assertFalse(bodies.isActive("firstTrailer"), "the first (throwing) body is still removed from the registry despite its own failure");
+  assertFalse(bodies.isActive("secondTrailer"), "the second body is removed normally");
+ }
+
+ /**
+  * MINECRAFT-545/547 (Wroosbit review, comment 55189): registry-entry disposition on partial
+  * failure. The predicate already confirmed the failing entry meets the sweep's own removal
+  * criterion; it is removed from the registry despite its own onRemove throwing (retaining it
+  * would only repeat the identical failure on every future sweep, for no benefit) - the exception
+  * is still reported, but is not evidence the entry survives in the registry.
+  */
+ @Test void aBodyWhoseOwnRemovalThrowsIsStillRemovedFromTheRegistry() {
+  var hitches = new HitchRegistry<String>();
+  var bodies = new BodyRegistry<String, Object>();
+  bodies.activate("failingTrailer", new Object());
+  hitches.reconcile("failingTrailer", "truck", () -> fakeJointThatThrowsOnRemove());
+  assertThrows(RuntimeException.class, () ->
+    bodies.removeIf((k, b) -> true, (k, b) -> hitches.release(k)));
+  assertFalse(bodies.isActive("failingTrailer"),
+    "the entry must be removed from the registry despite its own onRemove throwing - retaining it would only repeat the same failure on every future sweep");
+ }
+
+ /**
+  * MINECRAFT-545/547 (Wroosbit review, comment 55189): repeated-call/no-double-touch. Once a
+  * sweep has fully processed an entry (removed it from the registry, regardless of whether its
+  * own onRemove threw), a second sweep call must not find or re-touch it - there is nothing left
+  * in the registry for the predicate to match again.
+  */
+ @Test void aSecondSweepCallDoesNotReTouchAnAlreadyRemovedBody() {
+  var hitches = new HitchRegistry<String>();
+  var bodies = new BodyRegistry<String, Object>();
+  bodies.activate("trailer", new Object());
+  hitches.reconcile("trailer", "truck", () -> fakeJointThatThrowsOnRemove());
+  assertThrows(RuntimeException.class, () ->
+    bodies.removeIf((k, b) -> true, (k, b) -> hitches.release(k)));
+  assertFalse(bodies.isActive("trailer"));
+  int[] secondSweepTouches = {0};
+  bodies.removeIf((k, b) -> true, (k, b) -> secondSweepTouches[0]++);
+  assertEquals(0, secondSweepTouches[0], "a second sweep must not find or re-touch an already-removed entry");
  }
 
  @Test void compensableConnectionCompositionExcludesOnlyAValidCurrentPartnerJoint() {

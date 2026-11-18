@@ -25,6 +25,15 @@ public final class DynamicImmersiveVehicles {
    var registrar = event.registrar("1");
    registrar.playToServer(WheelAuxPayload.TYPE, WheelAuxPayload.STREAM_CODEC, WheelAuxPayload::handle);
   });
+  // MINECRAFT-545/547 (John's comments 54727/54730/54742): orphan-connection release runs on
+  // ServerTickEvent.Pre - fires at the HEAD of MinecraftServer#tickServer, before THIS tick's
+  // own entity-ticking - specifically so a connection orphaned during the PRIOR tick's own
+  // ServerTickEvent.Post phase (after that tick's entity-ticking already ran) is released
+  // before THIS tick's entity-ticking, not one tick late. See
+  // PhysicsBridge.releaseOrphanedTowingConnections's own doc for the full derivation. Extracted
+  // from cleanup() (below), which no longer performs this sweep - never both, no duplicate
+  // dispatch.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Pre event) -> PhysicsBridge.releaseOrphanedTowingConnections());
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
   // Ticket MINECRAFT-504: per-server-tick continuation for the hybrid H-pattern climb and the
   // analog handbrake's staleness timeout - see PhysicsBridge.advanceWheelAuxInputs's own doc for
@@ -134,12 +143,42 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.InstalledPartHitchFrameProbe.maybeRun(overworld);
   });
+  // Opt-in, CI/isolated-host-only float-only-hull hitch lifecycle probe (MINECRAFT-545) - OFF by
+  // default, a strict no-op otherwise. Never touches any real vehicle or world content - see
+  // BuoyantHitchProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.BuoyantHitchProbe.maybeRun(overworld);
+  });
+  // Opt-in, CI/isolated-host-only ground-vehicle hitch-replacement comparison probe
+  // (MINECRAFT-545, John's own directive comment 54217) - OFF by default, a strict no-op
+  // otherwise. Never touches any real vehicle or world content - see
+  // GroundHitchReplacementProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundHitchReplacementProbe.maybeRun(overworld);
+  });
+  // Opt-in, CI/isolated-host-only already-active unsafe-fallback lifecycle probe (MINECRAFT-
+  // 545/547, John's comment 54259) - OFF by default, a strict no-op otherwise. Never touches any
+  // real vehicle or world content - see AlreadyActiveUnsafeFallbackProbe's own doc.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.AlreadyActiveUnsafeFallbackProbe.maybeRun(overworld);
+  });
   // Opt-in, CI/isolated-host-only ground-surface-config hot-reload probe (MINECRAFT-531) - OFF by
   // default, a strict no-op otherwise. Never touches any real vehicle or world content - see
   // GroundSurfaceHotReloadProbe's own doc.
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSurfaceHotReloadProbe.maybeRun(overworld);
+  });
+  // MINECRAFT-545/547 (John's comment 54856): bounded, opt-in missing-index fallback fixture -
+  // OFF by default, a strict no-op otherwise. Never touches any real vehicle or world content -
+  // see MissingIndexFallbackProbe's own doc. Relies on releaseOrphanedTowingConnections's own
+  // existing ServerTickEvent.Pre registration above - no separate sweep trigger needed.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.MissingIndexFallbackProbe.maybeRun(overworld);
   });
   // Opt-in, dev/isolated-host-only real-Sable-handle rotor translational air drag probe
   // (MINECRAFT-543 review, comments 54188/54189) - OFF by default, a strict no-op otherwise.

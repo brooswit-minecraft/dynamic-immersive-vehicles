@@ -30,11 +30,15 @@ import java.util.List;
  * three sharing one {@code PhysicsBridge.Body} implementation - which gives it its own Sable body
  * jointed to its towing vehicle's body (see {@link HitchJoint}; the joint math itself is domain-
  * agnostic, since it only connects two already-classified bodies), rather than excluding it to
- * IV's native position-snap. {@link #floatEligible} still gates on {@code activelyTowed}: a
- * float-only hull's own {@code BuoyantBody} has no pose/anchor API for a hitch joint to connect
- * to (see {@code VehicleBody}, deliberately minimal), so a towed boat stays on IV's native hitch
- * code - a concrete, citable API gap, not an invented restriction, and a natural follow-up once
- * that API exists rather than something this task attempts speculatively.
+ * IV's native position-snap. MINECRAFT-545: {@link #floatEligible} no longer gates on
+ * {@code activelyTowed} either - {@code BuoyantBody} now implements {@code HitchAnchor}
+ * (the same minimal pose/anchor surface {@code PhysicsBridge.Body} exposes), so a towed
+ * float-only hull gets its own Sable body jointed to its towing vehicle's body exactly like any
+ * other towed vehicle, instead of staying on IV's native hitch code. {@code PhysicsBridge.active}
+ * still waits for the towing vehicle's own body to exist before activating a first-time-towed
+ * trailer's body (ground, flight, rotor, or float) - see {@code deferToNativeHitch} - so a
+ * float-only trailer never gets a brand-new Sable body with no joint partner yet, which would
+ * otherwise overlap IV's own native snap for one tick and double up on any thrust compensation.
  */
 public final class Classification {
  private Classification() {}
@@ -110,10 +114,18 @@ public final class Classification {
   * aircraft/blimp flag, so this method would never be reached for one via the {@code !ground}
   * guard in {@code PhysicsBridge.active} - this check is kept anyway as a direct, self-contained
   * guarantee rather than relying on call-site ordering.
+  *
+  * <p>MINECRAFT-545: {@code activelyTowed} no longer excludes a float-only hull - a towed boat
+  * is eligible on the same terms as a towed ground/flight/rotor vehicle (see {@link #eligible}'s
+  * own paragraph on this), now that {@code BuoyantBody} implements {@code HitchAnchor} and
+  * {@code PhysicsBridge.createHitch} can connect to either side of a joint regardless of which
+  * domain produced it. The parameter is kept (ignored) rather than removed, to avoid rippling an
+  * unrelated signature change through every existing call site/test for a param that is cheap to
+  * keep self-documenting the call's own towed state.
   */
  public static boolean floatEligible(JSONVehicle definition, List<JSONPart.JSONPartGroundDevice> installedGroundDevices,
      List<JSONPart.JSONPartPropeller> installedPropellers, boolean activelyTowed, boolean optedOut) {
-  if (optedOut || activelyTowed) return false;
+  if (optedOut) return false;
   if (definition == null || definition.motorized == null) return false;
   if (isFlightVehicle(definition)) return false;
   if (isRotorcraft(installedPropellers)) return false;
