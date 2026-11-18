@@ -1,6 +1,7 @@
 package io.github.brooswitminecraft.div;
 import dev.ryanhcode.sable.api.physics.mass.MassData;
 import org.joml.Vector3d;
+import org.joml.Vector3dc;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -184,10 +185,20 @@ class ProposedBoundedDragIntegrationTest {
  // recorded at the tick the divergence began (gameTime=204: towed point speed ~17 m/s,
  // tuning.waterDrag's real default of 400.0, fraction=1.0 - fully submerged, matching that run).
 
- @Test void theRealUnboundedDragFormulaAtTheActualDivergenceTickWouldExceedTheNonReversingBound() {
-  // "BEFORE": the OLD unconditional path's own real formula, fed the REAL high-speed value this
-  // ticket's own native run actually produced - confirms the raw force's own implied impulse
-  // genuinely WOULD overshoot past a non-reversing bound (the mechanism, not an assumption).
+ @Test void aRepresentativeRegressionUsingTheTicketsOwnRealisticHighSpeedMagnitudeExceedsTheNonReversingBound() {
+  // MINECRAFT-545/547 (John's comment 55139, item 3 - "label representative regression...
+  // overstates synthetic speed17/zeroangular/directionY as recorded six-DOF same event"):
+  // RELABELED. This is a REPRESENTATIVE regression using a REALISTIC magnitude (~17 m/s,
+  // matching the order of magnitude M545-packet-9732b32-replacementprobe-round2's own log
+  // actually recorded at gameTime=204) - it is a synthetic SCALAR case (single axis, zero
+  // angular velocity), NOT a claim of reproducing the full six-degree-of-freedom real event,
+  // and it does NOT independently verify the solid-box inertia model against Sable's own native
+  // response (that assumption remains a modeling choice grounded in the three native runs this
+  // ticket already performed, not re-proven by this scalar math alone - see
+  // VERIFICATION.md/BuoyantForces.UNBOUNDED_DRAG_OVERRIDE's own doc for that distinction).
+  // "BEFORE": the OLD unconditional path's own real formula, fed this representative value -
+  // confirms the raw force's own implied impulse genuinely WOULD overshoot past a non-reversing
+  // bound for a realistic magnitude, not an arbitrary synthetic one.
   double speed = 17.0; // m/s, matching the magnitude observed at the actual divergence tick
   double dragCoefficient = 400.0; // Overrides.FALLBACK.waterDrag's own real default
   double rawDragForceMagnitude = -Buoyancy.directionalDragForce(speed, speed, 1.0, dragCoefficient, 1.0);
@@ -208,23 +219,27 @@ class ProposedBoundedDragIntegrationTest {
   double rawImpulseMagnitude = rawDragForceMagnitude * DT;
 
   assertTrue(rawImpulseMagnitude > nonReversingBound,
-    "the REAL unbounded formula's own impulse at this realistic high speed must genuinely exceed the non-reversing bound - this IS the actual instability mechanism, not a hypothetical");
+    "the REAL unbounded formula's own impulse at this representative magnitude must genuinely exceed the non-reversing bound - a representative regression, not a full six-DOF mechanism reproduction");
 
-  // "AFTER": the SAME real inputs, through the already-reviewed bounded path - must not exceed
+  // "AFTER": the SAME inputs, through the already-reviewed bounded path - must not exceed
   // the bound, and must still point the same direction (never reversed, never boosted).
   Vector3d rawDragForceVector = new Vector3d(direction).mul(rawDragForceMagnitude);
   Vector3d bounded = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, rawDragForceVector, linearVelocity, angularVelocity, DT);
   double boundedImpulseMagnitude = bounded.length() * DT;
   assertTrue(boundedImpulseMagnitude <= nonReversingBound + 1e-9,
-    "the bounded path, given the EXACT SAME realistic high-speed inputs that broke the unconditional path, must never exceed the non-reversing bound");
+    "the bounded path, given the EXACT SAME representative inputs that broke the unconditional path, must never exceed the non-reversing bound");
   assertTrue(bounded.length() < rawDragForceMagnitude,
-    "the bound must actually have engaged (scaled down), not merely returned the raw force unchanged, for these realistic high-speed inputs");
+    "the bound must actually have engaged (scaled down), not merely returned the raw force unchanged, for these representative inputs");
  }
 
- @Test void theRealDragFormulaAtOrdinaryLowSpeedIsUnaffectedByBounding() {
-  // Preserves correct low-speed behavior (John's comment 55133, item 2): at the modest speeds
-  // this fixture's own log shows BEFORE the divergence began (gameTime=203: ~0.3-0.5 m/s), the
-  // bound must be a genuine no-op - the fix must change nothing where nothing was ever unstable.
+ @Test void theCapItselfAtOrdinaryLowSpeedIsANoOp() {
+  // CORRECTED per John's comment 55138, item 2 - "'true no-op/unaffected' claim is false for
+  // whole integration": this test proves ONLY that the CAP/BOUND FUNCTION ITSELF
+  // (ProposedBoundedDragIntegration.boundedDragForce) is a no-op at ordinary low speed - it
+  // does NOT prove the whole integration is unaffected (the sequential fresh-per-float
+  // recomputation is a SEPARATE reordering effect, present regardless of speed, quantified
+  // separately in multipleOffCenterAnisotropicFloatsShowAMeasurableButSmallDifferenceFrom
+  // SharedSnapshotEvenWithoutCapping below - do not conflate the two).
   double speed = 0.4; // m/s, matching the real pre-divergence magnitude from the actual log
   double dragCoefficient = 400.0;
   double rawDragForceMagnitude = -Buoyancy.directionalDragForce(speed, speed, 1.0, dragCoefficient, 1.0);
@@ -241,7 +256,77 @@ class ProposedBoundedDragIntegrationTest {
   Vector3d bounded = ProposedBoundedDragIntegration.boundedDragForce(massData, arm, rawDragForceVector, linearVelocity, angularVelocity, DT);
 
   assertEquals(0, new Vector3d(rawDragForceVector).sub(bounded).length(), 1e-9,
-    "at ordinary low speed the bounded result must be IDENTICAL to the raw unconditional force - zero behavior change where nothing was ever unstable");
+    "at ordinary low speed the CAP ITSELF must return the raw force unchanged - the cap is a genuine no-op here; this does NOT claim the whole integration (including the separate sequential-recomputation reordering effect) is unaffected");
+ }
+
+ @Test void multipleOffCenterAnisotropicFloatsShowAMeasurableButSmallDifferenceFromSharedSnapshotEvenWithoutCapping() {
+  // MINECRAFT-545/547 (John's comment 55138, item 2 AND item 4 - "quantify intended integration
+  // change" + "production sequence tests covering... multiple off-center anisotropic floats,
+  // not only scalar cap"): at ORDINARY low speed (cap never binds for either float, confirmed
+  // below), compares the OLD/unconditional model (every float's own drag computed from ONE
+  // SHARED pre-tick velocity snapshot, impulses summed and applied once) against the NEW
+  // default model (each float's impulse applied immediately via the real
+  // SequentialImpulseEnergyLedger - confirmed native-synchronous - so the SECOND float's own
+  // drag is computed from the ALREADY-UPDATED state the first float's own impulse produced).
+  // Two floats, OFF-CENTER (different, nonzero arms) and ANISOTROPIC (different per-axis
+  // multipliers, modeling tuning.longitudinal/lateral/verticalWaterDragMultiplier), mirroring
+  // the real multi-float case BuoyantForces.apply actually handles, not a single scalar value.
+  double mass = 400.0;
+  MassData massData = TestMassData.solidBox(mass, new Vector3d(0.6, 0.3, 1.0));
+  Vector3d arm1 = new Vector3d(0.5, -0.2, 0.0), arm2 = new Vector3d(-0.5, -0.2, 0.0); // off-center, two real float positions
+  Vector3d direction = new Vector3d(0, -1, 0);
+  Vector3d initialLinear = new Vector3d(0, 0.4, 0); // ordinary low speed - same as theCapItselfAtOrdinaryLowSpeedIsANoOp
+  Vector3d initialAngular = new Vector3d(0, 0, 0);
+  double multiplier1 = 0.7, multiplier2 = 1.3; // anisotropic - different per-axis multipliers for each float
+
+  // Confirm the cap never binds for either float at this speed (isolating the reordering effect
+  // from any capping effect, per this test's own stated purpose).
+  double raw1 = -Buoyancy.directionalDragForce(0.4, 0.4, 1.0, 400.0, multiplier1);
+  double raw2 = -Buoyancy.directionalDragForce(0.4, 0.4, 1.0, 400.0, multiplier2);
+  Vector3d rawVec1 = new Vector3d(direction).mul(raw1), rawVec2 = new Vector3d(direction).mul(raw2);
+  assertEquals(0, new Vector3d(rawVec1).sub(ProposedBoundedDragIntegration.boundedDragForce(massData, arm1, rawVec1, initialLinear, initialAngular, DT)).length(), 1e-9,
+    "setup check: the cap must not bind for float 1 at this speed");
+  assertEquals(0, new Vector3d(rawVec2).sub(ProposedBoundedDragIntegration.boundedDragForce(massData, arm2, rawVec2, initialLinear, initialAngular, DT)).length(), 1e-9,
+    "setup check: the cap must not bind for float 2 at this speed");
+
+  // OLD/unconditional model: both floats' own drag computed from the SAME initial velocity,
+  // impulses summed, applied ONCE at the end (the shared-snapshot behavior VERIFICATION.md's
+  // own "Corrections per 54700" entry already confirmed the pre-this-fix code actually had).
+  SequentialImpulseEnergyLedger sharedSnapshotLedger = new SequentialImpulseEnergyLedger(massData, initialLinear, initialAngular);
+  double sharedSnapshotEnergyChange = sharedSnapshotLedger.applyImpulseAndMeasureEnergyChange(arm1, direction, raw1 * DT)
+    + sharedSnapshotLedger.applyImpulseAndMeasureEnergyChange(arm2, direction, raw2 * DT);
+  Vector3dc sharedSnapshotFinalLinear = sharedSnapshotLedger.linearVelocity();
+  Vector3dc sharedSnapshotFinalAngular = sharedSnapshotLedger.angularVelocity();
+
+  // NEW default model: float 1's impulse applied immediately (updating real state), THEN
+  // float 2's own drag recomputed FRESH from that already-updated state - exactly
+  // BuoyantForces.apply's own per-float loop + fresh handle.getLinearVelocity/AngularVelocity
+  // reads between floats.
+  SequentialImpulseEnergyLedger freshSequentialLedger = new SequentialImpulseEnergyLedger(massData, initialLinear, initialAngular);
+  double freshEnergyChange1 = freshSequentialLedger.applyImpulseAndMeasureEnergyChange(arm1, direction, raw1 * DT);
+  // Recompute float 2's own drag FRESH from the state float 1's own impulse just produced:
+  Vector3d updatedPointVelocity2 = new Vector3d(freshSequentialLedger.angularVelocity()).cross(arm2, new Vector3d()).add(new Vector3d(freshSequentialLedger.linearVelocity()));
+  double updatedSpeed2 = updatedPointVelocity2.length();
+  double freshRaw2 = updatedSpeed2 > 1e-9 ? -Buoyancy.directionalDragForce(updatedSpeed2, updatedPointVelocity2.dot(new Vector3d(0,1,0)), 1.0, 400.0, multiplier2) : raw2;
+  double freshEnergyChange2 = freshSequentialLedger.applyImpulseAndMeasureEnergyChange(arm2, direction, freshRaw2 * DT);
+  double freshSequentialEnergyChange = freshEnergyChange1 + freshEnergyChange2;
+  Vector3dc freshSequentialFinalLinear = freshSequentialLedger.linearVelocity();
+  Vector3dc freshSequentialFinalAngular = freshSequentialLedger.angularVelocity();
+
+  // QUANTIFY the difference - do not claim zero, measure it.
+  double linearDifference = new Vector3d(sharedSnapshotFinalLinear).sub(new Vector3d(freshSequentialFinalLinear)).length();
+  double angularDifference = new Vector3d(sharedSnapshotFinalAngular).sub(new Vector3d(freshSequentialFinalAngular)).length();
+  assertTrue(linearDifference > 0 || angularDifference > 0,
+    "the sequential-recomputation reordering effect must be measurably NONZERO even though neither float's own cap ever bound - confirming the whole-integration equivalence claim does NOT hold, exactly as 55138 found");
+  // The difference must still be SMALL (bounded in magnitude) at this ordinary low speed - a
+  // reordering effect, not a new instability.
+  assertTrue(linearDifference < 0.01, "the reordering effect's own magnitude must be small at ordinary low speed, not itself a source of instability: got " + linearDifference);
+  assertTrue(angularDifference < 0.01, "the reordering effect's own magnitude must be small at ordinary low speed, not itself a source of instability: got " + angularDifference);
+
+  // What IS preserved regardless of the reordering: the physical law itself - drag never adds
+  // energy, in EITHER model.
+  assertTrue(sharedSnapshotEnergyChange <= 1e-9, "the shared-snapshot model's own total energy change from drag must stay non-positive");
+  assertTrue(freshSequentialEnergyChange <= 1e-9, "the fresh-sequential model's own total energy change from drag must ALSO stay non-positive - the physical law is preserved under both orderings, even though the numeric result differs");
  }
 
  @Test void theBoundScalesCorrectlyAcrossMassVariation() {

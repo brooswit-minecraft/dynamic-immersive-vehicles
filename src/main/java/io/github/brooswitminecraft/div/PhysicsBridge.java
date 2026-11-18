@@ -1258,18 +1258,38 @@ public final class PhysicsBridge {
   * reimplementing this same decision logic in parallel (which would only prove the fake's own
   * logic self-consistent, never that production actually behaves this way). {@code Body.remove()}
   * is the ONLY production caller, passing the real {@code isActive()}/{@code isValid()} results
-  * and real {@code removeObject}/{@code joint.remove()} calls; a test passes synthetic flags and
-  * {@code Runnable} spies instead - same method, same control flow, different leaves. Each
-  * resource at index {@code i} is attempted ONLY if {@code activeFlags[i]} is {@code true},
-  * independently try/caught so one throwing removal never prevents any other's attempt, with the
-  * FIRST exception encountered re-thrown at the end (never swallowed). Pure/generic (plain
-  * booleans and {@code Runnable}s, no entity/Sable/world dependency) - directly unit-testable
-  * with no native construction needed.
+  * and real {@code removeObject}/{@code joint.remove()} calls; a test passes synthetic suppliers
+  * and {@code Runnable} spies instead - same method, same control flow, different leaves.
+  *
+  * <p>MINECRAFT-545/547 (John's comment 55139 - "Put eligibility reads inside failure-isolated
+  * production orchestration... not only precomputed booleans if claiming failure isolation"):
+  * {@code activeChecks[i]} is a {@code BooleanSupplier}, NOT a precomputed {@code boolean} -
+  * the ELIGIBILITY check itself (e.g. {@code twoBodyJoint.isValid()}) is now evaluated INSIDE
+  * this same failure-isolated loop, not by the caller beforehand. The original version of this
+  * method took precomputed {@code boolean[]} flags; {@code Body.remove()}'s own caller code
+  * computed {@code twoBodyJoint.isValid()} BEFORE calling in, outside any try/catch - a throwing
+  * validity query would have propagated immediately and skipped every resource's own removal
+  * attempt, the exact same "one throw skips everything" failure this method exists to prevent,
+  * just moved one step earlier. If a given eligibility check itself throws, that resource is
+  * treated as not-safely-removable this call (skipped, not attempted) and the failure is
+  * captured exactly like a throwing removal would be - every OTHER resource's own eligibility
+  * check and removal still proceed independently. Each resource at index {@code i} is attempted
+  * ONLY if {@code activeChecks[i]} returns {@code true}, independently try/caught end to end, with
+  * the FIRST exception encountered (from either an eligibility check or a removal) re-thrown at
+  * the end (never swallowed). Pure/generic (plain {@code BooleanSupplier}s and {@code Runnable}s,
+  * no entity/Sable/world dependency) - directly unit-testable with no native construction needed.
   */
- static void removeIndependentResources(boolean[] activeFlags, Runnable[] removeOps) {
+ static void removeIndependentResources(java.util.function.BooleanSupplier[] activeChecks, Runnable[] removeOps) {
   RuntimeException firstFailure = null;
-  for (int i = 0; i < activeFlags.length; i++) {
-   if (activeFlags[i]) {
+  for (int i = 0; i < activeChecks.length; i++) {
+   boolean active;
+   try {
+    active = activeChecks[i].getAsBoolean();
+   } catch (RuntimeException ex) {
+    if (firstFailure == null) firstFailure = ex;
+    continue; // eligibility unknown - do not attempt removal, but do not block the others either
+   }
+   if (active) {
     try {
      removeOps[i].run();
     } catch (RuntimeException ex) {
@@ -2857,10 +2877,9 @@ public final class PhysicsBridge {
      TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
      return;
     }
-    boolean jointActive = twoBodyJoint!=null && twoBodyJoint.isValid();
     removeIndependentResources(
-      new boolean[]{jointActive, boxActive, upperActive},
-      new Runnable[]{ twoBodyJoint::remove, () -> c.physicsSystem().removeObject(box), () -> c.physicsSystem().removeObject(upperBox) });
+      new java.util.function.BooleanSupplier[]{ () -> twoBodyJoint!=null && twoBodyJoint.isValid(), () -> boxActive, () -> upperActive },
+      new Runnable[]{ () -> twoBodyJoint.remove(), () -> c.physicsSystem().removeObject(box), () -> c.physicsSystem().removeObject(upperBox) });
    }
    else if (box.isActive()) c.physicsSystem().removeObject(box);
   }
@@ -2932,17 +2951,25 @@ public final class PhysicsBridge {
     case FLIGHT -> stepFlight(v,pose,q,inverse,velocity,up);
     case ROTOR -> stepRotor(v,q,up,installedPropellers);
    };
-   // MINECRAFT-545/547 (John's comments 54706/54709, gate updated for 55129): this Body's own
-   // `box` is a plain BoxPhysicsObject (not the shape-aware variant) - its getMassTracker()
-   // would silently give Sable's shape-ignorant mass/6 fallback, so a correct solid-box MassData
-   // is built directly from this Body's own mass/halfExtents fields instead. Built whenever the
-   // bounded-drag path is actually going to read it (now the default - skipped only when
-   // BuoyantForces.UNBOUNDED_DRAG_OVERRIDE is set, never in any shipped/default configuration -
-   // 54709's own point stands: building this - a Matrix3d inversion plus a new MassData
-   // instance - unconditionally regardless of whether it will ever be read would be wasted work,
-   // so the gate mirrors BuoyantForces.apply's own condition exactly, not a separate decision).
-   MassData boundedDragMassData = BuoyantForces.UNBOUNDED_DRAG_OVERRIDE ? null : BoxInertia.solidBoxMassData(mass,halfExtents);
-   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle,boundedDragMassData);
+   // MINECRAFT-545/547 (John's comments 54706/54709, gate updated for 55129, construction site
+   // fixed for 55138 - "eager massData construction affects ground/flight/two-body paths even
+   // when no buoyancy call"): the ORIGINAL version of this line built boundedDragMassData
+   // BEFORE the `!twoBodyActive && plan.appliesBuoyancy()` check below - a Matrix3d inversion
+   // plus a new MassData instance, done on EVERY Body.step() call regardless of vehicle type,
+   // even for ground/flight/two-body vehicles that never call BuoyantForces.apply at all this
+   // tick. Moved inside the short-circuit (as the LAST argument expression of the apply() call
+   // itself) so Java's own && short-circuit evaluation means this is now constructed ONLY when
+   // this Body is actually buoyancy-eligible AND not two-body-active - the same work, now done
+   // only when it is actually needed. This Body's own `box` is a plain BoxPhysicsObject (not the
+   // shape-aware variant) - its getMassTracker() would silently give Sable's shape-ignorant
+   // mass/6 fallback, so a correct solid-box MassData is built directly from this Body's own
+   // mass/halfExtents fields instead, unless BuoyantForces.UNBOUNDED_DRAG_OVERRIDE is set (never
+   // in any shipped/default configuration), in which case null is passed deliberately -
+   // BuoyantForces.apply itself recognizes that exact combination (override set, massData null)
+   // as the intentional old-path selection, not a contract violation (see that method's own
+   // updated doc, 55138 item 3).
+   boolean floatAwake = !twoBodyActive && plan.appliesBuoyancy() && BuoyantForces.apply(level,v,tuning,center,hullVolume,pose,q,inverse,velocity,angular,handle,
+     BuoyantForces.UNBOUNDED_DRAG_OVERRIDE ? null : BoxInertia.solidBoxMassData(mass,halfExtents));
    if (primaryAwake || floatAwake) box.wakeUp();
    // Sable is authoritative. The pose here is the most recent completed simulation step.
    Vector3d origin=new Vector3d(pose.position()).sub(q.transform(new Vector3d(center)));

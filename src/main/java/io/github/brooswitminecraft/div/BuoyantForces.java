@@ -79,13 +79,29 @@ final class BuoyantForces {
   * never overshoots past zero regardless of speed, so the fix is EXACTLY the dissipative bound
   * the physics itself requires, no more aggressive and no less.
   *
-  * <p><b>Why ordinary (low-speed) behavior is unaffected:</b> the bound only ever engages
-  * ({@link ProposedBoundedDragIntegration#boundedDragForce} only ever returns something OTHER
-  * than the raw force) when the raw force's own impulse would already exceed {@code |s|/k} -
-  * at the speeds this hull sees in ordinary floating/towing (confirmed directly in
-  * {@code ProposedBoundedDragIntegrationTest.theRealDragFormulaAtOrdinaryLowSpeedIsUnaffectedByBounding},
-  * using this exact ticket's own real pre-divergence log values), this never triggers; the fix
-  * is a true no-op there, not a general damping change.
+  * <p><b>Qualified claim about ordinary (low-speed) behavior (CORRECTED per John's comment
+  * 55138, item 2 - "'true no-op/unaffected' claim is false for whole integration"):</b> the
+  * BOUND/CAP itself ({@link ProposedBoundedDragIntegration#boundedDragForce} returning something
+  * OTHER than the raw force it was given) only ever engages when that raw force's own impulse
+  * would already exceed {@code |s|/k} - confirmed directly
+  * ({@code ProposedBoundedDragIntegrationTest.theRealDragFormulaAtOrdinaryLowSpeedIsUnaffectedByBounding})
+  * that at ordinary low speed this specific cap check is a genuine no-op. That is NOT the same
+  * claim as "the whole integration is unaffected at low speed", and the prior version of this
+  * doc wrongly conflated the two: this method now reads FRESH per-float velocity from the
+  * handle for EACH float, sequentially (every float's own impulse is applied to the real native
+  * handle immediately - confirmed native-synchronous, see {@link SequentialImpulseEnergyLedger}'s
+  * own class doc), whereas the OLD/unconditional path computes every float's drag from ONE
+  * SHARED snapshot taken once before the per-float loop runs (the caller-supplied
+  * {@code velocity}/{@code angular} parameters, never re-read mid-loop). With more than one
+  * float, this reordering can change the raw numeric result even when the cap never binds -
+  * confirmed and QUANTIFIED, not merely asserted, by
+  * {@code ProposedBoundedDragIntegrationTest.multipleOffCenterAnisotropicFloatsShowAMeasurableButSmallDifferenceFromSharedSnapshotEvenWithoutCapping}
+  * (a representative two-float case at ordinary speed). What IS preserved, confirmed by that
+  * same test: the underlying physical law - total energy change from drag stays non-positive,
+  * no point-velocity component is ever reversed past zero - regardless of this reordering
+  * effect. The claim this doc makes is therefore the NARROWER, accurate one: the CAP is a no-op
+  * at low speed; the SEQUENTIAL RECOMPUTATION is a small but genuinely nonzero reordering effect
+  * present regardless of speed, bounded in magnitude and never violating dissipativity.
   *
   * <p><b>Why this generalizes beyond the float-only towing scenario this ticket is about:</b>
   * the bound depends only on {@code massData}/{@code arm}/the CURRENT velocity/the force already
@@ -225,18 +241,33 @@ final class BuoyantForces {
    // MINECRAFT-545/547 (John's comments 55116/55129/55133): BOUNDED BY DEFAULT now - see
    // UNBOUNDED_DRAG_OVERRIDE's own doc for the full derivation of why this is safe as the
    // default, not merely "the candidate passed one native run". `forceToApply` stays IDENTICAL
-   // to the raw unconditional `force` above ONLY if the override kill-switch is set (never in
-   // any shipped/default configuration) or massData is unexpectedly unavailable (should not
-   // happen from either real call site - see BuoyantBody.remove()'s own doc and the construction
-   // site in PhysicsBridge.Body.step). Otherwise: reads FRESH per-float velocity from the handle
-   // (not this method's own once-per-tick `velocity`/`angular` parameters - the confirmed
-   // staleness gap, VERIFICATION.md "Corrections per 54700"), converts to LOCAL frame (matching
-   // massData's own body-local tensor frame), recomputes drag fresh from a VIRTUAL post-buoyancy
-   // state (buoyancy's own impulse applied to a COPY of velocity, never the real body -
-   // VERIFICATION.md "Corrections per 54706"), and bounds that recomputed drag against that same
-   // virtual state - buoyancy itself is never touched/scaled, only ever the drag contribution.
+   // to the raw unconditional `force` above ONLY if the override kill-switch is explicitly set
+   // (never in any shipped/default configuration). Otherwise: reads FRESH per-float velocity
+   // from the handle (not this method's own once-per-tick `velocity`/`angular` parameters - the
+   // confirmed staleness gap, VERIFICATION.md "Corrections per 54700"), converts to LOCAL frame
+   // (matching massData's own body-local tensor frame), recomputes drag fresh from a VIRTUAL
+   // post-buoyancy state (buoyancy's own impulse applied to a COPY of velocity, never the real
+   // body - VERIFICATION.md "Corrections per 54706"), and bounds that recomputed drag against
+   // that same virtual state - buoyancy itself is never touched/scaled, only ever drag.
+   //
+   // MINECRAFT-545/547 (John's comment 55138, item 3 - "null massData currently silently selects
+   // old unstable force even under bounded default"): the ORIGINAL version of this condition was
+   // `!UNBOUNDED_DRAG_OVERRIDE && massData != null` - if the override was NOT set (bounded
+   // behavior intended) but massData was unexpectedly null for some reason, this SILENTLY fell
+   // through to the old unconditional force, with no signal that the intended default behavior
+   // did not actually happen. Both real call sites (BuoyantBody.step, unconditionally via
+   // box.getMassTracker(); PhysicsBridge.Body.step, constructed inline whenever this method is
+   // even reached - see that call site's own doc) are confirmed, by direct reading, to ALWAYS
+   // supply a real massData whenever the override is not set - so a null value here, with the
+   // override not set, is not a legitimate case to silently tolerate; it indicates a genuine
+   // caller-contract violation (a bug at the call site, not a signal to fall back). Fails loud
+   // now instead - fixed contract tested directly in BuoyantForcesTest (new) /
+   // ProposedBoundedDragIntegrationTest.
    Vector3d forceToApply = force;
-   if (!UNBOUNDED_DRAG_OVERRIDE && massData != null) {
+   if (!UNBOUNDED_DRAG_OVERRIDE) {
+    if (massData == null) {
+     throw new IllegalStateException("BuoyantForces.apply: massData must be non-null whenever UNBOUNDED_DRAG_OVERRIDE is false (the bounded path is the default) - both real call sites are expected to always supply one; a null value here is a caller-contract violation, not a legitimate fallback to the old unconditional force.");
+    }
     Vector3d localArm = anchor; // anchor is already body-local, pre-q-transform - no extra conversion needed
     Vector3d freshLocalLinear = inverse.transform(handle.getLinearVelocity(new Vector3d()));
     Vector3d freshLocalAngular = inverse.transform(handle.getAngularVelocity(new Vector3d()));

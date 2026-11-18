@@ -718,6 +718,14 @@ class PhysicsBridgeClassificationTest {
  // the real removeObject()/joint.remove() calls, instead of a FakeVehicleBody reimplementing
  // this same branching logic in parallel (the prior version of these tests, which only proved a
  // model self-consistent, never that production actually behaves this way).
+ //
+ // MINECRAFT-545/547 (John's comment 55139): activeChecks is now BooleanSupplier[], not a
+ // precomputed boolean[] - the eligibility check ITSELF is evaluated inside the failure-isolated
+ // method now, matching a real bug this exact change fixed in Body.remove() (see that method's
+ // own commit message/doc): a bound method reference on a null joint (`twoBodyJoint::remove`)
+ // eagerly dereferences at array-construction time, before any flag is ever checked, and a
+ // throwing `isValid()` query evaluated OUTSIDE this method used to propagate before any
+ // removal was attempted. Both are fixed now and tested directly below.
 
  @Test void removeIndependentResourcesUpperOnlyStaleSurvivingLowerIsActuallyRemoved() {
   // The real gap this whole fix addresses: isActive() correctly reports false when only ONE
@@ -726,7 +734,7 @@ class PhysicsBridgeClassificationTest {
   int[] jointAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
   Runnable jointOp = () -> jointAttempts[0]++, upperOp = () -> upperAttempts[0]++, lowerOp = () -> lowerAttempts[0]++;
   PhysicsBridge.removeIndependentResources(
-    new boolean[]{true, false, true}, // joint active, upper already dead, lower genuinely alive
+    new java.util.function.BooleanSupplier[]{() -> true, () -> false, () -> true}, // joint active, upper already dead, lower genuinely alive
     new Runnable[]{jointOp, upperOp, lowerOp});
   assertEquals(1, jointAttempts[0], "the still-valid joint must be removed");
   assertEquals(0, upperAttempts[0], "the already-dead upper half must never have removal attempted again");
@@ -738,7 +746,7 @@ class PhysicsBridgeClassificationTest {
   int[] jointAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
   Runnable jointOp = () -> jointAttempts[0]++, upperOp = () -> upperAttempts[0]++, lowerOp = () -> lowerAttempts[0]++;
   PhysicsBridge.removeIndependentResources(
-    new boolean[]{true, true, false}, // joint active, upper genuinely alive, lower already dead
+    new java.util.function.BooleanSupplier[]{() -> true, () -> true, () -> false}, // joint active, upper genuinely alive, lower already dead
     new Runnable[]{jointOp, upperOp, lowerOp});
   assertEquals(1, jointAttempts[0]);
   assertEquals(1, upperAttempts[0], "the surviving upper half must actually have removal attempted");
@@ -749,10 +757,12 @@ class PhysicsBridgeClassificationTest {
   // TwoBodyLifecycle's own doc notes "the native joint handle could remain valid after both
   // boxes were removed" on Sable 2.0.5 - exactly this case: both boxes already dead, joint
   // itself still reports valid and must still be cleaned up; neither dead box gets touched again.
+  // Re-confirmed after the 55139 null-method-reference/isValid-ordering fixes - this is the
+  // scenario John flagged as most likely to have silently broken from either bug.
   int[] jointAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
   Runnable jointOp = () -> jointAttempts[0]++, upperOp = () -> upperAttempts[0]++, lowerOp = () -> lowerAttempts[0]++;
   PhysicsBridge.removeIndependentResources(
-    new boolean[]{true, false, false}, // joint still valid, both boxes already dead
+    new java.util.function.BooleanSupplier[]{() -> true, () -> false, () -> false}, // joint still valid, both boxes already dead
     new Runnable[]{jointOp, upperOp, lowerOp});
   assertEquals(1, jointAttempts[0], "the still-valid joint must still be cleaned up even though both boxes are already gone");
   assertEquals(0, upperAttempts[0]);
@@ -768,11 +778,56 @@ class PhysicsBridgeClassificationTest {
   Runnable upperOp = () -> upperAttempts[0]++;
   Runnable lowerOp = () -> lowerAttempts[0]++;
   assertThrows(RuntimeException.class, () -> PhysicsBridge.removeIndependentResources(
-    new boolean[]{true, false, true}, new Runnable[]{jointOp, upperOp, lowerOp}),
+    new java.util.function.BooleanSupplier[]{() -> true, () -> false, () -> true}, new Runnable[]{jointOp, upperOp, lowerOp}),
     "the throw itself must still propagate, not be swallowed");
   assertEquals(1, jointAttempts[0]);
   assertEquals(0, upperAttempts[0], "the already-dead upper half still must never have removal attempted");
   assertEquals(1, lowerAttempts[0], "the surviving lower half must still have removal attempted despite the joint throwing first");
+ }
+
+ @Test void removeIndependentResourcesAnEligibilityCheckThatThrowsDoesNotSkipOtherRemovals() {
+  // MINECRAFT-545/547 (John's comment 55139, bug 2): twoBodyJoint.isValid() used to be
+  // evaluated OUTSIDE this method, in Body.remove() itself, before any try/catch - a throwing
+  // validity query propagated immediately and skipped box removal entirely. Now the eligibility
+  // check ITSELF is inside this method's own failure isolation: a throwing check is captured
+  // like a throwing removal, and every OTHER resource's own check/removal still proceeds.
+  int[] jointCheckAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
+  java.util.function.BooleanSupplier throwingJointCheck = () -> { jointCheckAttempts[0]++; throw new RuntimeException("Sable-level isValid() query failure"); };
+  Runnable jointOp = () -> fail("must never be invoked - eligibility could not be determined");
+  Runnable upperOp = () -> upperAttempts[0]++;
+  Runnable lowerOp = () -> lowerAttempts[0]++;
+  assertThrows(RuntimeException.class, () -> PhysicsBridge.removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{throwingJointCheck, () -> false, () -> true}, new Runnable[]{jointOp, upperOp, lowerOp}),
+    "the throw from the eligibility check itself must still propagate, not be swallowed");
+  assertEquals(1, jointCheckAttempts[0], "the eligibility check was attempted exactly once");
+  assertEquals(0, upperAttempts[0], "the already-dead upper half still must never have removal attempted");
+  assertEquals(1, lowerAttempts[0], "the surviving lower half must still have removal attempted despite the joint's OWN eligibility check throwing");
+ }
+
+ @Test void removeIndependentResourcesConstructionWithANullJointDoesNotThrowAndSkipsItCorrectly() {
+  // MINECRAFT-545/547 (John's comment 55139, bug 1): the REAL Body.remove() builds its
+  // Runnable/BooleanSupplier arrays with `twoBodyJoint` possibly null (whenever the joint
+  // itself was never alive to begin with, or a prior path already nulled the field) - a BOUND
+  // method reference (`twoBodyJoint::remove`) eagerly dereferences its receiver at the point
+  // the method reference expression itself is evaluated (array construction), not when the
+  // resulting Runnable is later invoked - confirmed empirically: a null-receiver bound method
+  // reference throws NullPointerException immediately on construction, before removeIndependent
+  // Resources ever runs. This test constructs the array THE SAME WAY Body.remove() now does -
+  // a LAMBDA (`() -> twoBodyJoint.remove()`), not a method reference - with a genuinely null
+  // joint reference, confirming construction itself does not throw, and the real method
+  // correctly skips the (absent) joint while still removing the live surviving half.
+  final Object nullJoint = null; // models twoBodyJoint == null exactly
+  int[] upperAttempts = {0}, lowerAttempts = {0};
+  Runnable jointOp = () -> { throw new AssertionError("must never be invoked - the joint is null, eligibility must be false"); };
+  Runnable upperOp = () -> upperAttempts[0]++;
+  Runnable lowerOp = () -> lowerAttempts[0]++;
+  // Construction itself, exactly mirroring Body.remove()'s own real expression shape:
+  var activeChecks = new java.util.function.BooleanSupplier[]{ () -> nullJoint != null, () -> false, () -> true };
+  var removeOps = new Runnable[]{ jointOp, upperOp, lowerOp }; // no method reference on a null receiver - construction must not throw
+  assertDoesNotThrow(() -> PhysicsBridge.removeIndependentResources(activeChecks, removeOps),
+    "construction and invocation with a genuinely null joint must never throw - this is the exact NPE Body.remove() used to hit before invocation even began");
+  assertEquals(0, upperAttempts[0], "the already-dead upper half must never have removal attempted");
+  assertEquals(1, lowerAttempts[0], "the surviving lower half must still actually be removed despite the joint being entirely absent");
  }
 
  @Test void removeIndependentResourcesIsIdempotentAcrossRepeatedCallsWithFreshlyRecomputedFlags() {
@@ -787,12 +842,12 @@ class PhysicsBridgeClassificationTest {
   Runnable upperOp = () -> { upperAttempts[0]++; upperActive[0] = false; };
   Runnable lowerOp = () -> { lowerAttempts[0]++; lowerActive[0] = false; };
   PhysicsBridge.removeIndependentResources(
-    new boolean[]{jointActive[0], upperActive[0], lowerActive[0]}, new Runnable[]{jointOp, upperOp, lowerOp});
+    new java.util.function.BooleanSupplier[]{() -> jointActive[0], () -> upperActive[0], () -> lowerActive[0]}, new Runnable[]{jointOp, upperOp, lowerOp});
   assertEquals(1, jointAttempts[0]); assertEquals(0, upperAttempts[0]); assertEquals(1, lowerAttempts[0]);
   // Second call, flags re-read fresh (now all false) - a true no-op, not a second attempt on
   // anything, exactly what makes repeated remove() calls on an already-fully-removed body safe.
   PhysicsBridge.removeIndependentResources(
-    new boolean[]{jointActive[0], upperActive[0], lowerActive[0]}, new Runnable[]{jointOp, upperOp, lowerOp});
+    new java.util.function.BooleanSupplier[]{() -> jointActive[0], () -> upperActive[0], () -> lowerActive[0]}, new Runnable[]{jointOp, upperOp, lowerOp});
   assertEquals(1, jointAttempts[0], "second call must not attempt the joint again");
   assertEquals(0, upperAttempts[0]);
   assertEquals(1, lowerAttempts[0], "second call must not attempt the lower box again");
