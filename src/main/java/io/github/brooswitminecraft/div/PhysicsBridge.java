@@ -1251,6 +1251,35 @@ public final class PhysicsBridge {
   }
  }
  /**
+  * MINECRAFT-545/547 (John's comment 55126 - "Four survivor tests reimplement removal in
+  * FakeVehicleBody.remove, proving model not actual Body.remove"): the exact branching logic
+  * {@code Body.remove()}'s own partial-two-body-survivor path uses, extracted so it can be
+  * exercised directly by a test with injected (fake) leaf operations, instead of a test double
+  * reimplementing this same decision logic in parallel (which would only prove the fake's own
+  * logic self-consistent, never that production actually behaves this way). {@code Body.remove()}
+  * is the ONLY production caller, passing the real {@code isActive()}/{@code isValid()} results
+  * and real {@code removeObject}/{@code joint.remove()} calls; a test passes synthetic flags and
+  * {@code Runnable} spies instead - same method, same control flow, different leaves. Each
+  * resource at index {@code i} is attempted ONLY if {@code activeFlags[i]} is {@code true},
+  * independently try/caught so one throwing removal never prevents any other's attempt, with the
+  * FIRST exception encountered re-thrown at the end (never swallowed). Pure/generic (plain
+  * booleans and {@code Runnable}s, no entity/Sable/world dependency) - directly unit-testable
+  * with no native construction needed.
+  */
+ static void removeIndependentResources(boolean[] activeFlags, Runnable[] removeOps) {
+  RuntimeException firstFailure = null;
+  for (int i = 0; i < activeFlags.length; i++) {
+   if (activeFlags[i]) {
+    try {
+     removeOps[i].run();
+    } catch (RuntimeException ex) {
+     if (firstFailure == null) firstFailure = ex;
+    }
+   }
+  }
+  if (firstFailure != null) throw firstFailure;
+ }
+ /**
   * MINECRAFT-545/547 (John's comment 55098): the real root cause of the native crash a
   * `BuoyantHitchProbe` `TOWING_UNAVAILABLE` FAILED run surfaced - traced to the actual log
   * (`BoxPhysicsObject.updatePose:61` NPE, "this.handle is null", inside `BuoyantBody.step:125`,
@@ -2809,13 +2838,15 @@ public final class PhysicsBridge {
    * independently try/catch each half and the joint, matching this class's own established
    * per-step-guarded pattern ({@link HitchRegistry#release}). The NEW case this method now
    * handles is PARTIAL survival (exactly one half already inactive, confirmed via
-   * {@link #isActive} no longer being the only caller that distinguishes this): removal is done
-   * directly here instead of delegating to {@code TwoBodyLifecycle.remove} (which always calls
+   * {@link #isActive} no longer being the only caller that distinguishes this): delegated to
+   * {@link #removeIndependentResources} (NOT {@code TwoBodyLifecycle.remove}, which always calls
    * removeObject on BOTH boxes unconditionally) - only the box(es) still genuinely active, and
    * the joint only if still valid, are actually touched; a throwing removal never prevents the
-   * other resource's own removal attempt (same first-failure-captured-rethrown-at-end pattern
-   * {@code HitchRegistry.release} already established). If BOTH halves are already inactive,
-   * this is a true no-op - nothing left to remove.
+   * other resource's own removal attempt. If BOTH halves are already inactive and the joint is
+   * already invalid too, this is a true no-op - nothing left to remove. {@code
+   * removeIndependentResources} is extracted as its own generic, directly-testable method
+   * (John's comment 55126) so a test exercises this EXACT branching logic with injected fake
+   * leaf operations, rather than a parallel reimplementation.
    */
   public void remove() {
    var c=SubLevelContainer.getContainer(level);
@@ -2826,20 +2857,10 @@ public final class PhysicsBridge {
      TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
      return;
     }
-    RuntimeException firstFailure=null;
-    if (twoBodyJoint!=null) {
-     try { if (twoBodyJoint.isValid()) twoBodyJoint.remove(); }
-     catch (RuntimeException ex) { firstFailure=ex; }
-    }
-    if (boxActive) {
-     try { c.physicsSystem().removeObject(box); }
-     catch (RuntimeException ex) { if (firstFailure==null) firstFailure=ex; }
-    }
-    if (upperActive) {
-     try { c.physicsSystem().removeObject(upperBox); }
-     catch (RuntimeException ex) { if (firstFailure==null) firstFailure=ex; }
-    }
-    if (firstFailure!=null) throw firstFailure;
+    boolean jointActive = twoBodyJoint!=null && twoBodyJoint.isValid();
+    removeIndependentResources(
+      new boolean[]{jointActive, boxActive, upperActive},
+      new Runnable[]{ twoBodyJoint::remove, () -> c.physicsSystem().removeObject(box), () -> c.physicsSystem().removeObject(upperBox) });
    }
    else if (box.isActive()) c.physicsSystem().removeObject(box);
   }

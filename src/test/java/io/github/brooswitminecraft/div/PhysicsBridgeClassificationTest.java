@@ -657,42 +657,19 @@ class PhysicsBridgeClassificationTest {
   * so those bodies are unused/unreachable by design, not a gap in this test's own coverage.
   *
   * <p>MINECRAFT-545/547 (John's comment 55116 - "partial two-body survivor cleanup"):
-  * remove()/isActive() now model TWO shapes, selected by {@code twoBodyModel}: the original
-  * single-resource case ({@code active}), and a three-independent-resource case ({@code
-  * jointActive}/{@code upperActive}/{@code lowerActive}) mirroring {@code PhysicsBridge.Body
-  * .remove()}'s own new partial-survivor logic exactly (only touch what's still active, each
-  * independently guarded, first failure captured and rethrown at the end) - a faithful model of
-  * the real production logic's SHAPE, not a reimplementation of Body itself (which this suite
-  * cannot construct). */
+  * remove()/isActive() model the original single-resource case ({@code active}) only - the
+  * two-body partial-survivor branch is no longer modeled here at all (John's comment 55126: a
+  * prior version reimplemented that branching logic in this class, which only proved the FAKE's
+  * own logic self-consistent, never that production actually behaves this way). The two-body
+  * cases are now tested directly against {@link PhysicsBridge#removeIndependentResources} below
+  * - the REAL method {@code Body.remove()} itself delegates to, with injected fake leaf
+  * operations, not a parallel reimplementation. */
  private static final class FakeVehicleBody implements VehicleBody {
   boolean active = true;
-  boolean twoBodyModel = false;
-  boolean jointActive = true, upperActive = true, lowerActive = true;
-  int removeCallCount = 0, jointRemoveAttempts = 0, upperRemoveAttempts = 0, lowerRemoveAttempts = 0;
-  RuntimeException throwOnJointRemove, throwOnUpperRemove, throwOnLowerRemove;
+  int removeCallCount = 0;
   public void step(minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics v) { throw new AssertionError("not reachable from activeOrReclaimStale itself"); }
-  public void remove() {
-   removeCallCount++;
-   if (!twoBodyModel) { if (!active) return; active = false; return; }
-   RuntimeException firstFailure = null;
-   if (jointActive) {
-    jointRemoveAttempts++;
-    try { if (throwOnJointRemove != null) throw throwOnJointRemove; jointActive = false; }
-    catch (RuntimeException ex) { if (firstFailure == null) firstFailure = ex; }
-   }
-   if (upperActive) {
-    upperRemoveAttempts++;
-    try { if (throwOnUpperRemove != null) throw throwOnUpperRemove; upperActive = false; }
-    catch (RuntimeException ex) { if (firstFailure == null) firstFailure = ex; }
-   }
-   if (lowerActive) {
-    lowerRemoveAttempts++;
-    try { if (throwOnLowerRemove != null) throw throwOnLowerRemove; lowerActive = false; }
-    catch (RuntimeException ex) { if (firstFailure == null) firstFailure = ex; }
-   }
-   if (firstFailure != null) throw firstFailure;
-  }
-  public boolean isActive() { return twoBodyModel ? (upperActive && lowerActive) : active; }
+  public void remove() { removeCallCount++; if (!active) return; active = false; }
+  public boolean isActive() { return active; }
   public PhysicsBridge.InheritedRigidBodyVelocity captureReplacementState(minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics v) { throw new AssertionError("not reachable"); }
   public Object level() { return "fake-level"; }
   public Overrides.Tuning tuning() { throw new AssertionError("not reachable"); }
@@ -735,90 +712,90 @@ class PhysicsBridgeClassificationTest {
   assertFalse(staleBody.active, "remove()'s own no-op path must leave the already-dead body exactly as dead, not toggle anything");
  }
 
- @Test void upperOnlyStaleIsReclaimedAndTheSurvivingLowerHalfIsActuallyRemoved() {
-  // MINECRAFT-545/547 (John's comment 55116): the real gap - isActive() correctly reports false
-  // when only ONE half died, but the ORIGINAL activeOrReclaimStale never called remove() at all
-  // in this branch, so the SURVIVING half's own native resource was never released - a real
-  // leak. Now: remove() is called, and it must actually remove the surviving lower half (and
-  // the still-valid joint), while never attempting to remove the already-dead upper half again.
-  var registry = new BodyRegistry<String, FakeVehicleBody>();
-  var hitches = new HitchRegistry<String>();
-  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
-  var body = new FakeVehicleBody();
-  body.twoBodyModel = true;
-  body.upperActive = false; // already dead by some other path
-  body.lowerActive = true;  // genuinely still alive - must be actually removed
-  body.jointActive = true;
-  registry.activate("car", body);
-  assertFalse(body.isActive(), "setup check: partial death must be detected as not fully active");
-  var result = PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "car");
-  assertNull(result);
-  assertEquals(0, body.upperRemoveAttempts, "the already-dead upper half must never have removal attempted again");
-  assertEquals(1, body.lowerRemoveAttempts, "the surviving lower half must actually have removal attempted");
-  assertFalse(body.lowerActive, "the surviving lower half must actually end up removed, not orphaned");
-  assertEquals(1, body.jointRemoveAttempts, "the still-valid joint must also be removed");
+ // MINECRAFT-545/547 (John's comment 55126): the following tests call
+ // PhysicsBridge.removeIndependentResources DIRECTLY - the exact method Body.remove()'s own
+ // partial-two-body-survivor branch delegates to - with injected Runnable spies standing in for
+ // the real removeObject()/joint.remove() calls, instead of a FakeVehicleBody reimplementing
+ // this same branching logic in parallel (the prior version of these tests, which only proved a
+ // model self-consistent, never that production actually behaves this way).
+
+ @Test void removeIndependentResourcesUpperOnlyStaleSurvivingLowerIsActuallyRemoved() {
+  // The real gap this whole fix addresses: isActive() correctly reports false when only ONE
+  // half died, but the SURVIVING half's own native resource must still actually be removed, and
+  // the already-dead half must never have removal attempted again.
+  int[] jointAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
+  Runnable jointOp = () -> jointAttempts[0]++, upperOp = () -> upperAttempts[0]++, lowerOp = () -> lowerAttempts[0]++;
+  PhysicsBridge.removeIndependentResources(
+    new boolean[]{true, false, true}, // joint active, upper already dead, lower genuinely alive
+    new Runnable[]{jointOp, upperOp, lowerOp});
+  assertEquals(1, jointAttempts[0], "the still-valid joint must be removed");
+  assertEquals(0, upperAttempts[0], "the already-dead upper half must never have removal attempted again");
+  assertEquals(1, lowerAttempts[0], "the surviving lower half must actually have removal attempted");
  }
 
- @Test void lowerOnlyStaleIsReclaimedAndTheSurvivingUpperHalfIsActuallyRemoved() {
-  // The symmetric case.
-  var registry = new BodyRegistry<String, FakeVehicleBody>();
-  var hitches = new HitchRegistry<String>();
-  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
-  var body = new FakeVehicleBody();
-  body.twoBodyModel = true;
-  body.upperActive = true;  // genuinely still alive - must be actually removed
-  body.lowerActive = false; // already dead by some other path
-  body.jointActive = true;
-  registry.activate("car", body);
-  var result = PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "car");
-  assertNull(result);
-  assertEquals(1, body.upperRemoveAttempts, "the surviving upper half must actually have removal attempted");
-  assertFalse(body.upperActive, "the surviving upper half must actually end up removed, not orphaned");
-  assertEquals(0, body.lowerRemoveAttempts, "the already-dead lower half must never have removal attempted again");
-  assertEquals(1, body.jointRemoveAttempts);
+ @Test void removeIndependentResourcesLowerOnlyStaleSurvivingUpperIsActuallyRemoved() {
+  // Upper/lower SYMMETRY - the opposite direction, same method, same guarantee.
+  int[] jointAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
+  Runnable jointOp = () -> jointAttempts[0]++, upperOp = () -> upperAttempts[0]++, lowerOp = () -> lowerAttempts[0]++;
+  PhysicsBridge.removeIndependentResources(
+    new boolean[]{true, true, false}, // joint active, upper genuinely alive, lower already dead
+    new Runnable[]{jointOp, upperOp, lowerOp});
+  assertEquals(1, jointAttempts[0]);
+  assertEquals(1, upperAttempts[0], "the surviving upper half must actually have removal attempted");
+  assertEquals(0, lowerAttempts[0], "the already-dead lower half must never have removal attempted again");
  }
 
- @Test void bothHalvesStaleReclaimsWithNoDoubleRemovalAttemptedOnEitherBox() {
-  // MINECRAFT-545/547: TwoBodyLifecycle's own doc notes "the native joint handle could remain
-  // valid after both boxes were removed" on Sable 2.0.5 - exactly modeled here: both boxes
-  // already dead, but the joint itself still reports valid and must still be cleaned up.
-  var registry = new BodyRegistry<String, FakeVehicleBody>();
-  var hitches = new HitchRegistry<String>();
-  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
-  var body = new FakeVehicleBody();
-  body.twoBodyModel = true;
-  body.upperActive = false;
-  body.lowerActive = false;
-  body.jointActive = true; // can genuinely outlive both boxes on this exact native version
-  registry.activate("car", body);
-  var result = PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "car");
-  assertNull(result);
-  assertEquals(0, body.upperRemoveAttempts, "neither already-dead box must have removal attempted again");
-  assertEquals(0, body.lowerRemoveAttempts, "neither already-dead box must have removal attempted again");
-  assertEquals(1, body.jointRemoveAttempts, "the still-valid joint must still be cleaned up even though both boxes are already gone");
+ @Test void removeIndependentResourcesBothBoxesStaleButJointStillValidRemovesOnlyTheJoint() {
+  // TwoBodyLifecycle's own doc notes "the native joint handle could remain valid after both
+  // boxes were removed" on Sable 2.0.5 - exactly this case: both boxes already dead, joint
+  // itself still reports valid and must still be cleaned up; neither dead box gets touched again.
+  int[] jointAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
+  Runnable jointOp = () -> jointAttempts[0]++, upperOp = () -> upperAttempts[0]++, lowerOp = () -> lowerAttempts[0]++;
+  PhysicsBridge.removeIndependentResources(
+    new boolean[]{true, false, false}, // joint still valid, both boxes already dead
+    new Runnable[]{jointOp, upperOp, lowerOp});
+  assertEquals(1, jointAttempts[0], "the still-valid joint must still be cleaned up even though both boxes are already gone");
+  assertEquals(0, upperAttempts[0]);
+  assertEquals(0, lowerAttempts[0]);
  }
 
- @Test void aJointRemovalExceptionDuringPartialSurvivorCleanupStillRemovesTheSurvivingBox() {
-  // MINECRAFT-545/547: "avoid removing dead handles twice" AND "don't let a throwing removal
-  // skip remaining cleanup" together - the joint's own removal throws, but the surviving lower
-  // half must still actually be removed, and the exception itself must still propagate (not be
-  // swallowed), matching the same first-failure-captured-rethrown-at-end pattern already
-  // established for HitchRegistry.release.
-  var registry = new BodyRegistry<String, FakeVehicleBody>();
-  var hitches = new HitchRegistry<String>();
-  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
-  var body = new FakeVehicleBody();
-  body.twoBodyModel = true;
-  body.upperActive = false;
-  body.lowerActive = true;
-  body.jointActive = true;
-  body.throwOnJointRemove = new RuntimeException("Sable-level joint removal failure");
-  registry.activate("car", body);
-  assertThrows(RuntimeException.class, () -> PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "car"),
+ @Test void removeIndependentResourcesJointExceptionDoesNotSkipTheSurvivingBoxAndStillPropagates() {
+  // "avoid removing dead handles twice" AND "don't let a throwing removal skip remaining
+  // cleanup" together - the joint's own removal throws, but the surviving lower half must still
+  // actually be removed, and the exception itself must still propagate (not be swallowed).
+  int[] jointAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
+  Runnable jointOp = () -> { jointAttempts[0]++; throw new RuntimeException("Sable-level joint removal failure"); };
+  Runnable upperOp = () -> upperAttempts[0]++;
+  Runnable lowerOp = () -> lowerAttempts[0]++;
+  assertThrows(RuntimeException.class, () -> PhysicsBridge.removeIndependentResources(
+    new boolean[]{true, false, true}, new Runnable[]{jointOp, upperOp, lowerOp}),
     "the throw itself must still propagate, not be swallowed");
-  assertEquals(1, body.lowerRemoveAttempts, "the surviving lower half must still have removal attempted despite the joint throwing first");
-  assertFalse(body.lowerActive, "the surviving lower half must still actually end up removed");
-  assertFalse(registry.isActive("car"), "the registry entry must still be reclaimed despite the throw");
+  assertEquals(1, jointAttempts[0]);
+  assertEquals(0, upperAttempts[0], "the already-dead upper half still must never have removal attempted");
+  assertEquals(1, lowerAttempts[0], "the surviving lower half must still have removal attempted despite the joint throwing first");
+ }
+
+ @Test void removeIndependentResourcesIsIdempotentAcrossRepeatedCallsWithFreshlyRecomputedFlags() {
+  // "Repeated calls" (John's comment 55126): Body.remove() recomputes box.isActive()/
+  // upperBox.isActive()/joint.isValid() FRESH every call - this models exactly that pattern:
+  // the SAME mutable flags feed the real method twice, updated by the real operations
+  // themselves (not reset between calls), mirroring how a second real-world remove() call
+  // would see nothing left active and perform zero operations.
+  boolean[] jointActive = {true}, upperActive = {false}, lowerActive = {true};
+  int[] jointAttempts = {0}, upperAttempts = {0}, lowerAttempts = {0};
+  Runnable jointOp = () -> { jointAttempts[0]++; jointActive[0] = false; };
+  Runnable upperOp = () -> { upperAttempts[0]++; upperActive[0] = false; };
+  Runnable lowerOp = () -> { lowerAttempts[0]++; lowerActive[0] = false; };
+  PhysicsBridge.removeIndependentResources(
+    new boolean[]{jointActive[0], upperActive[0], lowerActive[0]}, new Runnable[]{jointOp, upperOp, lowerOp});
+  assertEquals(1, jointAttempts[0]); assertEquals(0, upperAttempts[0]); assertEquals(1, lowerAttempts[0]);
+  // Second call, flags re-read fresh (now all false) - a true no-op, not a second attempt on
+  // anything, exactly what makes repeated remove() calls on an already-fully-removed body safe.
+  PhysicsBridge.removeIndependentResources(
+    new boolean[]{jointActive[0], upperActive[0], lowerActive[0]}, new Runnable[]{jointOp, upperOp, lowerOp});
+  assertEquals(1, jointAttempts[0], "second call must not attempt the joint again");
+  assertEquals(0, upperAttempts[0]);
+  assertEquals(1, lowerAttempts[0], "second call must not attempt the lower box again");
  }
 
  @Test void aMissingEntryIsSimplyAbsentNotAnError() {
