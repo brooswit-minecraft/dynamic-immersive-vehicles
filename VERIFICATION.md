@@ -12790,3 +12790,172 @@ stale-flag hazard in the shared VM-args (to be corrected in the new packet), and
 packet's own config keys were already correct (not a bug). Full suite green (912 tests). No
 native run performed. A new, corrected packet follows. No merge/Done transition made or
 implied.
+
+## Per 54870: bounded observer, pure cleanup orchestration with full resource tracking, real
+## anchor-point/request-consumption capture
+
+John's comment 54870 found four further, independent problems in the 54862 round's own fixes -
+three source-level, one packet-level. The three source-level items are addressed in this round;
+the fourth (building a fresh packet with the right flags) follows as a separate step, in a
+brand-new packet directory, never by editing a previously-declared one (per the standing rule
+from the 54839 process violation).
+
+### Finding 1: the 54862 "fix" for inference-vs-observation was itself a real (if slow) memory leak
+
+54862 replaced an inferred fallback-entry signal with
+`debugFallbackClearConnectionCallCounts`, an always-on, unbounded `Map<UUID, Integer>` on
+`PhysicsBridge` that is never pruned and accumulates one entry per distinct vehicle UUID ever
+observed for the lifetime of the server process. John correctly identified this as a genuine
+resource leak, just a slow one, not fixed by scoping it to debug use - unbounded growth keyed
+by UUID with no eviction is a leak regardless of how slowly it grows.
+
+**Fix**: replaced the unbounded counter with a bounded, opt-in, identity-matched observer API.
+A caller explicitly registers interest in one specific vehicle UUID for one specific expected
+connection object (`PhysicsBridge.registerFallbackObserver(UUID, Object expectedConnection)`,
+returning an opaque `FallbackObserverHandle`), and MUST explicitly unregister it
+(`unregisterFallbackObserver(FallbackObserverHandle)`) when done - the map holds at most as many
+entries as there are live, explicitly-registered observers, never one per UUID ever seen.
+`recordFallbackClearConnectionObservation(UUID, Object actualConnection)` is called from the
+real `clearConnection` callback site (capturing `v.towedByConnection` BEFORE it is nulled) and
+is a pure no-op for any UUID with no registered observer. It increments `matchedCount` only when
+the observed connection identity (`==`, not `.equals()`, consistent with every other
+identity-sensitive comparison in this file) matches the registered `expectedConnection`, and
+`mismatchedCount` otherwise - so a caller can distinguish "the fallback fired for MY connection"
+from "the fallback fired for some unrelated vehicle that happens to share this map," which the
+old counter could not do at all (it counted calls per-UUID with no connection-identity check).
+`debugFallbackObserverMatchedCount`/`debugFallbackObserverMismatchedCount` are pure readers.
+`MissingIndexFallbackProbe.faultInject()` now registers an observer for the exact injected
+connection instead of snapshotting the old global counter, and `awaitLeakFallback()` reads the
+matched/mismatched counts from its own handle instead of a counter delta.
+
+### Finding 2: cleanup aborts on first failure, and two resources were never tracked for cleanup
+
+Three independent bugs in the 54862-round cleanup, all variations on the same root cause - the
+original cleanup code was written as straight-line imperative code with no isolation between
+steps, so an exception midway through silently skipped everything after it, and two resources
+were tracked (or restored) only at the very end of their own acquisition, not incrementally:
+
+- `cleanupAllFixtureEntities` iterated all spawned entities in one try block; the first `.remove()`
+  that threw aborted the loop, leaving every later entity un-cleaned with no record that it had
+  even been attempted.
+- `requestChunkGrid` only recorded "chunks were forced" via a single boolean set at the end of its
+  own loop; a mid-loop exception meant the already-forced chunks before the failure point were
+  never tracked for unforcing at all.
+- `spawn()` added entries to the shared `ConfigSystem.packSpeedFactors`/`packVehicleScales` maps
+  (`PACK_ID` keys) but never recorded whether this probe run was the one that added them versus
+  them already being present from other config - so cleanup could never correctly decide whether
+  to remove them (removing a pre-existing value set by something else would itself be a bug).
+
+**Fix**: moved to per-resource tracking at acquisition time, not at the end of the acquiring step,
+plus a new pure orchestration primitive that isolates failures per-action:
+- `allSpawnedEntities` (`List<EntityVehicleF_Physics>`) is appended to immediately after each
+  `new EntityVehicleF_Physics(...)` call in `spawnHull`, before `world.spawnEntity`/`addFloat` -
+  both of which could themselves throw - so a tracked-but-not-yet-fully-spawned entity is still
+  tracked for cleanup.
+- `forcedChunkCoords` (`List<int[]>`) is appended to per-chunk, inside `requestChunkGrid`'s own
+  loop, immediately after each chunk is forced - not only once at the end. The old
+  `chunkGridForced`/`chunkGridUnforced` booleans and the standalone `unforceChunkGrid` method are
+  removed entirely, since per-chunk tracking replaces what they existed to approximate.
+- `addedPackSpeedFactor`/`addedPackVehicleScale` (`boolean`) capture
+  `packSpeedFactors.putIfAbsent(PACK_ID, 1.0) == null` (and the equivalent for vehicle scale) at
+  the exact point of insertion - `true` iff THIS run's own call actually added the entry (no prior
+  value existed), `false` if a pre-existing value was left untouched - so cleanup only ever
+  removes an entry this run itself created.
+- New pure orchestration: `CleanupAction(String tag, Runnable action)` (a record - no MTS types),
+  `CleanupOutcome { ALL_SUCCEEDED, SOME_FAILED }`, and
+  `runAllIndependently(List<CleanupAction>, BiConsumer<String, RuntimeException> onFailure)`,
+  which attempts every action in order regardless of whether an earlier one threw, invokes
+  `onFailure` with the action's own tag and exception for each failure, and returns
+  `SOME_FAILED` if any action failed, `ALL_SUCCEEDED` only if every single one succeeded - never
+  reporting success prematurely. `buildCleanupActions(ServerLevel)` now assembles the full action
+  list from every tracked entity, every tracked chunk, the conditional config-restoration
+  actions, and the observer-unregister action, and `finishTickIfTerminal` calls
+  `runAllIndependently` on it, storing the resulting `CleanupOutcome` and appending a
+  `CLEANUP_INCOMPLETE` suffix to the terminal COMPLETE/FAILED banner when it is `SOME_FAILED` -
+  so an incomplete cleanup is visible in the banner itself, not silently swallowed.
+
+Per John's own explicit note that this is testable without any MTS construction:
+`MissingIndexFallbackProbeTest` gained `allActionsSucceedingReportsAllSucceeded`,
+`firstActionThrowingDoesNotPreventTheRestFromBeingAttempted` (the literal "first/middle remove
+failure... subsequent attempts" ask),
+`middleActionThrowingStillAttemptsTheLastOne`,
+`everyActionThrowingStillAttemptsAllOfThemAndReportsEachFailure`, and
+`emptyActionListReportsAllSucceededVacuously` - all using synthetic tagged `Runnable`s that throw
+on command, confirming per-action isolation, that every subsequent action is still attempted
+after an earlier failure (first, middle, and all-failing cases), and that `ALL_SUCCEEDED` is
+never reported when any action actually failed.
+
+### Finding 3: raw body-center distance is not real anchor-point eligibility; `towingConnectionVar`
+### reset-to-zero IS real processing evidence, previously dismissed as not meaningful enough
+
+54862 logged raw Euclidean distance between vehicle body centers as an eligibility signal. John
+confirmed by direct comparison with the real decompiled `checkIfTrailerCanConnect` that
+eligibility is actually computed from the ROTATED, TRANSLATED connection anchor POINT
+(`localPos.copy().rotate(vehicle.orientation).add(vehicle.position)`), not raw body-center
+distance - for any vehicle with its connection point offset from its own body center (the normal
+case), the two numbers diverge, and the raw-distance log was reporting the wrong geometry
+entirely, not merely an approximation of the right one.
+
+Separately, prior rounds treated `towingConnectionVar` resetting to `0`/`isActive == false` as
+ambiguous - "could mean the request succeeded OR that no request was ever truly consumed" - and
+declined to use it as a discriminator. John's 54870 correction: `towingConnectionVar` resetting
+the SAME TICK it is consumed is real, confirmed processing evidence (the field is written, by the
+real decompiled code, exactly once per tick it is consumed, success or rejection alike) - it is
+real evidence of "a request was processed this tick," even though it is still never evidence of
+WHICH way that request was resolved (the actual rejection reason, confirmed in earlier rounds,
+reaches the client ONLY via a client-targeted chat packet, never server-logged - that specific
+gap remains open, unaddressed by this finding).
+
+**Fix**: added `anchorWorldPoint(EntityVehicleF_Physics vehicle, Point3D localConnectionPos)`,
+matching the real formula exactly (`localConnectionPos.copy().rotate(vehicle.orientation)
+.add(vehicle.position)`), and both `controlReconnectRequest`/`leakReconnectRequest` now log
+real anchor-point-to-anchor-point distances through this helper instead of raw body-center
+distance. Separately, `ReconnectOutcome` gained a third value, `REQUEST_NOT_CONSUMED`, captured
+in `awaitControlResult`/`awaitLeakResult` by checking `!towingX.towingConnectionVar.isActive`
+after the request window closes with no `NEW_CONNECTION_OBSERVED`/`NO_NEW_CONNECTION_REQUEST_
+CONSUMED` resolution - meaning the field never even reset, so the request was never processed at
+all, as distinct from a processed-but-rejected request. The old two-value `ControlOutcome`/
+`LeakProbeOutcome` enums are removed; `classifyLeakVerdict(ReconnectOutcome control,
+ReconnectOutcome leak)` is now a single unified function checking `REQUEST_NOT_CONSUMED` on
+EITHER side first (escalating straight to the new `INCONCLUSIVE_REQUEST_NOT_CONSUMED` verdict,
+taking priority even over a control failure), then the pre-existing control-failure/leak-result
+logic unchanged from prior rounds.
+
+`MissingIndexFallbackProbeTest` was rewritten in full: its three pre-existing
+`classifyLeakVerdict` tests were updated to reference `ReconnectOutcome` instead of the deleted
+enums, and four new tests were added covering the new outcome's escalation -
+`controlRequestNotConsumedIsInconclusiveRegardlessOfLeakProbeResult`,
+`leakRequestNotConsumedIsInconclusiveEvenWithASuccessfulControl` (confirming a successful control
+does NOT mask an unconsumed leak-side request), and
+`requestNotConsumedTakesPriorityOverControlFailure` (both anomalies present at once, confirming
+the documented check ordering). `controlDisconnect()`'s own anomaly branch (the case where the
+captured connection is inconsistent with the computed index, from the 54862 round's hardcoded-
+index fix) now reports `ReconnectOutcome.REQUEST_NOT_CONSUMED` rather than the deleted
+`ControlOutcome.FAILURE`, since no request was ever issued in that anomaly case - `REQUEST_NOT_
+CONSUMED` is the correct classification, not a meaningful "no new connection" rejection.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock (`/tmp/div-gradle-slot.lock`): **927 tests**, 0 failures,
+0 errors - up from 912 in the 54862 round's own receipt (15 net new: 7 new `PhysicsBridge`
+observer-API tests plus 8 net new in the rewritten `MissingIndexFallbackProbeTest`, after
+accounting for the enum-reference updates to the 3 pre-existing tests).
+
+### Disposition
+
+Three real, independently-found defects fixed: an unbounded always-on leak-risk counter
+(replaced with a bounded, opt-in, identity-matched observer API that a caller must explicitly
+register and unregister); cleanup that aborted on first failure and two resources tracked only
+at the end of acquisition rather than incrementally (replaced with per-resource tracking at
+acquisition time plus a new pure `runAllIndependently` orchestration, independently unit-tested
+for first/middle/all-failing cases with no MTS construction); and raw body-center distance
+presented as eligibility evidence, plus `towingConnectionVar`'s reset-to-zero wrongly dismissed
+as not meaningful (replaced with the real anchor-point formula and a new `REQUEST_NOT_CONSUMED`
+outcome capturing genuine non-consumption, both wired into a single unified `classifyLeakVerdict`
+checked in the documented priority order). The fourth 54870 item - packet-level flag/config
+correctness for the actual launch - is addressed in a brand-new packet, built from scratch for
+this commit, never by editing any previously-declared packet. Full suite green (927 tests). No
+native run performed. No merge/Done transition made or implied. The rejection on
+`M545-packet-5304341-missingindexprobe/launch-wrapper.sh`'s own edit, and the client-notification
+gap (rejection reason reaching only a client-targeted chat packet, never server-logged), both
+remain separately open and unaddressed by this round, as before.

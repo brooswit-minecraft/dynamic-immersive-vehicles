@@ -44,43 +44,53 @@ import java.util.Set;
  *  ({@code PhysicsBridge.releaseOrphanedTowingConnections()}, already globally wired on {@code
  *  ServerTickEvent.Pre}) then runs automatically, with no special invocation from this fixture.</li>
  *  <li><b>Fallback-entry evidence, a real observation, not an inference</b> (corrected per
- *  John's comment 54862 - a prior version of this reasoned "indexOf==-1 before removal, so this
- *  null MUST have come from the fallback," which is an INFERENCE from a postcondition, not a
- *  direct observation): {@code PhysicsBridge.debugFallbackClearConnectionCallCount}, a real,
- *  always-on counter keyed to the exact vehicle UUID, incremented exactly once per real
- *  invocation of the production {@code clearConnection} callback inside
- *  {@code fallbackClearConnection}'s own real adapter. This fixture snapshots it immediately
- *  before invalidating the anchor and compares it against the same counter once
- *  {@code towedA.towedByConnection} becomes null - only an actual observed increment confirms
- *  fallback-entry; a null field with NO counter increment is reported as a genuine anomaly and
- *  fails the fixture, never silently accepted.</li>
+ *  54862, then corrected AGAIN per 54870): a prior version reasoned "indexOf==-1 before removal,
+ *  so this null MUST have come from the fallback" - an INFERENCE, not a direct observation.
+ *  54862's own fix was a real observation, but an always-on, unbounded, never-released map - a
+ *  genuine (if slow) memory leak. Now uses {@code PhysicsBridge.registerFallbackObserver}/
+ *  {@code unregisterFallbackObserver} - bounded, opt-in, released on every terminal/error path,
+ *  keyed to BOTH the exact vehicle UUID AND the exact connection object reference (a mismatched
+ *  connection on the registered vehicle is counted separately, never silently folded into a
+ *  match). Only an actual observed match confirms fallback-entry; anything else is a genuine
+ *  anomaly and fails the fixture, never silently accepted.</li>
  *  <li><b>Matched positive control</b> (54849/54856's own explicit requirement - absence of a
  *  new connection alone does NOT prove the leak caused it, since {@code checkIfTrailerCanConnect}
  *  has several other rejection outcomes producing the identical signal): an independent
  *  {@code towingB}/{@code towedB} pair, IDENTICAL group/geometry, connected and then PROPERLY
- *  disconnected via the real {@code disconnectTrailer(0)} (never fault injection) - genuinely
- *  freeing {@code connectionGroupsIndexesInUse} on both sides. A FRESH {@code towingD} entity
- *  (same hitch definition, never reused from elsewhere) then drives a reconnect request through
- *  the REAL normal selection path - {@code towingD.towingConnectionVar.setTo(...)}, never calling
- *  {@code connectTrailer} directly, which would bypass the very {@code ALREADY_TOWED} check this
- *  fixture depends on (54844's own finding). A new connection MUST form here - if it does not,
- *  the verdict is {@code INCONCLUSIVE_CONTROL_FAILED}, with NO claim made about the leak probe's
- *  own result, per 54849/54856's explicit instruction.</li>
+ *  disconnected via the real {@code disconnectTrailer} (the ACTUAL computed index, never
+ *  hardcoded - 54862's own finding) - genuinely freeing {@code connectionGroupsIndexesInUse} on
+ *  both sides. A FRESH {@code towingD} entity (same hitch definition, never reused from
+ *  elsewhere) then drives a reconnect request through the REAL normal selection path -
+ *  {@code towingD.towingConnectionVar.setTo(...)}, never calling {@code connectTrailer} directly,
+ *  which would bypass the very {@code ALREADY_TOWED} check this fixture depends on (54844's own
+ *  finding). Eligibility is measured via the REAL anchor-world-point formula
+ *  {@code checkIfTrailerCanConnect} itself uses (54870's own correction - a raw body-center
+ *  distance is NOT the same thing), and the request's own {@code towingConnectionVar} reset-to-
+ *  zero transition is captured as genuine processing evidence (54870's own correction - distinct
+ *  from, and not the same as, the rejection reason itself, which remains unobservable). A request
+ *  that was never actually consumed escalates straight to {@code INCONCLUSIVE_REQUEST_NOT_CONSUMED};
+ *  a consumed request that still fails to form a new connection escalates to
+ *  {@code INCONCLUSIVE_CONTROL_FAILED} - neither makes any claim about the leak probe's own
+ *  result, per 54849/54856/54870's explicit instructions.</li>
  *  <li><b>The leak probe itself</b>: a SEPARATE fresh {@code towingC} entity (same definition),
  *  positioned with the SAME relative geometry {@code towingA} originally used, drives the SAME
  *  kind of normal reconnect request at {@code towedA} (whose {@code hookupGroupIndex} bit was
- *  never released by the fallback). Whether a new connection forms is the behavioral signal -
- *  explicitly logged as a signal, not direct proof of the {@code ALREADY_TOWED} reason
+ *  never released by the fallback), with the same real anchor-eligibility measurement and
+ *  request-consumption capture as the control. Whether a new connection forms is the behavioral
+ *  signal - explicitly logged as a signal, not direct proof of the {@code ALREADY_TOWED} reason
  *  specifically (54844/54849's own distinction - the real rejection reason is delivered only via
  *  a client-targeted chat packet, unobservable in this player-less fixture).</li>
  * </ol>
  *
  * <p><b>Explicitly NOT done, per 54844/54849/54856's own instructions</b>: no restore-then-
  * disconnect cleanup is relied on for anything this fixture's own verdict depends on - every
- * fixture-owned entity is simply despawned at the end, letting the leaked bookkeeping disappear
- * with the garbage-collected Java objects rather than attempting any unvalidated repair. No
- * client/bot is simulated and no new diagnostic Mixin is added - the chat-packet-only rejection
- * reason remains a separate, unverified, explicitly-named gap, not addressed by this fixture.
+ * fixture-owned entity is simply despawned at the end (independently, via the pure
+ * {@link #runAllIndependently} orchestration - 54870's own correction, since the first version
+ * aborted on the FIRST entity whose own removal threw, silently skipping every entity after it),
+ * letting the leaked bookkeeping disappear with the garbage-collected Java objects rather than
+ * attempting any unvalidated repair. No client/bot is simulated and no new diagnostic Mixin is
+ * added - the chat-packet-only rejection reason remains a separate, unverified, explicitly-named
+ * gap, not addressed by this fixture.
  *
  * <p>Opt-in via {@code -Ddiv.experimentalMissingIndexFallbackProbe=true} - OFF by default, never
  * runs during normal play, never touches any real vehicle, Zippy, or world content. Runs ONCE
@@ -121,28 +131,85 @@ public final class MissingIndexFallbackProbe {
   LEAK_RECONNECT_REQUEST, AWAIT_LEAK_RESULT, DONE, FAILED
  }
 
- /** MINECRAFT-545/547 (John's comment 54849/54856): the pure, Minecraft/MTS-free verdict policy
-  * this fixture's own real outcome routes through - trivially unit-testable with plain JUnit,
-  * same spirit as {@code LifecycleInvariants.RequiredPhaseVerdict}. */
- public enum ControlOutcome { SUCCESS, FAILURE }
- public enum LeakProbeOutcome { NEW_CONNECTION_OBSERVED, NO_NEW_CONNECTION }
- public enum LeakVerdict { LEAK_CONFIRMED, LEAK_NOT_OBSERVED, INCONCLUSIVE_CONTROL_FAILED }
+ /** MINECRAFT-545/547 (John's comment 54849/54856, corrected per 54870): the pure, Minecraft/MTS-
+  * free verdict policy this fixture's own real outcome routes through - trivially unit-testable
+  * with plain JUnit, same spirit as {@code LifecycleInvariants.RequiredPhaseVerdict}.
+  * <p>CORRECTED (54870): the first version only ever distinguished "a new connection formed" vs.
+  * "it didn't," with no way to tell a genuinely-processed-and-rejected request apart from one
+  * that was never actually processed at all (e.g. the requesting entity somehow never ticked).
+  * 54870 is correct that the real {@code towingConnectionVar} resetting from its own nonzero
+  * request value back to {@code 0} the same tick it is consumed IS real processing evidence
+  * (though never the rejection REASON, which remains the separately-unobservable chat packet) -
+  * {@code REQUEST_NOT_CONSUMED} (the var never reset within the bounded window) is now its own
+  * distinct outcome, both for the control and the leak probe, and always escalates to its own
+  * INCONCLUSIVE verdict rather than being folded into "no new connection" as if it were a
+  * meaningful rejection signal. */
+ public enum ReconnectOutcome { NEW_CONNECTION_OBSERVED, NO_NEW_CONNECTION_REQUEST_CONSUMED, REQUEST_NOT_CONSUMED }
+ public enum LeakVerdict { LEAK_CONFIRMED, LEAK_NOT_OBSERVED, INCONCLUSIVE_CONTROL_FAILED, INCONCLUSIVE_REQUEST_NOT_CONSUMED }
 
- /** 54849: "Failed control => INCONCLUSIVE, no cause claim." A failed control makes the leak
-  * probe's own result meaningless - it must not be classified as either confirming or refuting
-  * the leak, regardless of what it actually showed. */
- public static LeakVerdict classifyLeakVerdict(ControlOutcome control, LeakProbeOutcome leakProbe) {
-  if (control == ControlOutcome.FAILURE) return LeakVerdict.INCONCLUSIVE_CONTROL_FAILED;
-  return leakProbe == LeakProbeOutcome.NO_NEW_CONNECTION ? LeakVerdict.LEAK_CONFIRMED : LeakVerdict.LEAK_NOT_OBSERVED;
+ /** 54849/54870: a request that was never actually consumed (on EITHER side) makes BOTH this
+  * fixture's own methodology and its target unverifiable - escalates ahead of every other check.
+  * A control that was genuinely processed but still failed to form a new connection makes the
+  * leak probe's own result meaningless, per 54849's own "no cause claim" instruction - checked
+  * next. Only once the control is confirmed genuinely successful does the leak probe's own
+  * (also confirmed-processed) outcome get to decide LEAK_CONFIRMED vs LEAK_NOT_OBSERVED. */
+ public static LeakVerdict classifyLeakVerdict(ReconnectOutcome controlOutcome, ReconnectOutcome leakOutcome) {
+  if (controlOutcome == ReconnectOutcome.REQUEST_NOT_CONSUMED || leakOutcome == ReconnectOutcome.REQUEST_NOT_CONSUMED) {
+   return LeakVerdict.INCONCLUSIVE_REQUEST_NOT_CONSUMED;
+  }
+  if (controlOutcome != ReconnectOutcome.NEW_CONNECTION_OBSERVED) {
+   return LeakVerdict.INCONCLUSIVE_CONTROL_FAILED;
+  }
+  return leakOutcome == ReconnectOutcome.NO_NEW_CONNECTION_REQUEST_CONSUMED ? LeakVerdict.LEAK_CONFIRMED : LeakVerdict.LEAK_NOT_OBSERVED;
+ }
+
+ /** MINECRAFT-545/547 (John's comment 54870): the pure, generic cleanup orchestration every
+  * terminal path routes through - a {@code Runnable} action under a human-readable {@code tag},
+  * attempted independently of every other action's own success or failure. No MTS dependency at
+  * all - directly unit-testable with synthetic actions that throw on command. */
+ public record CleanupAction(String tag, Runnable action) {}
+ public enum CleanupOutcome { ALL_SUCCEEDED, SOME_FAILED }
+
+ /** Attempts EVERY action in {@code actions}, in order, regardless of whether an earlier one
+  * threw - a single aborted action must never prevent the rest from being attempted. Every
+  * individual failure is reported to {@code onFailure} (tag + the exception) for logging/receipt
+  * purposes; the aggregate {@link CleanupOutcome} reflects ALL actions, not merely the first one
+  * tried, and is never reported as {@code ALL_SUCCEEDED} unless literally every action completed
+  * without throwing - no premature success. */
+ public static CleanupOutcome runAllIndependently(java.util.List<CleanupAction> actions,
+     java.util.function.BiConsumer<String, RuntimeException> onFailure) {
+  boolean allSucceeded = true;
+  for (var action : actions) {
+   try {
+    action.action().run();
+   } catch (RuntimeException ex) {
+    allSucceeded = false;
+    onFailure.accept(action.tag(), ex);
+   }
+  }
+  return allSucceeded ? CleanupOutcome.ALL_SUCCEEDED : CleanupOutcome.SOME_FAILED;
  }
 
  private static Phase phase = Phase.WAIT_TERRAIN;
  private static int ticksInPhase = 0, terrainWaitTicksElapsed = 0;
- private static boolean configured = false, chunkGridForced = false, chunkGridUnforced = false;
+ private static boolean configured = false;
  private static double spawnX, spawnZ, spawnSurfaceY;
  private static EntityVehicleF_Physics towingA, towedA, towingB, towedB, towingC, towingD;
  private static JSONVehicle towingDefinition, towedDefinition;
  private static TowingConnection injectedConnection;
+
+ /** MINECRAFT-545/547 (John's comment 54870): every entity this fixture ever successfully
+  * constructs is appended HERE immediately - not only once assigned to its own named field - so
+  * a failure partway through {@link #spawnHull} (e.g. {@code world.spawnEntity} or
+  * {@code addFloat} throwing AFTER the real {@code new EntityVehicleF_Physics(...)} already
+  * succeeded) still leaves this fixture able to find and clean it up. */
+ private static final java.util.List<EntityVehicleF_Physics> allSpawnedEntities = new java.util.ArrayList<>();
+ /** Every chunk coordinate actually force-loaded, appended immediately after each individual
+  * successful {@code setChunkForced(...)} call - never only decided at the end of the whole
+  * loop, which could otherwise leave already-forced chunks untracked if the loop itself threw
+  * partway through. */
+ private static final java.util.List<int[]> forcedChunkCoords = new java.util.ArrayList<>();
+ private static boolean addedPackSpeedFactor = false, addedPackVehicleScale = false;
 
  private static boolean cleanedUp = false, cleanupFailed = false;
 
@@ -195,18 +262,23 @@ public final class MissingIndexFallbackProbe {
   * and reported as {@code CLEANUP_INCOMPLETE}, never allowed to mask or be masked by the
   * experiment's own verdict). The chunk-grid release is deliberately ordered AFTER entity
   * cleanup - entities should not briefly exist in now-unforced, potentially-unloading chunks. */
+ /** MINECRAFT-545/547 (John's comment 54870): "Publish sole terminal outcome after ALL
+  * entity/chunk cleanup attempts, explicit cleanup-incomplete if any fail." Cleanup (entities +
+  * chunks + config + observer, via {@link #runAllIndependently}) runs to completion - every
+  * tracked resource attempted independently - BEFORE the terminal banner is ever emitted, and
+  * the banner's own {@code CLEANUP_INCOMPLETE} suffix reflects the TRUE aggregate outcome across
+  * every one of those attempts, not just whether a single generic try/catch happened to catch
+  * something. */
  private static void finishTickIfTerminal(ServerLevel level) {
   if (phase != Phase.DONE && phase != Phase.FAILED) return;
   boolean firstTerminalTick = !cleanedUp;
   if (!cleanedUp) {
    cleanedUp = true;
-   try {
-    cleanupAllFixtureEntities();
-    LOGGER.info("[DIV missingIndexFallbackProbe] cleanup complete - every fixture-owned entity despawned");
-   } catch (RuntimeException ex) {
-    cleanupFailed = true;
-    LOGGER.error("[DIV missingIndexFallbackProbe] CLEANUP_INCOMPLETE - cleanup itself threw; some fixture-owned entities may remain", ex);
-   }
+   var outcome = runAllIndependently(buildCleanupActions(level),
+     (tag, ex) -> LOGGER.error("[DIV missingIndexFallbackProbe] cleanup action FAILED tag=" + tag, ex));
+   cleanupFailed = outcome == CleanupOutcome.SOME_FAILED;
+   LOGGER.info("[DIV missingIndexFallbackProbe] cleanup outcome=" + outcome
+     + " - every tracked resource (entities/chunks/config/observer) was attempted independently, regardless of any earlier failure");
   }
   // MINECRAFT-545/547 (John's comment 54862): "Terminal success/result must follow completed
   // cleanup or explicit CLEANUP_INCOMPLETE - not emit matching COMPLETE/FAILED marker early and
@@ -217,49 +289,54 @@ public final class MissingIndexFallbackProbe {
   // never a single blanket "COMPLETE" covering every verdict value, so a log/wrapper consumer
   // cannot mistake "the experiment ran" for "a defect either was or was not observed."
   if (firstTerminalTick) {
+   String cleanupSuffix = cleanupFailed ? " CLEANUP_INCOMPLETE" : "";
    if (phase == Phase.DONE) {
-    String cleanupSuffix = cleanupFailed ? " CLEANUP_INCOMPLETE" : "";
     LOGGER.info("[DIV missingIndexFallbackProbe] COMPLETE verdict=" + finalVerdict + cleanupSuffix
       + " (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");
    } else {
-    String cleanupSuffix = cleanupFailed ? " CLEANUP_INCOMPLETE" : "";
     LOGGER.error("[DIV missingIndexFallbackProbe] FAILED" + cleanupSuffix + " - see the specific FAILED line above for the real cause");
    }
   }
-  if (!chunkGridUnforced) {
-   chunkGridUnforced = true;
-   try {
-    unforceChunkGrid(level);
-    LOGGER.info("[DIV missingIndexFallbackProbe] released terrain chunk grid");
-   } catch (RuntimeException ex) {
-    LOGGER.error("[DIV missingIndexFallbackProbe] failed to release terrain chunk grid", ex);
-   }
-  }
  }
 
- /** Idempotent - every despawn is individually guarded by its own null/isValid check, so a
-  * partial-construction failure (an exception mid-{@link #spawn}, leaving some fields still
-  * null) is handled the same as full teardown. Covers {@code towingA} too (normally already
-  * invalidated by {@link #faultInject} itself, but guarded here in case a failure happened
-  * BEFORE that ever ran). */
- private static void cleanupAllFixtureEntities() {
-  if (towingA != null && towingA.isValid) towingA.remove();
-  if (towedA != null && towedA.isValid) towedA.remove();
-  if (towingB != null && towingB.isValid) towingB.remove();
-  if (towedB != null && towedB.isValid) towedB.remove();
-  if (towingC != null && towingC.isValid) towingC.remove();
-  if (towingD != null && towingD.isValid) towingD.remove();
+ /** MINECRAFT-545/547 (John's comment 54870): builds the FULL list of independently-attempted
+  * cleanup actions from every resource actually tracked as acquired - every spawned entity
+  * (via {@link #allSpawnedEntities}, not just the named fields, so a partial-construction
+  * failure is still covered), every individually-forced chunk, both {@code ConfigSystem} map
+  * entries this fixture may have added (restoring the shared map to its own original state, not
+  * merely leaving injected keys behind forever), and the fallback observer registration. Each
+  * action is independent - {@link #runAllIndependently} attempts every one regardless of
+  * whether an earlier one threw. */
+ private static java.util.List<CleanupAction> buildCleanupActions(ServerLevel level) {
+  var actions = new java.util.ArrayList<CleanupAction>();
+  for (var entity : allSpawnedEntities) {
+   actions.add(new CleanupAction("remove entity " + entity.uniqueUUID, () -> { if (entity.isValid) entity.remove(); }));
+  }
+  for (var coord : forcedChunkCoords) {
+   actions.add(new CleanupAction("unforce chunk " + coord[0] + "," + coord[1], () -> level.setChunkForced(coord[0], coord[1], false)));
+  }
+  if (addedPackSpeedFactor) {
+   actions.add(new CleanupAction("restore packSpeedFactors", () -> ConfigSystem.settings.general.packSpeedFactors.value.remove(PACK_ID)));
+  }
+  if (addedPackVehicleScale) {
+   actions.add(new CleanupAction("restore packVehicleScales", () -> ConfigSystem.settings.general.packVehicleScales.value.remove(PACK_ID)));
+  }
+  actions.add(new CleanupAction("unregister fallback observer", () -> PhysicsBridge.unregisterFallbackObserver(fallbackObserverHandle)));
+  return actions;
  }
 
  private static void requestChunkGrid(ServerLevel level) {
-  int chunkXHere = CHUNK_X, chunkZHere = CHUNK_Z;
-  for (int dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++) for (int dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++) level.setChunkForced(chunkXHere + dx, chunkZHere + dz, true);
-  chunkGridForced = true;
- }
-
- private static void unforceChunkGrid(ServerLevel level) {
-  if (!chunkGridForced) return;
-  for (int dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++) for (int dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++) level.setChunkForced(CHUNK_X + dx, CHUNK_Z + dz, false);
+  // MINECRAFT-545/547 (John's comment 54870): "Partial request loop only sets forced flag at
+  // end." Each chunk is now appended to forcedChunkCoords IMMEDIATELY after its own successful
+  // setChunkForced call - if this loop were to throw partway through, every chunk ALREADY
+  // forced is still tracked and will still be released during cleanup, rather than being lost
+  // because the flag marking "any chunks forced at all" was never reached.
+  for (int dx = -CHUNK_RADIUS; dx <= CHUNK_RADIUS; dx++) {
+   for (int dz = -CHUNK_RADIUS; dz <= CHUNK_RADIUS; dz++) {
+    level.setChunkForced(CHUNK_X + dx, CHUNK_Z + dz, true);
+    forcedChunkCoords.add(new int[]{CHUNK_X + dx, CHUNK_Z + dz});
+   }
+  }
  }
 
  private static boolean chunkGridLoaded(ServerLevel level) {
@@ -302,8 +379,13 @@ public final class MissingIndexFallbackProbe {
   double surfaceY = PLATFORM_Y + WATER_DEPTH;
   var packSpeedFactors = ConfigSystem.settings.general.packSpeedFactors.value;
   var packVehicleScales = ConfigSystem.settings.general.packVehicleScales.value;
-  packSpeedFactors.putIfAbsent(PACK_ID, 1.0);
-  packVehicleScales.putIfAbsent(PACK_ID, 1.0);
+  // MINECRAFT-545/547 (John's comment 54870): "restore original forced/config state." These are
+  // SHARED ConfigSystem maps, not private to this fixture - putIfAbsent's own return value
+  // (null means genuinely newly-added) tells us whether to restore the map to its own prior
+  // state during cleanup, rather than leaving an injected key behind forever regardless of
+  // whether it was already there.
+  addedPackSpeedFactor = packSpeedFactors.putIfAbsent(PACK_ID, 1.0) == null;
+  addedPackVehicleScale = packVehicleScales.putIfAbsent(PACK_ID, 1.0) == null;
 
   AWrapperWorld world = mcinterface1211.WrapperWorld.getWrapperFor(level);
   towingDefinition = buildHullDefinition("missingindex-towing-shared", true, false);
@@ -392,44 +474,45 @@ public final class MissingIndexFallbackProbe {
    phase = Phase.FAILED;
    return;
   }
-  // 54862: snapshot the REAL observation counter now, BEFORE invalidating the anchor - the
-  // baseline this fixture compares against once the sweep has had its chance to run.
-  fallbackCallCountBeforeInjection = PhysicsBridge.debugFallbackClearConnectionCallCount(towedA.uniqueUUID);
+  // MINECRAFT-545/547 (John's comments 54862/54870): register the bounded, opt-in observer HERE,
+  // keyed to BOTH towedA's own UUID and the EXACT injectedConnection reference, immediately
+  // before invalidating the anchor - the baseline this fixture compares against once the sweep
+  // has had its chance to run. Unregistered on every terminal/error path via cleanup (see
+  // cleanupAllFixtureEntities) - never left registered, no default retained growth.
+  fallbackObserverHandle = PhysicsBridge.registerFallbackObserver(towedA.uniqueUUID, injectedConnection);
   LOGGER.info("[DIV missingIndexFallbackProbe] invalidating towingA via the same supported lifecycle method (remove()) the existing"
     + " TOWING_UNAVAILABLE phase already uses");
   towingA.remove();
   phase = Phase.AWAIT_LEAK_FALLBACK; ticksInPhase = 0;
  }
 
- private static int fallbackCallCountBeforeInjection;
+ private static PhysicsBridge.FallbackObserverHandle fallbackObserverHandle;
 
  private static void awaitLeakFallback() {
   ticksInPhase++;
   if (!boundedOrFail("awaitLeakFallback/towedA", towedA) || !boundedOrFail("awaitLeakFallback/towingB", towingB)
     || !boundedOrFail("awaitLeakFallback/towedB", towedB)) return;
   if (towedA.towedByConnection == null) {
-   // MINECRAFT-545/547 (John's comment 54862): the prior version of this check INFERRED
-   // fallback-entry from the postcondition alone ("indexOf==-1 before removal, so this null
-   // MUST have come from the fallback") - a real inference, not a direct observation, and
-   // 54862 is correct that this is not the same thing. Now checks the REAL, always-on
-   // PhysicsBridge.debugFallbackClearConnectionCallCount observation instead - keyed to this
-   // exact vehicle's own UUID, incremented exactly once per real invocation of the production
-   // clearConnection callback. If the count did NOT increment, that is reported as a genuine,
-   // surfaced anomaly - never silently treated as confirmed fallback-entry anyway.
-   int fallbackCallCountAfter = PhysicsBridge.debugFallbackClearConnectionCallCount(towedA.uniqueUUID);
-   boolean fallbackObserved = fallbackCallCountAfter > fallbackCallCountBeforeInjection;
-   if (fallbackObserved) {
-    LOGGER.info("[DIV missingIndexFallbackProbe] FALLBACK-ENTRY EVIDENCE CONFIRMED (real observation, not inference) -"
-      + " towedA.towedByConnection is null after " + ticksInPhase + " ticks AND"
-      + " debugFallbackClearConnectionCallCount for towedA went from " + fallbackCallCountBeforeInjection + " to "
-      + fallbackCallCountAfter + " - the production fallback callback genuinely ran for this exact vehicle.");
+   // MINECRAFT-545/547 (John's comments 54862/54870): the prior version of this check INFERRED
+   // fallback-entry from the postcondition alone, then an always-on unbounded counter - 54870
+   // is correct that the counter leaked forever. Now checks the bounded, opt-in,
+   // identity-matched observer registered in faultInject above - only an actual MATCHED
+   // observation (same vehicle UUID AND the same connection reference) confirms fallback-entry;
+   // a mismatch or no observation at all is reported as a genuine, surfaced anomaly.
+   int matchedCount = PhysicsBridge.debugFallbackObserverMatchedCount(fallbackObserverHandle);
+   int mismatchedCount = PhysicsBridge.debugFallbackObserverMismatchedCount(fallbackObserverHandle);
+   if (matchedCount > 0) {
+    LOGGER.info("[DIV missingIndexFallbackProbe] FALLBACK-ENTRY EVIDENCE CONFIRMED (real, identity-matched observation, not"
+      + " inference) - towedA.towedByConnection is null after " + ticksInPhase + " ticks AND the registered observer for"
+      + " towedA's own UUID recorded " + matchedCount + " matched invocation(s) of the exact injectedConnection - the"
+      + " production fallback callback genuinely ran for this exact vehicle AND connection.");
     phase = Phase.CONTROL_DISCONNECT; ticksInPhase = 0;
     return;
    }
-   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - towedA.towedByConnection is null, but"
-     + " debugFallbackClearConnectionCallCount for towedA did NOT increment (" + fallbackCallCountBeforeInjection + " -> "
-     + fallbackCallCountAfter + ") - a genuine anomaly: something other than the expected fallbackClearConnection callback"
-     + " nulled this field. Treated as a failure, never silently accepted as confirmed fallback-entry.");
+   LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - towedA.towedByConnection is null, but the registered"
+     + " observer recorded matchedCount=" + matchedCount + " mismatchedCount=" + mismatchedCount + " - a genuine anomaly:"
+     + " either nothing observed this exact vehicle/connection pair, or something ELSE nulled this field. Treated as a"
+     + " failure, never silently accepted as confirmed fallback-entry.");
    phase = Phase.FAILED;
    return;
   }
@@ -453,7 +536,9 @@ public final class MissingIndexFallbackProbe {
    LOGGER.error("[DIV missingIndexFallbackProbe] FAILURE_DETECTED - CONTROL setup inconsistency before disconnect:"
      + " towedB.towedByConnection=" + connectionB + " computedIndex=" + indexB
      + " - this is a genuine anomaly, not fabricating an index to proceed anyway");
-   controlOutcome = ControlOutcome.FAILURE;
+   // No reconnect request was ever issued for this anomaly - REQUEST_NOT_CONSUMED is the correct
+   // classification (never a meaningful "no new connection" rejection, since no request existed).
+   controlOutcome = ReconnectOutcome.REQUEST_NOT_CONSUMED;
    phase = Phase.LEAK_RECONNECT_REQUEST; ticksInPhase = 0;
    return;
   }
@@ -474,43 +559,68 @@ public final class MissingIndexFallbackProbe {
   return spawnHull(world, def, x, y, z, 0);
  }
 
+ /** MINECRAFT-545/547 (John's comment 54870): the REAL anchor world point - the exact formula
+  * {@code checkIfTrailerCanConnect} itself computes (confirmed from the real decompiled source:
+  * {@code connection.pos.copy().rotate(definer.orientation).add(definer.position)}, scale
+  * omitted since every fixture vehicle here uses the default 1.0) - not a raw body-center
+  * distance, which is NOT the same thing the real eligibility check actually measures. */
+ private static Point3D anchorWorldPoint(EntityVehicleF_Physics vehicle, Point3D localConnectionPos) {
+  return localConnectionPos.copy().rotate(vehicle.orientation).add(vehicle.position);
+ }
+
  private static void controlReconnectRequest(ServerLevel level) {
   towingD = spawnFreshTowing(level, towedB, "missingindex-towingD");
   // 54844/54849/54856: the REAL normal selection path - towingConnectionVar's own public setter
   // - never connectTrailer directly, which would bypass the ALREADY_TOWED check entirely.
   towingD.towingConnectionVar.setTo(1.0, false); // group index 0 + 1
-  // MINECRAFT-545/547 (John's comment 54862 - "verify matching eligibility, group, relative
-  // anchor geometry/orientation/validity... before interpreting absence"): logged explicitly so
-  // a reviewer can sanity-check eligibility BEFORE this request's own outcome is interpreted,
-  // not just after. Does not itself confirm the request was processed (the real
-  // towingConnectionVar always resets to 0 the same tick it's read, success or not, so that
-  // alone carries no extra signal) - this is eligibility visibility, not a processing proof.
-  double distance = towingD.position.distanceTo(towedB.position);
+  // MINECRAFT-545/547 (John's comment 54870): the REAL anchor world points on BOTH sides - not
+  // a raw body-center distance, which 54870 correctly flagged as not the same thing the real
+  // eligibility check (checkIfTrailerCanConnect) actually measures.
+  var hitchAnchor = anchorWorldPoint(towingD, HITCH_POS);
+  var hookupAnchor = anchorWorldPoint(towedB, HOOKUP_POS);
+  double anchorDistance = hitchAnchor.distanceTo(hookupAnchor);
   LOGGER.info("[DIV missingIndexFallbackProbe] CONTROL - spawned fresh towingD=" + towingD.uniqueUUID + " towingD.isValid=" + towingD.isValid
-    + " towingD.position=" + towingD.position + " towedB.position=" + towedB.position + " distance=" + distance
-    + " requestedGroupIndex=0 - requested normal reconnect to towedB via towingConnectionVar");
+    + " hitchAnchorWorld=" + hitchAnchor + " hookupAnchorWorld=" + hookupAnchor + " anchorDistance=" + anchorDistance
+    + " (eligible if <= 4.0, the connection's own JSONConnection.distance) requestedGroupIndex=0 - requested normal reconnect to"
+    + " towedB via towingConnectionVar");
   phase = Phase.AWAIT_CONTROL_RESULT; ticksInPhase = 0;
  }
 
- private static ControlOutcome controlOutcome;
+ private static ReconnectOutcome controlOutcome;
 
  private static void awaitControlResult() {
   ticksInPhase++;
   if (!boundedOrFail("awaitControlResult/towedB", towedB) || !boundedOrFail("awaitControlResult/towingD", towingD)) return;
   if (towedB.towedByConnection != null && towingD.towingConnections.contains(towedB.towedByConnection)) {
-   controlOutcome = ControlOutcome.SUCCESS;
-   LOGGER.info("[DIV missingIndexFallbackProbe] CONTROL SUCCESS - a new connection formed between towingD/towedB after "
-     + ticksInPhase + " ticks - the normal selection pipeline and this fixture's own geometry/eligibility are confirmed working"
-     + " when the group index is genuinely free.");
+   controlOutcome = ReconnectOutcome.NEW_CONNECTION_OBSERVED;
+   LOGGER.info("[DIV missingIndexFallbackProbe] CONTROL SUCCESS (NEW_CONNECTION_OBSERVED) - a new connection formed between"
+     + " towingD/towedB after " + ticksInPhase + " ticks - the normal selection pipeline and this fixture's own geometry/"
+     + "eligibility are confirmed working when the group index is genuinely free.");
    phase = Phase.LEAK_RECONNECT_REQUEST; ticksInPhase = 0;
    return;
   }
+  // MINECRAFT-545/547 (John's comment 54870): "the request variable resetting to 0 after being
+  // set nonzero IS processing evidence (though not rejection reason)." The real update() method
+  // always resets towingConnectionVar back to 0 the SAME tick it is consumed, success or
+  // rejection alike - captured here within the bounded window, distinct from "no new connection"
+  // itself, so a request that was never actually processed (the var stayed nonzero) is never
+  // misread as a meaningful ALREADY_TOWED-shaped rejection.
+  boolean requestConsumed = !towingD.towingConnectionVar.isActive;
   if (ticksInPhase >= RECONNECT_WAIT_TICKS) {
-   controlOutcome = ControlOutcome.FAILURE;
-   LOGGER.error("[DIV missingIndexFallbackProbe] CONTROL FAILURE - no new connection formed between towingD/towedB within "
-     + RECONNECT_WAIT_TICKS + " ticks, even though towingB/towedB were properly disconnected first. Per 54849/54856: this makes"
-     + " the leak probe's own result UNUSABLE - proceeding to run it anyway for completeness, but the final verdict will be"
-     + " INCONCLUSIVE_CONTROL_FAILED regardless of what it shows.");
+   if (!requestConsumed) {
+    controlOutcome = ReconnectOutcome.REQUEST_NOT_CONSUMED;
+    LOGGER.error("[DIV missingIndexFallbackProbe] CONTROL REQUEST_NOT_CONSUMED - towingD.towingConnectionVar never reset to 0"
+      + " within " + RECONNECT_WAIT_TICKS + " ticks after being set - the request was apparently never actually processed"
+      + " (not merely rejected). A genuine anomaly - the final verdict will be INCONCLUSIVE_REQUEST_NOT_CONSUMED regardless of"
+      + " anything the leak probe would show.");
+   } else {
+    controlOutcome = ReconnectOutcome.NO_NEW_CONNECTION_REQUEST_CONSUMED;
+    LOGGER.error("[DIV missingIndexFallbackProbe] CONTROL NO_NEW_CONNECTION_REQUEST_CONSUMED - the request WAS consumed"
+      + " (towingConnectionVar reset to 0) but no new connection formed between towingD/towedB within " + RECONNECT_WAIT_TICKS
+      + " ticks, even though towingB/towedB were properly disconnected first. Per 54849/54856: this makes the leak probe's own"
+      + " result UNUSABLE - proceeding to run it anyway for completeness, but the final verdict will be"
+      + " INCONCLUSIVE_CONTROL_FAILED regardless of what it shows.");
+   }
    phase = Phase.LEAK_RECONNECT_REQUEST; ticksInPhase = 0;
   }
  }
@@ -518,12 +628,14 @@ public final class MissingIndexFallbackProbe {
  private static void leakReconnectRequest(ServerLevel level) {
   towingC = spawnFreshTowing(level, towedA, "missingindex-towingC");
   towingC.towingConnectionVar.setTo(1.0, false);
-  // Same eligibility-visibility logging as the control's own request - see that method's doc.
-  double distance = towingC.position.distanceTo(towedA.position);
+  var hitchAnchor = anchorWorldPoint(towingC, HITCH_POS);
+  var hookupAnchor = anchorWorldPoint(towedA, HOOKUP_POS);
+  double anchorDistance = hitchAnchor.distanceTo(hookupAnchor);
   LOGGER.info("[DIV missingIndexFallbackProbe] LEAK PROBE - spawned fresh towingC=" + towingC.uniqueUUID + " towingC.isValid=" + towingC.isValid
-    + " towingC.position=" + towingC.position + " towedA.position=" + towedA.position + " distance=" + distance
-    + " requestedGroupIndex=0 - requested normal reconnect to towedA (whose own hookupGroupIndex bit was never released by the"
-    + " fallback) via towingConnectionVar - identical mechanism and geometry pattern as the control, different target");
+    + " hitchAnchorWorld=" + hitchAnchor + " hookupAnchorWorld=" + hookupAnchor + " anchorDistance=" + anchorDistance
+    + " (eligible if <= 4.0) requestedGroupIndex=0 - requested normal reconnect to towedA (whose own hookupGroupIndex bit was"
+    + " never released by the fallback) via towingConnectionVar - identical mechanism and geometry pattern as the control,"
+    + " different target");
   phase = Phase.AWAIT_LEAK_RESULT; ticksInPhase = 0;
  }
 
@@ -536,11 +648,12 @@ public final class MissingIndexFallbackProbe {
  private static void awaitLeakResult() {
   ticksInPhase++;
   if (!boundedOrFail("awaitLeakResult/towedA", towedA) || !boundedOrFail("awaitLeakResult/towingC", towingC)) return;
-  LeakProbeOutcome leakOutcome = null;
+  ReconnectOutcome leakOutcome = null;
   if (towedA.towedByConnection != null && towingC.towingConnections.contains(towedA.towedByConnection)) {
-   leakOutcome = LeakProbeOutcome.NEW_CONNECTION_OBSERVED;
+   leakOutcome = ReconnectOutcome.NEW_CONNECTION_OBSERVED;
   } else if (ticksInPhase >= RECONNECT_WAIT_TICKS) {
-   leakOutcome = LeakProbeOutcome.NO_NEW_CONNECTION;
+   leakOutcome = !towingC.towingConnectionVar.isActive
+     ? ReconnectOutcome.NO_NEW_CONNECTION_REQUEST_CONSUMED : ReconnectOutcome.REQUEST_NOT_CONSUMED;
   }
   if (leakOutcome == null) return;
   finalVerdict = classifyLeakVerdict(controlOutcome, leakOutcome);
@@ -618,6 +731,11 @@ public final class MissingIndexFallbackProbe {
   definition.parts = List.of(floatSlotLeft, floatSlotRight);
   var item = new ItemVehicle(definition, definition.definitions.get(0), PACK_ID);
   var vehicle = new EntityVehicleF_Physics(world, null, item, null);
+  // MINECRAFT-545/547 (John's comment 54870): tracked IMMEDIATELY, before anything below that
+  // could still throw (world.spawnEntity, addFloat) - a partial-construction failure here must
+  // still leave this vehicle findable and removable by cleanup, not silently lost because it
+  // was never assigned to its own named field.
+  allSpawnedEntities.add(vehicle);
   vehicle.position.set(x, y, z);
   vehicle.orientation.set(new RotationMatrix()).setToAngles(new Point3D(0, yawDegrees, 0));
   world.spawnEntity(vehicle);

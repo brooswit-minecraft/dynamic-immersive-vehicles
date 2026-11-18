@@ -1219,19 +1219,79 @@ public final class PhysicsBridge {
  public static Object debugRegistryBodyIdentity(EntityVehicleF_Physics v) {
   return registry.get(v);
  }
- /** MINECRAFT-545/547 (John's comment 54862): a real, always-on OBSERVATION of the missing-
-  * index fallback's own real adapter actually running for a SPECIFIC vehicle - keyed by that
-  * vehicle's own entity UUID, incremented exactly once per real invocation of the production
-  * {@code clearConnection} callback inside {@code releaseOrphanedTowingConnections}'s own
-  * fallback adapter. Exists because a prior fixture's own reasoning ("the pre-injection state
-  * made the ordinary path structurally unreachable, so towedByConnection becoming null MUST
-  * have come from the fallback") is an INFERENCE from a postcondition, not a direct observation
-  * - this counter is the direct observation 54862 asked for instead. Diagnostic/test-only, never
-  * read from any production decision path; the increment itself is a single cheap map operation,
-  * always on (not gated behind a flag) since it never alters any teardown decision. */
- private static final java.util.Map<java.util.UUID, Integer> debugFallbackClearConnectionCallCounts = new java.util.HashMap<>();
- public static int debugFallbackClearConnectionCallCount(java.util.UUID towedVehicleUuid) {
-  return debugFallbackClearConnectionCallCounts.getOrDefault(towedVehicleUuid, 0);
+ /** MINECRAFT-545/547 (John's comment 54862, corrected per 54870): a real OBSERVATION of the
+  * missing-index fallback's own real adapter actually running for a SPECIFIC vehicle AND a
+  * SPECIFIC connection object - exists because a prior fixture's own reasoning ("the
+  * pre-injection state made the ordinary path structurally unreachable, so towedByConnection
+  * becoming null MUST have come from the fallback") is an INFERENCE from a postcondition, not a
+  * direct observation.
+  * <p>CORRECTED (54870): the first version of this was an always-on, unbounded
+  * {@code Map<UUID, Integer>} that retained one entry forever for every orphan this production
+  * code EVER processes across a long-running server's own lifetime - a real, if slow, memory
+  * leak, and never actually gated by anything. This is now BOUNDED and OPT-IN: nothing is
+  * retained at all unless a caller explicitly {@link #registerFallbackObserver registers} one,
+  * and every registration MUST be explicitly {@link #unregisterFallbackObserver unregistered} -
+  * the fixture that uses this does so on every terminal/error path, never leaving one behind.
+  * Keyed to the EXACT vehicle UUID AND the EXACT expected connection reference - an invocation
+  * for a registered vehicle with a DIFFERENT connection object does NOT count as a match (see
+  * {@link #recordFallbackClearConnectionObservation}'s own doc for why that distinction matters
+  * and how it is counted separately rather than silently ignored or silently accepted). */
+ private static final java.util.Map<java.util.UUID, FallbackObserverState> fallbackObservers = new java.util.HashMap<>();
+
+ private static final class FallbackObserverState {
+  final Object expectedConnection;
+  int matchedCount = 0;
+  int mismatchedCount = 0;
+  FallbackObserverState(Object expectedConnection) { this.expectedConnection = expectedConnection; }
+ }
+
+ /** Opaque handle to one registration - pass to {@link #unregisterFallbackObserver} to stop
+  * observing and release the (otherwise permanently retained) map entry. */
+ public static final class FallbackObserverHandle {
+  final java.util.UUID vehicleUuid;
+  private FallbackObserverHandle(java.util.UUID vehicleUuid) { this.vehicleUuid = vehicleUuid; }
+ }
+
+ /** Begins observing {@code vehicleUuid} for a real fallback-adapter invocation on EXACTLY
+  * {@code expectedConnection} (compared by reference, {@code ==}, never {@code equals} - same
+  * identity discipline as {@link OrphanedConnectionOps#connectionIdentity}'s own doc). Nothing
+  * is retained for any vehicle that is never registered - bounded, opt-in, no default growth. */
+ public static FallbackObserverHandle registerFallbackObserver(java.util.UUID vehicleUuid, Object expectedConnection) {
+  fallbackObservers.put(vehicleUuid, new FallbackObserverState(expectedConnection));
+  return new FallbackObserverHandle(vehicleUuid);
+ }
+
+ /** Stops observing and releases the map entry - callers MUST call this on every terminal/error
+  * path for every handle they ever registered; a no-op if {@code handle} is null. */
+ public static void unregisterFallbackObserver(FallbackObserverHandle handle) {
+  if (handle != null) fallbackObservers.remove(handle.vehicleUuid);
+ }
+
+ /** The pure, Minecraft/MTS-free recording logic the real adapter routes every invocation
+  * through (see the real call site in {@code releaseOrphanedTowingConnections}'s own fallback
+  * adapter) - takes a plain {@code UUID} and a plain {@code Object} connection reference, so
+  * this is directly unit-testable with synthetic values, no MTS object construction needed.
+  * Returns {@code true} only when a registration exists for {@code vehicleUuid} AND
+  * {@code actualConnection} is reference-identical to the registered expectation - a mismatched
+  * connection (registered vehicle, but a DIFFERENT connection object) is counted separately as
+  * a mismatch, not silently folded into the match count and not silently ignored either. A
+  * vehicle with no registration at all is a complete no-op - nothing is created or retained. */
+ public static boolean recordFallbackClearConnectionObservation(java.util.UUID vehicleUuid, Object actualConnection) {
+  var state = fallbackObservers.get(vehicleUuid);
+  if (state == null) return false;
+  if (state.expectedConnection == actualConnection) { state.matchedCount++; return true; }
+  state.mismatchedCount++;
+  return false;
+ }
+
+ public static int debugFallbackObserverMatchedCount(FallbackObserverHandle handle) {
+  var state = handle != null ? fallbackObservers.get(handle.vehicleUuid) : null;
+  return state != null ? state.matchedCount : 0;
+ }
+
+ public static int debugFallbackObserverMismatchedCount(FallbackObserverHandle handle) {
+  var state = handle != null ? fallbackObservers.get(handle.vehicleUuid) : null;
+  return state != null ? state.mismatchedCount : 0;
  }
  /** Diagnostic/test-only companion to {@link #debugReadPose} - the same body's own geometric
   * {@code center()} (chassis-local, fixed since construction) - lets a caller compute a REAL
@@ -1486,10 +1546,11 @@ public final class PhysicsBridge {
       if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
         "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back (connection missing from parent's own list) v=" + v.uniqueUUID
           + " - reproduced resetAllVariables/parkingBrake (both public); UNSUPPORTED (private/protected access, no reflection): connectionGroupsIndexesInUse release on either side, parent list removal (already absent), client PacketEntityTowingChange (needs a real index)");
-      // 54862: the real, direct observation - incremented exactly once per real invocation of
-      // this exact callback for this exact vehicle, keyed by its own UUID. See this field's own
-      // doc for why an inference from indexOf==-1 is not the same as actually observing this.
-      debugFallbackClearConnectionCallCounts.merge(v.uniqueUUID, 1, Integer::sum);
+      // 54862/54870: the real, direct, bounded observation - a complete no-op unless a caller
+      // has explicitly registered for this exact vehicle UUID, and only counts a match if the
+      // connection object captured here is reference-identical to what that caller registered.
+      // Captured BEFORE nulling - the field this reads would otherwise already be gone.
+      recordFallbackClearConnectionObservation(v.uniqueUUID, v.towedByConnection);
       v.towedByConnection = null;
      }
     });

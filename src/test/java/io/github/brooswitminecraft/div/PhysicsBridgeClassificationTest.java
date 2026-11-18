@@ -532,4 +532,80 @@ class PhysicsBridgeClassificationTest {
   PhysicsBridge.fallbackClearConnection(c, recordingFallbackOps());
   assertEquals(java.util.List.of("resetTowing", "resetTowed", "brake", "clear"), c.callOrder);
  }
+
+ // MINECRAFT-545/547 (John's comments 54862/54870): pure coverage of the bounded, opt-in
+ // fallback-observer API - PhysicsBridge.registerFallbackObserver/recordFallbackClearConnectionObservation/
+ // unregisterFallbackObserver. Plain UUIDs and Object references throughout - no MTS dependency.
+
+ @Test void unregisteredVehicleRecordsNothingAndMatchedCountIsZero() {
+  var randomUuid = java.util.UUID.randomUUID();
+  // Never registered - must be a complete no-op, not an exception, not a silently-created entry.
+  assertFalse(PhysicsBridge.recordFallbackClearConnectionObservation(randomUuid, new Object()));
+ }
+
+ @Test void registeredVehicleWithMatchingConnectionCountsAsAMatch() {
+  var vehicleUuid = java.util.UUID.randomUUID();
+  var connection = new Object();
+  var handle = PhysicsBridge.registerFallbackObserver(vehicleUuid, connection);
+  assertTrue(PhysicsBridge.recordFallbackClearConnectionObservation(vehicleUuid, connection));
+  assertEquals(1, PhysicsBridge.debugFallbackObserverMatchedCount(handle));
+  assertEquals(0, PhysicsBridge.debugFallbackObserverMismatchedCount(handle));
+  PhysicsBridge.unregisterFallbackObserver(handle);
+ }
+
+ @Test void registeredVehicleWithDifferentConnectionCountsAsAMismatchNotAMatch() {
+  // 54870: "Test wrong vehicle/connection rejection" - a registered vehicle observed with a
+  // DIFFERENT connection object (not equal-valued, a genuinely different reference) must be
+  // counted as a mismatch, never silently folded into the match count.
+  var vehicleUuid = java.util.UUID.randomUUID();
+  var expectedConnection = new Object();
+  var differentConnection = new Object();
+  var handle = PhysicsBridge.registerFallbackObserver(vehicleUuid, expectedConnection);
+  assertFalse(PhysicsBridge.recordFallbackClearConnectionObservation(vehicleUuid, differentConnection));
+  assertEquals(0, PhysicsBridge.debugFallbackObserverMatchedCount(handle));
+  assertEquals(1, PhysicsBridge.debugFallbackObserverMismatchedCount(handle));
+  PhysicsBridge.unregisterFallbackObserver(handle);
+ }
+
+ @Test void observationForADifferentUnregisteredVehicleDoesNotAffectAnotherVehiclesOwnRegistration() {
+  // "wrong vehicle... rejection" - an observation keyed to a vehicle UUID that was never
+  // registered must not affect a genuinely-registered DIFFERENT vehicle's own counts.
+  var registeredUuid = java.util.UUID.randomUUID();
+  var unregisteredUuid = java.util.UUID.randomUUID();
+  var connection = new Object();
+  var handle = PhysicsBridge.registerFallbackObserver(registeredUuid, connection);
+  assertFalse(PhysicsBridge.recordFallbackClearConnectionObservation(unregisteredUuid, connection));
+  assertEquals(0, PhysicsBridge.debugFallbackObserverMatchedCount(handle));
+  PhysicsBridge.unregisterFallbackObserver(handle);
+ }
+
+ @Test void exactlyOnceCountingAcrossMultipleObservations() {
+  var vehicleUuid = java.util.UUID.randomUUID();
+  var connection = new Object();
+  var handle = PhysicsBridge.registerFallbackObserver(vehicleUuid, connection);
+  PhysicsBridge.recordFallbackClearConnectionObservation(vehicleUuid, connection);
+  PhysicsBridge.recordFallbackClearConnectionObservation(vehicleUuid, connection);
+  assertEquals(2, PhysicsBridge.debugFallbackObserverMatchedCount(handle),
+    "each real observation must increment exactly once - no double-counting, no silent drops");
+  PhysicsBridge.unregisterFallbackObserver(handle);
+ }
+
+ @Test void unregisterReleasesTheEntryAndFurtherObservationsAreNoOps() {
+  // "unregister all terminal/error paths, no default retained growth" - after unregistering,
+  // the SAME vehicle UUID must go back to being a complete no-op, exactly as if it had never
+  // been registered at all - no stale state survives the unregister.
+  var vehicleUuid = java.util.UUID.randomUUID();
+  var connection = new Object();
+  var handle = PhysicsBridge.registerFallbackObserver(vehicleUuid, connection);
+  PhysicsBridge.recordFallbackClearConnectionObservation(vehicleUuid, connection);
+  PhysicsBridge.unregisterFallbackObserver(handle);
+  assertEquals(0, PhysicsBridge.debugFallbackObserverMatchedCount(handle),
+    "reading through a handle after its own unregister must report zero, same as never registered");
+  assertFalse(PhysicsBridge.recordFallbackClearConnectionObservation(vehicleUuid, connection),
+    "an observation after unregister must be a no-op, never silently resurrecting the registration");
+ }
+
+ @Test void unregisterWithNullHandleIsASafeNoOp() {
+  PhysicsBridge.unregisterFallbackObserver(null);
+ }
 }
