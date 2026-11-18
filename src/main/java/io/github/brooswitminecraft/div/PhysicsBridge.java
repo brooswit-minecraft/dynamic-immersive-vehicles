@@ -1250,7 +1250,43 @@ public final class PhysicsBridge {
    return false;
   }
  }
- public static void step(EntityVehicleF_Physics vehicle) { registry.get(vehicle).step(vehicle); }
+ /**
+  * MINECRAFT-545/547 (John's comment 55098): the real root cause of the native crash a
+  * `BuoyantHitchProbe` `TOWING_UNAVAILABLE` FAILED run surfaced - traced to the actual log
+  * (`BoxPhysicsObject.updatePose:61` NPE, "this.handle is null", inside `BuoyantBody.step:125`,
+  * two ticks after a `FAILED` bounded-area verdict for the SAME vehicle). Returns the key's
+  * active body, but FIRST reclaims (and returns {@code null} for) a STALE entry whose own
+  * {@link VehicleBody#isActive} already reports {@code false} - meaning the returned Java object
+  * would otherwise still look live while its underlying native resources were ALREADY removed by
+  * some other path (e.g. a chunk-unload-driven invalidation) that never cleared this registry
+  * entry. {@code PhysicsBridge.step} previously called {@code registry.get(vehicle).step(vehicle)}
+  * unconditionally and crashed inside that stale body's own step call, never at the lookup.
+  * Reclaims via the SAME registry-removal path {@code cleanup()}/{@code unload()} already use -
+  * not a new, second teardown mechanism: {@code deactivate} plus the identical companion
+  * cleanup, with no additional {@code remove()} call since the native object is already gone.
+  * This does NOT suppress or alter any probe's own FAILED verdict - that fires independently,
+  * earlier, from {@code BuoyantHitchProbe}'s own bounded-area check; this guard only prevents
+  * the SEPARATE crash that was following it. Generic and pure (no entity/Sable/world
+  * dependency) - directly unit-testable with fake keys/a fake body, the same seam-testing
+  * pattern {@link #activateOrClassify} already uses for registry-dependent logic that can't
+  * construct a real {@code EntityVehicleF_Physics}.
+  */
+ static <K, B extends VehicleBody> B activeOrReclaimStale(
+     BodyRegistry<K, B> registry, HitchRegistry<K> hitches, PendingReplacementState<K, ?> pendingInheritedVelocity, K key) {
+  B body = registry.get(key);
+  if (body == null) return null;
+  if (!body.isActive()) {
+   registry.deactivate(key);
+   hitches.release(key);
+   pendingInheritedVelocity.cleanup(key);
+   return null;
+  }
+  return body;
+ }
+ public static void step(EntityVehicleF_Physics vehicle) {
+  VehicleBody body = activeOrReclaimStale(registry, hitches, pendingInheritedVelocity, vehicle);
+  if (body != null) body.step(vehicle);
+ }
  /**
   * Ticket MINECRAFT-546 (tuning-provenance diagnostic): the live {@code Overrides.Tuning} the
   * currently-active body for {@code v} was actually constructed with - see {@code
@@ -2736,6 +2772,7 @@ public final class PhysicsBridge {
    if (twoBodyActive) TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
    else c.physicsSystem().removeObject(box);
   }
+  public boolean isActive() { return box.isActive(); }
   // MINECRAFT-545/547 (John's comment 54365): a real, independently-checkable freshness marker
   // for box.getPose()'s cached value - the Minecraft gameTime at which THIS body's own
   // box.updatePose() last actually ran, set immediately below it. Diagnostic bookkeeping only

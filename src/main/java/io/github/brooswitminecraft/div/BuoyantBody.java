@@ -89,6 +89,7 @@ final class BuoyantBody implements VehicleBody, HitchAnchor {
  }
  public ServerLevel level() { return level; }
  public void remove() { var c = SubLevelContainer.getContainer(level); if (c != null) c.physicsSystem().removeObject(box); }
+ public boolean isActive() { return box.isActive(); }
  public Overrides.Tuning tuning() { return tuning; }
  // HitchAnchor (MINECRAFT-545): box/center already exist for this body's own buoyancy/pose
  // bookkeeping above - exposed here, read-only, for PhysicsBridge.createHitch to compose a hitch

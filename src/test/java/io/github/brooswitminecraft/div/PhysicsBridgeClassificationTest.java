@@ -640,4 +640,67 @@ class PhysicsBridgeClassificationTest {
   assertEquals(1, PhysicsBridge.debugFallbackObserverMatchedCount(secondHandle));
   PhysicsBridge.unregisterFallbackObserver(secondHandle);
  }
+
+ // MINECRAFT-545/547 (John's comment 55098): the real root cause of the native crash a
+ // BuoyantHitchProbe TOWING_UNAVAILABLE FAILED run surfaced - PhysicsBridge.step previously
+ // called registry.get(vehicle).step(vehicle) unconditionally, so a registry entry whose own
+ // body had ALREADY had its native resources removed by some OTHER path (isActive()==false)
+ // while the entry itself was never cleared would still be stepped, crashing inside that stale
+ // body's own step() rather than being caught here. Exercises
+ // PhysicsBridge.activeOrReclaimStale(...), the exact generic seam PhysicsBridge.step now calls,
+ // with a fake key/body - the same fake-key/fake-body pattern activateOrClassify's own tests
+ // already use, since a real EntityVehicleF_Physics cannot be constructed in this suite.
+
+ /** Minimal VehicleBody test double - step()/captureReplacementState()/level()/tuning() are
+  * never invoked by activeOrReclaimStale itself (that method never calls step(), only
+  * PhysicsBridge.step's own thin wrapper does, with a real vehicle this suite cannot construct),
+  * so those bodies are unused/unreachable by design, not a gap in this test's own coverage. */
+ private static final class FakeVehicleBody implements VehicleBody {
+  boolean active = true;
+  boolean removed = false;
+  public void step(minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics v) { throw new AssertionError("not reachable from activeOrReclaimStale itself"); }
+  public void remove() { removed = true; }
+  public boolean isActive() { return active; }
+  public PhysicsBridge.InheritedRigidBodyVelocity captureReplacementState(minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics v) { throw new AssertionError("not reachable"); }
+  public Object level() { return "fake-level"; }
+  public Overrides.Tuning tuning() { throw new AssertionError("not reachable"); }
+ }
+
+ @Test void anActiveBodyIsReturnedUnchangedAndNeverReclaimed() {
+  var registry = new BodyRegistry<String, FakeVehicleBody>();
+  var hitches = new HitchRegistry<String>();
+  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
+  var body = new FakeVehicleBody();
+  registry.activate("car", body);
+  var result = PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "car");
+  assertSame(body, result, "an active body must be returned as-is");
+  assertTrue(registry.isActive("car"), "an active body's own registry entry must not be touched");
+  assertFalse(body.removed, "an active body must never have remove() called on it by this guard");
+ }
+
+ @Test void aStaleEntryWhoseBodyIsNoLongerActiveIsReclaimedNotStepped() {
+  // THE exact regression: the body's own native resources were already removed by some OTHER
+  // path (isActive()==false) while this registry entry was never cleared - this is the crash
+  // PhysicsBridge.step used to walk straight into (calling .step() on a dead body) before this
+  // fix; activeOrReclaimStale must now return null (so the caller never calls .step()) and
+  // self-heal the dangling entry via the SAME removal path cleanup()/unload() already use.
+  var registry = new BodyRegistry<String, FakeVehicleBody>();
+  var hitches = new HitchRegistry<String>();
+  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
+  var staleBody = new FakeVehicleBody();
+  staleBody.active = false; // already removed by some other path; registry entry never cleared
+  registry.activate("car", staleBody);
+  var result = PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "car");
+  assertNull(result, "a stale (no longer active) body must never be returned for stepping");
+  assertFalse(registry.isActive("car"), "the dangling registry entry must be reclaimed");
+  assertFalse(staleBody.removed, "remove() must NOT be called again - the native object is already gone, calling it again would be the duplicate-authority case this fix must avoid");
+ }
+
+ @Test void aMissingEntryIsSimplyAbsentNotAnError() {
+  var registry = new BodyRegistry<String, FakeVehicleBody>();
+  var hitches = new HitchRegistry<String>();
+  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
+  var result = PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "never-registered");
+  assertNull(result);
+ }
 }
