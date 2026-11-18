@@ -849,18 +849,29 @@ class PhysicsBridgeClassificationTest {
   assertEquals(2L, m.currentGeneration, "the replacement connection's own state must be completely untouched");
  }
 
- @Test void outOfOrderDeliveryWhereReplacementArrivesBeforeTheStaleNoticeIsAlsoSafe() {
-  // "Out-of-order generation/disconnect" - model the replacement connection being bound FIRST
-  // (generation 2), then the OLD notification (about generation 1) arriving late - same
-  // assertion as above, phrased explicitly as an ordering case rather than a static snapshot.
+ @Test void outOfOrderDeliveryThroughARealLedgerTransitionIsAlsoSafe() {
+  // MINECRAFT-545/547 (John's comment 54998): a prior version of this test used LITERAL 1L/2L
+  // constants, which only ever asserted the DECISION logic's own arithmetic, never an actual
+  // transition through the real ledger. This version drives the REAL
+  // connectionGeneration/forgetConnectionGeneration calls through an actual
+  // old-connection-torn-down-then-new-connection-formed sequence, using the generation VALUES
+  // the real ledger itself produces - not hand-picked numbers that happen to differ.
+  var oldConnectionObject = new Object();
+  var newConnectionObject = new Object(); // a DIFFERENT object - the real replacement.
+
+  long oldGeneration = PhysicsBridge.connectionGeneration(oldConnectionObject); // old connection first observed/bound.
+  PhysicsBridge.forgetConnectionGeneration(oldConnectionObject); // old connection actually torn down.
+  long newGeneration = PhysicsBridge.connectionGeneration(newConnectionObject); // replacement bound BEFORE the stale notice arrives.
+  assertNotEquals(oldGeneration, newGeneration, "the real ledger must never reuse the old connection's own generation value for the new object");
+
   var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
   var m = new ClientModel();
   m.currentConnection = identity(towing, towed, 0, 0, 0, 0);
-  m.currentGeneration = 2L; // the replacement already bound before the stale notice arrives.
+  m.currentGeneration = newGeneration; // the client's own current connection is bound to the REAL new generation.
   m.hasValidIndex = true; m.clientOwnIndex = 7;
 
   var staleNotified = identity(towing, towed, 0, 0, 0, 0);
-  decideAndApply(staleNotified, 1L, m); // the late, out-of-order notice about the superseded generation 1
+  decideAndApply(staleNotified, oldGeneration, m); // the late, out-of-order notice about the real, superseded old generation
 
   assertEquals(0, m.disconnectByIndexCallCount);
   assertEquals(0, m.idempotentCleanupCallCount);
@@ -916,5 +927,22 @@ class PhysicsBridgeClassificationTest {
 
  @Test void forgetConnectionGenerationWithNullIsASafeNoOp() {
   PhysicsBridge.forgetConnectionGeneration(null);
+ }
+
+ // MINECRAFT-545/547 (John's comment 54998): "WeakHashMap<Object,Long> relies on equals
+ // semantics: ... pin/test identity semantics ... before relying on reference-identity
+ // generation." This is a TEST-TIME-ONLY structural assertion using exclusively PUBLIC
+ // reflection on a PUBLIC class/method (no setAccessible, no bypassing any access control) -
+ // it exists purely as a regression guard: if a future MTS version ever adds an equals()/
+ // hashCode() override to TowingConnection, this test fails immediately and loudly, rather than
+ // silently breaking the generation ledger's own reference-identity safety assumption.
+
+ @Test void towingConnectionDoesNotOverrideEqualsOrHashCode() throws NoSuchMethodException {
+  var equalsMethod = minecrafttransportsimulator.baseclasses.TowingConnection.class.getMethod("equals", Object.class);
+  var hashCodeMethod = minecrafttransportsimulator.baseclasses.TowingConnection.class.getMethod("hashCode");
+  assertEquals(Object.class, equalsMethod.getDeclaringClass(),
+    "TowingConnection must keep using Object's own identity equals() - the generation ledger's WeakHashMap relies on this");
+  assertEquals(Object.class, hashCodeMethod.getDeclaringClass(),
+    "TowingConnection must keep using Object's own identity hashCode() - the generation ledger's WeakHashMap relies on this");
  }
 }

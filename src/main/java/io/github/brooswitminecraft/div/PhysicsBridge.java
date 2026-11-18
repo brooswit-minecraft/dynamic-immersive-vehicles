@@ -15,6 +15,7 @@ import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.baseclasses.Point3D;
 import minecrafttransportsimulator.baseclasses.RotationMatrix;
 import minecrafttransportsimulator.baseclasses.TowingConnection;
+import minecrafttransportsimulator.entities.components.AEntityB_Existing;
 import minecrafttransportsimulator.entities.components.AEntityE_Interactable;
 import minecrafttransportsimulator.entities.instances.APart;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
@@ -1534,7 +1535,21 @@ public final class PhysicsBridge {
   // actually keeps the server-side ledger populated for live connections, not merely the
   // fallback/orphan-release paths below, which only ever TEAR DOWN an already-assigned entry.
   for (var v : active) {
-   if (v.towedByConnection != null) connectionGeneration(v.towedByConnection);
+   var conn = v.towedByConnection;
+   // MINECRAFT-545/547 (John's comment 54998): checked BEFORE assigning, not after - this is
+   // what actually distinguishes "a fresh generation was just assigned this tick" (worth
+   // announcing to tracking clients) from "this connection's generation was already known"
+   // (every subsequent tick of the same connection's own lifetime, which must NOT re-announce
+   // on every tick - that would spam a new, unbounded stream of redundant packets instead of
+   // exactly one announcement per genuinely new connection).
+   if (conn != null && !connectionGenerations.containsKey(conn)) {
+    long generation = connectionGeneration(conn);
+    var recipient = resolveTrackingEntity(v);
+    if (recipient != null) {
+     net.neoforged.neoforge.network.PacketDistributor.sendToPlayersTrackingEntity(recipient,
+       new ConnectionGenerationPayload(toIdentity(conn), generation, false));
+    }
+   }
   }
   releaseOrphanedConnections(active, new OrphanedConnectionOps<EntityVehicleF_Physics>() {
    public boolean hasConnection(EntityVehicleF_Physics v) { return v.towedByConnection != null; }
@@ -1633,6 +1648,19 @@ public final class PhysicsBridge {
       // connection object captured here is reference-identical to what that caller registered.
       // Captured BEFORE nulling - the field this reads would otherwise already be gone.
       recordFallbackClearConnectionObservation(v.uniqueUUID, v.towedByConnection);
+      // MINECRAFT-545/547 (John's comment 54998): the actual disconnect-notify emission - the
+      // other half of the round trip the 54974/54979/54991 rounds only ever proposed. Captured,
+      // resolved, and sent BEFORE forgetting the generation/nulling the field below, using the
+      // SAME real recipient-resolution and identity helpers the connect-side announcement above
+      // already uses.
+      {
+       long generationBeforeForget = connectionGeneration(v.towedByConnection);
+       var recipient = resolveTrackingEntity(v);
+       if (recipient != null) {
+        net.neoforged.neoforge.network.PacketDistributor.sendToPlayersTrackingEntity(recipient,
+          new ConnectionGenerationPayload(toIdentity(v.towedByConnection), generationBeforeForget, true));
+       }
+      }
       // MINECRAFT-545/547 (John's comment 54979): the connection is actually gone now - its own
       // ledger entry MUST be released, so a LATER, DIFFERENT TowingConnection object that
       // happens to reuse the same vehicle/slot tuple gets its own fresh generation rather than
@@ -1723,6 +1751,59 @@ public final class PhysicsBridge {
   if (connection != null) connectionGenerations.remove(connection);
  }
 
+ /** O(active vehicles), bounded by the same per-JVM-side registry this class already iterates
+  * every tick for the orphan-release sweep - there is no direct UUID index on
+  * {@link BodyRegistry}, and adding one is unnecessary for a set this small. Each side (client
+  * or server) has its OWN separate {@code registry} instance (confirmed: {@code PhysicsBridge}
+  * is ordinary mod code loaded once per JVM, never shared across the client/server boundary),
+  * so this naturally finds only the LOCAL side's own currently-active vehicle, which is exactly
+  * what a client-side packet handler needs - never reaching across processes. */
+ public static EntityVehicleF_Physics findActiveVehicleByUuid(java.util.UUID uuid) {
+  var found = new EntityVehicleF_Physics[1];
+  registry.forEachActive((v, b) -> { if (found[0] == null && v.uniqueUUID.equals(uuid)) found[0] = v; });
+  return found[0];
+ }
+
+ /** MINECRAFT-545/547 (John's comment 54998): the CLIENT's own half of the generation ledger -
+  * a SEPARATE instance from {@link #connectionGenerations} (never shared - see that field's own
+  * thread-confinement doc), populated ONLY by binding an explicit, server-sourced generation
+  * announcement to the client's OWN local connection object, never by the client inventing its
+  * own numbering (an independently-numbered client-side counter would be meaningless to compare
+  * against the server's own numbers - the two would need to agree on nothing in particular).
+  * Also a {@code WeakHashMap} for the same structural-boundedness reason as the server's own. */
+ private static final java.util.Map<Object, Long> clientConnectionGenerations = new java.util.WeakHashMap<>();
+
+ /** Called from the client's own packet-handling thread when a generation ANNOUNCEMENT arrives
+  * (see the payload's own doc). Binds {@code announcedGeneration} to the client's own CURRENT
+  * connection for {@code towedVehicle} - but ONLY if that connection's own identity actually
+  * matches {@code announcedIdentity} field-for-field; a mismatch means the client's own local
+  * state has already moved on (e.g. the connection the announcement was about has already been
+  * superseded locally) and binding would associate the wrong object with this generation. */
+ public static void bindClientConnectionGeneration(
+     EntityVehicleF_Physics towedVehicle, TowingConnectionIdentity announcedIdentity, long announcedGeneration) {
+  if (towedVehicle.towedByConnection == null) return;
+  if (!toIdentity(towedVehicle.towedByConnection).equals(announcedIdentity)) return;
+  clientConnectionGenerations.put(towedVehicle.towedByConnection, announcedGeneration);
+ }
+
+ /** Called from the client's own packet-handling thread when a DISCONNECT notification arrives.
+  * Builds the client's own current identity/generation/valid-index inputs from
+  * {@code towedVehicle}'s own real, live state, decides via {@link #decideStaleDisconnectAction},
+  * and applies via {@link #applyStaleDisconnectAction} with the real
+  * {@link #REAL_STALE_DISCONNECT_OPS} adapter - the full real pipeline, never a reimplementation
+  * of either step. */
+ public static void handleClientStaleDisconnectNotification(
+     EntityVehicleF_Physics towedVehicle, TowingConnectionIdentity notifiedIdentity, long notifiedGeneration) {
+  var currentConnection = towedVehicle.towedByConnection;
+  TowingConnectionIdentity clientCurrent = currentConnection != null ? toIdentity(currentConnection) : null;
+  Long clientCurrentGeneration = clientConnectionGenerations.get(currentConnection);
+  int clientOwnIndex = currentConnection != null
+    ? currentConnection.towingVehicle.towingConnections.indexOf(currentConnection) : -1;
+  boolean clientHasValidIndex = clientOwnIndex >= 0;
+  var action = decideStaleDisconnectAction(notifiedIdentity, notifiedGeneration, clientCurrent, clientCurrentGeneration, clientHasValidIndex);
+  applyStaleDisconnectAction(towedVehicle, action, clientOwnIndex, REAL_STALE_DISCONNECT_OPS);
+ }
+
  /** What a client receiving a (proposed, not-yet-implemented) stale-disconnect notification
   * should do, given its OWN current state - never a blind instruction from the server alone. */
  public enum StaleDisconnectAction {
@@ -1804,6 +1885,63 @@ public final class PhysicsBridge {
    case IDEMPOTENT_CLEANUP_ONLY -> ops.idempotentCleanup(v);
    case IGNORE_NOTIFICATION, AMBIGUOUS_NO_OP -> { /* no-op by construction - never calls ops */ }
   }
+ }
+
+ /** MINECRAFT-545/547 (John's comment 54998): the REAL production adapter
+  * {@code applyStaleDisconnectAction} was still missing - this is it, wired to genuine public
+  * MTS methods only, same discipline as {@link #fallbackClearConnection}'s own real adapter.
+  * {@code disconnectByClientIndex} uses the exact real, public {@code disconnectTrailer(int)}
+  * with the CLIENT's own index (never the server's, which this entire mechanism exists because
+  * of). {@code idempotentCleanup} reuses the SAME pure orchestration the server's own fallback
+  * already uses - the required action (reset both sides' variables, engage the parking brake,
+  * then clear the field) is identical on either side, since it is defined purely in terms of
+  * the connection and the two vehicles, never anything server-only. */
+ public static final StaleDisconnectOps<EntityVehicleF_Physics> REAL_STALE_DISCONNECT_OPS = new StaleDisconnectOps<EntityVehicleF_Physics>() {
+  public void disconnectByClientIndex(EntityVehicleF_Physics v, int clientOwnIndex) {
+   v.towedByConnection.towingVehicle.disconnectTrailer(clientOwnIndex);
+  }
+  public void idempotentCleanup(EntityVehicleF_Physics v) {
+   PhysicsBridge.fallbackClearConnection(v, new FallbackClearOps<EntityVehicleF_Physics>() {
+    public void resetTowingVariables(EntityVehicleF_Physics v) { v.towedByConnection.towingVehicle.resetAllVariables(); }
+    public void resetTowedVariables(EntityVehicleF_Physics v) { v.resetAllVariables(); }
+    public void engageParkingBrake(EntityVehicleF_Physics v) { v.parkingBrakeVar.setTo(1.0, false); }
+    public void clearConnection(EntityVehicleF_Physics v) {
+     forgetConnectionGeneration(v.towedByConnection);
+     v.towedByConnection = null;
+    }
+   });
+  }
+ };
+
+ /** Pure, built from a real {@link TowingConnection}'s own public fields - no network/live
+  * dependency, directly reusable by both the server's own emission call sites and (once wired)
+  * a client's own dispatch handler. */
+ public static TowingConnectionIdentity toIdentity(TowingConnection connection) {
+  return new TowingConnectionIdentity(
+    connection.towingVehicle.uniqueUUID, connection.towedVehicle.uniqueUUID,
+    connection.hitchGroupIndex, connection.hitchConnectionIndex,
+    connection.hookupGroupIndex, connection.hookupConnectionIndex);
+ }
+
+ /** MINECRAFT-545/547 (John's comment 54998): the recipient-targeting question is RESOLVED, not
+  * foreclosed - {@code mcinterface1211.InterfaceInterface.toExternal(AEntityB_Existing)} is a
+  * genuinely PUBLIC, already-shipped MTS utility doing EXACTLY the bounded, same-world,
+  * loaded-entity enumeration with public-field reference comparison John asked to be checked:
+  * it enumerates every currently-loaded {@code BuilderEntityExisting} in the business entity's
+  * OWN world (server: {@code ServerLevel.getAllEntities()}; client:
+  * {@code ClientLevel.entitiesForRendering()} - both real, bounded, already-loaded sets, never
+  * an all-player broadcast) and returns the one whose own {@code entity} field (reference-
+  * compared via {@code equals()}, which {@code AEntityB_Existing} does not override, so this is
+  * effectively {@code ==}) matches. This was missed in the 54974/54979/54991 rounds' own checks
+  * because those searched for a method ON {@code AEntityB_Existing}/{@code BuilderEntityExisting}
+  * themselves, never a separate conversion-utility class - {@code InterfaceInterface} is the
+  * SAME kind of public `toInternal`/`toExternal` utility this codebase's own
+  * {@code mcinterface1211.WrapperPlayer}/{@code WrapperEntity} usage (in {@code WheelAuxPayload})
+  * already relies on, just never previously checked for this specific direction. Returns
+  * {@code null} if the entity is not currently loaded (not an error - a vehicle that has left
+  * the loaded area has nothing to notify). No reflection, no broadcast, no upstream change. */
+ public static net.minecraft.world.entity.Entity resolveTrackingEntity(AEntityB_Existing entity) {
+  return mcinterface1211.InterfaceInterface.toExternal(entity);
  }
 
  public static void cleanup() {

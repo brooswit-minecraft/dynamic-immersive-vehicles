@@ -13560,3 +13560,115 @@ three independent angles and remains unresolved, with precise source-level evide
 suite green (954 tests). No live packet, no client/server wiring, no new native run in this
 round. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on success remain distinct,
 unblurred. No merge/Done transition made or implied.
+
+## Per 54998: the recipient-wrapper question is RESOLVED - the full round trip is now wired
+
+John's comment 54998 correctly refused to accept "unresolved" without a deeper check: the
+54991 round's own three-angle investigation had checked `AEntityB_Existing`/
+`BuilderEntityExisting` themselves and `WrapperWorld.spawnEntityInternal`, but never a SEPARATE
+conversion-utility class. Checking that turned up the actual answer.
+
+### The resolution
+
+`mcinterface1211.InterfaceInterface.toExternal(AEntityB_Existing)` - a genuinely PUBLIC,
+already-shipped MTS method - returns the real `BuilderEntityExisting` (a vanilla `Entity`
+subclass) for a given business entity. Confirmed by reading its own real implementation
+directly: it enumerates every currently-loaded `BuilderEntityExisting` in the entity's own world
+(`ServerLevel.getAllEntities()` server-side, `ClientLevel.entitiesForRendering()` client-side -
+both bounded, already-loaded sets, never an all-player broadcast) and returns the one whose own
+`entity` field matches via `equals()` - which `AEntityB_Existing` does not override, so this is
+effectively `==`. This is EXACTLY the "bounded same-world loaded `BuilderEntityExisting`
+enumeration/query with public builder.entity reference comparison" John asked to be checked -
+it already exists, shipped, in MTS's own public API, in the same family of `toInternal`/
+`toExternal` conversion utilities `WheelAuxPayload` already relies on for the OTHER direction
+(`WrapperPlayer`/`WrapperEntity`), just never previously checked for THIS direction. Wrapped as
+`PhysicsBridge.resolveTrackingEntity(AEntityB_Existing)`.
+
+### The full round trip - now actually wired, not merely proposed
+
+A new DIV-owned payload, `ConnectionGenerationPayload` (`playToClient`, registered in
+`DynamicImmersiveVehicles`), carries the identity tuple + a generation number + a
+`disconnected` flag, serving both halves of the mechanism:
+
+- **Generation ANNOUNCEMENT** (`disconnected=false`): `releaseOrphanedTowingConnections`'s own
+  existing per-tick scan (added in the 54991 round to lazily assign generations) now ALSO
+  detects the exact tick a generation is FIRST assigned (checked via `containsKey` before
+  assigning, so this fires exactly once per genuinely new connection, never every tick of an
+  existing one) and sends the announcement to `resolveTrackingEntity(v)`'s own trackers via
+  `PacketDistributor.sendToPlayersTrackingEntity`.
+- **Disconnect NOTIFICATION** (`disconnected=true`): the real fallback `clearConnection` now
+  captures the connection's own generation and identity BEFORE forgetting/nulling, resolves the
+  same recipient set, and sends the notification - the actual missing half of the round trip the
+  54974/54979/54991 rounds only ever proposed or tested in isolation.
+- **Client dispatch** (`ConnectionGenerationPayload.handle`, `context.enqueueWork`, same
+  convention as `WheelAuxPayload`): resolves the LOCAL towed vehicle via the new
+  `PhysicsBridge.findActiveVehicleByUuid` (an O(active-vehicles) scan of this JVM's own
+  `BodyRegistry` - client and server each have their own separate instance, confirmed, so this
+  never reaches across the network boundary); an announcement calls
+  `PhysicsBridge.bindClientConnectionGeneration` (binds the generation to the client's OWN
+  current connection object, but ONLY if its identity actually matches - never trusting the
+  announcement blindly); a notification calls
+  `PhysicsBridge.handleClientStaleDisconnectNotification`, which builds the client's own real
+  current state and runs the FULL real `decideStaleDisconnectAction` ->
+  `applyStaleDisconnectAction` pipeline against the new `REAL_STALE_DISCONNECT_OPS` adapter -
+  genuine public MTS calls (`disconnectTrailer(int)` with the client's own index, or the same
+  pure cleanup orchestration the server's own fallback already uses), never a reimplementation
+  or a synthetic stand-in.
+- The client's own generation bindings live in `clientConnectionGenerations` - a SEPARATE
+  `WeakHashMap`-based ledger from the server's `connectionGenerations` (never shared, consistent
+  with this class's own existing thread-confinement discipline), populated ONLY from explicit
+  server-sourced announcements, never from an independently-invented client-side counter (which
+  would be meaningless to compare against the server's own numbers).
+
+### The two remaining, honestly-scoped gaps from 54998's own second point
+
+- **`applyStaleDisconnectAction` now DOES have a real adapter and a real call site** -
+  `REAL_STALE_DISCONNECT_OPS`, invoked from the real `handleClientStaleDisconnectNotification`,
+  itself invoked from the real, wired `ConnectionGenerationPayload.handle`. This was the
+  specific gap 54998 named ("still has no actual network/client adapter call site") - closed.
+- **The out-of-order test previously used literal `1L`/`2L` constants**, which only ever
+  exercised the decision function's own arithmetic, never a real ledger transition. Replaced
+  with `outOfOrderDeliveryThroughARealLedgerTransitionIsAlsoSafe`, which drives the REAL
+  `connectionGeneration`/`forgetConnectionGeneration` calls through an actual
+  old-connection-torn-down-then-new-connection-formed sequence, asserting on whatever values the
+  real ledger itself produces.
+- **`WeakHashMap<Object,Long>`'s own reliance on `equals()` semantics is now pinned, not merely
+  asserted**: a new test, `towingConnectionDoesNotOverrideEqualsOrHashCode`, uses PUBLIC
+  reflection (`Class.getMethod`, on a public class/method - no `setAccessible`, no bypassing any
+  access control) to directly confirm `TowingConnection` still declares neither `equals()` nor
+  `hashCode()` of its own. If a future MTS version ever adds either, this test fails immediately
+  and loudly, rather than silently invalidating the generation ledger's own safety assumption.
+
+### What genuinely remains open, honestly
+
+The client-side handler (`ConnectionGenerationPayload.handle`) and the live network round trip
+have never been exercised in a real Minecraft client - this environment has no client JVM to
+test against (every native run this investigation has performed has been a headless dedicated
+server). The real adapter/dispatch CODE is genuine, compiled, and reviewable, consistent with
+every other real-MTS-integration adapter in this codebase (e.g. `fallbackClearConnection`'s own
+real adapter), which are checked by compilation and direct inspection, never by a unit test that
+would require a live `EntityVehicleF_Physics`/network connection. No native run was performed
+this round, and none is proposed without the same explicit, specific, single-use coordinator
+release every prior native run in this investigation has required.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **955 tests** (up from 954 - the out-of-order test was
+rewritten rather than merely added-to, plus 1 new equals/hashCode contract test), 0 failures,
+0 errors.
+
+### Disposition
+
+The recipient-targeting question is RESOLVED, not foreclosed: a genuinely public, already-
+shipped MTS utility (`InterfaceInterface.toExternal`) does exactly what was needed, missed in
+three prior rounds' own checks because it lives in a different class than the ones those rounds
+searched. The full round trip (connection-generation announcement, disconnect notification,
+client dispatch, client-side ledger, and a real production apply-adapter) is now actually wired
+as real, compiled, reviewable production code - not merely proposed or tested in isolation. Both
+remaining gaps 54998 named (`applyStaleDisconnectAction` lacking a real adapter/call site; the
+out-of-order test's own literal constants) are fixed with real code and real ledger-driven
+tests; the `WeakHashMap` identity-semantics reliance is now pinned by an explicit regression
+test. What genuinely remains is live network/client verification, which this environment cannot
+perform without a real Minecraft client and has not been attempted. Full suite green (955
+tests). No native run performed. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on
+success remain distinct, unblurred. No merge/Done transition made or implied.

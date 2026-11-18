@@ -23,6 +23,9 @@ public final class DynamicImmersiveVehicles {
   modEventBus.addListener((RegisterPayloadHandlersEvent event) -> {
    var registrar = event.registrar("1");
    registrar.playToServer(WheelAuxPayload.TYPE, WheelAuxPayload.STREAM_CODEC, WheelAuxPayload::handle);
+   // MINECRAFT-545/547 (John's comment 54998): server-to-client, the connection-generation
+   // announce/disconnect-notify payload - see ConnectionGenerationPayload's own doc.
+   registrar.playToClient(ConnectionGenerationPayload.TYPE, ConnectionGenerationPayload.STREAM_CODEC, ConnectionGenerationPayload::handle);
   });
   // MINECRAFT-545/547 (John's comments 54727/54730/54742): orphan-connection release runs on
   // ServerTickEvent.Pre - fires at the HEAD of MinecraftServer#tickServer, before THIS tick's
