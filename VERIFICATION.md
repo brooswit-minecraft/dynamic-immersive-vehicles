@@ -14219,3 +14219,87 @@ tests, 0 failures, 0 errors) on the new exact head. No native run performed or p
 round. No merge/Done transition made or implied — independent review is still required per 55033's
 own explicit instruction before any merge. Client synchronization recorded as a linked unresolved
 follow-up on MINECRAFT-547, not a waived acceptance item.
+
+## 2026-11-18 — Per 55037: tested-tree mapping, acceptance matrix, PR state, overclaim correction
+
+### What John asked
+
+Comment 55037 independently re-verified the 98c41cc extraction (confirming the 936-test receipt and
+source-equivalence with the historical `37ba8f0-missingindexprobe-round3` packet), explicitly
+distinguishing that as "strong SOURCE-equivalence evidence, not new native receipt." He then asked
+for, concretely: (1) resolution of the small source diff vs the round3 packet; (2) a test receipt
+tied to an exact, unambiguous git SHA, since "XML alone doesn't record Git SHA"; (3) an acceptance
+matrix with exact test file/line citations per scenario, rejecting "cleanup untouched" as evidence;
+(4) the PR's actual draft/mergeable/reviewer-pickup state, distinguishing a reviewer *request* from
+an actual *review*; (5) correction of any phrasing implying "no supported correction exists" for the
+MTS index-packet path, and any phrasing implying the round3 native evidence proves the protected
+`connectionGroupsIndexesInUse` bit was specifically released.
+
+### What was done
+
+**Source diff vs round3, resolved.** `DynamicImmersiveVehicles.java` and
+`PhysicsBridgeClassificationTest.java` are confirmed byte-identical to `37ba8f0`
+(`git diff 37ba8f0 HEAD` on each: zero lines). `PhysicsBridge.java`'s only differences were: one
+unused import (`AEntityB_Existing`, referenced only inside a comment, never in code) — removed; one
+blank line — cosmetic, left as-is; and the missing-index fallback warning/comment's own wording,
+which carried actual content (not mere whitespace) and is addressed below.
+
+**Exact tested-tree-to-SHA mapping.** Rather than rely on the prior round's XML timestamps (which,
+as John notes, carry no SHA), the full suite was re-run fresh against the current exact working
+tree and then committed immediately after: `/tmp/gradle-8.14/bin/gradle test --console=plain`,
+under the exclusive `/tmp/div-gradle-slot.lock`. Result, tied unambiguously to commit **dc3d4b0**
+(pushed, on top of 98c41cc, history preserved): **93 suites, 936 tests, 0 failures, 0 errors, 0
+skipped** — exactly matching John's own independently-verified count.
+
+**Acceptance matrix, with exact citations** (current post-extraction codebase only):
+
+| Scenario | Exact test citation |
+|---|---|
+| Rotated installed anchors | `HitchJointTest.java:50` `localJointFrameConvertsAnAuthoredRotation`; `:65` `hookupOnlyRotationComposesWithNativeSignNotInverted`; `:83` `nonIdentityRotationsOnBothEndsMatchNativeComposition` |
+| Attach/detach | `HitchRegistryTest.java:309` `reconcileCreatesExactlyOneJointForActiveTowingAndTrailerKeys`; `:321` `reconcileToNoDesiredPartnerReleasesWithoutConstructing`; `:387` `switchingToADifferentTowingVehicleReleasesTheOldJointFirst` |
+| Unavailable/replacement | `PhysicsBridgeClassificationTest.java:326` `aCandidateWhoseConnectionChangedToADifferentInvalidOneIsSkippedNotDisconnected`; `:366` equal-valued-token variant; `:459` `aValidReplacementConnectionIsNeverDisconnectedBySweepingBeforeDispatch`; `:292` `missingIndexNeverInvokesDisconnectAndUsesTheHonestlyReducedFallback` |
+| Despawn/unload | `HitchRegistryTest.java:330` `losingTheTowingVehicleReleasesExactlyTheJointNotTheTrailerBody` (its own comment at `:342` ties directly to despawn/chunk-unload); `PhysicsBridgeClassificationTest.java:197` `releasesAnOrphanedConnectionOnlyWhenTowingEntityIsInvalid` |
+| Dead-handle/joint cleanup | `HitchRegistryTest.java:63` `reconcileTreatsANullCreatedHandleAsAFailedCreateNotAHealthyJoint`; `:396` `bulkSweepReleasesJointsBeforeBodiesWithNoLeak` (comment at `:397` ties to cleanup/unload ordering); `:354` `releaseAlsoDropsJointsHeldByTrailersPointedAtThisKey` |
+
+All five rows are unit/fake-object coverage only — none is a native run on this exact head, which
+is the same limitation already disclosed in the "Per 55033" entry above and is restated here, not
+newly introduced.
+
+**PR #39's literal state** (via `gh pr view 39`, not inferred): `isDraft: true`,
+`mergeable: "CONFLICTING"`, `mergeStateStatus: "DIRTY"` — the PR does **not** currently merge
+cleanly against `main` (real conflicts across 8 files: `README.md`, `VERIFICATION.md`,
+`build.gradle`, `Buoyancy.java`, `BuoyantForces.java`, `DynamicImmersiveVehicles.java`,
+`PhysicsBridge.java`, `BuoyancyTest.java` — `main` has moved on since this branch diverged).
+`reviewRequests: [wroosbit]` but `reviews: []` — literally no approval, changes-requested, or
+review comment has ever been submitted; the existing reviewer request is request-only, confirming
+John's exact distinction between a request and actual pickup. This is reported plainly, not
+resolved here — resolving the merge conflict is out of scope for this round and will need its own
+deliberate pass, not a blind rebase/merge.
+
+**Overclaim corrections.** Two specific phrasings John flagged were addressed:
+1. The in-code missing-index fallback comment's "no supported correction exists" framing (for the
+   MTS index-packet path specifically) is now qualified in place: a DIV-owned alternative
+   (`InterfaceInterface.toExternal`/`toInternal`, found in the 54998 round) exists and a new safe
+   protocol built on it was explicitly deferred (per the 55020/55033 rounds), not that no correction
+   of any kind exists. Fixed in commit dc3d4b0.
+2. A previously posted GitHub PR comment (id `6979047145`, 2026-11-18T12:49:56Z) stated "the real
+   fallback correctly released the group-index bit" as an established fact about round3's
+   `NO_LEAK_OBSERVED` result — but `connectionGroupsIndexesInUse` is confirmed inaccessible without
+   reflection, so this was never directly observed; it was an inference from the absence of a leak
+   symptom in one bounded scenario, not a direct read of the protected field. Since a posted GitHub
+   comment cannot be edited after the fact, a correcting reply was posted on PR #39 instead,
+   restating the accurate framing (no leak symptom observed in that one scenario; the protected
+   bit's own state was never directly read) without altering the PR's draft/non-mergeable status or
+   implying any merge/Done.
+
+### Disposition
+
+Tested tree now maps unambiguously to a specific commit (dc3d4b0) with a fresh, exact receipt (936
+tests, 0 failures, 0 errors). The acceptance matrix cites exact tests per scenario rather than
+asserting "untouched" as evidence, and explicitly marks every row as unit-only (no native head
+validation) rather than implying otherwise. The PR's real state (draft, conflicting against main,
+zero actual reviews despite an existing request) is reported exactly as found, not softened. Both
+flagged overclaim phrasings are corrected — one in source, one via a GitHub reply since the
+original comment is immutable. No native run performed or proposed. No merge/Done transition made
+or implied — independent review (an actual review, not merely a request) and current-main
+compatibility both remain outstanding gates.
