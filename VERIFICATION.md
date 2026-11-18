@@ -16788,3 +16788,71 @@ off) has never been natively tested, distinct from the confounded historical pas
 candidate on) and the confounded historical failures (no timing fix, candidate off). No guessed
 fix was made. A packet to close that specific gap is prepared and awaiting review/coordination, not
 launched. No native run performed. No merge/Done transition made or implied.
+
+## 2026-11-18 — Dated acceptance matrix, exact head 4ebd572
+
+Per John's comment 55170: normal review progression, with an accurate, dated acceptance matrix
+replacing the stale PR body (789 tests, the unresolved crash), reflecting the actual current exact
+head rather than any earlier point in this PR's own history.
+
+### Test receipt
+
+Full suite, exact head `4ebd572`: **1184 tests, 0 failures, 0 errors**.
+
+### Native evidence matrix
+
+| Configuration | Head | Result | Evidence |
+|---|---|---|---|
+| Historical candidate-ON (`b6ec50e-flagon`) | `b6ec50e` | `TOWING_REPLACEMENT` PASS (140 ticks) | Pre-session historical packet, retained |
+| Historical default-OFF (5 original crashes) | pre-session | `TOWING_REPLACEMENT` crash | Pre-session historical evidence, retained |
+| `9732b32` default-OFF (`...replacementprobe-round2`) | `9732b32` | `TOWING_UNAVAILABLE` FAILED + separate post-verdict NPE | This session, round2 — the crash that triggered the dead-handle guard fix |
+| `3f7054b` candidate-ON, guard fix included (`...flagon-frozen`) | `3f7054b` | All 7 phases PASS, zero exceptions | This session — confirms the guard fix prevents the crash; candidate flag still required at this point |
+| `5cb937f` default-OFF, guard fix included (`...flagon-off-frozen`) | `5cb937f` | `TOWING_UNAVAILABLE` FAILED, deterministically identical to round2's own divergence (same tick, same displacement value), but zero exceptions | This session — isolates the guard fix (prevents the crash-after-failure) from the physics instability itself (unaffected, still fails identically) |
+| **`4ebd572` bounded-by-default, no flag needed (`...shipping-default-round2`)** | `4ebd572` | **All 7 phases PASS, zero exceptions**, `sequentialDragBoundDefault=true` confirmed genuinely active (69 real diagnostic rows) | **This session — the shipping-default validation. Same exact scenario that failed deterministically in both prior OFF configurations now passes on the actual production default, no opt-in flag required.** |
+
+This progression — OFF fails identically twice, ON (with guard) passes, DEFAULT (with guard AND the
+drag-integration fix, no flag) passes on the same scenario that failed as OFF — is the actual
+empirical basis for this fix, not an inference from source reading alone. The two OFF failures
+being bit-identical (same tick, same displacement value) on a fixed seed is what establishes the
+guard fix and the physics fix as logically separable: the guard stops the crash, the drag fix
+stops the divergence, and both were independently confirmed in isolation before being combined.
+
+### Cleanup-assertion honesty, explicit (per John's own repeated standard this round)
+
+Per-resource cleanup was NOT uniformly confirmed in the `4ebd572` native run: of 5 fixture
+vehicles, 1 had a direct post-remove native-state confirmation, 2 were inferred only from absence
+of exception, and 2 were never despawned within the run at all (left to ordinary server shutdown).
+World-save and chunk-grid release are confirmed; they are NOT proof every fixture's native handle
+was actually invalidated. This gap is pre-existing (present in every native run this entire
+session, not introduced by this round's fix) and is disclosed here rather than implied resolved.
+
+### Fallback source-equivalence (already-established reasoning, restated for this matrix)
+
+The already-active-float-trailer fallback gap (PR #39's own stale "Known, OPEN gaps" bullet #2) is
+resolved by source-equivalence: the exact code (`deferToNativeHitch`'s `|| unsafeLock` branch) is
+unchanged since commit `5cb21fb`, which was already natively verified end-to-end by the retained
+`M545-fallbackprobe-run4` evidence (100-tick sustained PASS). This is a diff-based equivalence
+argument, not a fresh native run on `4ebd572` itself for this specific gap — stated explicitly, not
+implied as a fresh validation.
+
+### M547 client-sync gap — still open, unaffected by this round
+
+The generation-based client-notification/binding protocol remains intentionally disabled
+(`shouldBindAnnouncedGeneration` always returns `false`) pending a future protocol design, tracked
+on MINECRAFT-547 as a linked, unresolved follow-up — not a waived acceptance item. Nothing in this
+round's native physics work touches that mechanism.
+
+### CI
+
+GitHub Actions run for exact head `4ebd572` completed SUCCESS (both `build` and `runtime-smoke`
+jobs) — confirmed independently by John via the GitHub connector (comment 55170).
+
+### Disposition
+
+This matrix supersedes the stale PR-body acceptance claims (789 tests, unresolved crash) with the
+actual current state: 1184 tests, the shipping-default fix natively validated against the exact
+scenario that previously crashed deterministically, with every limitation (cleanup-assertion gaps,
+the fallback's equivalence-not-fresh-run basis, the open M547 client-sync item) disclosed rather
+than implied resolved. No merge/Done claimed here. PR #39 is being marked ready for review and
+MINECRAFT-545 moved to In Review as the next step, per John's explicit direction — not implying
+acceptance or approval, which remains the reviewer's own determination.
