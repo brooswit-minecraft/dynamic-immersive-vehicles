@@ -12555,3 +12555,91 @@ source-reading-only scope - "safe" is a hypothesis pending real validation, and 
 rests on one traced check, not an exhaustive proof. No instrumentation, native run, or CI job
 added - none was authorized this round, and the question asked did not require one. No
 merge/Done transition made or implied.
+
+## Per 54856: explicit implementation authorization - the bounded missing-index fallback fixture
+## implemented, with pure test seams, compiled and tested; new packet to follow
+
+John's comment 54856 was an explicit implementation authorization from the parent, superseding
+the prior instrumentation-scope wait - "implement now the bounded OPT-IN isolated missing-index
+fixture, production-used pure test seams and pure tests, then prepare NEW immutable exact-head
+packet. Do not stop at another design-only response."
+
+### New class: `MissingIndexFallbackProbe`
+
+Implemented exactly the design traced and authorized across 54839/54844/54849/54856, not a new
+guess:
+
+1. **Fault injection, explicitly labeled as such**: after a normal connection forms between
+   `towingA`/`towedA`, captures the exact `TowingConnection` object, removes ONLY it from
+   `towingA`'s own confirmed-public `towingConnections` list, and asserts BOTH
+   `towingA.towingConnections.indexOf(connection) == -1` AND `towedA.towedByConnection ==
+   connection` (same reference) BEFORE invalidating the anchor via the same supported lifecycle
+   method (`towingA.remove()`) the existing `TOWING_UNAVAILABLE` phase already uses. Every log
+   line for this step says "FAULT INJECTION" / "deliberately injected inconsistent state"
+   explicitly - never presented as a natural reproduction.
+2. **Fallback-entry evidence, not setup alone**: once `towedA.towedByConnection` becomes null,
+   the probe's own log states the reasoning explicitly - this MUST have come from
+   `fallbackClearConnection`, never `disconnectAtIndex`, because the pre-injection assertion
+   already proved `indexOf == -1` before `towingA.remove()` ever ran, making the ordinary path
+   structurally unreachable. (Launching with `-Ddiv.debugGroundContact=true` additionally
+   surfaces that method's own existing diagnostic log line as corroborating evidence - not
+   required for this conclusion.)
+3. **Matched positive control**: an independent `towingB`/`towedB` pair, identical
+   group/geometry, connected then PROPERLY disconnected via the real `disconnectTrailer(0)`
+   (never fault injection). A fresh `towingD` entity then drives a reconnect request through the
+   real normal selection path - `towingConnectionVar.setTo(...)`, never `connectTrailer`
+   directly. A failed control yields `INCONCLUSIVE_CONTROL_FAILED` regardless of what the leak
+   probe itself shows - no cause claim made either way, exactly as 54849/54856 require.
+4. **The leak probe**: a separate fresh `towingC` entity, same relative geometry `towingA`
+   originally used (computed fresh against `towedA`'s current position, never a stale
+   snapshot), drives the same kind of normal reconnect request at `towedA`. Whether a new
+   connection forms is logged explicitly as a BEHAVIORAL SIGNAL, not direct proof of the
+   `ALREADY_TOWED` reason specifically - the real rejection reason remains unobservable (client-
+   targeted chat packet only, confirmed in the prior entry), and the probe's own final log line
+   restates this and the separate, still-open client-notification gap explicitly.
+5. **No restore-then-disconnect reliance**: cleanup simply despawns every fixture-owned entity;
+   the leaked bookkeeping disappears with the garbage-collected Java objects, never relying on
+   the unvalidated teardown hypothesis from two rounds back.
+
+### Pure test seam
+
+`MissingIndexFallbackProbe.ControlOutcome`/`LeakProbeOutcome`/`LeakVerdict` plus
+`classifyLeakVerdict(ControlOutcome, LeakProbeOutcome)` - a small, pure, Minecraft/MTS-free
+policy the real fixture's own observed outcomes route through, same spirit as
+`LifecycleInvariants.RequiredPhaseVerdict`. 3 new tests in a new
+`MissingIndexFallbackProbeTest`, covering: a failed control forces `INCONCLUSIVE_CONTROL_FAILED`
+for BOTH possible leak-probe results (54849's own named requirement); a successful control with
+no new connection confirms the leak; a successful control WITH a new connection means the leak
+was not observed this run. Referencing the enclosing class to reach these pure members does not
+construct any MTS object - confirmed consistent with how `PhysicsBridgeClassificationTest`
+already references `EntityVehicleF_Physics` as a bare type parameter without instantiating it.
+
+### Registration and compile/test receipt
+
+Registered on `ServerTickEvent.Post` in `DynamicImmersiveVehicles`, same convention as every
+other opt-in probe (`-Ddiv.experimentalMissingIndexFallbackProbe=true`, OFF by default). Relies
+on `releaseOrphanedTowingConnections`'s own existing `ServerTickEvent.Pre` registration - no
+separate sweep trigger needed, since the production sweep already runs globally every tick.
+
+Compiled and tested under the exclusive Gradle lock, first attempt, no compile errors: **912
+tests, 0 failures, 0 errors** (up from 909 - 3 new pure tests).
+
+### What remains explicitly unverified by this implementation alone
+
+No native run has been performed - this fixture has never actually executed against a live
+server. Everything about its own correctness (geometry/offsets, whether `towingConnectionVar`
+timing genuinely drives the request on the expected tick, whether the bounded tick windows are
+sufficient) is exactly as traced from source, not yet confirmed by execution - the same honest
+distinction already drawn for the restore-then-disconnect hypothesis. The client-notification
+gap remains untouched and separately open. A new immutable packet for this commit is prepared
+next, per 54856's own instruction - native execution itself remains CLOSED regardless.
+
+### Disposition
+
+Implemented, not merely designed again: a new, bounded, opt-in fixture class with the exact
+fault-injection/fallback-evidence/positive-control/leak-probe structure traced and authorized
+across the last several rounds, a pure, unit-tested verdict-classification seam, and clean
+registration matching every existing probe's own convention. Compiles and passes the full suite
+on the first attempt (912 tests, 0 failures). No native run performed - this fixture's own real
+correctness remains unconfirmed by execution, stated as such. A new packet follows. No merge/
+Done transition made or implied.

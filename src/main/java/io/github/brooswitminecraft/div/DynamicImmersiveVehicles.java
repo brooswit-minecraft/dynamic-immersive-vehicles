@@ -168,5 +168,13 @@ public final class DynamicImmersiveVehicles {
    var overworld = event.getServer().overworld();
    if (overworld != null) io.github.brooswitminecraft.div.experimental.GroundSurfaceHotReloadProbe.maybeRun(overworld);
   });
+  // MINECRAFT-545/547 (John's comment 54856): bounded, opt-in missing-index fallback fixture -
+  // OFF by default, a strict no-op otherwise. Never touches any real vehicle or world content -
+  // see MissingIndexFallbackProbe's own doc. Relies on releaseOrphanedTowingConnections's own
+  // existing ServerTickEvent.Pre registration above - no separate sweep trigger needed.
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> {
+   var overworld = event.getServer().overworld();
+   if (overworld != null) io.github.brooswitminecraft.div.experimental.MissingIndexFallbackProbe.maybeRun(overworld);
+  });
  }
 }
