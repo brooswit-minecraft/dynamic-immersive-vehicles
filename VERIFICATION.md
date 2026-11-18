@@ -16729,13 +16729,34 @@ then. Confirmed by source read: `BuoyantForces.java`'s own
 `SEQUENTIAL_DRAG_BOUND_ENABLED = Boolean.getBoolean("div.sequentialDragBound")` defaults `false`
 whenever the system property is unset — so the CURRENT shipping default (`9732b32`: timing fix
 permanently present, candidate flag off) is a configuration that has **never actually been
-natively run**. This is not a new Java-side or Rust/Sable-side defect discovery - prior rounds
-already traced the underlying mechanism toward Rapier's native solver internals, outside DIV/
-Sable's own Java source and outside what this round's investigation could further narrow. No
-source fix is made this round because no specific, confidently-identified code-level defect
-(distinct from "an untested configuration" or "a possible fixture confound already flagged by
-specialist review") was found — fabricating one would repeat exactly the pattern this ticket's
+natively run**. **Corrected per John's comment 55079**: this is NOT proof that "all Java-side
+candidates are exhausted" or that the cause is conclusively external to DIV/Sable's own Java
+source - that framing, used in an earlier draft of this entry, claimed more certainty than the
+evidence actually supports. The accurate statement is narrower: the current default configuration
+(timing fix present, candidate flag off) has never been natively tested. That is a justified
+experiment to run next, not proof that the original crash still reproduces on the current head,
+and not proof the cause lies in Rapier's native solver rather than somewhere in DIV's own Java
+code - both directions remain genuinely open until the untested configuration is actually
+observed. No source fix is made this round because no specific, confidently-identified code-level
+defect (distinct from "an untested configuration" or "a possible fixture confound already flagged
+by specialist review") was found — fabricating one would repeat exactly the pattern this ticket's
 history has already corrected multiple times.
+
+**Clarifying run4's own scope (John's comment 55079, item 4)**: the already-active-fallback
+native evidence above (`M545-fallbackprobe-run4-20261116T160229Z`) was executed AT commit
+**5cb21fb**, not at `9732b32` - the claim that it still applies to the current head rests on a
+SOURCE-EQUIVALENCE argument (the direct `git diff 5cb21fb HEAD` showing the relevant functions
+byte-identical), not on a claim that `9732b32` itself was natively run for this scenario. These
+are two different kinds of evidence and must not be conflated.
+
+**Run4's own cleanup gap (John's comment 55079, item 5): a genuine evidence gap, not cosmetic.**
+The "Honest cleanup-disposition audit" above (no "Stopping server"/"Saving worlds" line, no
+`unforceChunkGrid`/fixture-removal call, no restoration receipt) is not a minor or cosmetic
+concern - it means fixture/forced-chunk cleanup and an orderly shutdown were never actually
+exercised or verified in that run, only the specific native observations already described
+(joint release, native-object destruction, persisting IV authority, 100-tick stability) were
+real and direct. Do not read run4 as proving all lifecycle cleanup, only those specific
+observations.
 
 ### Packet prepared for review, NOT launched
 
