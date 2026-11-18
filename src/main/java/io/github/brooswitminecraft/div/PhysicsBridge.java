@@ -1311,9 +1311,12 @@ public final class PhysicsBridge {
   /** Only ever called when {@link #hasConnection} is currently true for the same {@code v}. */
   boolean anchorIsValid(V v);
   /** A stable identity for whatever connection {@code v} CURRENTLY has (the real adapter uses
-   * the real {@code TowingConnection} object reference itself - reference identity via {@code
-   * equals}, never recomputed/derived). Called once during phase-1 collection and again,
-   * fresh, immediately before dispatch - teardown proceeds only if both reads agree. */
+   * the real {@code TowingConnection} object reference itself). Compared by the orchestration
+   * using {@code ==} (true reference identity), NEVER {@code equals} - two distinct connection
+   * objects that happen to compare equal-by-value must still be treated as a changed identity
+   * (John's comment 54790: {@code Objects.equals} silently permits exactly that, which is not
+   * what "identity-preserving" means). Called once during phase-1 collection and again, fresh,
+   * immediately before dispatch - teardown proceeds only if both reads are the same reference. */
   Object connectionIdentity(V v);
   /** Only ever called when {@link #hasConnection} is true, {@link #anchorIsValid} is false, and
    * {@link #connectionIdentity} still matches its own phase-1 value, for the same {@code v},
@@ -1338,7 +1341,8 @@ public final class PhysicsBridge {
    // list, never a decision already made - and identity, not merely current eligibility, is
    // now part of what gets re-verified.
    if (!ops.hasConnection(v) || ops.anchorIsValid(v)) continue;
-   if (!java.util.Objects.equals(ops.connectionIdentity(v), collectedIdentities.get(i))) continue;
+   // Reference identity (==), NOT equals - see connectionIdentity's own doc (John's 54790).
+   if (ops.connectionIdentity(v) != collectedIdentities.get(i)) continue;
    int index = ops.indexInParentList(v);
    if (canSafelyDisconnectAtIndex(index)) ops.disconnectAtIndex(v, index);
    else ops.fallbackClearConnection(v);
@@ -1412,7 +1416,9 @@ public final class PhysicsBridge {
     // <p>Precise, tested unsupported case (not glossed over): {@code connectionGroupsIndexesInUse}
     // is NOT released on either side in this fallback path - a real, standing resource-leak risk
     // for this one edge case (connection object present on the child but already absent from the
-    // parent's own list), stated here as a known, accepted limitation, not silently absorbed.
+    // parent's own list). Documenting this precisely is NOT an acceptance waiver of the risk
+    // itself (John's comment 54790) - this remains an OPEN gap pending further review, not a
+    // closed/accepted one; "documented" and "accepted" are not the same thing here.
     // The parent list removal and client {@code PacketEntityTowingChange} notification remain
     // unsupported for the same reasons already documented (nothing left to remove; no real index
     // to send).

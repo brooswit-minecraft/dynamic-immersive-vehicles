@@ -354,6 +354,44 @@ class PhysicsBridgeClassificationTest {
   assertEquals(0, v.fallbackCalls);
  }
 
+ /** A deliberately value-equal-but-distinct-instance token, for proving the identity check uses
+  * {@code ==} and not {@code equals} (John's comment 54790). */
+ private static final class EqualValueToken {
+  final int value;
+  EqualValueToken(int value) { this.value = value; }
+  @Override public boolean equals(Object o) { return o instanceof EqualValueToken t && t.value == value; }
+  @Override public int hashCode() { return value; }
+ }
+
+ @Test void aCandidateWhoseConnectionChangedToADistinctButEqualValuedTokenIsSkippedNotDisconnected() {
+  // MINECRAFT-545/547 (John's comment 54790): a prior version of this check used
+  // java.util.Objects.equals, which treats two DISTINCT objects as "the same identity" whenever
+  // they happen to compare equal-by-value - not what an identity-preserving contract means, and
+  // this test is the one the prior suite was missing: two deliberately different EqualValueToken
+  // instances that compare equal() but are not the same reference. The check must still treat
+  // this as a CHANGED identity and skip the candidate - proving == is actually used, not equals.
+  var v = new FakeOrphanCandidate(true, false, 0);
+  var originalIdentity = new EqualValueToken(7);
+  var differentInstanceSameValue = new EqualValueToken(7); // equals() true, but a genuinely different object
+  assertEquals(originalIdentity, differentInstanceSameValue, "sanity check: these two instances must compare equal() while being distinct references");
+  assertTrue(originalIdentity != differentInstanceSameValue, "sanity check: these two instances must NOT be the same reference");
+  var ops = new PhysicsBridge.OrphanedConnectionOps<FakeOrphanCandidate>() {
+   boolean firstRead = true;
+   public boolean hasConnection(FakeOrphanCandidate c) { return c.hasConnection; }
+   public boolean anchorIsValid(FakeOrphanCandidate c) { return c.anchorValid; }
+   public Object connectionIdentity(FakeOrphanCandidate c) {
+    if (firstRead) { firstRead = false; return originalIdentity; }
+    return differentInstanceSameValue;
+   }
+   public int indexInParentList(FakeOrphanCandidate c) { return 5; }
+   public void disconnectAtIndex(FakeOrphanCandidate c, int index) { c.disconnectCalls++; c.lastReceivedIndex = index; c.hasConnection = false; }
+   public void fallbackClearConnection(FakeOrphanCandidate c) { c.fallbackCalls++; }
+  };
+  PhysicsBridge.releaseOrphanedConnections(java.util.List.of(v), ops);
+  assertEquals(0, v.disconnectCalls, "a distinct-but-equal-valued connection token must still be treated as a changed identity (== semantics, not equals) and skipped");
+  assertEquals(0, v.fallbackCalls);
+ }
+
  @Test void aCandidateWhoseConnectionIdentityIsPreservedIsStillTornDownExactlyOnce() {
   // Regression guard: the new identity check must not accidentally block the ORDINARY case
   // where the SAME connection (same identity throughout) is simply still orphaned at dispatch

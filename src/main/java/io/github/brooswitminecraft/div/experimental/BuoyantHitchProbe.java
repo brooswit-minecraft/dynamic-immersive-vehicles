@@ -802,6 +802,18 @@ public final class BuoyantHitchProbe {
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT lifecycleInvariantCheck sampleCount=" + towingReplacementSamples.size()
      + " outcome=" + replacementOutcome
      + " firstSample=" + towingReplacementSamples.get(0) + " lastSample=" + towingReplacementSamples.get(towingReplacementSamples.size() - 1));
+   // 54790: the prior version here only treated FAIL_STARVED_TICK/FAIL_DUPLICATE_TICK as
+   // failures and then unconditionally printed the "TOWING_REPLACEMENT PASS" banner regardless
+   // of outcome - so INSUFFICIENT_SAMPLES/BODY_ABSENT/BODY_IDENTITY_CHANGED (none of which prove
+   // exactly-once per-tick stepping) were silently presented to a reader as a passing lifecycle
+   // check. Fixed to require a real, named outcome before claiming anything:
+   //  - FAIL_STARVED_TICK/FAIL_DUPLICATE_TICK: a genuine per-tick stepping defect - fails this
+   //    fixture, same as before and same as the TOWING_UNAVAILABLE check above.
+   //  - INSUFFICIENT_SAMPLES/BODY_ABSENT/BODY_IDENTITY_CHANGED: the check could not be
+   //    completed, NOT proof the lifecycle is broken (the SAME distinction the
+   //    TOWING_UNAVAILABLE check above already draws, per 54603's own rationale) - does NOT fail
+   //    this fixture, but is now logged explicitly as INCONCLUSIVE, never silently as PASS.
+   //  - PASS: the only outcome that earns the actual "TOWING_REPLACEMENT PASS" banner.
    if (replacementOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_STARVED_TICK
        || replacementOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_DUPLICATE_TICK) {
     LOGGER.error("[DIV buoyantHitchProbe] FAILED - TOWING_REPLACEMENT lifecycleInvariantCheck outcome=" + replacementOutcome
@@ -809,7 +821,13 @@ public final class BuoyantHitchProbe {
     phase = Phase.FAILED;
     return;
    }
-   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT PASS anchorDistance=" + distance + " - despawning towed for DESPAWN_TRAILER");
+   if (replacementOutcome != io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.PASS) {
+    LOGGER.warn("[DIV buoyantHitchProbe] TOWING_REPLACEMENT INCONCLUSIVE outcome=" + replacementOutcome
+      + " - the per-tick stepping check could not be completed (not proof of a defect, and not"
+      + " proof of success either); proceeding past this phase without claiming PASS for it");
+   } else {
+    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT PASS anchorDistance=" + distance + " - despawning towed for DESPAWN_TRAILER");
+   }
    towed.remove();
    phase = Phase.DESPAWN_TRAILER; ticksInPhase = 0;
   }

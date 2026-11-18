@@ -11742,3 +11742,105 @@ not merely logged; and the stale "not attempted" banner/doc corrected to match c
 Full suite green (890 tests). No native run performed - a new packet is being prepared for
 independent review, not launched. No merge/Done transition; identity/missing-index gaps and the
 connectionGroupsIndexesInUse leak risk remain open and explicitly not claimed resolved.
+
+## Per 54790: two real bugs in the 54782 fix, found by independent review of commit a6b0fc5
+
+John reviewed `a6b0fc5` independently (while the `M545-packet-a6b0fc5` packet above was being
+prepared) and found two real, concrete defects in that same commit's own fix - both confirmed
+and corrected in a follow-up commit, not merely acknowledged.
+
+### Bug 1: the identity check used value-equality, not reference identity
+
+The orchestration's `connectionIdentity` re-check (`PhysicsBridge.releaseOrphanedConnections`)
+used `java.util.Objects.equals(ops.connectionIdentity(v), collectedIdentities.get(i))`.
+`Objects.equals` delegates to `.equals()` when both arguments are non-null - it is NOT reference
+comparison. An "identity-preserving" contract whose own check is written in terms of value
+equality permits exactly the failure mode it claims to prevent: two DISTINCT connection objects
+that happen to compare equal-by-value would be treated as "the same identity." The real
+`TowingConnection` class does not currently override `equals()` (so `Objects.equals` on it
+degenerates to reference equality in practice today) - but the CONTRACT, as documented, claimed
+reference identity explicitly, and the implementation did not actually enforce that; a future
+change to `TowingConnection` (or reuse of this same orchestration with a different `V`/identity
+type) could silently break it with no test ever catching it, since every existing test's "equal"
+identities were always the same object reference anyway.
+
+**Fix**: changed the comparison from `Objects.equals(...)` to `ops.connectionIdentity(v) !=
+collectedIdentities.get(i)` (true `==` reference comparison). Updated the interface's own doc
+comment to state plainly that comparison is by `==`, never `equals`.
+
+**Test coverage**: added `aCandidateWhoseConnectionChangedToADistinctButEqualValuedTokenIsSkippedNotDisconnected`,
+using a new private test-only `EqualValueToken` class that deliberately overrides `equals()`/
+`hashCode()` by value. The test constructs two DIFFERENT `EqualValueToken` instances with the
+same value, asserts (as a sanity check) that they ARE `.equals()` to each other and ARE NOT the
+same reference, then confirms the orchestration still treats them as a CHANGED identity and
+skips the candidate. This is the test the prior suite was genuinely missing - every previous
+identity test used either the literal same reference (unchanged case) or a `new Object()` (which
+also happens to differ by both `==` and `.equals()`, so it could not have caught this bug on its
+own).
+
+### Bug 2: TOWING_REPLACEMENT's terminal check conflated "inconclusive" with "pass"
+
+The new terminal invariant check added in the 54782 cycle only treated
+`FAIL_STARVED_TICK`/`FAIL_DUPLICATE_TICK` as failures; every OTHER outcome
+(`INSUFFICIENT_SAMPLES`, `BODY_ABSENT`, `BODY_IDENTITY_CHANGED` - none of which prove exactly-once
+per-tick stepping) fell through to the SAME unconditional `"TOWING_REPLACEMENT PASS"` log line as
+a genuine `Outcome.PASS`. A reader of that log could not tell a real pass from "the check could
+not be completed" - exactly the silent-success-on-missing-observation failure mode 54790 named.
+
+Re-examined the EXISTING `TOWING_UNAVAILABLE` check (same file, above this one) before fixing
+this: it already draws a deliberate distinction, documented at comment 54603, between
+`FAIL_STARVED_TICK`/`FAIL_DUPLICATE_TICK` (a real defect) and
+`INSUFFICIENT_SAMPLES`/`BODY_IDENTITY_CHANGED` (the check itself could not be completed - NOT
+proof of a defect, and asserting on it would misreport a measurement gap as a lifecycle defect).
+A blanket "require literal `Outcome.PASS` or fail the fixture" fix - my first attempt before
+re-checking this precedent - would have been WRONG: it would have hard-failed this fixture on a
+benign incomplete-measurement outcome, contradicting the established 54603 rationale and
+potentially turning a harmless sampling gap into a false failure report.
+
+**Fix, consistent with the existing precedent**: `FAIL_STARVED_TICK`/`FAIL_DUPLICATE_TICK` still
+fail the fixture (unchanged). Every other non-`PASS` outcome
+(`INSUFFICIENT_SAMPLES`/`BODY_ABSENT`/`BODY_IDENTITY_CHANGED`) does NOT fail the fixture, but no
+longer reaches the `"TOWING_REPLACEMENT PASS"` line either - it now logs a distinct
+`"TOWING_REPLACEMENT INCONCLUSIVE outcome=..."` warning naming the exact outcome. Only a literal
+`Outcome.PASS` reaches the actual PASS banner. `towed.remove()` and the phase transition to
+`DESPAWN_TRAILER` still happen unconditionally afterward in all three cases (FAIL aside, which
+already `return`s) - this change affects only what gets CLAIMED in the log, not the phase's own
+control flow.
+
+### Also corrected: overclaiming "accepted" language around the missing-index leak risk
+
+54790: "parent authorized precise documented unsupported case/risk, not automatic acceptance
+waiver. Keep it OPEN pending review." The 54782 cycle's own doc comment on
+`fallbackClearConnection` and this very file's own Gap 2 section both described the
+`connectionGroupsIndexesInUse` leak risk as "a known, **accepted** limitation" - correct that it
+is known and precisely documented, but "accepted" overclaims a waiver that was never actually
+given; being told to document a risk precisely is not the same as the risk being approved as
+permanent. Corrected the source doc comment to state plainly that this remains an OPEN gap
+pending further review, not a closed/accepted one. (This VERIFICATION.md entry's own prior
+wording, two sections up, is left as the historical record of what was actually written at the
+time rather than edited after the fact - the correction is recorded here, not substituted in.)
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **891 tests total, 0 failures, 0 errors** (up from 890 -
+one new test, `aCandidateWhoseConnectionChangedToADistinctButEqualValuedTokenIsSkippedNotDisconnected`).
+
+### Packet impact
+
+`M545-packet-a6b0fc5` (prepared immediately before this round of findings arrived) is now STALE
+- it reflects the pre-54790-fix commit. A new packet for the corrected commit is prepared next;
+`M545-packet-a6b0fc5` is left in place, unmodified, as the historical record of what was actually
+reviewed and found wanting, not deleted or silently replaced.
+
+### Disposition
+
+Two real, independently-found bugs in the 54782 cycle's own fix, both confirmed and corrected:
+(1) the identity check used `Objects.equals` instead of true reference identity - fixed to `==`,
+with a new test using distinct-but-equal-valued tokens that the prior test suite could not have
+caught; (2) the TOWING_REPLACEMENT terminal check silently presented
+`INSUFFICIENT_SAMPLES`/`BODY_ABSENT`/`BODY_IDENTITY_CHANGED` outcomes as `PASS` - fixed to log a
+distinct `INCONCLUSIVE` outcome for those, matching the existing, deliberate
+`TOWING_UNAVAILABLE` precedent rather than either overclaiming success or overclaiming failure.
+Also corrected overclaiming "accepted limitation" language back to "open, pending review." Full
+suite green (891 tests). No native run performed. `M545-packet-a6b0fc5` is stale; a corrected
+packet follows.
