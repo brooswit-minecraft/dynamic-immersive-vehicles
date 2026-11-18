@@ -3701,11 +3701,13 @@ public final class PhysicsBridge {
     // local Phase 1 velocity component; no longitudinal wheelspin/lockup claim), real supported
     // load (normal/gravity, this tick's real per-dimension gravity), and the EXACT Phase 1
     // raycast block/face threaded through WheelHit unchanged - never re-derived from `point`.
-    // Finite-positive-load guard: a wheel with zero/non-finite normal has no real contact to
-    // report. Listeners must not mutate the world from this handler - see the event's own doc.
-    if (Double.isFinite(h.normal()) && h.normal()>0 && h.contactBlockPos()!=null) {
-     NeoForge.EVENT_BUS.post(new WheelGroundContactEvent(level,h.contactBlockPos(),h.contactFace(),
-       Math.abs(sideSpeed),h.normal()/gravity,level.getServer().getTickCount()));
+    // createIfValid validates every PUBLISHED value itself (not merely h.normal()), returning
+    // null (fire nothing) for any non-finite/non-positive input or result. Listeners must not
+    // mutate the world from this handler - see the event's own doc.
+    var wheelGroundContactEvent = WheelGroundContactEvent.createIfValid(level,h.contactBlockPos(),h.contactFace(),
+      sideSpeed,h.normal(),gravity,level.getServer().getTickCount());
+    if (wheelGroundContactEvent != null) {
+     NeoForge.EVENT_BUS.post(wheelGroundContactEvent);
     }
     Vector3d force=new Vector3d(up).mul(h.normal()).fma(tire.longitudinal(),forward).fma(tire.lateral(),right);
     // Captured BEFORE the world-frame point/force below are mutated in place into the
