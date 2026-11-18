@@ -183,15 +183,17 @@ public final class BuoyantHitchProbe {
  // nicety. Capturing ONLY, same as towedRemovalSpanSamples - never alters the real phase
  // sequence/timing/physics.
  private static final java.util.List<io.github.brooswitminecraft.div.LifecycleInvariants.Sample> towingReplacementSamples = new java.util.ArrayList<>();
- /** MINECRAFT-545/547 (John's comment 54814, generalized per 54823): every required phase's own
-  * {@code LifecycleInvariants.Outcome} gets routed through
-  * {@code LifecycleInvariants.classifyRequiredPhaseOutcome} and appended here, in check order -
-  * for BOTH the within-TOWING_UNAVAILABLE check and the TOWING_REPLACEMENT check (54814's own
-  * fix only wired the second one; 54823 found the first one was never recorded at all). The
-  * final terminal banner runs the SAME pure {@code aggregateRequiredPhaseVerdicts} policy over
-  * this list - a single seam every required-phase site routes through, rather than each site
-  * reimplementing (and potentially drifting on) its own ad hoc non-PASS/non-FAIL distinction. */
- private static final java.util.List<io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict> requiredPhaseVerdicts = new java.util.ArrayList<>();
+ /** MINECRAFT-545/547 (John's comment 54814, generalized per 54823, made phase-identity-aware
+  * per 54832): every required phase's own {@code LifecycleInvariants.Outcome} gets routed
+  * through {@code classifyRequiredPhaseOutcome} and merged into this map UNDER ITS OWN PHASE
+  * NAME (never merely appended to a bare list - a List could not distinguish "two checks on the
+  * same phase" from "one phase checked, a different required phase never checked at all," since
+  * both produce the same list SHAPE). {@link #REQUIRED_PHASE_NAMES} is the full set of phase
+  * names {@link io.github.brooswitminecraft.div.LifecycleInvariants#aggregateRequiredPhaseVerdicts}
+  * checks for completeness - a name in that set with no entry here is itself an incomplete
+  * result, never silently treated as a pass. */
+ private static final java.util.Map<String, io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict> requiredPhaseVerdicts = new java.util.HashMap<>();
+ private static final java.util.Set<String> REQUIRED_PHASE_NAMES = java.util.Set.of("TOWING_UNAVAILABLE", "TOWING_REPLACEMENT");
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -783,7 +785,8 @@ public final class BuoyantHitchProbe {
     phase = Phase.FAILED;
     return;
    }
-   requiredPhaseVerdicts.add(withinUnavailableVerdict);
+   requiredPhaseVerdicts.merge("TOWING_UNAVAILABLE", withinUnavailableVerdict,
+     io.github.brooswitminecraft.div.LifecycleInvariants::worseOfRequiredPhaseVerdicts);
    if (withinUnavailableVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE) {
     LOGGER.warn("[DIV buoyantHitchProbe] TOWING_UNAVAILABLE INCONCLUSIVE withinUnavailableOutcome=" + withinUnavailableOutcome
       + " - the per-tick stepping check could not be completed (not proof of a defect, and not proof of success either)");
@@ -843,7 +846,8 @@ public final class BuoyantHitchProbe {
     phase = Phase.FAILED;
     return;
    }
-   requiredPhaseVerdicts.add(replacementVerdict);
+   requiredPhaseVerdicts.merge("TOWING_REPLACEMENT", replacementVerdict,
+     io.github.brooswitminecraft.div.LifecycleInvariants::worseOfRequiredPhaseVerdicts);
    if (replacementVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE) {
     LOGGER.warn("[DIV buoyantHitchProbe] TOWING_REPLACEMENT INCONCLUSIVE outcome=" + replacementOutcome
       + " - the per-tick stepping check could not be completed (not proof of a defect, and not"
@@ -945,11 +949,24 @@ public final class BuoyantHitchProbe {
    // aggregateRequiredPhaseVerdicts policy here, over every verdict actually recorded - a
    // genuinely all-PASS run keeps the original COMPLETE banner; any recorded INCONCLUSIVE
    // verdict gets a DIFFERENT, explicitly non-"all passed" terminal line instead - never both.
-   var aggregateVerdict = io.github.brooswitminecraft.div.LifecycleInvariants.aggregateRequiredPhaseVerdicts(requiredPhaseVerdicts);
-   if (aggregateVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE) {
-    LOGGER.warn("[DIV buoyantHitchProbe] INCONCLUSIVE - every phase ran to its own completion with no FAILED defect, but at least one required phase (see the per-phase INCONCLUSIVE line above) did not reach a proven PASS outcome - this is NOT the same as \"all passed\", and must not be read as full success");
+   // MINECRAFT-545/547 (John's comment 54832): CORRECTED AGAIN - a bare List could not tell
+   // "both required phases checked and passed" from "one phase checked twice, the other never
+   // checked at all" (same list shape, [PASS, PASS]). Now keyed by REQUIRED_PHASE_NAMES/a real
+   // Map, so a required phase with no entry is itself INCONCLUSIVE (never a silent pass by
+   // omission) - see aggregateRequiredPhaseVerdicts's own doc. The banner text itself now comes
+   // from the SAME exhaustive, pure, unit-tested formatRequiredPhaseAggregateBanner covering all
+   // three RequiredPhaseVerdict values explicitly (PASS/INCONCLUSIVE/FAIL), not a binary
+   // PASS-vs-else branch that would have silently mapped a hypothetical FAIL to this same
+   // "COMPLETE... all passed" text.
+   var aggregateVerdict = io.github.brooswitminecraft.div.LifecycleInvariants.aggregateRequiredPhaseVerdicts(REQUIRED_PHASE_NAMES, requiredPhaseVerdicts);
+   var bannerText = io.github.brooswitminecraft.div.LifecycleInvariants.formatRequiredPhaseAggregateBanner(aggregateVerdict,
+     "ATTACH/DETACH/TOWING_UNAVAILABLE/TOWING_REPLACEMENT/DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");
+   if (aggregateVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.FAIL) {
+    LOGGER.error("[DIV buoyantHitchProbe] " + bannerText);
+   } else if (aggregateVerdict == io.github.brooswitminecraft.div.LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE) {
+    LOGGER.warn("[DIV buoyantHitchProbe] " + bannerText);
    } else {
-    LOGGER.info("[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/TOWING_REPLACEMENT/DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");
+    LOGGER.info("[DIV buoyantHitchProbe] " + bannerText);
    }
   }
  }

@@ -210,36 +210,102 @@ class LifecycleInvariantsTest {
     LifecycleInvariants.classifyRequiredPhaseOutcome(Outcome.BODY_ABSENT));
  }
 
- @Test void aggregateRequiredPhaseVerdictsPassWhenEveryPhasePasses() {
-  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.PASS,
-    LifecycleInvariants.aggregateRequiredPhaseVerdicts(List.of(
-      LifecycleInvariants.RequiredPhaseVerdict.PASS, LifecycleInvariants.RequiredPhaseVerdict.PASS)));
+ // MINECRAFT-545/547 (John's comment 54832): aggregateRequiredPhaseVerdicts is now
+ // phase-identity-aware - keyed by Map<phaseName, verdict> plus the actual Set<String> of
+ // required phase names, specifically so a phase checked twice can never substitute for a
+ // DIFFERENT phase that was never checked at all (both produced the same bare-List shape under
+ // the prior signature). Covers: all-pass, vacuous-pass-with-no-REQUIRED-phases (a different,
+ // degenerate case from "phases are required but missing"), a required phase present but
+ // INCONCLUSIVE, FAIL winning over INCONCLUSIVE, a required phase MISSING entirely (not merely
+ // list-empty - this is the exact named gap), and a duplicated phase name merged via
+ // worseOfRequiredPhaseVerdicts not masking the other, genuinely-missing phase.
+
+ private static final LifecycleInvariants.RequiredPhaseVerdict PASS_V = LifecycleInvariants.RequiredPhaseVerdict.PASS;
+ private static final LifecycleInvariants.RequiredPhaseVerdict FAIL_V = LifecycleInvariants.RequiredPhaseVerdict.FAIL;
+ private static final LifecycleInvariants.RequiredPhaseVerdict INCONCLUSIVE_V = LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE;
+
+ @Test void aggregateRequiredPhaseVerdictsPassWhenEveryRequiredPhasePasses() {
+  var required = java.util.Set.of("A", "B");
+  var byPhase = java.util.Map.of("A", PASS_V, "B", PASS_V);
+  assertEquals(PASS_V, LifecycleInvariants.aggregateRequiredPhaseVerdicts(required, byPhase));
  }
 
- @Test void aggregateRequiredPhaseVerdictsVacuouslyPassWithNoPhasesChecked() {
-  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.PASS,
-    LifecycleInvariants.aggregateRequiredPhaseVerdicts(List.of()));
+ @Test void aggregateRequiredPhaseVerdictsVacuouslyPassWhenNoPhaseIsRequiredAtAll() {
+  // A different, degenerate case from "phases are required but missing" - here nothing is
+  // required in the first place, so there is nothing to have been left incomplete.
+  assertEquals(PASS_V, LifecycleInvariants.aggregateRequiredPhaseVerdicts(java.util.Set.of(), java.util.Map.of()));
  }
 
- @Test void aggregateRequiredPhaseVerdictsInconclusiveWhenOnePhaseIsInconclusiveAndRestPass() {
-  // MINECRAFT-545/547 (John's comment 54823's own named gap, as a pure regression): a mix of
-  // PASS phases and exactly one INCONCLUSIVE phase must aggregate to INCONCLUSIVE, never PASS -
-  // this is the exact scenario the within-TOWING_UNAVAILABLE check could previously reach
-  // without ever being recorded into any aggregate at all.
-  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
-    LifecycleInvariants.aggregateRequiredPhaseVerdicts(List.of(
-      LifecycleInvariants.RequiredPhaseVerdict.PASS,
-      LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
-      LifecycleInvariants.RequiredPhaseVerdict.PASS)));
+ @Test void aggregateRequiredPhaseVerdictsInconclusiveWhenOneRequiredPhaseIsInconclusiveAndRestPass() {
+  var required = java.util.Set.of("A", "B", "C");
+  var byPhase = java.util.Map.of("A", PASS_V, "B", INCONCLUSIVE_V, "C", PASS_V);
+  assertEquals(INCONCLUSIVE_V, LifecycleInvariants.aggregateRequiredPhaseVerdicts(required, byPhase));
  }
 
- @Test void aggregateRequiredPhaseVerdictsFailWhenAnyPhaseFailsRegardlessOfOthers() {
-  // A real defect anywhere must win over an inconclusive result elsewhere - FAIL is never
-  // downgraded to INCONCLUSIVE just because another phase's own check also couldn't complete.
-  assertEquals(LifecycleInvariants.RequiredPhaseVerdict.FAIL,
-    LifecycleInvariants.aggregateRequiredPhaseVerdicts(List.of(
-      LifecycleInvariants.RequiredPhaseVerdict.INCONCLUSIVE,
-      LifecycleInvariants.RequiredPhaseVerdict.FAIL,
-      LifecycleInvariants.RequiredPhaseVerdict.PASS)));
+ @Test void aggregateRequiredPhaseVerdictsFailWhenAnyRequiredPhaseFailsRegardlessOfOthers() {
+  var required = java.util.Set.of("A", "B", "C");
+  var byPhase = java.util.Map.of("A", INCONCLUSIVE_V, "B", FAIL_V, "C", PASS_V);
+  assertEquals(FAIL_V, LifecycleInvariants.aggregateRequiredPhaseVerdicts(required, byPhase));
+ }
+
+ @Test void aggregateRequiredPhaseVerdictsInconclusiveWhenARequiredPhaseWasNeverCheckedAtAll() {
+  // The exact named gap (54832): "B" is required but has NO entry in byPhase at all - not
+  // merely absent-with-a-null-verdict, genuinely never recorded. Must be INCONCLUSIVE, never a
+  // silent PASS by omission, even though the one phase that WAS checked passed.
+  var required = java.util.Set.of("A", "B");
+  var byPhase = java.util.Map.of("A", PASS_V);
+  assertEquals(INCONCLUSIVE_V, LifecycleInvariants.aggregateRequiredPhaseVerdicts(required, byPhase));
+ }
+
+ @Test void aggregateRequiredPhaseVerdictsMissingPhaseIsNotMaskedByADuplicateCheckOnAnotherPhase() {
+  // The exact failure mode a bare List could not distinguish: "A" checked twice (merged via
+  // worseOfRequiredPhaseVerdicts into one PASS slot) must NOT make this look like "every
+  // required phase was checked" when "B" was never recorded at all.
+  var required = java.util.Set.of("A", "B");
+  var byPhase = new java.util.HashMap<String, LifecycleInvariants.RequiredPhaseVerdict>();
+  byPhase.merge("A", PASS_V, LifecycleInvariants::worseOfRequiredPhaseVerdicts);
+  byPhase.merge("A", PASS_V, LifecycleInvariants::worseOfRequiredPhaseVerdicts); // "A" checked twice; "B" never checked
+  assertEquals(1, byPhase.size(), "merging two checks on the SAME phase name must occupy only one map slot");
+  assertEquals(INCONCLUSIVE_V, LifecycleInvariants.aggregateRequiredPhaseVerdicts(required, byPhase));
+ }
+
+ @Test void worseOfRequiredPhaseVerdictsFailBeatsEverything() {
+  assertEquals(FAIL_V, LifecycleInvariants.worseOfRequiredPhaseVerdicts(FAIL_V, PASS_V));
+  assertEquals(FAIL_V, LifecycleInvariants.worseOfRequiredPhaseVerdicts(INCONCLUSIVE_V, FAIL_V));
+ }
+
+ @Test void worseOfRequiredPhaseVerdictsInconclusiveBeatsPass() {
+  assertEquals(INCONCLUSIVE_V, LifecycleInvariants.worseOfRequiredPhaseVerdicts(PASS_V, INCONCLUSIVE_V));
+ }
+
+ @Test void worseOfRequiredPhaseVerdictsPassWhenBothPass() {
+  assertEquals(PASS_V, LifecycleInvariants.worseOfRequiredPhaseVerdicts(PASS_V, PASS_V));
+ }
+
+ // MINECRAFT-545/547 (John's comment 54832): the terminal-banner formatter must handle all
+ // three RequiredPhaseVerdict values explicitly and be independently testable, even though a
+ // FAIL aggregate is normally unreachable at BuoyantHitchProbe's own one call site today (any
+ // per-phase FAIL already returns earlier). Pure - no Minecraft/MTS dependency.
+
+ @Test void formatRequiredPhaseAggregateBannerPassUsesTheSuppliedDetailText() {
+  var text = LifecycleInvariants.formatRequiredPhaseAggregateBanner(PASS_V, "X/Y/Z all passed");
+  assertEquals("COMPLETE - X/Y/Z all passed", text);
+ }
+
+ @Test void formatRequiredPhaseAggregateBannerInconclusiveDoesNotReuseThePassBannerText() {
+  // The INCONCLUSIVE text legitimately mentions "all passed" once, as a quoted CONTRAST ("...
+  // NOT the same as \"all passed\"...") - checked precisely for that, not banned as a bare
+  // substring, which would also (wrongly) flag that deliberate contrast phrase.
+  var text = LifecycleInvariants.formatRequiredPhaseAggregateBanner(INCONCLUSIVE_V, "X/Y/Z all passed");
+  assertTrue(text.startsWith("INCONCLUSIVE"));
+  assertFalse(text.contains("X/Y/Z all passed"), "an INCONCLUSIVE banner must never reuse the caller's own PASS-specific detail text");
+ }
+
+ @Test void formatRequiredPhaseAggregateBannerFailDoesNotReuseThePassBannerText() {
+  // Exercised directly even though FAIL is normally unreachable at the one real call site -
+  // the formatter itself must still map it correctly, defensively, not merely by omission.
+  var text = LifecycleInvariants.formatRequiredPhaseAggregateBanner(FAIL_V, "X/Y/Z all passed");
+  assertTrue(text.startsWith("FAILED"));
+  assertFalse(text.contains("X/Y/Z all passed"));
  }
 }

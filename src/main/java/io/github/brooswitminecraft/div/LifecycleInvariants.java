@@ -70,21 +70,59 @@ public final class LifecycleInvariants {
   };
  }
 
- /** The aggregate verdict across every required phase a run actually checked, in the order they
-  * were checked: {@code FAIL} if ANY phase was {@code FAIL} (a real defect anywhere ends the
-  * aggregate there, regardless of what came before or would come after); otherwise
-  * {@code INCONCLUSIVE} if ANY phase was {@code INCONCLUSIVE} (an incomplete required check
-  * anywhere means the run as a whole cannot claim "all passed," even if every OTHER phase
-  * genuinely passed); otherwise {@code PASS} only if EVERY phase checked was {@code PASS}. An
-  * empty list (no required phase ever checked) is vacuously {@code PASS} - there is nothing to
-  * have failed or left inconclusive, same spirit as {@link #evaluate}'s own 0/1-sample case. */
- public static RequiredPhaseVerdict aggregateRequiredPhaseVerdicts(List<RequiredPhaseVerdict> verdicts) {
+ /** MINECRAFT-545/547 (John's comment 54832): CORRECTED - a bare {@code List<RequiredPhaseVerdict>}
+  * (the prior signature) has no notion of WHICH phase each entry came from, so it cannot
+  * distinguish "every required phase was checked and passed" from "one required phase was
+  * checked twice (both PASS) and a DIFFERENT required phase was never checked at all" - both
+  * produce the identical list shape, {@code [PASS, PASS]}, under the prior signature. A phase
+  * recorded twice must never be able to SUBSTITUTE for a different phase that was never
+  * recorded. This aggregator now takes the real, keyed set of verdicts (one slot per phase
+  * NAME, not per check) plus the actual set of phase names that are required, and returns
+  * {@code INCONCLUSIVE} - never a vacuous {@code PASS} - whenever any name in {@code
+  * requiredPhaseNames} has no entry in {@code verdictsByPhase} at all: a required phase that was
+  * never checked is itself an incomplete result, exactly like any other {@code INCONCLUSIVE}
+  * outcome, not silently treated as having passed by omission. An EMPTY {@code
+  * requiredPhaseNames} (no phase is required at all - a different, degenerate case from "phases
+  * are required but incomplete") is vacuously {@code PASS}, same spirit as {@link #evaluate}'s
+  * own 0/1-sample case. {@code FAIL} still wins over everything if any present phase is {@code
+  * FAIL}. See {@link #worseOfRequiredPhaseVerdicts} for how a genuinely-duplicated check on the
+  * SAME phase name should be merged into its one slot. */
+ public static RequiredPhaseVerdict aggregateRequiredPhaseVerdicts(
+     java.util.Set<String> requiredPhaseNames, java.util.Map<String, RequiredPhaseVerdict> verdictsByPhase) {
   boolean anyInconclusive = false;
-  for (RequiredPhaseVerdict v : verdicts) {
+  for (String phaseName : requiredPhaseNames) {
+   RequiredPhaseVerdict v = verdictsByPhase.get(phaseName);
+   if (v == null) { anyInconclusive = true; continue; } // a required phase never checked at all - incomplete, not a pass
    if (v == RequiredPhaseVerdict.FAIL) return RequiredPhaseVerdict.FAIL;
    if (v == RequiredPhaseVerdict.INCONCLUSIVE) anyInconclusive = true;
   }
   return anyInconclusive ? RequiredPhaseVerdict.INCONCLUSIVE : RequiredPhaseVerdict.PASS;
+ }
+
+ /** The correct way to merge two verdicts for the SAME phase name checked more than once in one
+  * run (abnormal, but must not silently discard either result): the more severe of the two wins
+  * - {@code FAIL} beats {@code INCONCLUSIVE} beats {@code PASS} - so a phase that was ever seen
+  * to fail or come back inconclusive is never later overwritten by a merely-coincidental PASS on
+  * a repeat check. Intended as the remapping function for {@code Map.merge}. */
+ public static RequiredPhaseVerdict worseOfRequiredPhaseVerdicts(RequiredPhaseVerdict a, RequiredPhaseVerdict b) {
+  if (a == RequiredPhaseVerdict.FAIL || b == RequiredPhaseVerdict.FAIL) return RequiredPhaseVerdict.FAIL;
+  if (a == RequiredPhaseVerdict.INCONCLUSIVE || b == RequiredPhaseVerdict.INCONCLUSIVE) return RequiredPhaseVerdict.INCONCLUSIVE;
+  return RequiredPhaseVerdict.PASS;
+ }
+
+ /** MINECRAFT-545/547 (John's comment 54832): the terminal-banner formatter must handle ALL
+  * THREE {@link RequiredPhaseVerdict} values explicitly, not a binary PASS-vs-"everything else"
+  * branch - a prior binary branch would have mapped a hypothetical {@code FAIL} aggregate to the
+  * SAME "all passed" text as a genuine {@code PASS}, even though at today's one call site a
+  * {@code FAIL} aggregate is normally unreachable (any per-phase FAIL already returns earlier,
+  * at its own check site, before the aggregate is ever computed). Pure, no Minecraft/MTS
+  * dependency - testable for all three cases regardless of which are reachable today. */
+ public static String formatRequiredPhaseAggregateBanner(RequiredPhaseVerdict verdict, String passBannerDetail) {
+  return switch (verdict) {
+   case PASS -> "COMPLETE - " + passBannerDetail;
+   case INCONCLUSIVE -> "INCONCLUSIVE - every phase ran to its own completion with no FAILED defect, but at least one required phase did not reach a proven PASS outcome - this is NOT the same as \"all passed\", and must not be read as full success";
+   case FAIL -> "FAILED - aggregate verdict is FAIL at the terminal banner (should be unreachable here - a required-phase FAIL is expected to have already returned at its own check site before reaching this aggregate)";
+  };
  }
 
  /** True only if EVERY consecutive pair in {@code counts} (one sample per real tick, in tick

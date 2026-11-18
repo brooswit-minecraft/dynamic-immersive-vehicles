@@ -12083,3 +12083,171 @@ precisely scoped to what's actually pure (the order), not overclaiming testabili
 MTS calls themselves, which remain confirmed untestable without new integration infrastructure
 or forbidden reflection. Full suite green (901 tests). No native run performed. No merge/Done
 transition made or implied.
+
+## Per 54832: a phase-identity-aware aggregator (missing required phase != duplicate check),
+## an exhaustive pure terminal-banner formatter, the parser test exercising the REAL shared
+## function (not a copy), the confirmed absence of any automated downstream consumer, and a
+## concrete remediation/fixture proposal for the missing-index group-release gap
+
+John's comment 54832 is another same-owner continuation review, this time of `2d668dd`. Five
+more concrete points, all addressed in the SAME commit (test failures from earlier in this
+cycle were fixed before this commit was finalized, not left for a later one).
+
+### The real design gap: a bare List cannot distinguish "missing" from "duplicated"
+
+`aggregateRequiredPhaseVerdicts(List<RequiredPhaseVerdict>)` had no notion of WHICH phase each
+entry came from. `[PASS, PASS]` is produced identically whether both required phases were
+checked once each (genuinely complete) OR one phase was checked TWICE and a DIFFERENT required
+phase was never checked at all (genuinely incomplete) - the aggregator could not tell these
+apart, and an empty list was unconditionally treated as vacuous PASS regardless of whether any
+phase was actually required.
+
+**Fix**: changed the signature to `aggregateRequiredPhaseVerdicts(Set<String> requiredPhaseNames,
+Map<String, RequiredPhaseVerdict> verdictsByPhase)`. A required name absent from the map is
+itself `INCONCLUSIVE` - never a silent pass by omission. `BuoyantHitchProbe` now keeps a
+`Map<String, RequiredPhaseVerdict> requiredPhaseVerdicts` (was a `List`) plus a
+`REQUIRED_PHASE_NAMES = Set.of("TOWING_UNAVAILABLE", "TOWING_REPLACEMENT")` constant, and both
+check sites `.merge(phaseName, verdict, LifecycleInvariants::worseOfRequiredPhaseVerdicts)`
+instead of `.add(verdict)` - a phase genuinely checked twice (abnormal, but possible) occupies
+ONE map slot, merged to the more severe of the two results, and can never substitute for a
+different, genuinely-missing phase. Added `worseOfRequiredPhaseVerdicts(a, b)` (FAIL beats
+INCONCLUSIVE beats PASS) as the merge function.
+
+**Test coverage** (6 new `LifecycleInvariantsTest` cases, replacing the old List-shaped ones):
+all-required-phases-pass; vacuous PASS when NO phase is required at all (a genuinely different,
+degenerate case from "phases are required but incomplete"); one required phase present but
+INCONCLUSIVE; FAIL winning regardless of position; the exact named gap - a required phase with
+NO entry at all, even though the one phase that WAS checked passed; and a phase checked twice
+(merged into one map slot) not masking a different, truly-missing phase. Plus 3 direct
+`worseOfRequiredPhaseVerdicts` cases.
+
+### An exhaustive, pure terminal-banner formatter
+
+54832: "Final banner maps INCONCLUSIVE specially and everything else COMPLETE despite aggregate
+FAIL type: express/test complete PASS/FAIL/INCONCLUSIVE mapping in production-used formatter,
+even if current early return makes FAIL normally unreachable." Confirmed: the prior banner code
+was a binary `if (INCONCLUSIVE) {...} else {...COMPLETE...}` - a hypothetical `FAIL` aggregate
+(normally unreachable today, since any per-phase FAIL already returns earlier at its own check
+site) would have fallen into the `else` branch and been presented as "all passed." Added
+`LifecycleInvariants.formatRequiredPhaseAggregateBanner(RequiredPhaseVerdict, String
+passBannerDetail)` - an exhaustive `switch` over all three verdicts, pure, no Minecraft/MTS
+dependency. `BuoyantHitchProbe`'s own banner site now calls this and dispatches to
+`LOGGER.error`/`.warn`/`.info` based on which verdict actually came back, rather than a binary
+branch. 3 new tests exercise all three mappings directly, including the normally-unreachable
+FAIL case - defensive completeness, not merely "correct by omission."
+
+**Real test bug caught and fixed along the way**: my own first version of the INCONCLUSIVE-case
+test asserted the banner text must not contain the bare substring `"all passed"` - but the real
+INCONCLUSIVE text legitimately contains that phrase once, as a deliberate quoted CONTRAST
+("...this is NOT the same as \"all passed\"..."), so the test failed against CORRECT production
+text. Fixed by checking for the caller's own PASS-specific detail string instead of a bare
+substring - a precise assertion, not a loose one that would also flag the deliberate contrast.
+
+### The parser test now exercises the real shared function, not a copy
+
+54832: "Parser tests should exercise actual consumer/shared implementation, not only a copied
+case statement; no Minecraft needed." Confirmed: the prior synthetic-fixture test
+(`/tmp/test_terminal_parser.sh`) re-typed its own copy of the `case` statement rather than
+calling the wrapper's own logic - a genuine risk the test and the real wrapper could silently
+drift apart. Extracted the classification into `probe-result.sh`
+(`classify_probe_result(TERMINAL)`), the SAME shared-function convention already established by
+`runtime-manifest.sh`'s own `compute_runtime_byte_manifest`. Both this packet's own
+`launch-wrapper.sh` (sources it for the real `PROBE_RESULT` computation) and its own test
+(`receipts/terminal-parser-synthetic-test.sh`, which now sources the SAME file) call the
+identical real function - no duplicate logic anywhere. Extended the test with 4 more direct
+cases beyond the original 4 (`TIMEOUT`/`STARTUP_FAILURE`/`PROCESS_EXITED_EARLY`/
+`UNRECOGNIZED_TERMINAL`, the non-`PROBE_TERMINAL` paths `classify_probe_result` must also
+handle) - all 8 cases pass.
+
+### Confirmed: no automated downstream consumer exists today
+
+54832: "verify actual downstream acceptance reads that verdict and cannot treat rc0 alone as
+success." Inspected `.github/workflows/ci.yml` directly, in full: it defines probe jobs for
+`anchorFrameProbe`, `twoBodyImpulseProbe`, and `groundSupportFixture` - NONE for
+`BuoyantHitchProbe`. **Confirmed: no CI job in this repository invokes this probe or reads this
+wrapper's own exit code/`PROBE_RESULT` at all.** The only consumer of this wrapper's own receipt
+today is a human reviewer, reading the owner-file line and this packet's own `PACKET-NOTES.md`.
+Both new packets' own `PACKET-NOTES.md` now say so explicitly, with an unambiguous instruction:
+check `PROBE_RESULT`, never `rc` alone, since `rc` is clean-shutdown evidence, not a test
+verdict. This is a precise, honest answer to the question asked - not a code fix, because there
+is currently nothing automated to fix.
+
+### Missing-index group-release gap: confirmed no supported remediation exists; a concrete bounded fixture proposal
+
+54832: "Order-only fallback tests are progress but do not close group release/client
+notification; supply concrete supported remediation/isolated fixture proposal with required
+observations and risk, no claim absent infrastructure makes testing impossible."
+
+**Re-checked for a supported remediation, with NEW concrete evidence, not merely repeating the
+prior finding**: searched the real decompiled `AEntityG_Towable` for any OTHER public method
+that might release `connectionGroupsIndexesInUse` without needing a `towingConnections` index.
+Found exactly one candidate beyond `disconnectTrailer(int)` itself: `public void
+disconnectAllConnections()`. Read its real body: `this.towingConnections.clear();
+this.towedByConnection = null;` - it does NOT touch `connectionGroupsIndexesInUse` either, and
+it is further unsuitable regardless (it clears EVERY connection on the entity, not just the
+orphaned one - unacceptable collateral effect on any other, currently-valid connection). **Confirmed:
+no public API releases this bookkeeping without a valid `towingConnections` index** - the exact
+thing missing in this fallback case. This is not a repeated assertion; it is a second, specific
+piece of negative evidence (one additional method actually read and ruled out).
+
+**Concrete bounded isolated-fixture proposal (design only - NOT implemented, NOT executed)**:
+extend this project's own existing CI probe-job pattern (`.github/workflows/ci.yml`'s
+`anchorFrameProbe`/`groundSupportFixture` jobs already boot a real headless dedicated server for
+exactly this kind of bounded, isolated runtime question) with a NEW job that:
+1. Engineers the SAME orphan-producing scenario this whole investigation already understands
+   (anchor entity removed while `blockMainUpdateCall()` prevents `update()`), driving a real
+   connection into this exact fallback path.
+2. After the fallback runs, attempts a SECOND, fresh connection that would naturally compete for
+   the SAME physical hitch/hookup connection-group slot the leaked entry still occupies.
+3. Observes the outcome using ONLY already-public, already-existing signals (no reflection, no
+   private-field read) - e.g., whether the second connection attempt behaves as if that slot is
+   still considered in-use (a rejected/retried connection, or a different group index chosen
+   than would otherwise be expected) versus connecting cleanly as if the slot had been properly
+   released.
+
+**Required observations**: the real `GroundContactDiagnostics`-style logging this investigation
+already uses throughout, extended to print whichever group index actually gets chosen for the
+second connection attempt, and a scripted log-based assertion (same pattern as
+`groundSupportFixture`'s own `ACTIVATION_CHECK`) comparing it against the expected value if the
+leak were and were not present.
+
+**Honestly stated risk, not glossed over**: this is a BLACK-BOX behavioral test, not a direct
+observation of the leaked field - MTS's own index-allocation algorithm (not fully traced in this
+investigation) might simply allocate the next free slot regardless of the leaked one, producing
+no externally-visible symptom even when the leak IS present (a false negative risk). A fully
+conclusive test would still require reading the private field directly, which remains withheld
+pending further authorization (no reflection without it). This proposal is offered as the best
+AVAILABLE bounded fixture given that constraint, explicitly not claimed to be a conclusive
+substitute for it - stating the infrastructure gap precisely is not the same as claiming no
+test of any kind could ever be designed, which is the distinction 54832 itself drew.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **909 tests, 0 failures, 0 errors** (up from 901 - 6 new
+phase-identity aggregator tests, 3 new `worseOfRequiredPhaseVerdicts` tests, 3 new formatter
+tests, replacing the 4 old List-shaped aggregator tests removed).
+
+### Commit and packets
+
+This round's source changes (`LifecycleInvariants.java`/`BuoyantHitchProbe.java`/
+`LifecycleInvariantsTest.java`) land in their OWN new commit, on top of (not amending) the
+already-pushed `2d668dd` - `M545-packet-2d668dd`/`M545-packet-2d668dd-flagon` reflect the PRIOR
+commit and are correspondingly now stale for the source changes, same convention as every prior
+superseded packet; the shared-function/parser-test/PACKET-NOTES.md infrastructure
+improvements made directly inside those two packet directories this round (not a source change)
+are retained there as-is. New packets for this round's own new commit follow, by the same
+construction method as every prior packet in this ticket.
+
+### Disposition
+
+Five more concrete points addressed: the aggregator is now phase-identity-aware (a required
+phase missing is never masked by a duplicate check elsewhere); the terminal banner's own mapping
+is exhaustive and independently pure-tested for all three verdicts, including the normally-
+unreachable FAIL case; the parser test now calls the real shared classification function
+instead of a hand-copied duplicate; confirmed, by reading the actual CI workflow, that no
+automated consumer of this wrapper's own verdict exists today, and documented the resulting
+reviewer instruction explicitly; and the missing-index group-release gap gets a concrete,
+honestly-risk-stated bounded fixture proposal rather than a bare "infrastructure absent"
+non-answer, while still correctly NOT claiming a supported in-API remediation exists (re-
+confirmed with new, specific negative evidence against `disconnectAllConnections()`). Full suite
+green (909 tests). No native run performed. No merge/Done transition made or implied.
