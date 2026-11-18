@@ -1954,20 +1954,30 @@ public final class PhysicsBridge {
  }
 
  /**
+  * MINECRAFT-545/547 (John's comment 55196): the actual production per-body three-action
+  * composition, extracted to a package-visible, fully generic seam so a test can exercise this
+  * EXACT control-flow (not a reimplementation with a reduced/trimmed signature) with injected
+  * fake joint/body/pending operations, instead of only being reachable through
+  * {@link #cleanupOneRegisteredBody}'s own hardwired statics. Still the same
+  * {@link #removeIndependentResources} composition as before this extraction - this is a pure
+  * refactor of {@code cleanupOneRegisteredBody}'s own body, not a behavior change.
+  */
+ static void cleanupOneBodyThreeActions(Runnable releaseJoint, Runnable removeBody, Runnable cleanupPending) {
+  removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true },
+    new Runnable[]{ releaseJoint, removeBody, cleanupPending });
+ }
+ /**
   * MINECRAFT-545/547 (Wroosbit review, comment 55189): the per-body callback below used to call
   * {@code hitches.release(v)}, {@code b.remove()}, and {@code pendingInheritedVelocity.cleanup(v)}
   * with no isolation between them - a throwing {@code hitches.release(v)} (itself already
   * fail-closed internally since the 55104 round, but still capable of re-throwing its own first
-  * failure) skipped the other two steps for that SAME body. Wrapped in the same generic
-  * {@link #removeIndependentResources} helper {@link Body#remove} already uses internally, with
-  * all three "always eligible" (no eligibility gating needed here, unlike the two-body case) -
-  * one throwing step no longer prevents the other two independent steps for this body.
+  * failure) skipped the other two steps for that SAME body. Now delegates to
+  * {@link #cleanupOneBodyThreeActions}, the same real composition a test can exercise directly.
   */
  private static void cleanupOneRegisteredBody(EntityVehicleF_Physics v, VehicleBody b) {
   if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info("[DIV lifecycleDiagnostic] cleanup releasing/removing v=" + v.uniqueUUID);
-  removeIndependentResources(
-    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true },
-    new Runnable[]{ () -> hitches.release(v), () -> b.remove(), () -> pendingInheritedVelocity.cleanup(v) });
+  cleanupOneBodyThreeActions(() -> hitches.release(v), b::remove, () -> pendingInheritedVelocity.cleanup(v));
  }
  /**
   * MINECRAFT-545/547 (John's comment 55194 - the same bug class one level further out): {@code

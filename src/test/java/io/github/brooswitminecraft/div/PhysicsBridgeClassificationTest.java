@@ -1,7 +1,9 @@
 package io.github.brooswitminecraft.div;
 import org.junit.jupiter.api.Test;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Set;
 import static io.github.brooswitminecraft.div.PhysicsBridge.ActivationDecision.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -854,59 +856,117 @@ class PhysicsBridgeClassificationTest {
  }
 
  /**
-  * MINECRAFT-545/547 (John's comment 55194, gap 2): PhysicsBridge.cleanup()/unload() now run
-  * their own registry sweep AND every independent sweep (pendingInheritedVelocity, the
-  * handbrake/H-pattern/wheel-aux maps) through this SAME {@link PhysicsBridge#removeIndependentResources}
-  * method, as one flat list of equally-independent steps (per the 55194 fix immediately above
-  * this test file's own production source) - exactly mirroring the real production composition,
-  * not a reimplementation. The registry-sweep step itself is built from the real {@link
-  * BodyRegistry#removeIf}/{@link HitchRegistry#release} (the same pair {@code
-  * cleanupOneRegisteredBody} uses), with a genuinely failing joint on exactly ONE body - by
-  * design, only that one body can ever be the thrower, so this test's own assertions do not
-  * depend on {@code BodyRegistry}'s underlying {@code IdentityHashMap} iteration order (per
-  * John's own explicit caution: sorting results after the fact does not establish real temporal
-  * order - this test instead ensures there is only ONE possible cause of the failure, so order
-  * never matters). Confirms: the OTHER body within the same registry sweep still gets its own
-  * joint removed; every unrelated independent sweep (modeled here as simple counters, since the
-  * real sweeps are themselves just {@code Collection.removeIf} calls on unrelated maps, already
-  * covered by this file's and {@code HitchRegistryTest}'s own existing validity-predicate tests)
-  * still runs despite the registry sweep's own failure; a non-matching registry entry is left
-  * untouched; and the exact first exception is the one ultimately reported.
+  * MINECRAFT-545/547 (John's comment 55196 - correcting the 55194-round test's own flaw):
+  * "only one entry throws" does NOT by itself prove the fix, because if that one entry happens
+  * to be visited LAST by {@code BodyRegistry}'s real (unordered) {@code IdentityHashMap}
+  * iteration, the OLD broken abort-on-first-failure code would ALSO pass - everything before it
+  * would already have completed normally before the failure ever occurred. This test instead
+  * DETERMINES the real visitation order empirically first (a dry instrumented pass over the
+  * exact same String literal objects - identical object references give identical
+  * {@code IdentityHashMap} placement, so the dry pass's own observed order is the real order the
+  * actual test run will also see), THEN configures the body that run ACTUALLY visits first to be
+  * the one that throws, and asserts on the one visited second - never assumed, always observed.
+  *
+  * <p>Exercises the REAL production per-body composition directly via {@link
+  * PhysicsBridge#cleanupOneBodyThreeActions} (joint release + body remove + pending cleanup
+  * together, not a reduced reimplementation), with a real {@link HitchRegistry}, a real
+  * {@code FakeVehicleBody} (a genuine {@link VehicleBody}, not a bare counter), and a real
+  * {@link PhysicsBridge.PendingReplacementState} holding both a co-registered entry and a
+  * genuinely pending-only entry (staged there, absent from {@code BodyRegistry} entirely).
   */
  @Test void outerSweepRunsEveryIndependentStepDespiteARegistryLevelFailureAndLeavesNonMatchingEntries() {
-  var hitches = new HitchRegistry<String>();
-  var bodies = new BodyRegistry<String, Object>();
-  bodies.activate("failingBody", new Object());
-  bodies.activate("okBody", new Object());
-  bodies.activate("nonMatchingBody", new Object()); // never meets the sweep's own removal predicate
-  hitches.reconcile("failingBody", "truckA", PhysicsBridgeClassificationTest::fakeJointThatThrowsOnRemove);
-  boolean[] okRemoved = {false};
-  hitches.reconcile("okBody", "truckB", () -> fakeJoint(okRemoved));
+  // Step 1: determine the REAL visitation order empirically, on a throwaway dry run over the
+  // exact same String literal objects (same identity => same IdentityHashMap placement/order).
+  var dryRun = new BodyRegistry<String, Object>();
+  dryRun.activate("bodyA", new Object());
+  dryRun.activate("bodyB", new Object());
+  List<String> observedOrder = new ArrayList<>();
+  dryRun.removeIf((k, b) -> true, (k, b) -> observedOrder.add(k));
+  String firstVisited = observedOrder.get(0), secondVisited = observedOrder.get(1);
 
-  int[] pendingOnlySweepRan = {0}, handbrakeSweepRan = {0}, wheelSweepRan = {0};
+  // Step 2: build the REAL structures, configuring the body ACTUALLY visited first to throw.
+  var hitches = new HitchRegistry<String>();
+  var bodies = new BodyRegistry<String, FakeVehicleBody>();
+  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
+  var firstBody = new FakeVehicleBody(); var secondBody = new FakeVehicleBody(); var nonMatchingBody = new FakeVehicleBody();
+  bodies.activate(firstVisited, firstBody);
+  bodies.activate(secondVisited, secondBody);
+  bodies.activate("nonMatchingBody", nonMatchingBody); // never meets the sweep's own removal predicate
+  pending.stage(firstVisited, new Object());
+  pending.stage(secondVisited, new Object());
+  pending.stage("pendingOnlyKey", new Object()); // genuinely absent from BodyRegistry entirely
+  hitches.reconcile(firstVisited, "truckFirst", PhysicsBridgeClassificationTest::fakeJointThatThrowsOnRemove);
+  boolean[] secondJointRemoved = {false};
+  hitches.reconcile(secondVisited, "truckSecond", () -> fakeJoint(secondJointRemoved));
+
+  int[] handbrakeSweepRan = {0}, wheelSweepRan = {0};
 
   RuntimeException thrown = assertThrows(RuntimeException.class, () -> PhysicsBridge.removeIndependentResources(
     new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true, () -> true },
     new Runnable[]{
-      // Mirrors the real registry-sweep step: only "failingBody" and "okBody" match (true), the
-      // same predicate shape cleanup()/unload() use (!v.isValid / b.level()==level), never
-      // touching "nonMatchingBody".
-      () -> bodies.removeIf((k, b) -> !k.equals("nonMatchingBody"), (k, b) -> hitches.release(k)),
-      // Mirrors pendingInheritedVelocity.removeIf - independent of BodyRegistry entirely (e.g. a
-      // vehicle already deactivated before being fully registered).
-      () -> pendingOnlySweepRan[0]++,
+      // Mirrors the real registry-sweep step in cleanup()/unload(): same predicate shape
+      // (never touching "nonMatchingBody"), and the REAL per-body three-action composition.
+      () -> bodies.removeIf((k, b) -> !k.equals("nonMatchingBody"),
+        (k, b) -> PhysicsBridge.cleanupOneBodyThreeActions(() -> hitches.release(k), b::remove, () -> pending.cleanup(k))),
+      // Mirrors pendingInheritedVelocity.removeIf - independent of BodyRegistry entirely.
+      () -> pending.removeIf(k -> k.equals("pendingOnlyKey")),
       () -> handbrakeSweepRan[0]++,
       () -> wheelSweepRan[0]++ }));
 
   assertEquals("Sable-level removal failure", thrown.getMessage(),
-    "the first (and only possible) exception, from the registry sweep, must still be the one ultimately reported");
-  assertTrue(okRemoved[0], "the OTHER body's own joint, within the SAME registry sweep, must still be removed despite failingBody's own failure");
-  assertFalse(bodies.isActive("failingBody"), "the failing entry is still removed from the registry (attempted, not proof of native release - see BodyRegistry's own doc)");
-  assertFalse(bodies.isActive("okBody"));
+    "the first exception, from the ACTUALLY-first-visited body's own joint, must still be the one ultimately reported");
+  assertTrue(secondJointRemoved[0], "the body visited SECOND must still have its own joint removed despite the first body's own failure");
+  assertEquals(1, secondBody.removeCallCount, "the second body's own remove() must still run (same-body wiring, not a bare counter)");
+  assertNull(pending.get(secondVisited), "the second body's own pending entry must still be cleaned up");
+  assertEquals(1, firstBody.removeCallCount, "the FIRST (throwing) body's own remove() must still run - the joint failure must not skip this SAME body's other two actions");
+  assertNull(pending.get(firstVisited), "the first body's own pending entry must still be cleaned up despite its own joint throwing");
+  assertFalse(bodies.isActive(firstVisited));
+  assertFalse(bodies.isActive(secondVisited));
   assertTrue(bodies.isActive("nonMatchingBody"), "an entry that never matched the sweep's own predicate is left untouched, not removed");
-  assertEquals(1, pendingOnlySweepRan[0], "the independent pending-only sweep must still run despite the registry sweep's own failure");
+  assertEquals(0, nonMatchingBody.removeCallCount);
+  assertNull(pending.get("pendingOnlyKey"), "the genuinely pending-only entry (absent from BodyRegistry) must still be cleaned up by its own independent sweep despite the registry sweep's own failure");
   assertEquals(1, handbrakeSweepRan[0], "the independent handbrake/H-pattern sweep must still run despite the registry sweep's own failure");
   assertEquals(1, wheelSweepRan[0], "the independent wheel-aux sweep must still run despite the registry sweep's own failure");
+
+  // Repeat-call check: nothing left to double-touch, nothing wrongly re-touched.
+  int[] secondCallHandbrakeRan = {0};
+  assertDoesNotThrow(() -> PhysicsBridge.removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true },
+    new Runnable[]{
+      () -> bodies.removeIf((k, b) -> !k.equals("nonMatchingBody"),
+        (k, b) -> PhysicsBridge.cleanupOneBodyThreeActions(() -> hitches.release(k), b::remove, () -> pending.cleanup(k))),
+      () -> pending.removeIf(k -> k.equals("pendingOnlyKey")),
+      () -> secondCallHandbrakeRan[0]++ }), "a second call must find nothing left to remove and must not throw");
+  assertEquals(1, firstBody.removeCallCount, "a second call must not double-touch the first body's own remove()");
+  assertEquals(1, secondBody.removeCallCount, "a second call must not double-touch the second body's own remove()");
+  assertTrue(bodies.isActive("nonMatchingBody"), "the non-matching entry survives repeated calls, untouched");
+  assertEquals(1, secondCallHandbrakeRan[0], "the independent sweep itself still runs on a second call - it is unconditional, only its own target map is now empty");
+ }
+
+ /**
+  * MINECRAFT-545/547 (John's comment 55196, point 4): a LATER independent sweep (one of the
+  * pending/handbrake/H-pattern/wheel sweeps) ALSO throwing must not be confused with the
+  * EARLIER registry-sweep failure - the FIRST exception object encountered across the whole
+  * composition is the one ultimately propagated (checked by {@code assertSame}, not just
+  * message/type equality), and every step AFTER the second (later) failure must still run too.
+  */
+ @Test void aLaterIndependentSweepAlsoThrowingStillPropagatesOnlyTheFirstExceptionAndRunsRemainingSteps() {
+  RuntimeException registrySweepFailure = new RuntimeException("registry-sweep failure - occurs first");
+  RuntimeException laterSweepFailure = new RuntimeException("later independent sweep failure - occurs second");
+  int[] stepAfterRegistryRan = {0}, stepAfterLaterFailureRan = {0};
+
+  RuntimeException thrown = assertThrows(RuntimeException.class, () -> PhysicsBridge.removeIndependentResources(
+    new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true, () -> true },
+    new Runnable[]{
+      () -> { throw registrySweepFailure; }, // step 0: mirrors the registry sweep throwing
+      () -> stepAfterRegistryRan[0]++,       // step 1: mirrors pendingInheritedVelocity's own sweep - must still run
+      () -> { throw laterSweepFailure; },    // step 2: mirrors a LATER independent sweep (e.g. handbrake) also throwing
+      () -> stepAfterLaterFailureRan[0]++ })); // step 3: mirrors a sweep AFTER that later failure - must still run too
+
+  assertSame(registrySweepFailure, thrown,
+    "the FIRST exception object encountered (from the registry sweep) must be the exact one ultimately propagated, not merely an equal-looking one, and not the later sweep's own exception");
+  assertEquals(1, stepAfterRegistryRan[0], "the step immediately after the registry sweep's own failure must still run");
+  assertEquals(1, stepAfterLaterFailureRan[0], "the step after the SECOND (later) failure must still run too - a later failure must not block anything after IT either");
  }
 
  @Test void aMissingEntryIsSimplyAbsentNotAnError() {
