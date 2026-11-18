@@ -856,16 +856,20 @@ class PhysicsBridgeClassificationTest {
  }
 
  /**
-  * MINECRAFT-545/547 (John's comment 55196 - correcting the 55194-round test's own flaw):
-  * "only one entry throws" does NOT by itself prove the fix, because if that one entry happens
-  * to be visited LAST by {@code BodyRegistry}'s real (unordered) {@code IdentityHashMap}
-  * iteration, the OLD broken abort-on-first-failure code would ALSO pass - everything before it
-  * would already have completed normally before the failure ever occurred. This test instead
-  * DETERMINES the real visitation order empirically first (a dry instrumented pass over the
-  * exact same String literal objects - identical object references give identical
-  * {@code IdentityHashMap} placement, so the dry pass's own observed order is the real order the
-  * actual test run will also see), THEN configures the body that run ACTUALLY visits first to be
-  * the one that throws, and asserts on the one visited second - never assumed, always observed.
+  * MINECRAFT-545/547 (John's comment 55203 - correcting the 55196-round test's own remaining
+  * flaw): a separate "dry" {@code BodyRegistry} with only 2 entries was used to PREDICT real
+  * visitation order, then that prediction was applied to the REAL registry, which has 3 entries
+  * (the two matching bodies plus {@code nonMatchingBody}). {@code IdentityHashMap}'s internal
+  * table size/layout depends on how many entries it holds - a differently-sized map is not
+  * guaranteed to iterate the SAME two identity-hashed keys in the same order. Identity hashes
+  * alone do not guarantee identical collision/layout iteration across differently-sized maps.
+  *
+  * <p>Fixed by removing the prediction entirely: a shared "already thrown" flag means whichever
+  * matching callback the REAL sweep actually invokes FIRST is the one that throws (it is the
+  * first to observe the flag still clear), and every SUBSEQUENT matching callback observes the
+  * flag already set and completes normally - which key ends up being "first" is recorded live,
+  * as it happens, never predicted. This is deterministically correct regardless of whatever the
+  * real {@code IdentityHashMap} iteration order turns out to be, every time.
   *
   * <p>Exercises the REAL production per-body composition directly via {@link
   * PhysicsBridge#cleanupOneBodyThreeActions} (joint release + body remove + pending cleanup
@@ -875,29 +879,26 @@ class PhysicsBridgeClassificationTest {
   * genuinely pending-only entry (staged there, absent from {@code BodyRegistry} entirely).
   */
  @Test void outerSweepRunsEveryIndependentStepDespiteARegistryLevelFailureAndLeavesNonMatchingEntries() {
-  // Step 1: determine the REAL visitation order empirically, on a throwaway dry run over the
-  // exact same String literal objects (same identity => same IdentityHashMap placement/order).
-  var dryRun = new BodyRegistry<String, Object>();
-  dryRun.activate("bodyA", new Object());
-  dryRun.activate("bodyB", new Object());
-  List<String> observedOrder = new ArrayList<>();
-  dryRun.removeIf((k, b) -> true, (k, b) -> observedOrder.add(k));
-  String firstVisited = observedOrder.get(0), secondVisited = observedOrder.get(1);
-
-  // Step 2: build the REAL structures, configuring the body ACTUALLY visited first to throw.
-  var hitches = new HitchRegistry<String>();
   var bodies = new BodyRegistry<String, FakeVehicleBody>();
   var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
-  var firstBody = new FakeVehicleBody(); var secondBody = new FakeVehicleBody(); var nonMatchingBody = new FakeVehicleBody();
-  bodies.activate(firstVisited, firstBody);
-  bodies.activate(secondVisited, secondBody);
+  var bodyA = new FakeVehicleBody(); var bodyB = new FakeVehicleBody(); var nonMatchingBody = new FakeVehicleBody();
+  bodies.activate("bodyA", bodyA);
+  bodies.activate("bodyB", bodyB);
   bodies.activate("nonMatchingBody", nonMatchingBody); // never meets the sweep's own removal predicate
-  pending.stage(firstVisited, new Object());
-  pending.stage(secondVisited, new Object());
+  pending.stage("bodyA", new Object());
+  pending.stage("bodyB", new Object());
   pending.stage("pendingOnlyKey", new Object()); // genuinely absent from BodyRegistry entirely
-  hitches.reconcile(firstVisited, "truckFirst", PhysicsBridgeClassificationTest::fakeJointThatThrowsOnRemove);
-  boolean[] secondJointRemoved = {false};
-  hitches.reconcile(secondVisited, "truckSecond", () -> fakeJoint(secondJointRemoved));
+
+  // Shared "already thrown" flag: whichever matching callback the REAL sweep invokes FIRST
+  // throws; every subsequent matching callback observes the flag already set and completes
+  // normally. No prediction - this reacts to whatever the actual iteration order turns out to
+  // be, recording which key was first/second live, as the real run happens.
+  boolean[] alreadyThrown = {false};
+  List<String> actualVisitOrder = new ArrayList<>();
+  java.util.function.Function<String, Runnable> jointReleaseFor = key -> () -> {
+   actualVisitOrder.add(key);
+   if (!alreadyThrown[0]) { alreadyThrown[0] = true; throw new RuntimeException("Sable-level removal failure for " + key); }
+  };
 
   int[] handbrakeSweepRan = {0}, wheelSweepRan = {0};
 
@@ -907,21 +908,25 @@ class PhysicsBridgeClassificationTest {
       // Mirrors the real registry-sweep step in cleanup()/unload(): same predicate shape
       // (never touching "nonMatchingBody"), and the REAL per-body three-action composition.
       () -> bodies.removeIf((k, b) -> !k.equals("nonMatchingBody"),
-        (k, b) -> PhysicsBridge.cleanupOneBodyThreeActions(() -> hitches.release(k), b::remove, () -> pending.cleanup(k))),
+        (k, b) -> PhysicsBridge.cleanupOneBodyThreeActions(jointReleaseFor.apply(k), b::remove, () -> pending.cleanup(k))),
       // Mirrors pendingInheritedVelocity.removeIf - independent of BodyRegistry entirely.
       () -> pending.removeIf(k -> k.equals("pendingOnlyKey")),
       () -> handbrakeSweepRan[0]++,
       () -> wheelSweepRan[0]++ }));
 
-  assertEquals("Sable-level removal failure", thrown.getMessage(),
-    "the first exception, from the ACTUALLY-first-visited body's own joint, must still be the one ultimately reported");
-  assertTrue(secondJointRemoved[0], "the body visited SECOND must still have its own joint removed despite the first body's own failure");
-  assertEquals(1, secondBody.removeCallCount, "the second body's own remove() must still run (same-body wiring, not a bare counter)");
-  assertNull(pending.get(secondVisited), "the second body's own pending entry must still be cleaned up");
+  assertEquals(2, actualVisitOrder.size(), "both matching bodies must actually be visited exactly once each");
+  String firstKey = actualVisitOrder.get(0), secondKey = actualVisitOrder.get(1);
+  var firstBody = firstKey.equals("bodyA") ? bodyA : bodyB;
+  var secondBody = secondKey.equals("bodyA") ? bodyA : bodyB;
+
+  assertEquals("Sable-level removal failure for " + firstKey, thrown.getMessage(),
+    "the first exception, from whichever body the real sweep actually visited first, must still be the one ultimately reported");
+  assertEquals(1, secondBody.removeCallCount, "the SUBSEQUENT matching callback (visited after the throw) must still run its own full composition - same-body wiring, not a bare counter");
+  assertNull(pending.get(secondKey), "the subsequent body's own pending entry must still be cleaned up");
   assertEquals(1, firstBody.removeCallCount, "the FIRST (throwing) body's own remove() must still run - the joint failure must not skip this SAME body's other two actions");
-  assertNull(pending.get(firstVisited), "the first body's own pending entry must still be cleaned up despite its own joint throwing");
-  assertFalse(bodies.isActive(firstVisited));
-  assertFalse(bodies.isActive(secondVisited));
+  assertNull(pending.get(firstKey), "the first body's own pending entry must still be cleaned up despite its own joint throwing");
+  assertFalse(bodies.isActive("bodyA"));
+  assertFalse(bodies.isActive("bodyB"));
   assertTrue(bodies.isActive("nonMatchingBody"), "an entry that never matched the sweep's own predicate is left untouched, not removed");
   assertEquals(0, nonMatchingBody.removeCallCount);
   assertNull(pending.get("pendingOnlyKey"), "the genuinely pending-only entry (absent from BodyRegistry) must still be cleaned up by its own independent sweep despite the registry sweep's own failure");
@@ -934,7 +939,7 @@ class PhysicsBridgeClassificationTest {
     new java.util.function.BooleanSupplier[]{ () -> true, () -> true, () -> true },
     new Runnable[]{
       () -> bodies.removeIf((k, b) -> !k.equals("nonMatchingBody"),
-        (k, b) -> PhysicsBridge.cleanupOneBodyThreeActions(() -> hitches.release(k), b::remove, () -> pending.cleanup(k))),
+        (k, b) -> PhysicsBridge.cleanupOneBodyThreeActions(jointReleaseFor.apply(k), b::remove, () -> pending.cleanup(k))),
       () -> pending.removeIf(k -> k.equals("pendingOnlyKey")),
       () -> secondCallHandbrakeRan[0]++ }), "a second call must find nothing left to remove and must not throw");
   assertEquals(1, firstBody.removeCallCount, "a second call must not double-touch the first body's own remove()");
