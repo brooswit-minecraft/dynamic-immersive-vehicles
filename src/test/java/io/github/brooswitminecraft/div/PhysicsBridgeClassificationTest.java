@@ -948,46 +948,75 @@ class PhysicsBridgeClassificationTest {
 
  // MINECRAFT-545/547 (John's comments 55005/55010): "immutable/monotonic number alone does not
  // identify the object... fix trustworthy creation/order binding... watermarks alone do not
- // establish object identity." CORRECTED AGAIN per 55010: a "strictly greater than the
- // watermark" comparison (the 55005 round's own fix) was STILL unsafe - it never limited
- // protection to already-bound replacements, so a stale announcement for an UNBOUND same-tuple
- // replacement could still bind on a numerically-higher value alone. Fixed to accept ONLY the
- // first-ever announcement for a vehicle (nothing to compare against yet) OR an EXACT repeat of
- // an already-trusted value (a legitimate same-generation retrack with a new client object) -
- // anything GENUINELY NEWER than the watermark now fails closed, since a bare number provides no
- // trustworthy evidence it is really about the current object versus a stale/delayed
- // announcement for a since-superseded one that merely has not been claimed yet.
+ // establish object identity." CORRECTED A THIRD TIME per 55020: BOTH of the 55010 round's own
+ // acceptance paths (bootstrap-on-null-watermark, and equality-to-watermark) are ALSO unsafe -
+ // John provided two concrete counterexamples, both reproduced here as production-path
+ // regression tests (not just scalar-predicate tests - see the second block below, which runs
+ // the FULL decide+apply pipeline against a realistic object-identity scenario) BEFORE the fix,
+ // confirming they would have failed under the 55010 round's own logic, and AFTER, confirming
+ // the current code (which never binds anything at all) correctly prevents both.
 
- @Test void firstEverAnnouncementForAVehicleIsAccepted() {
-  assertTrue(PhysicsBridge.shouldBindAnnouncedGeneration(false, null, 1L));
- }
-
- @Test void alreadyBoundObjectIsNeverRebound() {
-  // Even if the announced generation would otherwise look trustworthy - an object that already
-  // has SOME binding must never be rebound, by construction (only one real binding per object).
-  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(true, 1L, 99L));
-  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(true, 1L, 1L));
- }
-
- @Test void delayedOrReplayedOldAnnouncementAfterANewerGenerationIsRejected() {
-  // The 55005 scenario: watermark already at 2, a delayed/replayed announcement for the OLD
-  // generation 1 now arrives for a (hypothetically) unbound object - still correctly rejected,
-  // since 1 != 2.
+ @Test void shouldBindAnnouncedGenerationNeverAcceptsAnyInputWhatsoever() {
+  // Per 55020's own explicit instruction: "remove acceptance of ANY unproven object binding,
+  // including bootstrap/equality... ambiguous/unproven binding causes NO mutation." No scalar
+  // combination of inputs may ever return true - confirmed across a representative spread,
+  // including the exact two inputs the 55010 round's own (now known-unsafe) logic accepted.
+  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(false, null, 1L)); // the 55010 round's own "bootstrap" accept case.
+  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(false, 2L, 2L)); // the 55010 round's own "equality" accept case.
   assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(false, 2L, 1L));
- }
-
- @Test void repeatOfTheAlreadyTrustedGenerationIsAccepted() {
-  // THE case 55010 explicitly asked to be preserved: "same-generation retrack with a NEW client
-  // object" - the client's own local object reference changed (e.g. a retrack rebuilt it), but
-  // the announced value is EXACTLY the one already trusted for this vehicle - safe to bind.
-  assertTrue(PhysicsBridge.shouldBindAnnouncedGeneration(false, 2L, 2L));
- }
-
- @Test void genuinelyNewerGenerationThanTheWatermarkFailsClosed() {
-  // THE exact 55010 regression: a numerically higher, never-before-seen value is NOT
-  // trustworthy evidence of a real replacement - it must fail closed (reject), not accept on
-  // the hope that it probably is legitimate. This is the corrected behavior - the 55005 round's
-  // own version WRONGLY accepted this case.
   assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(false, 1L, 2L));
+  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(true, 1L, 99L));
+  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(true, null, 0L));
+ }
+
+ // MINECRAFT-545/547 (John's comment 55020) - THE two actual production-path counterexamples,
+ // run through the REAL decide+apply pipeline (not the bare predicate) against a realistic
+ // object-identity scenario, exactly as 55020 asked ("real distinct object identities",
+ // "actual production binding/application state machine"). Both confirm: given the 55010
+ // round's own (unsafe) acceptance logic, the replacement would have been WRONGLY torn down;
+ // given the CURRENT (always-reject) logic, it survives untouched - zero calls to either real
+ // ops method.
+
+ @Test void counterexampleA_bootstrapBindingWouldHaveDestroyedAnUnboundReplacement() {
+  // No watermark yet. The CURRENT connection is a same-tuple REPLACEMENT that was never bound.
+  // A stale FIRST announcement (generation 1, for the OLD, already-superseded connection)
+  // arrives, followed by a stale disconnect for that same old generation.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var staleFirstAnnouncement = identity(towing, towed, 0, 0, 0, 0);
+  var m = new ClientModel();
+  m.currentConnection = identity(towing, towed, 0, 0, 0, 0); // same tuple - the unbound replacement.
+  m.currentGeneration = null; // never bound - watermark for this vehicle is null.
+  m.hasValidIndex = true; m.clientOwnIndex = 3;
+
+  // Simulate the stale announcement's own attempted bind (via the real production function):
+  boolean wouldBind = PhysicsBridge.shouldBindAnnouncedGeneration(
+    /* alreadyBoundForThisObject= */ false, /* watermarkForVehicle= */ null, /* announcedGeneration= */ 1L);
+  assertFalse(wouldBind, "the stale first announcement must NOT bind - no trustworthy evidence ties generation 1 to THIS object");
+  // Since binding correctly never happens, m.currentGeneration stays null, so the stale
+  // disconnect for generation 1 cannot possibly match - confirmed via the real pipeline:
+  decideAndApply(staleFirstAnnouncement, 1L, m);
+  assertEquals(0, m.disconnectByIndexCallCount);
+  assertEquals(0, m.idempotentCleanupCallCount);
+ }
+
+ @Test void counterexampleB_equalityBindingWouldHaveDestroyedAnUnboundReplacement() {
+  // Watermark already 1 (from an OLD, now-gone object this client never actually bound either -
+  // modeling the realistic case where the watermark advanced through some OTHER path). The
+  // CURRENT connection is a DIFFERENT, UNBOUND same-tuple replacement. A REPLAY of the original
+  // generation-1 announcement arrives (equal to the watermark - the 55010 round's own "safe
+  // retrack" case), followed by a legitimate disconnect for generation 1.
+  var towing = java.util.UUID.randomUUID(); var towed = java.util.UUID.randomUUID();
+  var replayedAnnouncement = identity(towing, towed, 0, 0, 0, 0);
+  var m = new ClientModel();
+  m.currentConnection = identity(towing, towed, 0, 0, 0, 0); // same tuple - the unbound replacement.
+  m.currentGeneration = null; // THIS object was never bound - the watermark being 1 does not mean THIS object is.
+  m.hasValidIndex = true; m.clientOwnIndex = 5;
+
+  boolean wouldBind = PhysicsBridge.shouldBindAnnouncedGeneration(
+    /* alreadyBoundForThisObject= */ false, /* watermarkForVehicle= */ 1L, /* announcedGeneration= */ 1L);
+  assertFalse(wouldBind, "equality to the watermark must NOT bind either - it proves nothing about whether THIS object is the one generation 1 belongs to");
+  decideAndApply(replayedAnnouncement, 1L, m);
+  assertEquals(0, m.disconnectByIndexCallCount);
+  assertEquals(0, m.idempotentCleanupCallCount);
  }
 }

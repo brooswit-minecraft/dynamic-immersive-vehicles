@@ -1522,7 +1522,8 @@ public final class PhysicsBridge {
   * {@code DynamicImmersiveVehicles}) - {@link #cleanup()} no longer performs this sweep at all,
   * so this never runs twice in the same tick (no duplicate dispatch).
   */
- public static void releaseOrphanedTowingConnections() {
+ public static void releaseOrphanedTowingConnections(net.minecraft.server.MinecraftServer server) {
+  processPendingTrackerAnnounces(server);
   var active = new java.util.ArrayList<EntityVehicleF_Physics>();
   registry.forEachActive((v, b) -> active.add(v));
   // MINECRAFT-545/547 (John's comment 54991): "show the actual production call sites, not
@@ -1761,24 +1762,78 @@ public final class PhysicsBridge {
   if (connection != null) connectionGenerations.remove(connection);
  }
 
- /** MINECRAFT-545/547 (John's comment 55010): the {@code PlayerEvent.StartTracking}-driven
-  * announce - registered from {@code DynamicImmersiveVehicles} on the common event bus (this
-  * event is server-side, confirmed by reading its own real NeoForge doc comment: fired when a
-  * specific player begins tracking a specific entity). Replaces the 55005 round's own blind,
-  * fixed-length retry window: every late join/retrack is now covered by an ACTUAL tracking
-  * event, for exactly the one newly-tracking player, with no timer and no window to miss. Takes
-  * the raw vanilla {@code Entity} the event itself provides (never a cached/captured reference)
-  * and re-derives the CURRENT connection fresh from the business entity's own live state on
-  * every call - so an already-superseded or already-normally-disconnected connection is never
-  * re-announced, closing the other half of the 55005 round's own retry-loop staleness risk. */
+ /** MINECRAFT-545/547 (John's comment 55020): "StartTracking does not prove business entity/
+  * connection initialization; current missing-local-state drop loses delivery." Confirmed: the
+  * 55010 round's own version returned silently (dropping the announcement permanently) if the
+  * business entity wasn't yet linked to its builder, or the connection/generation wasn't yet
+  * assigned, at the EXACT tick tracking started - a real race window, not merely theoretical
+  * (entity linking and this class's own per-tick generation assignment do not happen atomically
+  * with vanilla's own tracking-start). Fixed with a BOUNDED per-tracking retry (never an
+  * unbounded one): {@link #pendingTrackerAnnounces} queues the (player, target) pair for a few
+  * more ticks if the first attempt is not yet ready, re-processed by
+  * {@link #processPendingTrackerAnnounces()} from the SAME per-tick sweep. */
+ private record PendingTrackerAnnounce(java.util.UUID playerUuid, java.util.UUID targetUuid, int ticksRemaining) {}
+ private static final int TRACKER_ANNOUNCE_RETRY_TICKS = 20;
+ private static final java.util.List<PendingTrackerAnnounce> pendingTrackerAnnounces = new java.util.ArrayList<>();
+
+ /** The {@code PlayerEvent.StartTracking}-driven announce - registered from
+  * {@code DynamicImmersiveVehicles} on the common event bus (this event is server-side,
+  * confirmed by reading its own real NeoForge doc comment: fired when a specific player begins
+  * tracking a specific entity). Replaces the 55005 round's own blind, fixed-length global retry
+  * window: every late join/retrack is covered by an ACTUAL tracking event, for exactly the one
+  * newly-tracking player, with a small BOUNDED per-tracking retry (not a global one) for the
+  * genuine initialization race 55020 identified. */
  public static void announceConnectionGenerationToNewTracker(net.minecraft.server.level.ServerPlayer player, net.minecraft.world.entity.Entity target) {
-  if (!(target instanceof mcinterface1211.BuilderEntityExisting builder)) return;
-  if (!(mcinterface1211.InterfaceInterface.toInternal(builder) instanceof EntityVehicleF_Physics v)) return;
-  var conn = v.towedByConnection; // re-derived fresh, right here, right now - never a stale capture.
-  if (conn == null) return;
+  if (!tryAnnounceToTracker(player, target.getUUID())) {
+   pendingTrackerAnnounces.add(new PendingTrackerAnnounce(player.getUUID(), target.getUUID(), TRACKER_ANNOUNCE_RETRY_TICKS));
+  }
+ }
+
+ /** Returns {@code true} if this attempt is DONE (either genuinely sent, or genuinely
+  * inapplicable - not a towed vehicle, or legitimately has no connection right now) and should
+  * NOT be retried; {@code false} only when the business entity/connection/generation is not yet
+  * initialized and a retry may still resolve it. Re-derives everything fresh from
+  * {@code targetUuid} on every call - never a captured reference - so an already-superseded or
+  * already-normally-disconnected connection is never (re)announced. */
+ private static boolean tryAnnounceToTracker(net.minecraft.server.level.ServerPlayer player, java.util.UUID targetUuid) {
+  // player.level() is declared Level, which has no getEntity(UUID) overload - only
+  // ServerLevel does (confirmed by reading its own decompiled source); a ServerPlayer's level
+  // is always a ServerLevel in practice, so this cast is safe, never a guess.
+  var level = (net.minecraft.server.level.ServerLevel) player.level();
+  var target = level.getEntity(targetUuid);
+  if (target == null) return true; // the entity itself is gone (despawned/unloaded) - nothing left to retry for.
+  if (!(target instanceof mcinterface1211.BuilderEntityExisting builder)) return true; // not a business-entity wrapper at all.
+  var business = mcinterface1211.InterfaceInterface.toInternal(builder);
+  if (business == null) return false; // builder exists but not yet linked to its own business entity - retry.
+  if (!(business instanceof EntityVehicleF_Physics v)) return true; // linked, but not a towing-capable vehicle - done, nothing to announce, ever.
+  var conn = v.towedByConnection;
+  if (conn == null) return true; // genuinely no connection right now - not a race, just nothing to announce.
   Long generation = connectionGenerations.get(conn);
-  if (generation == null) return; // not yet assigned (or already torn down) - nothing trustworthy to announce yet.
+  if (generation == null) return false; // connection exists but this tick's own generation assignment hasn't run yet - retry.
   net.neoforged.neoforge.network.PacketDistributor.sendToPlayer(player, new ConnectionGenerationPayload(toIdentity(conn), generation, false));
+  return true;
+ }
+
+ /** Called once per tick (from {@link #releaseOrphanedTowingConnections}'s own sweep) - retries
+  * every still-pending tracker announcement, bounded by its own remaining tick count; expires
+  * (silently gives up - this is already the SECOND layer of delivery attempt, after the
+  * original StartTracking-driven one, and remains a best-effort announce, never a correctness
+  * requirement, since {@link #shouldBindAnnouncedGeneration} never actually binds anything
+  * regardless - see that method's own doc) once a pending entry's own window runs out. Player
+  * lookup via {@code MinecraftServer.getPlayerList().getPlayer(UUID)} - the genuinely public,
+  * supported vanilla accessor for exactly this purpose. */
+ private static void processPendingTrackerAnnounces(net.minecraft.server.MinecraftServer server) {
+  if (pendingTrackerAnnounces.isEmpty()) return;
+  var stillPending = new java.util.ArrayList<PendingTrackerAnnounce>();
+  for (var pending : pendingTrackerAnnounces) {
+   var player = server.getPlayerList().getPlayer(pending.playerUuid());
+   boolean done = player == null || tryAnnounceToTracker(player, pending.targetUuid());
+   if (!done && pending.ticksRemaining() > 1) {
+    stillPending.add(new PendingTrackerAnnounce(pending.playerUuid(), pending.targetUuid(), pending.ticksRemaining() - 1));
+   }
+  }
+  pendingTrackerAnnounces.clear();
+  pendingTrackerAnnounces.addAll(stillPending);
  }
 
  /** MINECRAFT-545/547 (John's comment 55010): CORRECTED - the 55005 round's own
@@ -1794,38 +1849,41 @@ public final class PhysicsBridge {
   * side-agnostic decision ({@link #shouldBindAnnouncedGeneration}, no Minecraft/MTS object
   * dependency at all) remains here, directly below, consistent with every other pure policy in
   * this file. */
- /** MINECRAFT-545/547 (John's comment 55010): CORRECTED AGAIN - the 55005 round's own fix
-  * ("strictly greater than the watermark is safe to bind") was NOT actually safe: it never
-  * limited protection to already-bound replacements, so a stale announcement for an UNBOUND
-  * same-tuple replacement could still bind (a numerically-higher, never-before-seen generation
-  * provides no trustworthy evidence it is actually about the CURRENT object, only that nothing
-  * else has claimed that number yet) - a subsequent, matching stale DISCONNECT notification
-  * would then correctly "match" the wrongly-bound state and tear down a connection that was
-  * never actually superseded by anything the client has real evidence for.
-  * <p>Per John's own explicit instruction ("immediately fail closed on any binding lacking
-  * trustworthy creation/order evidence... watermarks alone do not establish object identity"):
-  * a bare generation VALUE, with no object reference and no stronger protocol, can never
-  * trustworthily distinguish "this is genuinely the current object's own announcement" from
-  * "this is a stale/delayed announcement for a since-superseded object that merely has not been
-  * claimed yet." The only value a bare number CAN trustworthily confirm is EQUALITY to an
-  * already-bound value (e.g. a legitimate retrack with a new client-side object reference for
-  * the SAME still-current generation - the exact case 55010 separately asked to be preserved).
-  * Any value STRICTLY GREATER than the current watermark is therefore a genuinely NEW
-  * generation this client has no trustworthy evidence about yet, and is REJECTED (fails
-  * closed) rather than accepted on the hope that it probably is legitimate.
-  * <p><b>Explicit, standing acceptance gap</b> (not glossed over): once a real replacement
-  * occurs for a given towed vehicle, THIS client will never again be protected for that
-  * specific vehicle (no further binding ever succeeds) until a genuine session boundary
-  * (logout/rejoin, world unload) resets its own watermark. Only the FIRST connection a client
-  * ever observes for a given towed vehicle in a session is ever protected by this mechanism.
-  * Closing this fully requires a stronger protocol than a bare counter - most plausibly an
-  * upstream MTS connection-generation/session field carried end-to-end, or a handshake/
-  * acknowledgment scheme DIV would need to design and implement as its own separate, larger
-  * follow-on - cited here as the precise impossibility, not asserted away. */
+ /** MINECRAFT-545/547 (John's comment 55020): CORRECTED A THIRD TIME - both of the 55010
+  * round's own own acceptance paths (bootstrap-on-null-watermark, and equality-to-watermark)
+  * are ALSO unsafe, confirmed by two concrete counterexamples John provided:
+  * <p><b>Counterexample A (bootstrap)</b>: no watermark yet for this vehicle; the client's
+  * CURRENT connection is actually an UNBOUND same-tuple REPLACEMENT (a prior connection existed
+  * and was replaced, but neither one was ever successfully bound). A STALE announcement for the
+  * FIRST (now-superseded) generation arrives. Because the watermark is null, the 55010 round's
+  * own code accepted this as "first-ever" and bound the CURRENT (different!) object to the OLD
+  * generation. A later disconnect notification for that old generation then correctly "matches"
+  * the wrongly-bound state and tears down the replacement.
+  * <p><b>Counterexample B (equality)</b>: the watermark is already set from an OLD, now-gone
+  * object. The client's CURRENT connection is a DIFFERENT, UNBOUND same-tuple replacement. A
+  * REPLAY of the original announcement (whose generation value equals the watermark) arrives.
+  * Equality to the watermark was treated as proof of a safe "retrack," but it proves nothing of
+  * the kind here - the CURRENT object is not, and never was, the one that generation value
+  * actually belongs to; it only happens to share a tuple and a coincidentally-matching number.
+  * Binding it anyway, then later matching a legitimate disconnect notification for that same
+  * value, again tears down the replacement.
+  * <p>Both counterexamples share the same root cause: a bare generation VALUE plus a bare
+  * TUPLE match, with no actual reference tying a specific announcement to a specific object,
+  * can NEVER trustworthily prove "this announcement is about the object the client currently
+  * holds" - not on first sight, not on a repeat, not under any scalar comparison. Per John's own
+  * explicit instruction ("remove acceptance of ANY unproven object binding, including bootstrap/
+  * equality... ambiguous/unproven binding causes NO mutation, even if notification
+  * functionality remains incomplete"): this method now ALWAYS returns {@code false}. The
+  * stale-disconnect-notification mechanism, as currently designed, is NOT safe to ever act on a
+  * binding, and is left intentionally non-functional (every notification resolves
+  * {@code AMBIGUOUS_NO_OP}, since nothing is ever bound) rather than papering over the gap with
+  * another scalar heuristic. See VERIFICATION.md's own "Per 55020" entry for the architecture
+  * review John asked for before any further networking patch - a coherent supported protocol
+  * (most plausibly a real handshake tying a specific client-local object to a specific
+  * server-assigned token, or an upstream MTS connection-identity field) is required before this
+  * method can safely return {@code true} for anything. */
  public static boolean shouldBindAnnouncedGeneration(boolean alreadyBoundForThisObject, Long watermarkForVehicle, long announcedGeneration) {
-  if (alreadyBoundForThisObject) return false;
-  if (watermarkForVehicle == null) return true; // first-ever for this vehicle - nothing to compare against; must accept something once, or the mechanism can never bootstrap at all.
-  return announcedGeneration == watermarkForVehicle; // ONLY an already-trusted, identical value (e.g. a same-generation retrack) is safe - anything newer has no trustworthy creation/order evidence and fails closed.
+  return false;
  }
 
  /** What a client receiving a (proposed, not-yet-implemented) stale-disconnect notification

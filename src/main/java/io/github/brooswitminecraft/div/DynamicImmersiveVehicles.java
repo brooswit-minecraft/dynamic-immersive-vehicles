@@ -35,7 +35,7 @@ public final class DynamicImmersiveVehicles {
   // PhysicsBridge.releaseOrphanedTowingConnections's own doc for the full derivation. Extracted
   // from cleanup() (below), which no longer performs this sweep - never both, no duplicate
   // dispatch.
-  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Pre event) -> PhysicsBridge.releaseOrphanedTowingConnections());
+  NeoForge.EVENT_BUS.addListener((ServerTickEvent.Pre event) -> PhysicsBridge.releaseOrphanedTowingConnections(event.getServer()));
   NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> PhysicsBridge.cleanup());
   // Ticket MINECRAFT-504: per-server-tick continuation for the hybrid H-pattern climb and the
   // analog handbrake's staleness timeout - see PhysicsBridge.advanceWheelAuxInputs's own doc for

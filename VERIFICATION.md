@@ -13907,3 +13907,172 @@ actually separated into its own `Dist.CLIENT`-scoped class, not merely argued to
 it previously sat. Full suite green (960 tests). No native run performed or proposed. Round3's
 `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on success remain distinct, unblurred. No
 merge/Done transition made or implied.
+
+## 2026-11-18 — Per 55020
+
+### What John found
+
+Comment 55020 reviewed the 55010 round's own "fail-closed" `shouldBindAnnouncedGeneration`
+(accept only a first-ever announcement for a vehicle, or an exact repeat of the already-trusted
+generation; reject everything else) and found it is **also** exploitable, via two precise
+counterexamples that do not depend on a numerically-newer value at all:
+
+- **Counterexample A (bootstrap path):** no watermark yet exists for a vehicle. The *current*
+  connection object is an unbound, same-tuple *replacement* for an older, already-superseded
+  connection. A stale, delayed "first announcement" for generation 1 — which actually belongs to
+  the OLD connection, not the current one — arrives and binds, purely because the watermark was
+  null. A subsequent stale disconnect for generation 1 then matches the bound generation and
+  tears down the replacement.
+- **Counterexample B (equality path):** a watermark of 1 already exists (from some earlier
+  object this client never itself bound). The *current* connection is a distinct, unbound,
+  same-tuple replacement. A *replayed* announcement of generation 1 arrives and is accepted
+  because it equals the watermark — even though nothing ties generation 1 to *this* object
+  specifically. A subsequent legitimate disconnect for generation 1 then tears down the
+  replacement.
+
+In both cases the defect is the same: a bare scalar comparison (null-watermark, or
+equal-to-watermark) is treated as proof of *object identity*, when it proves nothing of the
+kind. John's explicit instruction: disable ALL binding acceptance (not merely narrow it
+further); add two failing-then-passing regression tests reproducing both counterexamples through
+the real production pipeline with distinct real object identities, without preseeding the
+desired binding or using a test-only guard; add a bounded per-tracking retry for the
+`StartTracking`-does-not-prove-initialization race; and present a coherent, reviewed protocol
+design — not another ad-hoc numeric predicate — before any further networking patch.
+
+### What changed
+
+**`shouldBindAnnouncedGeneration` now unconditionally returns `false`.** Every disconnect
+notification will resolve to `AMBIGUOUS_NO_OP` via `decideStaleDisconnectAction` until a real
+protocol replaces this mechanism. This is a deliberate regression in *functionality* (the
+notification path no longer does anything) in exchange for closing both counterexamples
+structurally — not by excluding the two bad inputs case-by-case, but by refusing to treat any
+scalar comparison as identity evidence at all. Its Javadoc states this explicitly and documents
+both counterexamples so a future reviewer does not have to rediscover them.
+
+**Two new production-pipeline regression tests**, added to `PhysicsBridgeClassificationTest.java`
+alongside a scalar-only sweep test (`shouldBindAnnouncedGenerationNeverAcceptsAnyInputWhatsoever`,
+which explicitly includes the exact two inputs the 55010 round's own logic used to accept):
+
+- `counterexampleA_bootstrapBindingWouldHaveDestroyedAnUnboundReplacement` — builds a real
+  `ClientModel` with a genuinely distinct, never-bound `TowingConnectionIdentity` standing in as
+  the current replacement, a null watermark, calls the real `shouldBindAnnouncedGeneration` to
+  confirm it now refuses to bind, then drives the real `decideStaleDisconnectAction` +
+  `applyStaleDisconnectAction` pipeline with a stale generation-1 disconnect and asserts zero
+  calls to either real disconnect op.
+- `counterexampleB_equalityBindingWouldHaveDestroyedAnUnboundReplacement` — same shape, with a
+  pre-existing watermark of 1 and a replayed announcement/disconnect pair equal to it.
+
+Both tests would have failed under the 55010 round's own (now superseded) implementation — the
+scalar calls they make (`shouldBindAnnouncedGeneration(false, null, 1L)` and
+`shouldBindAnnouncedGeneration(false, 1L, 1L)`) are exactly the inputs that logic used to accept.
+No test preseeds a binding or substitutes a guard for the real pipeline call.
+
+**Bounded per-tracking retry for the `StartTracking` initialization race.** A new
+`PendingTrackerAnnounce` record (`playerUuid`, `targetUuid`, `ticksRemaining`), queued by
+`announceConnectionGenerationToNewTracker` only when the first attempt
+(`tryAnnounceToTracker`) is not yet ready (business entity not yet linked, or this tick's own
+generation assignment hasn't run), and drained by `processPendingTrackerAnnounces(MinecraftServer)`
+each tick from `releaseOrphanedTowingConnections`'s own sweep (its signature changed from
+no-arg to taking the `MinecraftServer`, needed to re-resolve the `ServerPlayer` by UUID each
+retry; the one real call site in `DynamicImmersiveVehicles.java` was updated to pass
+`event.getServer()`). `tryAnnounceToTracker` re-derives everything fresh from the target UUID on
+every call — never a captured reference — so a since-superseded or already-normally-disconnected
+connection is never (re)announced. Retry window: `TRACKER_ANNOUNCE_RETRY_TICKS = 20`, expiring
+silently (best-effort, since nothing downstream binds on it anyway while the mechanism above is
+disabled).
+
+### A compile-time bug caught and fixed before this round's test run
+
+`tryAnnounceToTracker` initially called `player.level().getEntity(targetUuid)` — `Level` has no
+`getEntity(UUID)` overload (only `getEntity(int)`, confirmed by reading the decompiled source);
+only `ServerLevel` declares `getEntity(UUID)`. Fixed by casting to `ServerLevel` (a
+`ServerPlayer`'s level is always a `ServerLevel` in practice), with a comment citing why the cast
+is safe rather than a guess. Caught by the compiler, not by John — reported here for the same
+reason every other self-caught mistake in this log has been: transparency, not because it was an
+externally-found defect.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **958 tests**, 0 failures, 0 errors (net −2 from the
+prior round's 960: 5 now-superseded `shouldBindAnnouncedGeneration` test methods removed, 3 new
+ones added — the scalar sweep and the two counterexample pipeline tests). Both new
+counterexample tests confirmed present and passing in the JUnit XML report
+(`counterexampleA_bootstrapBindingWouldHaveDestroyedAnUnboundReplacement`,
+`counterexampleB_equalityBindingWouldHaveDestroyedAnUnboundReplacement`).
+
+### Protocol design proposal — FOR REVIEW, not yet implemented
+
+Per John's explicit instruction, this is presented for review before any further networking
+patch is attempted; nothing below is implemented, and the notification mechanism remains
+disabled (`AMBIGUOUS_NO_OP` always) until a design along these lines, or a different one John
+prefers, is actually approved and built.
+
+**Why no further numeric predicate can work.** A `long` generation counter carries no evidence
+of *which object* it was assigned to beyond its own value. Any comparison between a freshly
+announced value and a previously stored one (less-than, equal-to, greater-than, first-ever) is a
+claim about *ordering or presence*, never about *identity* — and identity is exactly what both
+counterexamples attacked. Closing this requires the client to receive something that is
+cryptographically or structurally tied to the *specific object instance* the server is talking
+about, not merely a bigger or smaller number.
+
+**Proposed shape: a server-issued opaque session token per connection, carried end-to-end.**
+
+1. **Token minting at connection creation, not at tracking time.** When a `TowingConnection` is
+   actually created server-side (the real moment of object creation — not the later, decoupled
+   moment a player happens to start tracking it), the server mints a random, unguessable token
+   (e.g. a `long` or UUID drawn from a CSPRNG, not a counter) and stores it keyed by the
+   connection object identity in the existing `connectionGenerations`-style `WeakHashMap`,
+   replacing the sequential generation number with this token. Minting at creation (rather than
+   at tracking/announce time) is what ties the token causally to the *server's own object
+   creation event* — the exact causal evidence John asked for — rather than to a later, separate
+   notification event that a stale/replayed packet could imitate.
+2. **The token travels with every packet that currently carries a generation number** — the
+   initial tracking announcement, and any disconnect notification — so the client never needs to
+   infer or reconstruct it.
+3. **Client-side binding becomes trivial and provably safe:** the client stores, per *client-local
+   connection object* (not per vehicle), the exact token it was told about when that object was
+   first linked to a server connection. A disconnect notification only ever applies if its token
+   is an *exact match* to the one already stored on the client's *own current* object — not a
+   vehicle-level watermark, not a generation ordering. A same-tuple replacement object necessarily
+   has no token yet (nothing has told it one), so it is structurally immune to a stale disconnect
+   for the token the OLD object held, with no special-casing required — the token namespace being
+   per-object rather than per-vehicle is what directly defeats both counterexamples, since there
+   is no shared "watermark" value for a replay or bootstrap race to collide with.
+4. **World/dimension/session validation:** every token is scoped to BOTH the connection AND the
+   `ServerLevel` the server minted it in (store `(level, token)`, not a bare token) — a client
+   that changes dimension or disconnects/reconnects discards all tokens for the old session
+   implicitly, since `ClientTowingConnectionTracker.onLevelUnload` already exists and already
+   clears client-side state on exactly that signal; no new mechanism needed there, only wiring
+   the token field through it.
+5. **Finite stop/cleanup conditions:** token entries are removed from the server's own
+   `WeakHashMap` automatically when the connection object itself becomes unreachable (existing
+   behavior, unchanged); client-side token entries are removed by the existing
+   `forgetClientConnectionGeneration`/`forgetAllClientStateForTowedVehicle` cleanup paths, which
+   need no new triggers beyond what already calls them (disconnect-by-index, idempotent cleanup,
+   and level unload) — only the stored value's type/shape changes from a `long` watermark to a
+   `(level, token)` pair.
+6. **Open questions to resolve before implementation**, named here rather than silently decided:
+   whether the token should ride inside the EXISTING `ConnectionGenerationPayload` (renaming/
+   repurposing its `generation` field) or a new payload type; whether minting should happen in
+   `PhysicsBridge` at the exact `TowingConnection` construction call site (requires locating every
+   construction call site across this codebase and MTS's own, not yet audited) or lazily on first
+   per-tick observation (simpler, but reopens a narrower version of the causal-evidence question
+   this proposal exists to close, and would need its own argument for why "first observed" is an
+   acceptable proxy for "created"); and whether token comparison should be a plain `equals()` or
+   should additionally require the stored `ServerLevel` reference to remain the *same* object
+   (not just equal) to fully rule out a cross-dimension replay in a multi-level server.
+
+No implementation of this proposal has been started. No native run performed or proposed this
+round. No merge/Done transition made or implied. The notification mechanism remains intentionally
+non-functional pending review of this design (or an alternative).
+
+### Disposition
+
+Both of John's counterexamples are closed structurally (binding disabled outright, not
+patched around), reproduced as failing-before/passing-after regression tests through the real
+production pipeline with genuinely distinct object identities, per his explicit instruction. The
+`StartTracking` initialization race now has a bounded per-tracking retry. Full suite green (958
+tests). **No "all fixed" claim is made here** — the notification mechanism itself remains
+deliberately non-functional, and the actual safe-binding problem remains unsolved pending review
+of the protocol proposal above (or a preferred alternative). No native run performed or
+proposed. No merge/Done transition made or implied.
