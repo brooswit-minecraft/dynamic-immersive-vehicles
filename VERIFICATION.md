@@ -16807,24 +16807,36 @@ Full suite, exact head `4ebd572`: **1184 tests, 0 failures, 0 errors**.
 | Historical default-OFF (5 original crashes) | pre-session | `TOWING_REPLACEMENT` crash | Pre-session historical evidence, retained |
 | `9732b32` default-OFF (`...replacementprobe-round2`) | `9732b32` | `TOWING_UNAVAILABLE` FAILED + separate post-verdict NPE | This session, round2 — the crash that triggered the dead-handle guard fix |
 | `3f7054b` candidate-ON, guard fix included (`...flagon-frozen`) | `3f7054b` | All 7 phases PASS, zero exceptions | This session — confirms the guard fix prevents the crash; candidate flag still required at this point |
-| `5cb937f` default-OFF, guard fix included (`...flagon-off-frozen`) | `5cb937f` | `TOWING_UNAVAILABLE` FAILED, deterministically identical to round2's own divergence (same tick, same displacement value), but zero exceptions | This session — isolates the guard fix (prevents the crash-after-failure) from the physics instability itself (unaffected, still fails identically) |
-| **`4ebd572` bounded-by-default, no flag needed (`...shipping-default-round2`)** | `4ebd572` | **All 7 phases PASS, zero exceptions**, `sequentialDragBoundDefault=true` confirmed genuinely active (69 real diagnostic rows) | **This session — the shipping-default validation. Same exact scenario that failed deterministically in both prior OFF configurations now passes on the actual production default, no opt-in flag required.** |
+| `5cb937f` default-OFF, guard fix included (`...flagon-off-frozen`) | `5cb937f` | `TOWING_UNAVAILABLE` FAILED, the same displayed tick (4) and the same displayed displacement value (25.703947387170558) as round2's own divergence, but zero exceptions | This session — isolates the guard fix (prevents the crash-after-failure) from the physics instability itself |
+| **`4ebd572` bounded-by-default, no flag needed (`...shipping-default-round2`)** | `4ebd572` | **All 7 phases PASS, zero exceptions**, `sequentialDragBoundDefault=true` confirmed genuinely active (69 real diagnostic rows) | **This session — the shipping-default validation. The same named scenario that failed deterministically in both prior OFF configurations now passes on the actual production default, no opt-in flag required.** |
 
-This progression — OFF fails identically twice, ON (with guard) passes, DEFAULT (with guard AND the
-drag-integration fix, no flag) passes on the same scenario that failed as OFF — is the actual
-empirical basis for this fix, not an inference from source reading alone. The two OFF failures
-being bit-identical (same tick, same displacement value) on a fixed seed is what establishes the
-guard fix and the physics fix as logically separable: the guard stops the crash, the drag fix
-stops the divergence, and both were independently confirmed in isolation before being combined.
+**Corrected per the kickback review (comments 55174/55177/55178) — do not overstate this
+progression.** Matching displayed terminal values (the same tick number, the same displacement
+value at the FAILED line) between round2 and the 5cb937f OFF run is NOT byte-identical
+full-trajectory evidence, and this comparison is NOT a sole-variable isolation: `5cb937f` and
+round2's own base differ in more than the guard fix alone (the full set of confounds is already
+disclosed in the 55138/55139/55149 rounds' own entries above - different source revisions
+entirely, not a controlled single-variable pair). What this progression actually shows, stated at
+the correct strength: the SAME two displayed terminal values recur across an OFF run with the
+guard fix present, consistent with (not proof of) the physics instability being unaffected by
+that fix, while the candidate-ON and bounded-DEFAULT configurations - which do differ from the OFF
+runs in the one specific drag-integration code path - both PASS cleanly on the same named
+scenario. This is strong, repeated, bounded evidence for the hypothesis; it is not a controlled
+single-variable experiment and must not be described as one.
 
 ### Cleanup-assertion honesty, explicit (per John's own repeated standard this round)
 
 Per-resource cleanup was NOT uniformly confirmed in the `4ebd572` native run: of 5 fixture
-vehicles, 1 had a direct post-remove native-state confirmation, 2 were inferred only from absence
-of exception, and 2 were never despawned within the run at all (left to ordinary server shutdown).
-World-save and chunk-grid release are confirmed; they are NOT proof every fixture's native handle
-was actually invalidated. This gap is pre-existing (present in every native run this entire
-session, not introduced by this round's fix) and is disclosed here rather than implied resolved.
+vehicles, 1 had a logged `post-remove() ... towing.isValid=false` line, 2 were inferred only from
+absence of exception, and 2 were never despawned within the run at all (left to ordinary server
+shutdown). **Corrected per the kickback review (comment 55177)**: that one logged `isValid=false`
+observation is evidence at the MTS wrapper-entity level, not proof the underlying native Sable
+physics handle was itself destroyed — these are two different layers, and the one does not
+establish the other. World-save and chunk-grid release are likewise confirmed only at the
+terrain/world level; neither is proof every fixture's own native handle was actually invalidated.
+This gap is pre-existing (present in every native run this entire session, not introduced by
+this round's fix) and is disclosed here, at its correct evidentiary strength, rather than implied
+resolved.
 
 ### Fallback source-equivalence (already-established reasoning, restated for this matrix)
 
@@ -16837,10 +16849,15 @@ implied as a fresh validation.
 
 ### M547 client-sync gap — still open, unaffected by this round
 
-The generation-based client-notification/binding protocol remains intentionally disabled
-(`shouldBindAnnouncedGeneration` always returns `false`) pending a future protocol design, tracked
-on MINECRAFT-547 as a linked, unresolved follow-up — not a waived acceptance item. Nothing in this
-round's native physics work touches that mechanism.
+**Corrected per the kickback review (comments 55177/55178)**: the generation-based client
+notification/binding protocol is not something currently shipping in a disabled state —
+`shouldBindAnnouncedGeneration` and the entire client-protocol experiment (including
+`ConnectionGenerationPayload`, `ClientTowingConnectionTracker`, and the StartTracking hooks) were
+REMOVED entirely by the `98c41cc` server-only extraction earlier this session, not merely
+toggled off. The current shipping code contains none of that mechanism at all. A safe
+client-synchronization protocol remains undesigned and is tracked on MINECRAFT-547 as a
+deferred, not-yet-built follow-up — not a waived acceptance item, and not a disabled feature
+flag waiting to be re-enabled. Nothing in this round's native physics work touches this area.
 
 ### CI
 
