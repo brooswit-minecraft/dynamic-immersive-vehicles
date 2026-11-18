@@ -1270,6 +1270,14 @@ public final class PhysicsBridge {
   * dependency) - directly unit-testable with fake keys/a fake body, the same seam-testing
   * pattern {@link #activateOrClassify} already uses for registry-dependent logic that can't
   * construct a real {@code EntityVehicleF_Physics}.
+  *
+  * <p>MINECRAFT-545/547 (John's comment 55104): the ORIGINAL version of this method called
+  * {@code hitches.release(key)} before {@code pendingInheritedVelocity.cleanup(key)} with no
+  * guard between them - a throwing {@code release} (itself now hardened against the same
+  * partial-cleanup gap, see {@link HitchRegistry#release}'s own doc) would still have skipped
+  * this method's own SECOND, independent cleanup step. {@code cleanup(key)} now always runs
+  * regardless of whether {@code release(key)} throws; the exception itself (if any) is still
+  * re-thrown afterward, not swallowed.
   */
  static <K, B extends VehicleBody> B activeOrReclaimStale(
      BodyRegistry<K, B> registry, HitchRegistry<K> hitches, PendingReplacementState<K, ?> pendingInheritedVelocity, K key) {
@@ -1277,8 +1285,14 @@ public final class PhysicsBridge {
   if (body == null) return null;
   if (!body.isActive()) {
    registry.deactivate(key);
-   hitches.release(key);
+   RuntimeException releaseFailure = null;
+   try {
+    hitches.release(key);
+   } catch (RuntimeException ex) {
+    releaseFailure = ex;
+   }
    pendingInheritedVelocity.cleanup(key);
+   if (releaseFailure != null) throw releaseFailure;
    return null;
   }
   return body;
@@ -2772,7 +2786,18 @@ public final class PhysicsBridge {
    if (twoBodyActive) TwoBodyLifecycle.remove(level, new TwoBodyLifecycle.Bodies(upperBox,box,upperHandle,handle,twoBodyJoint));
    else c.physicsSystem().removeObject(box);
   }
-  public boolean isActive() { return box.isActive(); }
+  /**
+   * MINECRAFT-545/547 (John's comment 55103 - "Body.isActive currently lower-box only"): for a
+   * two-body vehicle, {@code step()} (see the {@code upperHandle.getLinearVelocity}/
+   * {@code getAngularVelocity} calls below, gated on {@code twoBodyActive}) touches BOTH boxes'
+   * own native handles, not just the primary {@code box} - a partial-invalidity state (one box
+   * removed, the other not) is exactly as crashable as the single-body case this guard was
+   * originally built for. Both boxes must report active for this body to be considered safely
+   * steppable; for a non-two-body vehicle ({@code twoBodyActive == false}), {@code upperBox} is
+   * always {@code null} (see this constructor's own else-branch) and irrelevant, so this
+   * correctly reduces to the original single-box check.
+   */
+  public boolean isActive() { return box.isActive() && (!twoBodyActive || upperBox.isActive()); }
   // MINECRAFT-545/547 (John's comment 54365): a real, independently-checkable freshness marker
   // for box.getPose()'s cached value - the Minecraft gameTime at which THIS body's own
   // box.updatePose() last actually ran, set immediately below it. Diagnostic bookkeeping only

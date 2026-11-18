@@ -703,4 +703,77 @@ class PhysicsBridgeClassificationTest {
   var result = PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "never-registered");
   assertNull(result);
  }
+
+ /** A joint whose own remove() throws - the real GenericConstraintHandle shape, same as
+  * HitchRegistryTest's own fake joints, deliberately misbehaving on this one call. */
+ private static dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle fakeJointThatThrowsOnRemove() {
+  return new dev.ryanhcode.sable.api.physics.constraint.GenericConstraintHandle() {
+   public void setFrame1(org.joml.Vector3dc pos, org.joml.Quaterniondc orientation) {}
+   public void setFrame2(org.joml.Vector3dc pos, org.joml.Quaterniondc orientation) {}
+   public void setLimit(dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis axis, double lower, double upper) {}
+   public void lockAxes(dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis... axes) {}
+   public void getJointImpulses(org.joml.Vector3d linear, org.joml.Vector3d angular) {}
+   public void setContactsEnabled(boolean enabled) {}
+   public void setMotor(dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis axis, double target, double stiffness, double damping, boolean limited, double maxForce) {}
+   public void remove() { throw new RuntimeException("Sable-level removal failure"); }
+   public boolean isValid() { return true; }
+  };
+ }
+ private static dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle fakeJoint(boolean[] removed) {
+  return new dev.ryanhcode.sable.api.physics.constraint.GenericConstraintHandle() {
+   public void setFrame1(org.joml.Vector3dc pos, org.joml.Quaterniondc orientation) {}
+   public void setFrame2(org.joml.Vector3dc pos, org.joml.Quaterniondc orientation) {}
+   public void setLimit(dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis axis, double lower, double upper) {}
+   public void lockAxes(dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis... axes) {}
+   public void getJointImpulses(org.joml.Vector3d linear, org.joml.Vector3d angular) {}
+   public void setContactsEnabled(boolean enabled) {}
+   public void setMotor(dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis axis, double target, double stiffness, double damping, boolean limited, double maxForce) {}
+   public void remove() { removed[0] = true; }
+   public boolean isValid() { return !removed[0]; }
+  };
+ }
+
+ @Test void aStaleEntryWithBothPendingStateAndALinkedHitchReleasesBoth() {
+  // MINECRAFT-545/547 (John's comment 55103 - "seeded with pending state AND actual linked
+  // hitch"): the combined scenario, not just one or the other. "car" is staged in
+  // pendingInheritedVelocity (a real in-flight replacement capture) AND is actually jointed, via
+  // HitchRegistry, to "truck" at the SAME time its own body goes stale. Reclaiming "car" must
+  // release BOTH: the real joint (HitchRegistry) and the pending replacement state.
+  var registry = new BodyRegistry<String, FakeVehicleBody>();
+  var hitches = new HitchRegistry<String>();
+  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
+  var staleBody = new FakeVehicleBody();
+  staleBody.active = false;
+  registry.activate("car", staleBody);
+  boolean[] jointRemoved = {false};
+  hitches.reconcile("car", "truck", () -> fakeJoint(jointRemoved));
+  pending.stage("car", new Object());
+  assertTrue(hitches.isJointed("car"), "setup check: car must actually be jointed before reclaiming");
+  assertNotNull(pending.get("car"), "setup check: car must actually have staged pending state before reclaiming");
+  var result = PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "car");
+  assertNull(result);
+  assertTrue(jointRemoved[0], "the real linked hitch (outgoing constraint) must be released");
+  assertFalse(hitches.isJointed("car"), "car must no longer be jointed after reclaiming");
+  assertNull(pending.get("car"), "the pending replacement state must also be cleared");
+ }
+
+ @Test void aThrowingHitchReleaseDuringReclaimStillRunsPendingCleanupAndStillPropagates() {
+  // MINECRAFT-545/547 (John's comment 55104): the ORIGINAL activeOrReclaimStale called
+  // hitches.release(key) before pendingInheritedVelocity.cleanup(key) with no guard between
+  // them - a throwing release() would have skipped this method's own second, independent
+  // cleanup step. pending.cleanup() must still run regardless, and the exception itself must
+  // still propagate to the caller, not be swallowed.
+  var registry = new BodyRegistry<String, FakeVehicleBody>();
+  var hitches = new HitchRegistry<String>();
+  var pending = new PhysicsBridge.PendingReplacementState<String, Object>();
+  var staleBody = new FakeVehicleBody();
+  staleBody.active = false;
+  registry.activate("car", staleBody);
+  hitches.reconcile("car", "truck", () -> fakeJointThatThrowsOnRemove());
+  pending.stage("car", new Object());
+  assertThrows(RuntimeException.class, () -> PhysicsBridge.activeOrReclaimStale(registry, hitches, pending, "car"),
+    "the throw itself must still propagate, not be swallowed");
+  assertNull(pending.get("car"), "pending cleanup must still run despite hitches.release throwing");
+  assertFalse(registry.isActive("car"), "the registry entry must still be reclaimed despite the throw");
+ }
 }

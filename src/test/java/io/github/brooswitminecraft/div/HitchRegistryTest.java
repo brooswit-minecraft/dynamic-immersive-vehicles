@@ -369,6 +369,53 @@ class HitchRegistryTest {
   assertFalse(hitches.isJointed("trailer"));
  }
 
+ /** A joint whose own remove() throws, standing in for a real Sable-level removal failure -
+  * same fakeJoint shape, deliberately misbehaving on this one call. */
+ private static PhysicsConstraintHandle fakeJointThatThrowsOnRemove() {
+  return new GenericConstraintHandle() {
+   @Override public void setFrame1(Vector3dc pos, Quaterniondc orientation) {}
+   @Override public void setFrame2(Vector3dc pos, Quaterniondc orientation) {}
+   @Override public void setLimit(ConstraintJointAxis axis, double lower, double upper) {}
+   @Override public void lockAxes(ConstraintJointAxis... axes) {}
+   @Override public void getJointImpulses(Vector3d linear, Vector3d angular) {}
+   @Override public void setContactsEnabled(boolean enabled) {}
+   @Override public void setMotor(ConstraintJointAxis axis, double target, double stiffness, double damping, boolean limited, double maxForce) {}
+   @Override public void remove() { throw new RuntimeException("Sable-level removal failure"); }
+   @Override public boolean isValid() { return true; }
+  };
+ }
+
+ @Test void aThrowingOwnJointRemovalStillClearsPartnerMapAndReleasesOtherTrailers() {
+  // MINECRAFT-545/547 (John's comment 55104, confirmed by direct source+bytecode reading): the
+  // ORIGINAL release(key) called own.remove() BEFORE partners.remove(key) and BEFORE the sweep
+  // releasing every OTHER trailer jointed TO key - a throwing own.remove() skipped ALL of that
+  // remaining, otherwise-independent cleanup. "truck" here is BOTH a trailer (jointed to
+  // "flatbed") AND a towing vehicle (towing "car") - exactly the combined dead-anchor scenario
+  // 55103 asked for: releasing truck must release its own INCOMING joint (to flatbed) and its
+  // OUTGOING joint (car's, to truck), even though truck's own joint-removal itself throws.
+  var hitches = new HitchRegistry<String>();
+  hitches.reconcile("truck", "flatbed", () -> fakeJointThatThrowsOnRemove()); // truck's own incoming joint - throws on remove
+  boolean[] carJointRemoved = {false};
+  hitches.reconcile("car", "truck", () -> fakeJoint(carJointRemoved)); // car's outgoing joint, pointed at truck
+  assertThrows(RuntimeException.class, () -> hitches.release("truck"), "the throw itself must still propagate, not be swallowed");
+  assertNull(hitches.partnerOf("truck"), "truck's own partner entry must still be cleared despite its own joint's throw");
+  assertTrue(carJointRemoved[0], "car's own joint (an UNRELATED release, pointed at truck) must still be released despite truck's own joint throwing first");
+  assertFalse(hitches.isJointed("car"), "car must no longer be jointed after its own joint was released");
+ }
+
+ @Test void aThrowingPartneredTrailerReleaseStillReleasesOtherPartneredTrailers() {
+  // The plural case: TWO different trailers both jointed to the SAME towing vehicle; one's own
+  // joint throws on remove(), the other's does not - releasing the towing vehicle must still
+  // release the SECOND trailer's joint, not stop after the first one throws.
+  var hitches = new HitchRegistry<String>();
+  hitches.reconcile("trailer-a", "truck", () -> fakeJointThatThrowsOnRemove());
+  boolean[] trailerBRemoved = {false};
+  hitches.reconcile("trailer-b", "truck", () -> fakeJoint(trailerBRemoved));
+  assertThrows(RuntimeException.class, () -> hitches.release("truck"));
+  assertTrue(trailerBRemoved[0], "trailer-b's own joint must still be released even though trailer-a's own release threw first");
+  assertFalse(hitches.isJointed("trailer-b"));
+ }
+
  @Test void releasingAKeyWithNoJointInEitherRoleIsANoOp() {
   var hitches = new HitchRegistry<String>();
   assertDoesNotThrow(() -> hitches.release("nothing-here"));
