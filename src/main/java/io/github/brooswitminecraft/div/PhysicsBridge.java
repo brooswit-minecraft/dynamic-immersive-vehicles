@@ -15,7 +15,6 @@ import io.github.brooswitminecraft.div.mixin.WorldAccessor;
 import minecrafttransportsimulator.baseclasses.Point3D;
 import minecrafttransportsimulator.baseclasses.RotationMatrix;
 import minecrafttransportsimulator.baseclasses.TowingConnection;
-import minecrafttransportsimulator.entities.components.AEntityB_Existing;
 import minecrafttransportsimulator.entities.components.AEntityE_Interactable;
 import minecrafttransportsimulator.entities.instances.APart;
 import minecrafttransportsimulator.entities.instances.EntityVehicleF_Physics;
@@ -1592,14 +1591,21 @@ public final class PhysicsBridge {
       // AEntityG_Towable.update(), the ONLY other place this could self-heal) is unconditionally
       // blocked by blockMainUpdateCall() (returns true whenever towedByConnection != null) on
       // EVERY side, client included - confirmed NOT server-only, NOT DIV-specific, and never
-      // overridden by DIV. There is therefore no supported code path, on either side, by which a
-      // tracking client's own local towedByConnection/towingConnections/parking-brake state is
-      // ever corrected once this fallback fires - a real, standing state-propagation gap,
-      // distinct from the separately-documented, purely-cosmetic ALREADY_TOWED chat-notification
-      // gap. Since no supported correction exists, this is instead surfaced operationally:
-      // UNCONDITIONAL (not gated behind the opt-in GroundContactDiagnostics flag) so a server
-      // operator has visibility into exactly when this known gap may be affecting a live client,
-      // without this ever being silently invisible by default.
+      // overridden by DIV. There is therefore no supported code path ON THIS EXISTING MTS
+      // INDEX-PACKET MECHANISM, on either side, by which a tracking client's own local
+      // towedByConnection/towingConnections/parking-brake state is ever corrected once this
+      // fallback fires - a real, standing state-propagation gap, distinct from the
+      // separately-documented, purely-cosmetic ALREADY_TOWED chat-notification gap. A DIV-owned
+      // alternative notification path was separately investigated and found (see
+      // InterfaceInterface.toExternal/toInternal, MINECRAFT-547's 54998 round) - but the
+      // generation/binding safety logic needed to use it safely was found exploitable in later
+      // rounds and has been deliberately removed pending a reviewed protocol design; see
+      // MINECRAFT-547 for the current state of that deferred work. Since no correction via the
+      // existing MTS packet mechanism exists, and no DIV-owned alternative currently ships
+      // either, this is instead surfaced operationally: UNCONDITIONAL (not gated behind the
+      // opt-in GroundContactDiagnostics flag) so a server operator has visibility into exactly
+      // when this known gap may be affecting a live client, without this ever being silently
+      // invisible by default.
       // MINECRAFT-545/547 (John's comment 54974): the prior wording of this log claimed a
       // specific resolution path ("until it reconnects or leaves render distance") that was
       // never actually verified at runtime - a source-predicted guess, not observed behavior.
