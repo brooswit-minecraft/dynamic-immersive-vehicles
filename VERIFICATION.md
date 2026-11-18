@@ -11486,3 +11486,113 @@ same reviewed runtime with zero recompilation. The original (flag-absent) packet
 unchanged as evidence. No source or fixture changes. No native run performed - launch remains
 explicitly withheld pending independent review and a further, specific release naming this
 replacement packet.
+
+## THE authorized run (per 54776): TOWING_UNAVAILABLE zero-gap confirmed; TOWING_REPLACEMENT
+## genuinely ran and PASSED for the first time this investigation - with explicit limits on
+## what that does and does not establish
+
+John's comment 54776 was the specific, named release for `M545-packet-b6ec50e-flagon`. Verified
+the four cited hashes (`launch-wrapper.sh`, `preflight.sh`, `serverRunVmArgs.txt`,
+`runtime-byte-manifest.sha256`) matched this packet's own files exactly, confirmed `git status`
+clean at the exact cited commit, re-ran a fresh dry-run preflight immediately before launch (all
+11 checks passed), then ran `launch-wrapper.sh` for real - the ONE authorized native execution
+this correction cycle. John's own comment 54779 independently confirmed every finding below.
+
+### Result: `COMPLETE`
+
+Java exited 0, orderly shutdown confirmed, lock released cleanly (confirmed via the owner file
+and a direct `flock -n` check immediately after - another ticket's own agent has since claimed
+it, as expected and none of this investigation's concern). Original 8 config + 2 world-level
+files confirmed byte-identical post-run. Full wrapper output archived as
+`receipts/launch-wrapper-run-20261118T000526Z.log`.
+
+### TOWING_UNAVAILABLE: the one-tick gap is GONE - confirmed, not merely expected
+
+Extracted all 60 `TOWING_UNAVAILABLE tick=N ... stepInvocationCount=S` samples and checked every
+adjacent delta: ALL 59 intervals are exactly `+1` (`201`->`260`), ZERO gaps - unlike the
+pre-fix flagon run's own confirmed single gap at tick1->tick2. The retroactive
+`lifecycleInvariantCheck` itself now reports `withinUnavailableOutcome=PASS` (previously
+`FAIL_STARVED_TICK`) for the exact same 60-sample window structure
+(`sampleCount=61`/`firstSample stepInvocationCount=201`/`lastWithinUnavailableSample
+stepInvocationCount=260`/`postGapSample stepInvocationCount=261` - all consecutive). This is
+the Pre-timing fix working exactly as designed, confirmed by direct measurement, not merely by
+the source change's own stated intent.
+
+### The Pre-hook's own runtime firing - confirmed by an actual log line, not source registration alone
+
+Per 54779's own distinction ("distinguish source registration from explicit runtime hook
+marker"): the NEW `releaseOrphanedTowingConnections`'s own log line
+(`"[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections releasing orphaned
+towedByConnection..."`) appears TWICE in the raw log - confirming the new `ServerTickEvent.Pre`
+listener genuinely fired and performed the real release at runtime, not merely that the source
+registers it. The OLD phrase (`"cleanup releasing orphaned..."`) appears ZERO times - confirming
+`cleanup()` genuinely no longer performs this sweep, matching the code change exactly.
+
+### TOWING_REPLACEMENT: genuinely ran, 140 ticks, PASS - for the first time in this investigation
+
+Unlike EVERY prior native run this entire investigation (the original crash-reproduction runs,
+`df4b0c2`, and the first `95bc8ed-flagon` run), THIS run's fixture actually proceeded PAST the
+`TOWING_REPLACEMENT` connection and INTO its own real tick loop (`ticksInPhase=1` through
+`tick=140`), converging the anchor distance from `3.024` down to `0.00137`, and reaching
+`TOWING_REPLACEMENT PASS anchorDistance=0.0013710998172779345 - despawning towed for
+DESPAWN_TRAILER` - no crash, no `NullPointerException`, no hang. Every prior run in this
+investigation failed EARLIER than this point (either during `TOWING_UNAVAILABLE` itself, or at
+the retroactive `lifecycleInvariantCheck` gate immediately after reconnecting, BEFORE the
+`TOWING_REPLACEMENT` tick loop itself ever got to run) - this is the FIRST run to actually reach
+and complete that loop.
+
+**A confirmed, stale, incorrect log message** (54779's own finding, independently matching):
+the terminal `COMPLETE` banner unconditionally prints `"TOWING_REPLACEMENT disclosed as not
+attempted - see this class's own doc"` - a hardcoded string
+(`BuoyantHitchProbe.java` line 850) that does not check anything about what actually happened
+this run. This run's own log directly contradicts it: `TOWING_REPLACEMENT` was attempted and
+PASSED. The referenced class-level doc comment describes an EARLIER iteration of this probe,
+where a live towing-body-replacement scenario "reproducibly crashed `BuoyantBody.step` with a
+`NullPointerException` within ~6 ticks of connecting - confirmed-live across five separate
+runs" - that doc/log pairing has not been updated to reflect that the probe was since extended
+to actually attempt and measure this phase. Reported as a confirmed fixture-reporting
+discrepancy, per 54779's own instruction ("report factual phase receipts, no source edits
+solely during receipt gathering") - NOT fixed, no source edit made during this receipt-gathering
+pass.
+
+**What this does NOT establish** (per 54779's own explicit limits, and this entry's own
+caution): `TOWING_REPLACEMENT`'s own tick loop logs `stepInvocationCount` only TWICE total in
+this run - once in the pre-connect line, once inside the retroactive
+`lifecycleInvariantCheck` covering the PRECEDING `TOWING_UNAVAILABLE` window - ZERO per-tick
+step-count samples exist for any of the 140 `TOWING_REPLACEMENT` ticks themselves. So: this run
+confirms `TOWING_REPLACEMENT` ran to completion without crashing and with a converging anchor
+distance - it does NOT, by itself, establish that every one of those 140 ticks individually
+dispatched gap-free (no comparable per-tick evidence exists for that phase, unlike the
+exhaustively-sampled `TOWING_UNAVAILABLE` window). Separately, and more importantly: this is
+ONE successful run, against a doc comment describing FIVE separate prior crashes under
+(as far as this entry can state) a different code/fixture configuration than today's. One
+non-crash does not, by itself, refute five confirmed prior crashes, and is NOT claimed to -
+consistent with 54779's own "no automatic further run or final acceptance overclaim" and this
+investigation's standing refusal to declare the original hitch/reconnect crash resolved.
+
+### Candidate activity
+
+69 `sequentialDragBoundCandidate=true` diagnostic lines this run (vs. 12 in the pre-fix flagon
+run) - more float-ticks were exercised since this run survived substantially longer (through
+the full `TOWING_REPLACEMENT` phase too), consistent with, not separately re-analyzed beyond,
+the already-established candidate-activity confirmation from the prior run.
+
+### Disposition
+
+The one authorized native run for `M545-packet-b6ec50e-flagon` completed (`COMPLETE`, exit 0,
+clean shutdown, baselines unmutated). The `ServerTickEvent.Pre` timing fix is CONFIRMED working
+exactly as designed: zero gaps across all 60 exhaustively-sampled `TOWING_UNAVAILABLE` ticks
+(previously exactly one), the retroactive invariant now reports `PASS` (previously
+`FAIL_STARVED_TICK`), and the new release method's own runtime log line fired exactly where
+expected while the old one never fired at all - confirmed by direct log evidence, not source
+inspection alone. Separately and notably, `TOWING_REPLACEMENT` - the exact scenario this entire
+investigation's own original crash came from - ran to completion for the first time this
+investigation has ever recorded, with a converging anchor distance and no crash; a confirmed
+stale/incorrect fixture log message (unconditionally claiming it was "not attempted") was found
+and reported, not fixed. This is explicitly NOT claimed as resolving, disproving, or even
+materially re-assessing the original reproducible crash (five confirmed prior occurrences under
+a different configuration) - one non-crash is reported as exactly that: one data point, with its
+own stated evidence limits (no per-tick step-count granularity within that phase). Native hold
+is CLOSED again (one run consumed) - no further native execution without a new explicit
+coordinator release. Identity/missing-index gaps remain open; no final acceptance is claimed or
+implied.
