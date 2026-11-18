@@ -11596,3 +11596,149 @@ own stated evidence limits (no per-tick step-count granularity within that phase
 is CLOSED again (one run consumed) - no further native execution without a new explicit
 coordinator release. Identity/missing-index gaps remain open; no final acceptance is claimed or
 implied.
+
+## Per 54782: three concrete bounded-acceptance gaps closed - identity-preserving teardown,
+## confirmed-unsupported fallback bookkeeping, strengthened TOWING_REPLACEMENT sampling + fixed
+## stale banner
+
+John's comment 54782 authorized the next bounded-acceptance step on the same branch/PR, and
+named three specific gaps to close now, not generically defer. All three addressed in this
+cycle - production code changes, this time, not merely reporting.
+
+### Gap 1: identity-preserving teardown (REVERSES the prior 54665 contract)
+
+54782: "collected connection identity vs fresh mutable state... skip/recollect changed
+identity, including invalid replacement, rather than disconnect a different newly-installed
+invalid connection... current allowing-changed-invalid test does NOT prove identity
+preservation."
+
+The prior contract (54662/54665) re-checked only CURRENT eligibility
+(`hasConnection`/`anchorIsValid`) at dispatch time, and explicitly allowed disconnecting a
+DIFFERENT connection than the one collected in phase 1, as long as it was ALSO currently
+invalid - reasoned as "correct under the current invariant." 54782 found this unsafe: a brand-
+new, intended replacement connection (exactly `TOWING_REPLACEMENT`'s own shape) can be
+transiently invalid during its own setup window; the old contract would tear THAT down, not the
+original orphan.
+
+**Fix**: `OrphanedConnectionOps<V>` gained a new method, `connectionIdentity(V v)` - a stable
+identity token for whatever connection `v` currently has (the real adapter returns
+`v.towedByConnection` itself - reference identity, nothing derived). `releaseOrphanedConnections`
+now captures this once during phase-1 collection and re-reads it fresh immediately before
+dispatch; if the two disagree, the candidate is SKIPPED, regardless of the new connection's own
+validity. Teardown now targets ONLY the exact connection object collected in phase 1.
+
+**Test coverage** (`PhysicsBridgeClassificationTest`): the prior test of this shape
+(`aCandidateWhoseConnectionChangedButIsStillInvalidRemainsEligible`) asserted the WRONG
+behavior and is REPLACED, not merely edited, by
+`aCandidateWhoseConnectionChangedToADifferentInvalidOneIsSkippedNotDisconnected` (asserts the
+candidate is skipped, `indexInParentList`'s own returned index is never used) and
+`aCandidateWhoseConnectionIdentityIsPreservedIsStillTornDownExactlyOnce` (regression guard - the
+ORDINARY case, same connection throughout, must still be disconnected exactly once - the new
+check must not accidentally block legitimate same-connection teardown). The existing valid-
+replacement test (`aCandidateWhoseAnchorBecomesValidBeforeDispatchIsNeverDisconnected`) already
+covered that case via the eligibility check alone; confirmed it still passes with identity now
+also checked (unchanged identity throughout that test).
+
+### Gap 2: missing-index fallback bookkeeping - confirmed UNSUPPORTED without reflection, not merely undesirable
+
+54782: "trace pinned supported MTS teardown side effects on parent/child/group indexes/parking
+brake/client notification. Implement smallest supported consistent recovery OR state precise
+unsupported case/risk with tested contract."
+
+Attempted the fuller recovery first, reproducing the real `disconnectTrailer`'s snap/non-snap
+branch directly from the connection object (no index needed): `connection.hitchConnectionGroup`/
+`hookupConnectionGroup.isSnap` branching into either `towing.disconnectedTowingConnections.add(connection)`
+or releasing `connectionGroupsIndexesInUse` on both `connection.towingEntity`/`towedEntity`.
+
+**Confirmed, by the compiler directly, not assumed**: `AEntityG_Towable.disconnectedTowingConnections`
+is PRIVATE and `AEntityE_Interactable.connectionGroupsIndexesInUse` is PROTECTED - neither is
+reachable from DIV's own (different-package, non-subclass) code without reflection, which every
+standing instruction in this investigation forbids. This is the precise, tested-boundary
+"unsupported case" 54782's own alternative asked for, not a vague "cannot do it."
+
+**What IS genuinely reachable and public, and now reproduced** in the fallback path: both
+vehicles' real `resetAllVariables()` and the child's real parking-brake engage
+(`v.parkingBrakeVar.setTo(1.0, false)`) - the exact same calls the real `disconnectTrailer`
+itself makes, needing no index and no private access. Previously this fallback did NEITHER.
+
+**Precise, stated remaining risk, not glossed over**: `connectionGroupsIndexesInUse` is NOT
+released on either side in this fallback path - a real, standing resource-leak risk for this
+one specific edge case (connection present on the child but already absent from the parent's
+own list) - documented in the method's own doc comment and its diagnostic log line, as an
+accepted, confirmed-unsupported limitation. The parent list removal and client
+`PacketEntityTowingChange` notification remain unsupported for the reasons already documented
+(nothing left to remove; no real index to send).
+
+### Gap 3: TOWING_REPLACEMENT sampling strengthened; stale COMPLETE banner and class doc corrected
+
+54782: "inspect retained continuous step logs for per-tick proof rather than overclaim two
+counter rows... Correct misleading final COMPLETE banner and strengthen actual replacement
+sampling/assertions without weakening bounds/gaps."
+
+**Confirmed, re-inspecting the retained log**: `boundedOrFail` already runs EVERY tick for both
+`towing2` and `towed` throughout the 140-tick settle loop - genuine per-tick evidence against a
+crash/NaN/out-of-bounds state for the WHOLE phase, already existed and already ran. What
+genuinely did NOT exist, confirmed by inspection (not assumption): any per-tick
+`stepInvocationCount` SAMPLE within that same loop - only the pre-connect snapshot and the
+retroactive check (covering the PRECEDING `TOWING_UNAVAILABLE` window) ever touched that
+counter. The "only 2 counter rows" finding stands exactly as reported; it was not an
+underclaim correctable by re-reading the SAME log more carefully.
+
+**Fix - new per-tick sampling + its own terminal invariant check**: added
+`towingReplacementSamples`, a NEW sample list mirroring `towedRemovalSpanSamples`'s own pattern
+exactly - cleared immediately after reconnecting, appended EVERY tick inside the per-tick block
+(not just the previously-logged subset), and evaluated via the SAME
+`LifecycleInvariants.evaluate` at this phase's own PASS point, with the SAME real fixture-
+failure wiring (`FAIL_STARVED_TICK`/`FAIL_DUPLICATE_TICK` now fails the fixture here too, not
+merely logged). This closes the exact gap 54782 named for ANY future run - genuine per-tick
+dispatch-continuity evidence for `TOWING_REPLACEMENT`, not merely "didn't crash."
+
+**Fix - the stale `COMPLETE` banner**: previously, unconditionally, printed "TOWING_REPLACEMENT
+disclosed as not attempted" regardless of what actually happened - directly contradicted by
+this run's own log (`TOWING_REPLACEMENT PASS` already fired earlier in the same run). Corrected
+to list every phase this sequence actually, unconditionally, passes through to reach this point
+(confirmed via the `Phase` enum's own strictly sequential transitions - reaching
+`INSTALLED_PART_ATTACH`'s own completion is only possible after `TOWING_REPLACEMENT` already
+ran) - `TOWING_REPLACEMENT` is now included, and the banner points to VERIFICATION.md for any
+specific run's own precise evidence instead of restating stale numbers inline.
+
+**Fix - the stale class-level doc**: the SAME "disclosed, NOT attempted" claim, at the class
+javadoc level, described an EARLIER iteration of this probe where the main pair's own
+replacement reproducibly crashed with a `NullPointerException` - accurate FOR THAT iteration,
+but the method (`towingReplacement`) was SINCE implemented and genuinely runs today; neither
+this doc nor the banner had ever been updated to say so. Corrected to state precisely: the
+phase was since implemented and is exercised; VERIFICATION.md (not this doc) carries any given
+run's own exact status; the historical crash is NOT claimed resolved, disproven, or reassessed
+merely because this phase now runs. (Separately, and still accurate, unchanged: the
+INSTALLED-PART-specific crash documented on `installedPartAttach`'s own javadoc - a genuinely
+DIFFERENT scenario, combining an installed-part hookup with a replacement - remains
+undisturbed, still deliberately never re-attempted.)
+
+Compiled and tested under the exclusive Gradle lock: full suite, 890 tests, 0 failures/errors
+(one test replaced, two added net - see `PhysicsBridgeClassificationTest`, now 36 tests).
+
+### Still open, not claimed resolved
+
+No native run performed or requested this cycle. These are real production (`PhysicsBridge`)
+and fixture (`BuoyantHitchProbe`) changes, not yet validated by any execution - per 54782's own
+instruction ("if new native proof needed prepare finite immutable packet for independent
+review, DO NOT run"), a new packet is being prepared for independent review; launch remains
+withheld pending its own specific release. The `connectionGroupsIndexesInUse` leak risk in the
+missing-index fallback path remains a genuinely open, accepted limitation - not fixed, only
+precisely documented. Identity/missing-index gaps (the broader category) remain open. No
+merge/Done transition made or implied - acceptance/CI/review remain this ticket's own separate,
+unresolved steps.
+
+### Disposition
+
+Three concrete gaps closed with real production/fixture changes, not reporting alone:
+identity-preserving teardown (reversing an earlier, now-confirmed-unsafe contract, with a
+replaced test and a new regression guard); the missing-index fallback's fuller recovery
+attempted, found genuinely unsupported without reflection (confirmed by the compiler, not
+assumed), and precisely documented as such while still reproducing everything that IS public
+and reachable; `TOWING_REPLACEMENT` given the same per-tick dispatch-continuity evidence
+`TOWING_UNAVAILABLE` already had, with its own terminal invariant now a real fixture failure,
+not merely logged; and the stale "not attempted" banner/doc corrected to match current reality.
+Full suite green (890 tests). No native run performed - a new packet is being prepared for
+independent review, not launched. No merge/Done transition; identity/missing-index gaps and the
+connectionGroupsIndexesInUse leak risk remain open and explicitly not claimed resolved.

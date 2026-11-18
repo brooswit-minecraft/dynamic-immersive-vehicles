@@ -1293,32 +1293,52 @@ public final class PhysicsBridge {
   * candidate - an earlier candidate's own disconnect must never be trusted to leave a later
   * candidate's own eligibility unchanged; the phase-1 list is a set of candidates to re-verify,
   * never a decision already made.
-  * <p>This re-check is a CURRENT-ELIGIBILITY check, not an identity-snapshot guard: it asks
-  * "is whatever connection {@code v} has right now still orphaned," never "is this literally
-  * the same connection object collected in phase 1." A candidate whose connection became valid
-  * (or disappeared) is skipped; a candidate whose connection changed to a DIFFERENT one that is
-  * still invalid remains eligible and IS disconnected - correct under the current invariant
-  * (release any currently-orphaned connection), not a gap. */
+  * <p>CORRECTED (John's comment 54782, reversing the prior 54665 framing): this is now an
+  * IDENTITY-PRESERVING teardown, not merely a current-eligibility re-check. The prior version's
+  * re-check asked only "is whatever connection {@code v} has right now still orphaned," and
+  * explicitly allowed disconnecting a DIFFERENT (but also currently-invalid) connection than the
+  * one collected in phase 1 - reasoned as "correct under the current invariant." 54782 found
+  * that reasoning unsafe: if {@code v}'s connection changed between collection and dispatch
+  * (e.g. a brand-new, intended replacement connection that is merely transiently invalid during
+  * its own setup window - exactly the shape of {@code TOWING_REPLACEMENT}'s own reconnect), this
+  * sweep must never tear down THAT different connection just because something ELSE made it
+  * eligible by the old (current-state-only) rule. Teardown now targets ONLY the EXACT connection
+  * object collected in phase 1 - if {@code v}'s connection has changed identity by dispatch time
+  * (to anything, valid or invalid), this candidate is SKIPPED, never disconnected, regardless of
+  * the new connection's own state. */
  interface OrphanedConnectionOps<V> {
   boolean hasConnection(V v);
   /** Only ever called when {@link #hasConnection} is currently true for the same {@code v}. */
   boolean anchorIsValid(V v);
-  /** Only ever called when {@link #hasConnection} is true and {@link #anchorIsValid} is false
-   * for the same {@code v}, immediately before use - the real {@code
-   * towingVehicle.towingConnections.indexOf(connection)}. */
+  /** A stable identity for whatever connection {@code v} CURRENTLY has (the real adapter uses
+   * the real {@code TowingConnection} object reference itself - reference identity via {@code
+   * equals}, never recomputed/derived). Called once during phase-1 collection and again,
+   * fresh, immediately before dispatch - teardown proceeds only if both reads agree. */
+  Object connectionIdentity(V v);
+  /** Only ever called when {@link #hasConnection} is true, {@link #anchorIsValid} is false, and
+   * {@link #connectionIdentity} still matches its own phase-1 value, for the same {@code v},
+   * immediately before use - the real {@code towingVehicle.towingConnections.indexOf(connection)}. */
   int indexInParentList(V v);
   void disconnectAtIndex(V v, int index);
   void fallbackClearConnection(V v);
  }
  static <V> void releaseOrphanedConnections(Iterable<V> candidates, OrphanedConnectionOps<V> ops) {
   var orphaned = new java.util.ArrayList<V>();
+  var collectedIdentities = new java.util.ArrayList<Object>();
   for (V v : candidates) {
-   if (ops.hasConnection(v) && shouldReleaseOrphanedTowingConnection(true, ops.anchorIsValid(v))) orphaned.add(v);
+   if (ops.hasConnection(v) && shouldReleaseOrphanedTowingConnection(true, ops.anchorIsValid(v))) {
+    orphaned.add(v);
+    collectedIdentities.add(ops.connectionIdentity(v));
+   }
   }
-  for (V v : orphaned) {
+  for (int i = 0; i < orphaned.size(); i++) {
+   V v = orphaned.get(i);
    // Re-check fresh, immediately before acting - see this method's own doc (54662's own race
-   // guard). Phase 1's snapshot is a CANDIDATE list, never a decision already made.
+   // guard, 54782's own identity-preservation correction). Phase 1's snapshot is a CANDIDATE
+   // list, never a decision already made - and identity, not merely current eligibility, is
+   // now part of what gets re-verified.
    if (!ops.hasConnection(v) || ops.anchorIsValid(v)) continue;
+   if (!java.util.Objects.equals(ops.connectionIdentity(v), collectedIdentities.get(i))) continue;
    int index = ops.indexInParentList(v);
    if (canSafelyDisconnectAtIndex(index)) ops.disconnectAtIndex(v, index);
    else ops.fallbackClearConnection(v);
@@ -1363,6 +1383,10 @@ public final class PhysicsBridge {
   releaseOrphanedConnections(active, new OrphanedConnectionOps<EntityVehicleF_Physics>() {
    public boolean hasConnection(EntityVehicleF_Physics v) { return v.towedByConnection != null; }
    public boolean anchorIsValid(EntityVehicleF_Physics v) { return v.towedByConnection.towingEntity.isValid; }
+   // 54782: the real TowingConnection object reference itself - null when there is no current
+   // connection, so a candidate that lost its connection entirely (hasConnection now false) is
+   // already excluded by the orchestration's own re-check before this is ever compared.
+   public Object connectionIdentity(EntityVehicleF_Physics v) { return v.towedByConnection; }
    public int indexInParentList(EntityVehicleF_Physics v) {
     return v.towedByConnection.towingVehicle.towingConnections.indexOf(v.towedByConnection);
    }
@@ -1374,13 +1398,32 @@ public final class PhysicsBridge {
     towing.disconnectTrailer(index);
    }
    public void fallbackClearConnection(EntityVehicleF_Physics v) {
-    // Connection not actually present in towing's own list - the real disconnectTrailer cannot
-    // be safely invoked (List.remove(-1) throws). At minimum restore exactly-once dispatch by
-    // clearing the child's own stale pointer directly; the fuller bookkeeping (parent list entry
-    // already absent, connectionGroupsIndexesInUse, client packet, parking brake) cannot run
-    // without a valid index - this is a reduced, not equivalent, recovery for this one edge case.
+    // MINECRAFT-545/547 (John's comment 54782 - "smallest supported consistent recovery... OR
+    // state precise unsupported case/risk with tested contract"): attempted the fuller recovery
+    // first (reproducing the real snap/non-snap connectionGroupsIndexesInUse branch directly
+    // from the connection object, no index needed) - CONFIRMED UNSUPPORTED, not merely
+    // undesirable: `AEntityG_Towable.disconnectedTowingConnections` is PRIVATE and
+    // `AEntityE_Interactable.connectionGroupsIndexesInUse` is PROTECTED - neither is reachable
+    // from this (different-package, non-subclass) code without reflection, which every standing
+    // instruction in this investigation forbids. Confirmed by the compiler directly, not assumed.
+    // <p>What IS genuinely reachable and public, and IS reproduced here: both vehicles' real
+    // {@code resetAllVariables()} and the child's real parking-brake engage - the same calls the
+    // real {@code disconnectTrailer} itself makes, needing no index and no private access.
+    // <p>Precise, tested unsupported case (not glossed over): {@code connectionGroupsIndexesInUse}
+    // is NOT released on either side in this fallback path - a real, standing resource-leak risk
+    // for this one edge case (connection object present on the child but already absent from the
+    // parent's own list), stated here as a known, accepted limitation, not silently absorbed.
+    // The parent list removal and client {@code PacketEntityTowingChange} notification remain
+    // unsupported for the same reasons already documented (nothing left to remove; no real index
+    // to send).
+    var connection = v.towedByConnection;
+    var towing = connection.towingVehicle;
+    towing.resetAllVariables();
+    v.resetAllVariables();
+    v.parkingBrakeVar.setTo(1.0, false);
     if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
-      "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back to direct null (connection missing from parent's own list) v=" + v.uniqueUUID);
+      "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back (connection missing from parent's own list) v=" + v.uniqueUUID
+        + " - reproduced resetAllVariables/parkingBrake (both public); UNSUPPORTED (private/protected access, no reflection): connectionGroupsIndexesInUse release on either side, parent list removal (already absent), client PacketEntityTowingChange (needs a real index)");
     v.towedByConnection = null;
    }
   });

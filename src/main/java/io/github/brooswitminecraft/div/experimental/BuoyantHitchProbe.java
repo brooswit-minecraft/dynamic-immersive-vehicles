@@ -91,13 +91,18 @@ import java.util.Set;
  *  <li>{@code DESPAWN_TRAILER}/{@code LEVEL_UNLOAD} - despawn `towed` itself (already unjointed),
  *  then a direct {@code PhysicsBridge.unload(level)} call (the exact sweep a real chunk/level
  *  unload triggers) with nothing left alive from this pair; no crash for either.
- *  <b>Disclosed, NOT attempted here:</b> a live towing-body-REPLACEMENT demo (fresh towing hull,
- *  reconnect, settle) was tried in earlier iterations of this probe and reproducibly crashed
- *  {@code BuoyantBody.step} with a {@code NullPointerException} within ~6 ticks of connecting -
- *  confirmed-live across five separate runs (including doubled spawn clearance), not explained
- *  by any geometry/overlap/reuse hypothesis tried, and NOT root-caused within this ticket's own
- *  bounded scope/budget - see VERIFICATION.md and MINECRAFT-547. "Unavailable" is
- *  still live-proven by this phase; "replacement" specifically is not.</li>
+ *  <li>{@code TOWING_REPLACEMENT} - a live towing-body-REPLACEMENT demo (fresh towing2 hull,
+ *  reconnect `towed` to it, settle). CORRECTED (John's comment 54782): this doc previously said
+ *  this phase was "disclosed, NOT attempted" - that was accurate for an EARLIER iteration of
+ *  this probe (which reproducibly crashed {@code BuoyantBody.step} with a
+ *  {@code NullPointerException} within ~6 ticks of connecting, confirmed-live across five
+ *  separate runs, never root-caused within this ticket's own bounded scope/budget), but this
+ *  phase WAS SINCE IMPLEMENTED (this method) and IS genuinely exercised today - this doc and
+ *  the terminal {@code COMPLETE} banner had simply never been updated to say so. See
+ *  VERIFICATION.md for the current, precisely-scoped status of any individual run's own
+ *  result - this doc does not restate numbers that belong there, and does NOT claim the
+ *  historical crash above is resolved, disproven, or reassessed merely because this phase now
+ *  runs.</li>
  *  <li>{@code INSTALLED_PART_ATTACH} - an independent third pair/pool, spawned only after the
  *  above completes: `towed3`'s hookup connection is owned by its own installed right-float part
  *  (not the vehicle root) - live proof that {@code HitchJoint.partConnectionOffset}'s
@@ -169,6 +174,15 @@ public final class BuoyantHitchProbe {
  // in a new LOG line after capture completes, never changing this fixture's own existing
  // pass/fail criteria or timing.
  private static final java.util.List<io.github.brooswitminecraft.div.LifecycleInvariants.Sample> towedRemovalSpanSamples = new java.util.ArrayList<>();
+ // MINECRAFT-545/547 (John's comment 54782 - "strengthen actual replacement sampling/assertions
+ // without weakening bounds/gaps"): the SAME per-tick lifecycle-invariant coverage
+ // towedRemovalSpanSamples already gives TOWING_UNAVAILABLE, extended to TOWING_REPLACEMENT's
+ // own settle-tick loop, which previously had NO per-tick stepInvocationCount sample at all
+ // (only two: the pre-connect snapshot and the retroactive check covering the PRECEDING
+ // window) - a confirmed, real evidence gap for any future run, not merely a documentation
+ // nicety. Capturing ONLY, same as towedRemovalSpanSamples - never alters the real phase
+ // sequence/timing/physics.
+ private static final java.util.List<io.github.brooswitminecraft.div.LifecycleInvariants.Sample> towingReplacementSamples = new java.util.ArrayList<>();
 
  public static void maybeRun(ServerLevel level) {
   if (!ENABLED) return;
@@ -701,6 +715,10 @@ public final class BuoyantHitchProbe {
      + " towing2.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towing2)
      + " towed.linearVelocity=" + PhysicsBridge.debugReadLinearVelocity(towed)
      + " towed.angularVelocity=" + PhysicsBridge.debugReadAngularVelocity(towed));
+   // 54782: reset HERE, immediately after reconnect, same defensive pattern as
+   // towedRemovalSpanSamples's own clear() above - the per-tick block below (which runs on this
+   // same call too) appends this phase's own first real sample.
+   towingReplacementSamples.clear();
    var connection = new TowingConnection(towing2, 0, 0, towed, 0, 0);
    towing2.connectTrailer(connection, false);
    LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT connected towed to fresh towing2=" + towing2.position);
@@ -753,6 +771,12 @@ public final class BuoyantHitchProbe {
    }
   }
   if (!boundedOrFail("towingReplacement/towing2", towing2) || !boundedOrFail("towingReplacement/towed", towed)) return;
+  // 54782: the per-tick stepInvocationCount sample TOWING_REPLACEMENT previously never took -
+  // EVERY tick, not just the logged subset below, mirroring towedRemovalSpanSamples's own
+  // coverage of TOWING_UNAVAILABLE. Capturing ONLY; evaluated at this phase's own PASS point.
+  towingReplacementSamples.add(new io.github.brooswitminecraft.div.LifecycleInvariants.Sample(
+    towed.uniqueUUID, level.getGameTime(), PhysicsBridge.debugStepInvocationCount(towed),
+    PhysicsBridge.debugRegistryBodyIdentity(towed)));
   double distance = anchorDistance(towing2, towing2Definition);
   double towing2Speed = towing2.motion.length() * 20 * towing2.speedFactor;
   double towedSpeed = towed.motion.length() * 20 * towed.speedFactor;
@@ -766,6 +790,22 @@ public final class BuoyantHitchProbe {
   if (ticksInPhase >= SETTLE_TICKS) {
    if (distance > ANCHOR_TOLERANCE) {
     LOGGER.error("[DIV buoyantHitchProbe] FAILED - TOWING_REPLACEMENT anchorDistance=" + distance + " did not settle within tolerance=" + ANCHOR_TOLERANCE);
+    phase = Phase.FAILED;
+    return;
+   }
+   // 54782: the SAME real per-tick-dispatch assertion TOWING_UNAVAILABLE already has, now also
+   // covering TOWING_REPLACEMENT's own settle window - genuinely closing the gap flagged there
+   // ("only 2 counter rows, don't overclaim per-tick proof"). Deferred to HERE, after every
+   // other piece of this tick's own evidence has already been captured/logged, same ordering
+   // rationale as the UNAVAILABLE check above.
+   var replacementOutcome = io.github.brooswitminecraft.div.LifecycleInvariants.evaluate(towingReplacementSamples);
+   LOGGER.info("[DIV buoyantHitchProbe] TOWING_REPLACEMENT lifecycleInvariantCheck sampleCount=" + towingReplacementSamples.size()
+     + " outcome=" + replacementOutcome
+     + " firstSample=" + towingReplacementSamples.get(0) + " lastSample=" + towingReplacementSamples.get(towingReplacementSamples.size() - 1));
+   if (replacementOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_STARVED_TICK
+       || replacementOutcome == io.github.brooswitminecraft.div.LifecycleInvariants.Outcome.FAIL_DUPLICATE_TICK) {
+    LOGGER.error("[DIV buoyantHitchProbe] FAILED - TOWING_REPLACEMENT lifecycleInvariantCheck outcome=" + replacementOutcome
+      + " (a real per-tick stepping defect across the TOWING_REPLACEMENT settle window, not a sampling gap)");
     phase = Phase.FAILED;
     return;
    }
@@ -847,7 +887,13 @@ public final class BuoyantHitchProbe {
    towing3.remove();
    towed3.remove();
    phase = Phase.DONE;
-   LOGGER.info("[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed (TOWING_REPLACEMENT disclosed as not attempted - see this class's own doc)");
+   // MINECRAFT-545/547 (John's comment 54782): this banner previously, unconditionally, claimed
+   // "TOWING_REPLACEMENT disclosed as not attempted" regardless of what actually happened that
+   // run - stale and, as of this run's own log, directly contradicted (TOWING_REPLACEMENT ran
+   // and reported its own PASS above). Corrected to list every phase this method sequence
+   // actually runs through to reach here, unconditionally - TOWING_REPLACEMENT included, since
+   // reaching INSTALLED_PART_ATTACH's own completion is only possible after it already ran.
+   LOGGER.info("[DIV buoyantHitchProbe] COMPLETE - ATTACH/DETACH/TOWING_UNAVAILABLE/TOWING_REPLACEMENT/DESPAWN_TRAILER/LEVEL_UNLOAD/INSTALLED_PART_ATTACH all passed (see VERIFICATION.md for this run's own precise evidence/limits, not restated here)");
   }
  }
 
