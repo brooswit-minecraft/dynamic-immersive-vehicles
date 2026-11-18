@@ -13094,3 +13094,122 @@ the synthetic self-test's own execution log kept distinct from mere script prese
 addressed in the same brand-new packet. The b6ec50e native lifecycle evidence remains the
 distinct, separately-preserved record it always was - this round claims nothing about it. The
 client-notification gap remains open, unaddressed, as before.
+
+## Per 54966: the first successful native run, and a full trace of the client-notification gap
+
+### The first successful native run
+
+Per the parent's ONE-RUN RELEASE (54960) and the launcher-permission fix in
+M545-packet-37ba8f0-missingindexprobe-round3 (fixing round2's own trivial, non-native
+"Permission denied" failure - see the preceding entry's own packet-level corrections), this
+fixture ran natively for the first time in this entire investigation. Result: `PROBE_RESULT=
+NO_LEAK_OBSERVED` (`verdict=LEAK_NOT_OBSERVED`). The deliberate fault injection reproduced the
+designed inconsistent state exactly (`removed=true indexAfterInjection=-1 sameChildReference=
+true`); the real fallback callback was observed firing exactly once for the exact vehicle+
+connection with zero mismatches (satisfying the exactly-one/zero-mismatch requirement from the
+54929 round); both the control and the leak-probe reconnect attempts were genuinely processed,
+geometrically eligible (`anchorDistance` 1.847 and 1.518 respectively, both `<= 4.0`), and both
+successfully formed new connections. Independently confirmed by John (comment 54962) including
+two exact receipt hashes (`wrapper-run-stdout.log`/`latest.log`), both re-verified to match.
+This is single-run, bounded, default-off fault-injection evidence about local group-index reuse
+specifically - NOT a universal claim about the missing-index/bookkeeping defect space, NOT
+candidate-on evidence (`div.sequentialDragBound` stayed default-off throughout), and does not
+supersede or reinforce `b6ec50e`'s own separate, earlier native success - the two remain
+distinct records.
+
+### The client-notification trace (54966's own explicit ask)
+
+John's 54966 asked for a precise trace distinguishing actual state propagation from the
+separately-documented ALREADY_TOWED chat-observability gap, with exact citations, determining
+whether a reproducible stale-client state actually exists before proposing any fix.
+
+**Normal disconnect (the supported, working path)**: `AEntityG_Towable.disconnectTrailer(int)`
+clears the connection, updates `connectionGroupsIndexesInUse` on both sides, calls
+`resetAllVariables()`/engages the parking brake on both vehicles, then explicitly sends
+`InterfaceManager.packetInterface.sendToAllClients(new PacketEntityTowingChange(this,
+connectionIndex))`. `PacketEntityTowingChange.handle()` is the SOLE client-sync mechanism for
+this state - on receipt, the client replays the exact same `disconnectTrailer(connectionIndex)`
+call locally. Client state is kept in sync by replaying the state-change method, never by
+automatic field/`ComputedVariable` sync (both `resetAllVariables`/parking-brake calls pass
+`sendPacket=false`, confirmed).
+
+**Missing-index fallback (the unsupported gap, now precisely characterized)**: the fallback's own
+`clearConnection` reproduces `resetAllVariables()`/parking-brake (both genuinely public, already
+confirmed working) but can NEVER send `PacketEntityTowingChange`, because:
+- Its `int connectionIndex` constructor requires a real index still present in the PARENT's own
+  `towingConnections` list - exactly what is absent by definition of reaching this fallback path
+  at all (the orchestration only calls `fallbackClearConnection` when `indexInParentList` already
+  returned a not-found result).
+- Its OTHER constructor (`PacketEntityTowingChange(hitchEntity, TowingConnection)`) is reserved
+  for CONNECT, not disconnect - confirmed by reading `handle()` directly: a packet constructed
+  with `connectionIndex=-1` (via the int constructor) would make the RECEIVING client's own
+  `handle()` take the `connectionIndex == -1` branch expecting non-null `connectionData`, which
+  would be null - this is PRECISELY why an index-(-1) call is forbidden, not merely discouraged
+  as a style preference.
+- MTS's own built-in auto-disconnect check (inside `AEntityG_Towable.update()`, line ~82-83 -
+  the ONLY other place a client could ever self-heal this without a packet) is unconditionally
+  blocked by `blockMainUpdateCall()` (`return towedByConnection != null;`) on EVERY side -
+  confirmed NOT server-only, NOT DIV-specific, and never overridden anywhere in this codebase
+  (`grep -rn blockMainUpdateCall` in `src/main/java` returns only comments referencing the base
+  MTS method, zero overrides). The client cannot quietly self-correct through its own normal
+  tick either.
+
+**ALREADY_TOWED rejection (separate, already-documented, cosmetic-only)**: delivered via
+`TrailerConnectionResult.handlePacket` -> `PacketPlayerChatMessage` -> `player.displayChatMessage(...)`
+on the requesting client only - never server-logged (`grep -n LOGGER` on the real
+`AEntityG_Towable.java` returns zero matches near this path, confirmed directly). This gap is
+about an unobserved REASON string, not about stale STATE - the two must never be conflated, per
+54966's own explicit instruction.
+
+**Conclusion - a confirmed, reproducible divergence, not speculation**: any client already
+tracking the towed vehicle before the fallback fires never receives any notification of any
+kind, by any mechanism, on either side of the connection - its own local `towedByConnection`/
+`towingConnections`/parking-brake state is never corrected. This is real, code-level, and
+reproducible by inspection, not inferred from the server-only reconnect result above.
+
+### Why no fix is implemented, and what is
+
+Every avenue for a supported correction is foreclosed by the above, confirmed by the compiler/
+source, not merely assumed:
+- `connectionGroupsIndexesInUse` (protected) / `disconnectedTowingConnections` (private) remain
+  inaccessible without reflection (forbidden, standing instruction, unchanged from every prior
+  round this investigation).
+- `PacketEntityTowingChange` cannot be constructed validly for this exact case (no real index
+  exists to send; the `-1` constructor means something else entirely and is explicitly forbidden
+  by John's own instruction, now understood to be not just risky but literally wrong - it would
+  misroute to the connect-handling branch on the client).
+- The client's own built-in self-heal path is unconditionally blocked by base MTS logic that
+  applies identically on every side.
+
+No reflection, no fabricated index, and no acceptance-weakening substitute was implemented, per
+every standing instruction in this investigation. Instead, the ONE legitimately supported,
+genuinely safe action available - operational visibility - was added:
+`PhysicsBridge`'s real `clearConnection` adapter now emits an UNCONDITIONAL (not gated behind the
+opt-in `GroundContactDiagnostics` flag) `LOGGER.warn` naming the affected vehicle UUID and
+stating plainly that no client notification was sent and why, whenever this fallback path
+actually fires in a live game - giving an operator/future investigator visibility into exactly
+when this known gap may be affecting a live client, rather than this remaining silently
+invisible by default as it was before this round. This is not a fix for the gap itself - the gap
+remains open, exactly as documented - it is a diagnostic improvement only.
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **936 tests** (unchanged - a logging-only change adds no
+new branch to unit-test; logging statements are not independently unit-tested anywhere else in
+this codebase either, confirmed by the existing convention).
+
+### Disposition
+
+The client-notification state-propagation gap is now fully traced and precisely characterized,
+with every claim grounded in exact file/line citations from the real decompiled MTS source - no
+longer merely flagged as "separately open," but concretely understood: no supported correction
+exists (every avenue confirmed foreclosed, not merely untried), and an unconditional operator-
+visible diagnostic log is the smallest safe, genuinely supported improvement available. The
+separate, purely-cosmetic ALREADY_TOWED chat-observability gap remains distinct and equally
+unaddressed by this round, as it must be - the two were never conflated here. The stale PR #39
+comment that could read as a blanket "group leakage confirmed" claim was reconciled (not
+overwritten) to distinguish the structural `connectionGroupsIndexesInUse` accessibility gap
+(unchanged) from round3's own single-run empirical result (new, narrower, not a universal
+claim). No merge/Done transition made or implied - the structural resource-leak-risk gap, the
+now-precisely-understood client-notification gap, and the original five-crash native history
+this ticket exists to diagnose all remain open.

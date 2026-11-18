@@ -1578,6 +1578,32 @@ public final class PhysicsBridge {
       if (GroundContactDiagnostics.ENABLED) com.mojang.logging.LogUtils.getLogger().info(
         "[DIV lifecycleDiagnostic] releaseOrphanedTowingConnections falling back (connection missing from parent's own list) v=" + v.uniqueUUID
           + " - reproduced resetAllVariables/parkingBrake (both public); UNSUPPORTED (private/protected access, no reflection): connectionGroupsIndexesInUse release on either side, parent list removal (already absent), client PacketEntityTowingChange (needs a real index)");
+      // MINECRAFT-545/547 (John's comment 54966): confirmed via direct trace of MTS's real
+      // PacketEntityTowingChange/AEntityG_Towable.disconnectTrailer source that this fallback
+      // path has NO supported way to notify any tracking client - PacketEntityTowingChange's
+      // int-connectionIndex constructor requires a real index still present in the PARENT's own
+      // towingConnections list (exactly what is absent here, by definition of reaching this
+      // fallback at all); its OTHER constructor is reserved for CONNECT, not disconnect
+      // (constructing it with connectionIndex=-1 would hit the receiving handle()'s "connect"
+      // branch with a null connectionData and fail/crash - confirmed by reading
+      // PacketEntityTowingChange.handle() directly, which is exactly why an index-(-1) call is
+      // forbidden, not merely discouraged). MTS's own built-in auto-disconnect check (inside
+      // AEntityG_Towable.update(), the ONLY other place this could self-heal) is unconditionally
+      // blocked by blockMainUpdateCall() (returns true whenever towedByConnection != null) on
+      // EVERY side, client included - confirmed NOT server-only, NOT DIV-specific, and never
+      // overridden by DIV. There is therefore no supported code path, on either side, by which a
+      // tracking client's own local towedByConnection/towingConnections/parking-brake state is
+      // ever corrected once this fallback fires - a real, standing state-propagation gap,
+      // distinct from the separately-documented, purely-cosmetic ALREADY_TOWED chat-notification
+      // gap. Since no supported correction exists, this is instead surfaced operationally:
+      // UNCONDITIONAL (not gated behind the opt-in GroundContactDiagnostics flag) so a server
+      // operator has visibility into exactly when this known gap may be affecting a live client,
+      // without this ever being silently invisible by default.
+      com.mojang.logging.LogUtils.getLogger().warn(
+        "[DIV] missing-index fallback fired for towed vehicle " + v.uniqueUUID + " - this vehicle's own towing connection was cleared"
+          + " server-side with NO client notification packet sent (none is supported for this exact case - see MINECRAFT-547)."
+          + " Any client that was already tracking this vehicle may retain stale towedByConnection/group/parking-brake state until"
+          + " it reconnects or the vehicle leaves its render distance and returns.");
       // 54862/54870: the real, direct, bounded observation - a complete no-op unless a caller
       // has explicitly registered for this exact vehicle UUID, and only counts a match if the
       // connection object captured here is reference-identical to what that caller registered.
