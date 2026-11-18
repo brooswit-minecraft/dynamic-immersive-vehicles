@@ -945,4 +945,37 @@ class PhysicsBridgeClassificationTest {
   assertEquals(Object.class, hashCodeMethod.getDeclaringClass(),
     "TowingConnection must keep using Object's own identity hashCode() - the generation ledger's WeakHashMap relies on this");
  }
+
+ // MINECRAFT-545/547 (John's comment 55005): "immutable/monotonic number alone does not
+ // identify the object... fix trustworthy creation/order binding." Pure tests for
+ // shouldBindAnnouncedGeneration, the decision bindClientConnectionGeneration actually applies -
+ // covering the exact scenario 55005 demonstrated: a delayed/replayed OLD announcement arriving
+ // after a same-slot REPLACEMENT has already been correctly bound must be rejected.
+
+ @Test void firstEverAnnouncementForAVehicleIsAccepted() {
+  assertTrue(PhysicsBridge.shouldBindAnnouncedGeneration(false, null, 1L));
+ }
+
+ @Test void alreadyBoundObjectIsNeverRebound() {
+  // Even if the announced generation would otherwise look newer - an object that already has
+  // SOME binding must never be rebound, by construction (only one real binding per object ever).
+  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(true, 1L, 99L));
+ }
+
+ @Test void delayedOrReplayedOldAnnouncementAfterANewerGenerationIsRejected() {
+  // THE exact 55005 scenario: watermark already at 2 (a newer generation was already bound for
+  // this vehicle), a delayed/replayed announcement for the OLD generation 1 now arrives.
+  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(false, 2L, 1L));
+ }
+
+ @Test void replayOfTheSameGenerationIsAlsoRejected() {
+  // Not strictly necessary for safety (rebinding the SAME value would be harmless), but the
+  // watermark comparison is strict ">" by design - confirms equal-to-watermark is also rejected,
+  // consistent with "never rebind" once a generation has been seen.
+  assertFalse(PhysicsBridge.shouldBindAnnouncedGeneration(false, 2L, 2L));
+ }
+
+ @Test void genuinelyNewerGenerationThanTheWatermarkIsAccepted() {
+  assertTrue(PhysicsBridge.shouldBindAnnouncedGeneration(false, 1L, 2L));
+ }
 }

@@ -68,7 +68,11 @@ public record ConnectionGenerationPayload(
 
  public static void handle(ConnectionGenerationPayload payload, IPayloadContext context) {
   context.enqueueWork(() -> {
-   var towed = PhysicsBridge.findActiveVehicleByUuid(payload.towedVehicleUuid());
+   // MINECRAFT-545/547 (John's comment 55005): this payload is playToClient - handle() only
+   // ever runs client-side - resolved via the CLIENT's own local entity set, NEVER PhysicsBridge's
+   // own physics registry (confirmed unsafe for this purpose - see
+   // PhysicsBridge.findClientTrackedVehicleByUuid's own doc for why).
+   var towed = PhysicsBridge.findClientTrackedVehicleByUuid(payload.towedVehicleUuid());
    if (towed == null) return; // not currently loaded/tracked client-side - nothing to do.
    if (payload.disconnected()) {
     PhysicsBridge.handleClientStaleDisconnectNotification(towed, payload.identity(), payload.generation());

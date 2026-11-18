@@ -1536,20 +1536,48 @@ public final class PhysicsBridge {
   // fallback/orphan-release paths below, which only ever TEAR DOWN an already-assigned entry.
   for (var v : active) {
    var conn = v.towedByConnection;
-   // MINECRAFT-545/547 (John's comment 54998): checked BEFORE assigning, not after - this is
-   // what actually distinguishes "a fresh generation was just assigned this tick" (worth
-   // announcing to tracking clients) from "this connection's generation was already known"
-   // (every subsequent tick of the same connection's own lifetime, which must NOT re-announce
-   // on every tick - that would spam a new, unbounded stream of redundant packets instead of
-   // exactly one announcement per genuinely new connection).
-   if (conn != null && !connectionGenerations.containsKey(conn)) {
-    long generation = connectionGeneration(conn);
-    var recipient = resolveTrackingEntity(v);
+   // MINECRAFT-545/547 (John's comment 54998): assigned at most once per connection OBJECT -
+   // this check is what distinguishes "a fresh generation was just assigned this tick" from
+   // every subsequent tick of the same connection's own lifetime.
+   boolean freshlyAssigned = conn != null && !connectionGenerations.containsKey(conn);
+   if (freshlyAssigned) {
+    connectionGeneration(conn);
+    // MINECRAFT-545/547 (John's comment 55005): "Announcement only on server containsKey miss
+    // loses late-join/retrack, packet-before-local-vehicle/connection, and recipient-null
+    // attempts permanently." A single one-shot send at the exact tick of assignment can miss a
+    // player who was not yet tracking, or who had no resolvable entity wrapper that exact
+    // tick - and the OLD code never tried again. Fixed with a BOUNDED retry window (not an
+    // unbounded per-tick resend, which would be its own kind of leak/spam): every freshly
+    // assigned connection is also registered here, and the actual send/resend happens in the
+    // loop immediately below, uniformly, for every connection still within its own bounded
+    // window - covering the very first tick AND every later retry tick with the same logic.
+    pendingAnnounceRetryTicksRemaining.put(conn, ANNOUNCE_RETRY_WINDOW_TICKS);
+   }
+  }
+  // MINECRAFT-545/547 (John's comment 55005): the actual bounded retry/resend loop - every
+  // connection registered above (fresh OR still within its own retry window from an earlier
+  // tick) gets (re)sent to its CURRENT trackers every tick until the window expires, which
+  // naturally covers a late join/retrack/transient-null-recipient tick within the window,
+  // while remaining strictly bounded (never resent forever, never an unbounded broadcast - the
+  // recipient set itself stays scoped to actual current trackers via resolveTrackingEntity +
+  // sendToPlayersTrackingEntity on every attempt, exactly as before).
+  if (!pendingAnnounceRetryTicksRemaining.isEmpty()) {
+   var expired = new java.util.ArrayList<Object>();
+   for (var entry : pendingAnnounceRetryTicksRemaining.entrySet()) {
+    var conn = entry.getKey();
+    int ticksRemaining = entry.getValue();
+    Long generation = connectionGenerations.get(conn);
+    if (generation == null) { expired.add(conn); continue; } // torn down before the window expired - nothing left to announce.
+    EntityVehicleF_Physics towingVehicle = ((TowingConnection) conn).towingVehicle;
+    EntityVehicleF_Physics towedVehicle = ((TowingConnection) conn).towedVehicle;
+    var recipient = resolveTrackingEntity(towedVehicle != null ? towedVehicle : towingVehicle);
     if (recipient != null) {
      net.neoforged.neoforge.network.PacketDistributor.sendToPlayersTrackingEntity(recipient,
-       new ConnectionGenerationPayload(toIdentity(conn), generation, false));
+       new ConnectionGenerationPayload(toIdentity((TowingConnection) conn), generation, false));
     }
+    if (ticksRemaining <= 1) expired.add(conn); else entry.setValue(ticksRemaining - 1);
    }
+   for (var conn : expired) pendingAnnounceRetryTicksRemaining.remove(conn);
   }
   releaseOrphanedConnections(active, new OrphanedConnectionOps<EntityVehicleF_Physics>() {
    public boolean hasConnection(EntityVehicleF_Physics v) { return v.towedByConnection != null; }
@@ -1732,6 +1760,14 @@ public final class PhysicsBridge {
  private static final java.util.Map<Object, Long> connectionGenerations = new java.util.WeakHashMap<>();
  private static long nextConnectionGeneration = 0;
 
+ /** MINECRAFT-545/547 (John's comment 55005): "bounded authoritative tracking snapshot/retry
+  * lifecycle." A freshly-assigned generation's own announcement is attempted every tick for
+  * this many ticks after assignment (not merely once) - bounded, never forever - so a player
+  * who was not yet tracking, or who had no resolvable entity wrapper on the exact tick of
+  * assignment, still receives it on a later tick within the same bounded window. */
+ private static final int ANNOUNCE_RETRY_WINDOW_TICKS = 100;
+ private static final java.util.Map<Object, Integer> pendingAnnounceRetryTicksRemaining = new java.util.WeakHashMap<>();
+
  /** Returns the existing generation for this exact connection OBJECT if already assigned, else
   * assigns and returns a fresh one - pure identity semantics (see this field's own doc for why
   * a plain {@code WeakHashMap} is safe here). A null {@code connection} has no generation
@@ -1748,20 +1784,42 @@ public final class PhysicsBridge {
   * unreachable, regardless of whether this is ever called for a given connection). A no-op for
   * a connection with no entry, or for {@code null}. */
  public static void forgetConnectionGeneration(Object connection) {
-  if (connection != null) connectionGenerations.remove(connection);
+  if (connection != null) {
+   connectionGenerations.remove(connection);
+   pendingAnnounceRetryTicksRemaining.remove(connection);
+  }
  }
 
- /** O(active vehicles), bounded by the same per-JVM-side registry this class already iterates
-  * every tick for the orphan-release sweep - there is no direct UUID index on
-  * {@link BodyRegistry}, and adding one is unnecessary for a set this small. Each side (client
-  * or server) has its OWN separate {@code registry} instance (confirmed: {@code PhysicsBridge}
-  * is ordinary mod code loaded once per JVM, never shared across the client/server boundary),
-  * so this naturally finds only the LOCAL side's own currently-active vehicle, which is exactly
-  * what a client-side packet handler needs - never reaching across processes. */
- public static EntityVehicleF_Physics findActiveVehicleByUuid(java.util.UUID uuid) {
-  var found = new EntityVehicleF_Physics[1];
-  registry.forEachActive((v, b) -> { if (found[0] == null && v.uniqueUUID.equals(uuid)) found[0] = v; });
-  return found[0];
+ /** MINECRAFT-545/547 (John's comment 55005): CORRECTED - the 54998 round's own
+  * {@code findActiveVehicleByUuid} resolved through THIS class's own static {@code registry},
+  * which is a REAL, CONFIRMED hazard, not a theoretical one: {@code registry} is populated
+  * ONLY by server-side body construction ({@code activateOrClassify}, which requires a
+  * {@code ServerLevel}) - a remote client's own JVM never populates it with client bodies at
+  * all, so a remote client's own lookup would simply (and silently) always return null, while
+  * on an INTEGRATED singleplayer world (client and internal server sharing ONE JVM's static
+  * state) the SAME lookup would instead find and return the SERVER's own live object - letting
+  * client-side packet-handling code mutate server state from the client's own logical thread.
+  * REMOVED entirely - replaced by {@link #findClientTrackedVehicleByUuid}, which NEVER touches
+  * this class's own physics registry. */
+
+ /** The CLIENT's own, side-correct resolution: enumerates the CLIENT's own currently-rendered
+  * entities ({@code Minecraft.getInstance().level.entitiesForRendering()} - a real, bounded,
+  * client-local set, never reaching across the network) for a {@code BuilderEntityExisting}
+  * whose own business entity (via {@code InterfaceInterface.toInternal}, the exact reverse of
+  * {@link #resolveTrackingEntity}'s own forward direction) matches {@code uuid}. Must be called
+  * ONLY from client-side code (this payload is {@code playToClient}, so {@code handle()} only
+  * ever runs client-side) - never from server code, and never falls back to this class's own
+  * physics registry for any reason. */
+ public static EntityVehicleF_Physics findClientTrackedVehicleByUuid(java.util.UUID uuid) {
+  var level = net.minecraft.client.Minecraft.getInstance().level;
+  if (level == null) return null;
+  for (var entity : level.entitiesForRendering()) {
+   if (entity instanceof mcinterface1211.BuilderEntityExisting builder) {
+    var business = mcinterface1211.InterfaceInterface.toInternal(builder);
+    if (business instanceof EntityVehicleF_Physics v && v.uniqueUUID.equals(uuid)) return v;
+   }
+  }
+  return null;
  }
 
  /** MINECRAFT-545/547 (John's comment 54998): the CLIENT's own half of the generation ledger -
@@ -1773,17 +1831,75 @@ public final class PhysicsBridge {
   * Also a {@code WeakHashMap} for the same structural-boundedness reason as the server's own. */
  private static final java.util.Map<Object, Long> clientConnectionGenerations = new java.util.WeakHashMap<>();
 
- /** Called from the client's own packet-handling thread when a generation ANNOUNCEMENT arrives
-  * (see the payload's own doc). Binds {@code announcedGeneration} to the client's own CURRENT
-  * connection for {@code towedVehicle} - but ONLY if that connection's own identity actually
-  * matches {@code announcedIdentity} field-for-field; a mismatch means the client's own local
-  * state has already moved on (e.g. the connection the announcement was about has already been
-  * superseded locally) and binding would associate the wrong object with this generation. */
+ /** MINECRAFT-545/547 (John's comment 55005): "immutable/monotonic number alone does not
+  * identify the object... fix trustworthy creation/order binding." Tracks, per TOWED VEHICLE
+  * (a stable identifier across reconnects, unlike any one {@code TowingConnection} object), the
+  * highest generation number this client has EVER successfully bound - a plain
+  * {@code HashMap<UUID,Long>}, not identity-keyed, intentionally small and explicitly cleared
+  * on disconnect (see {@link #forgetClientConnectionGeneration}), never left to grow unbounded. */
+ private static final java.util.Map<java.util.UUID, Long> clientHighestBoundGenerationPerTowedVehicle = new java.util.HashMap<>();
+
+ /** Called from the client's own packet-handling thread when a generation ANNOUNCEMENT arrives.
+  * CORRECTED (55005): the 54998 round's own version bound unconditionally on a bare tuple
+  * match, which a DELAYED or REPLAYED old announcement could use to silently overwrite an
+  * ALREADY-bound, newer generation for a same-slot replacement (tuple equality alone cannot
+  * tell two different connection OBJECTS for the same pair/slot apart - that is exactly what
+  * generations exist to fix, so the binding step itself must not reintroduce the same hole).
+  * Now requires BOTH: (1) no existing binding yet for this exact connection OBJECT (a bound
+  * object's own generation is never overwritten by a later/duplicate announcement), AND (2) the
+  * announced generation is STRICTLY GREATER than the highest ever bound for this TOWED VEHICLE
+  * (rejects a stale/delayed announcement whose own generation has already been superseded).
+  * <p>Disclosed, not glossed over: this narrows, but cannot fully eliminate, the ambiguity -a
+  * stale announcement for an object that was NEVER bound (e.g. its own announcement was lost)
+  * arriving BEFORE the real current object's own announcement, with a generation number that
+  * still happens to exceed the watermark (e.g. the watermark is still unset), could still bind
+  * incorrectly. This residual case requires an upstream MTS connection-generation field to close
+  * completely (see VERIFICATION.md's own "Per 54979"/"Per 55005" entries) - what IS implemented
+  * correctly rejects every case where the client has ALREADY processed a newer announcement,
+  * which is the scenario 55005 actually demonstrated. */
+ /** Pure: the actual safety decision {@link #bindClientConnectionGeneration} applies, factored
+  * out so it is directly unit-testable with synthetic values - no live connection object, no
+  * MTS dependency. {@code alreadyBoundForThisObject} is whether the CURRENT connection object
+  * already has ANY binding (never overwritten once set); {@code watermarkForVehicle} is the
+  * highest generation ever bound for this towed vehicle so far, or {@code null} if none yet. */
+ public static boolean shouldBindAnnouncedGeneration(boolean alreadyBoundForThisObject, Long watermarkForVehicle, long announcedGeneration) {
+  if (alreadyBoundForThisObject) return false;
+  return watermarkForVehicle == null || announcedGeneration > watermarkForVehicle;
+ }
+
  public static void bindClientConnectionGeneration(
      EntityVehicleF_Physics towedVehicle, TowingConnectionIdentity announcedIdentity, long announcedGeneration) {
-  if (towedVehicle.towedByConnection == null) return;
-  if (!toIdentity(towedVehicle.towedByConnection).equals(announcedIdentity)) return;
-  clientConnectionGenerations.put(towedVehicle.towedByConnection, announcedGeneration);
+  var current = towedVehicle.towedByConnection;
+  if (current == null) return;
+  if (!toIdentity(current).equals(announcedIdentity)) return;
+  boolean alreadyBound = clientConnectionGenerations.containsKey(current);
+  Long watermark = clientHighestBoundGenerationPerTowedVehicle.get(towedVehicle.uniqueUUID);
+  if (!shouldBindAnnouncedGeneration(alreadyBound, watermark, announcedGeneration)) return;
+  clientConnectionGenerations.put(current, announcedGeneration);
+  clientHighestBoundGenerationPerTowedVehicle.put(towedVehicle.uniqueUUID, announcedGeneration);
+ }
+
+ /** MINECRAFT-545/547 (John's comment 55005): the CLIENT's own counterpart to
+  * {@link #forgetConnectionGeneration} - releases {@code connection}'s own entry from the
+  * CLIENT's ledger (never the server's). The watermark in
+  * {@link #clientHighestBoundGenerationPerTowedVehicle} is deliberately NOT cleared here (it
+  * must persist across a disconnect so a later, stale/delayed announcement for the
+  * just-removed object cannot "win" simply because its own entry is now gone) - only
+  * {@link #forgetAllClientStateForTowedVehicle} (logout/world-unload/session-reset) clears it. */
+ public static void forgetClientConnectionGeneration(java.util.UUID towedVehicleUuid, Object connection) {
+  if (connection != null) clientConnectionGenerations.remove(connection);
+ }
+
+ /** MINECRAFT-545/547 (John's comment 55005): "include logout/world unload/session reset and
+  * retention bounds." Call on logout/world-unload/session-reset to fully release BOTH the
+  * per-object binding (already weakly held, but explicit release is still prompt) AND the
+  * per-vehicle watermark (which, unlike the per-object binding, is NOT released by ordinary
+  * disconnects - a genuine session boundary is the only point a stale watermark can safely be
+  * dropped, since connection-generation numbers themselves are never meaningful across a
+  * session restart - see {@link #connectionGenerations}'s own "nonreusable session identity"
+  * doc for the server-side equivalent of this same reasoning). */
+ public static void forgetAllClientStateForTowedVehicle(java.util.UUID towedVehicleUuid) {
+  clientHighestBoundGenerationPerTowedVehicle.remove(towedVehicleUuid);
  }
 
  /** Called from the client's own packet-handling thread when a DISCONNECT notification arrives.
@@ -1887,29 +2003,35 @@ public final class PhysicsBridge {
   }
  }
 
- /** MINECRAFT-545/547 (John's comment 54998): the REAL production adapter
+ /** MINECRAFT-545/547 (John's comment 54998, corrected per 55005): the REAL production adapter
   * {@code applyStaleDisconnectAction} was still missing - this is it, wired to genuine public
   * MTS methods only, same discipline as {@link #fallbackClearConnection}'s own real adapter.
   * {@code disconnectByClientIndex} uses the exact real, public {@code disconnectTrailer(int)}
   * with the CLIENT's own index (never the server's, which this entire mechanism exists because
-  * of). {@code idempotentCleanup} reuses the SAME pure orchestration the server's own fallback
-  * already uses - the required action (reset both sides' variables, engage the parking brake,
-  * then clear the field) is identical on either side, since it is defined purely in terms of
-  * the connection and the two vehicles, never anything server-only. */
+  * of). {@code idempotentCleanup} performs the SAME reset/brake/clear sequence the server's own
+  * fallback uses - but CORRECTED (55005): the 54998 round's own version reused
+  * {@link #fallbackClearConnection}'s existing ops lambda VERBATIM, which calls
+  * {@link #forgetConnectionGeneration} - the SERVER's own ledger - from what is actually a
+  * CLIENT-side code path. On an integrated singleplayer world (client and server sharing one
+  * JVM's static state), this would have erased the SERVER's own live ledger entry from
+  * client-invoked code; on a dedicated-server/remote-client split it would have been a
+  * harmless no-op on an entry that was never there, masking the bug rather than ever exposing
+  * it. This adapter now forgets from {@link #clientConnectionGenerations} (and its own
+  * watermark - see {@link #forgetClientConnectionGeneration}) in BOTH branches - the
+  * client-owned ledger, never the server's, regardless of which branch actually ran. */
  public static final StaleDisconnectOps<EntityVehicleF_Physics> REAL_STALE_DISCONNECT_OPS = new StaleDisconnectOps<EntityVehicleF_Physics>() {
   public void disconnectByClientIndex(EntityVehicleF_Physics v, int clientOwnIndex) {
+   var connection = v.towedByConnection;
    v.towedByConnection.towingVehicle.disconnectTrailer(clientOwnIndex);
+   forgetClientConnectionGeneration(v.uniqueUUID, connection);
   }
   public void idempotentCleanup(EntityVehicleF_Physics v) {
-   PhysicsBridge.fallbackClearConnection(v, new FallbackClearOps<EntityVehicleF_Physics>() {
-    public void resetTowingVariables(EntityVehicleF_Physics v) { v.towedByConnection.towingVehicle.resetAllVariables(); }
-    public void resetTowedVariables(EntityVehicleF_Physics v) { v.resetAllVariables(); }
-    public void engageParkingBrake(EntityVehicleF_Physics v) { v.parkingBrakeVar.setTo(1.0, false); }
-    public void clearConnection(EntityVehicleF_Physics v) {
-     forgetConnectionGeneration(v.towedByConnection);
-     v.towedByConnection = null;
-    }
-   });
+   var connection = v.towedByConnection;
+   v.towedByConnection.towingVehicle.resetAllVariables();
+   v.resetAllVariables();
+   v.parkingBrakeVar.setTo(1.0, false);
+   v.towedByConnection = null;
+   forgetClientConnectionGeneration(v.uniqueUUID, connection);
   }
  };
 

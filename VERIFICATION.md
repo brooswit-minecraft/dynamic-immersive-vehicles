@@ -13672,3 +13672,111 @@ test. What genuinely remains is live network/client verification, which this env
 perform without a real Minecraft client and has not been attempted. Full suite green (955
 tests). No native run performed. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own candidate-on
 success remain distinct, unblurred. No merge/Done transition made or implied.
+
+## Per 55005: four real defects in the 54998 round's own "wired" implementation
+
+John's exact-head review of `9cb3d34` found the client path BLOCKED for acceptance by four
+concrete code defects - not design proposals this time, but actual bugs in code already
+claimed as "real, wired" the previous round. All four fixed.
+
+### 1. `findActiveVehicleByUuid` resolved through the SERVER's own physics registry
+
+Confirmed exactly as John found it: `PhysicsBridge.registry` is populated ONLY by server-side
+body construction (`activateOrClassify`, which requires a `ServerLevel`). On a genuine REMOTE
+client (separate JVM), the client-side lookup would always silently return null (no server
+bodies exist there at all) - but on an INTEGRATED SINGLEPLAYER world, where the client and the
+internal server share ONE JVM's static class state, the exact same lookup would instead find
+and return the SERVER's own live object, letting client-side packet-handling code read/mutate
+server state from the client's own logical thread - a real cross-side hazard, not theoretical.
+
+**Fixed**: `findActiveVehicleByUuid` removed entirely, replaced by
+`findClientTrackedVehicleByUuid`, which NEVER touches `PhysicsBridge`'s own registry - it
+enumerates the CLIENT's own currently-rendered entities
+(`Minecraft.getInstance().level.entitiesForRendering()` - a real, bounded, client-local set)
+for a `BuilderEntityExisting` whose own business entity (via `InterfaceInterface.toInternal`,
+the exact reverse of `resolveTrackingEntity`'s own forward direction - both from the SAME public
+MTS utility class) matches the target UUID.
+
+### 2. `bindClientConnectionGeneration` bound unconditionally on a bare tuple match
+
+Confirmed: a DELAYED or REPLAYED old generation-announcement, arriving AFTER a same-slot
+REPLACEMENT connection had already been correctly bound, would silently overwrite the correct
+binding - because tuple equality alone cannot distinguish two DIFFERENT connection OBJECTS for
+the same pair/slot, which is EXACTLY the hole generations exist to close; the binding step
+itself had reintroduced it.
+
+**Fixed**: a new pure decision, `shouldBindAnnouncedGeneration(boolean alreadyBoundForThisObject,
+Long watermarkForVehicle, long announcedGeneration)`, requires BOTH (1) no existing binding yet
+for this exact connection object (a bound object's own generation is never overwritten), AND
+(2) the announced generation is STRICTLY GREATER than `clientHighestBoundGenerationPerTowedVehicle`'s
+own watermark for that towed vehicle (rejects a stale/delayed/replayed announcement whose own
+generation has already been superseded). **Disclosed, not glossed over**: this narrows but does
+not fully eliminate the ambiguity - a stale announcement for an object that was NEVER bound at
+all (its own announcement lost), arriving before the real current object's own announcement,
+with a generation number that still happens to exceed an as-yet-unset watermark, could still
+bind incorrectly. Fully closing this needs the same upstream MTS connection-generation field
+already named in the 54979 entry's own disclosure. What IS fixed correctly rejects every case
+where the client has ALREADY processed a newer announcement - the exact scenario 55005
+demonstrated. 5 new pure tests cover: first-ever announcement (accept), already-bound object
+(reject, regardless of generation value), the exact delayed-old-after-newer scenario (reject),
+replay of the identical generation (reject, strict `>`), and a genuinely newer generation
+(accept).
+
+### 3. Announcement sent only once, with no retry - permanently lost for late-join/retrack/transient-null-recipient
+
+Confirmed: the 54998 round's own per-tick scan sent the announcement EXACTLY once, at the exact
+tick a generation was first assigned - a player not yet tracking at that tick, or a transient
+null from `resolveTrackingEntity` on that one tick, meant the announcement was gone forever
+(the generation itself was still marked "assigned," so no retry was ever attempted).
+
+**Fixed with a bounded retry window** (never an unbounded resend, and never an unbounded
+broadcast - the recipient set itself stays scoped to actual CURRENT trackers via
+`resolveTrackingEntity`/`sendToPlayersTrackingEntity` on every attempt): a new
+`pendingAnnounceRetryTicksRemaining` ledger (also a `WeakHashMap`, same structural-boundedness
+reasoning) is populated with `ANNOUNCE_RETRY_WINDOW_TICKS` (100) the instant a generation is
+freshly assigned, and a new per-tick loop (re)sends to current trackers for every connection
+still within its own window, decrementing until expiry. A late-joining or newly-retracking
+player within that bounded window now receives it; a transient null recipient on any one tick
+no longer permanently loses the announcement. Released from this ledger too whenever
+`forgetConnectionGeneration` runs (the connection was torn down before its own window expired -
+nothing left to announce).
+
+### 4. Client-side cleanup called the SERVER's own `forgetConnectionGeneration`
+
+Confirmed: the 54998 round's own `REAL_STALE_DISCONNECT_OPS.idempotentCleanup` reused
+`fallbackClearConnection`'s existing ops lambda VERBATIM - which calls `forgetConnectionGeneration`,
+the SERVER's own ledger, from what is actually a CLIENT-side code path. On integrated
+singleplayer (shared static state), this would have erased the SERVER's own live ledger entry
+from client-invoked code; on a dedicated-server/remote-client split it would have been a
+harmless no-op on an entry that was never there - masking the bug rather than ever exposing it
+either way.
+
+**Fixed**: `REAL_STALE_DISCONNECT_OPS` (both `disconnectByClientIndex` and `idempotentCleanup`)
+now calls the new `forgetClientConnectionGeneration` - the CLIENT's own ledger, never the
+server's - in both branches, regardless of which one actually ran. A new
+`forgetAllClientStateForTowedVehicle` (logout/world-unload/session-reset) separately clears the
+per-vehicle watermark, which - unlike the per-object binding - must NOT be cleared by an
+ordinary disconnect (a stale watermark can safely be dropped only at a genuine session
+boundary, since generation numbers are never meaningful across a session restart - the exact
+same reasoning as `connectionGenerations`'s own "nonreusable session identity" doc for the
+server-side equivalent).
+
+### Test receipt
+
+Full suite, same exclusive Gradle lock: **960 tests** (up from 955 - 5 new pure
+`shouldBindAnnouncedGeneration` cases), 0 failures, 0 errors.
+
+### Disposition
+
+Four real, confirmed-live defects in code the prior round had already called "wired" are fixed:
+a cross-side registry hazard that could mutate server state from client-invoked code on
+integrated singleplayer (replaced with a genuinely client-local resolution); an unsafe
+tuple-only binding that could let a stale announcement overwrite a correctly-bound replacement
+(replaced with an object-identity-plus-watermark decision, with its own residual ambiguity
+disclosed precisely); a one-shot announcement with no retry (replaced with a bounded retry
+window); and client-side cleanup that erased the SERVER's own ledger entry (replaced with a
+genuinely client-owned ledger and cleanup path). Full suite green (960 tests). No native run
+performed or proposed - any future client/network validation still requires the same explicit,
+specific, single-use coordinator release and fresh parent/M510 slot coordination every prior
+native run in this investigation has required. Round3's `NO_LEAK_OBSERVED` and `b6ec50e`'s own
+candidate-on success remain distinct, unblurred. No merge/Done transition made or implied.
