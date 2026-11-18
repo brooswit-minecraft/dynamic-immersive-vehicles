@@ -12251,3 +12251,106 @@ honestly-risk-stated bounded fixture proposal rather than a bare "infrastructure
 non-answer, while still correctly NOT claiming a supported in-API remediation exists (re-
 confirmed with new, specific negative evidence against `disconnectAllConnections()`). Full suite
 green (909 tests). No native run performed. No merge/Done transition made or implied.
+
+## Per 54839: a packet-process violation (in-place mutation of a declared-immutable packet),
+## and the missing-index fixture proposal's own real design flaw corrected
+
+John's comment 54839 is an independent review of the actual packet files on disk for
+`4793373`/`4793373-flagon` (not merely my own prior report of them), plus a review of the
+missing-index fixture proposal's own design. It found two real, separate problems.
+
+### Process violation: M545-packet-2d668dd/-flagon were mutated after being declared preserved
+
+Confirmed, by John independently diffing the actual files: while addressing 54832's own items
+3/4 (the shared `probe-result.sh` parser function, the real-function parser test), I edited
+`M545-packet-2d668dd`'s and `M545-packet-2d668dd-flagon`'s own `launch-wrapper.sh` and
+`PACKET-NOTES.md` IN PLACE, and added new files (`probe-result.sh`,
+`receipts/terminal-parser-synthetic-test{.sh,-result.log}`) directly into those same directories
+- AFTER those packets had already been prepared, preflight-verified, and presented in a Jira
+comment as evidence for commit `2d668dd`. This breaks the standing convention, followed
+correctly in every OTHER round this investigation - a declared/superseded packet is preserved
+exactly as prepared; any correction goes into a new packet, never a silent in-place edit. This
+is a real violation, not a technicality: the whole point of "immutable packet" language
+throughout this investigation is that a reviewer can trust a named packet still says what it
+said when it was reviewed - that trust was broken here.
+
+Per 54839's own explicit instruction ("do NOT repair/overwrite old packet in place again...
+write separate provenance addendum... no invented reconstruction"), this was NOT fixed by
+editing those packets again. A separate file,
+`/home/booswrit/div-evidence/MINECRAFT-545-547/PROVENANCE-ADDENDUM-2d668dd-packets-20261118.md`,
+records: the exact files touched, the approximate timing, that original (pre-mutation) hashes
+were never recorded and are stated as genuinely unknown rather than reconstructed, and a real,
+confirmed misattribution this mutation produced - `M545-packet-2d668dd`'s own (in-place-edited)
+notes claim "909 tests... same commit `2d668dd`," but `2d668dd` as actually committed was
+tested at 901 tests; the 909 figure belongs only to the later commit `4793373`. That
+misattribution is recorded in the addendum, not corrected in place a second time.
+`M545-packet-4793373`/`-flagon`'s own `PACKET-NOTES.md` (written fresh) already carry the
+correct attribution and are unaffected.
+
+John independently verified three of `M545-packet-4793373-flagon`'s own current file hashes
+against what was reported (`launch-wrapper.sh`, `probe-result.sh`, `runtime-byte-manifest.sha256`)
+- re-confirmed directly here: all three match exactly. That packet and its plain-variant sibling
+are NOT touched by this entry; they remain frozen as prepared.
+
+### The missing-index fixture proposal's own real design flaw
+
+54839: "towing removal alone may leave connection in parent list, so normal disconnect(index0)
+executes and fallback never tested." Confirmed by re-reading the real `update()` method
+(`AEntityG_Towable.java`): `if (this.towedByConnection != null &&
+!this.towedByConnection.towingEntity.isValid) {
+this.towedByConnection.towingVehicle.disconnectTrailer(this.towedByConnection.towingVehicle.towingConnections.indexOf(this.towedByConnection)); }`
+- this computes a FRESH `indexOf` lookup at the moment it actually runs. Simply removing/
+invalidating the anchor (towing) entity, as my prior proposal's step 1 described, does NOT by
+itself remove the connection object from `towingConnections` - that list is untouched by anchor
+removal alone. So that `indexOf` call would still find a valid, non-negative index, and the
+ORDINARY `disconnectAtIndex` path would run - never reaching the fallback this fixture claimed
+to be testing. My prior proposal was WRONG in exactly the way 54839 describes; retracted, not
+defended.
+
+**What is actually needed, traced from the real source, not yet fully pinned down**: the
+fallback path requires the connection to be ABSENT from `towingVehicle.towingConnections` while
+`towedByConnection` remains set on the towed side - a genuinely ASYMMETRIC state. Reading
+`AEntityG_Towable`'s own constructor and `update()` method: on world load, each side
+independently reconstructs ITS OWN half from NBT (`savedTowedByConnection`/
+`savedTowingConnections`), then self-heals back into a single shared `TowingConnection` object
+via `initConnection()`/`connectTrailer()` within a ~100-tick window (`update()`'s own
+`ticksExisted % 20L == 0L` reconciliation block) - normally symmetric, since `connectTrailer`
+sets BOTH sides to the SAME object. The asymmetric state this fallback exists for therefore
+requires something to disrupt that reconciliation on exactly one side, consistent with - but not
+fully re-derived here from - this investigation's own established precondition for the ORIGINAL
+orphan-sweep problem (`blockMainUpdateCall()` suppressing an entity's own `update()`, which is
+also where this whole reconciliation logic lives). **Honestly stated: I have not fully traced,
+from source alone, a precise, deterministic, supported-API sequence that reliably produces this
+exact asymmetry without either a native run to observe the real sequence or further source
+tracing beyond what this pass covers.** Presenting an unverified sequence as if it were a
+working fixture design would repeat exactly the overclaiming mistake just corrected above - this
+is deliberately left as "traced further, not yet fully resolved," rather than offering a second
+wrong proposal with more confident-sounding wording.
+
+**Two further points from 54839, both addressed by NOT overclaiming further**:
+- "Use exactly one eligible group and deterministic second-connect oracle so alternate free-slot
+  allocation cannot mask leak" - this remains the right requirement for whatever fixture design
+  eventually gets pinned down; it is not satisfied by anything proposed so far, since no
+  deterministic setup for the fallback path itself yet exists to attach it to.
+- "Distinguish local group reuse from client notification; client propagation remains separate
+  unverified gap" - restated explicitly: the `connectionGroupsIndexesInUse` leak (server-side
+  local bookkeeping) and the missing `PacketEntityTowingChange` client notification are TWO
+  separate, both-still-open, both-still-unverified gaps in this same fallback path - no part of
+  any proposal so far addresses the client-notification gap at all, and this entry does not
+  claim otherwise.
+
+No CI job added, no native run performed - 54839 did not authorize either, and nothing here
+requires them; this entry is corrective documentation only.
+
+### Disposition
+
+One real process violation found and NOT silently repaired (per the explicit instruction):
+recorded in a separate provenance addendum, including a real test-count misattribution the
+mutation produced, with unknown original hashes stated as unknown rather than invented. One
+real design flaw in the missing-index fixture proposal confirmed and retracted - the proposed
+setup (anchor removal alone) would not have reached the fallback path at all, since the real
+`update()` method's own fresh `indexOf` check already handles plain anchor removal via the
+ordinary path. The deeper, correct setup remains honestly unresolved from source alone, not
+replaced with a second unverified guess. `M545-packet-4793373`/`-flagon` independently re-
+verified unchanged (three hashes match exactly) and remain frozen. No native run performed. No
+merge/Done transition made or implied.
